@@ -1,0 +1,25 @@
+# ---- Runtime data: DO NOT COMMIT ----
+# Contains live Chrome login cookies (chrome_profiles/*) and the SQLite DB
+# with account info. Pushing these would leak active login sessions.
+data/
+
+# ---- Python caches ----
+__pycache__/
+*.pyc
+
+# ---- Backup / scratch ----
+*.old
+
+# ---- Logs ----
+*.log
+server.log
+
+# ---- Runtime uploads & screenshots ----
+uploads/
+images/
+
+# ---- Throwaway debug / DOM-inspection scripts ----
+inspect_xhh.py
+inspect_drafts.py
+test_e2e_xhh.py
+cleanup_xhh.py

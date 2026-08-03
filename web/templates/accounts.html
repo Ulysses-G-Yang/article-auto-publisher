@@ -1,0 +1,138 @@
+{% extends "base.html" %}
+{% block title %}账号管理 - 自动化文章发布工具{% endblock %}
+{% block content %}
+<div x-data="accounts" x-init="checkStatus()" class="container" style="max-width: 700px;">
+    <h2 class="mb-4"><i class="bi bi-person-badge me-2"></i>平台账号管理</h2>
+
+    <p class="text-muted mb-3">
+        首次使用需要在各平台登录。登录 Cookie 会自动保存，后续无需重复登录。
+    </p>
+
+    <!-- 清理僵尸进程按钮 -->
+    <div class="d-flex gap-2 mb-3">
+        <button class="btn btn-outline-danger btn-sm" @click="cleanupZombies()">
+            <i class="bi bi-trash me-1"></i>清理僵尸 Chrome 进程
+        </button>
+        <span x-show="cleanupMsg" class="align-self-center text-muted small" x-text="cleanupMsg"></span>
+    </div>
+
+    <!-- ZOL -->
+    <div class="card mb-3">
+        <div class="card-body">
+            <div class="d-flex justify-content-between align-items-center">
+                <div>
+                    <h5 class="mb-1">
+                        <span class="badge bg-info me-2">ZOL</span>中关村在线
+                    </h5>
+                    <small class="text-muted">blog.zol.com.cn</small>
+                    <div class="mt-2">
+                        <span x-show="zolStatus === 'logged_in'" class="badge bg-success">已登录</span>
+                        <span x-show="zolStatus === 'logged_out'" class="badge bg-secondary">未登录</span>
+                        <span x-show="zolStatus === 'logging_in'" class="badge bg-warning text-dark">登录中...</span>
+                        <span x-show="zolStatus === 'unknown'" class="badge bg-secondary">未知状态</span>
+                        <span x-show="!zolStatus" class="badge bg-secondary">未检测</span>
+                    </div>
+                </div>
+                <button class="btn btn-primary" @click="login('zol')" :disabled="zolLoading">
+                    <template x-if="!zolLoading">登录</template>
+                    <template x-if="zolLoading">
+                        <span class="spinner-border spinner-border-sm me-1"></span>等待扫码...
+                    </template>
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 小黑盒 -->
+    <div class="card mb-3">
+        <div class="card-body">
+            <div class="d-flex justify-content-between align-items-center">
+                <div>
+                    <h5 class="mb-1">
+                        <span class="badge bg-purple me-2">小黑盒</span>小黑盒
+                    </h5>
+                    <small class="text-muted">www.xiaoheihe.cn</small>
+                    <div class="mt-2">
+                        <span x-show="xhStatus === 'logged_in'" class="badge bg-success">已登录</span>
+                        <span x-show="xhStatus === 'logged_out'" class="badge bg-secondary">未登录</span>
+                        <span x-show="xhStatus === 'logging_in'" class="badge bg-warning text-dark">登录中...</span>
+                        <span x-show="xhStatus === 'unknown'" class="badge bg-secondary">未知状态</span>
+                        <span x-show="!xhStatus" class="badge bg-secondary">未检测</span>
+                    </div>
+                </div>
+                <button class="btn btn-primary" @click="login('xiaoheihe')" :disabled="xhLoading">
+                    <template x-if="!xhLoading">登录</template>
+                    <template x-if="xhLoading">
+                        <span class="spinner-border spinner-border-sm me-1"></span>等待扫码...
+                    </template>
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 状态提示 -->
+    <div x-show="showAlert" class="alert" :class="alertClass" x-text="alertMsg" style="transition: all 0.3s;"></div>
+</div>
+
+<script>
+document.addEventListener('alpine:init', () => {
+    Alpine.data('accounts', () => ({
+        zolStatus: 'unknown',
+        xhStatus: 'unknown',
+        zolLoading: false,
+        xhLoading: false,
+        showAlert: false,
+        alertClass: 'alert-info',
+        alertMsg: '',
+        cleanupMsg: '',
+
+        async cleanupZombies() {
+            this.cleanupMsg = '正在清理...';
+            try {
+                const res = await fetch('/api/cleanup', { method: 'POST' });
+                const data = await res.json();
+                this.cleanupMsg = `已清理 ${data.killed} 个僵尸进程`;
+                setTimeout(() => this.cleanupMsg = '', 5000);
+            } catch (e) {
+                this.cleanupMsg = '清理失败: ' + e.message;
+            }
+        },
+
+        async checkStatus() {
+            try {
+                const res = await fetch('/api/accounts');
+                const data = await res.json();
+                data.forEach(acc => {
+                    if (acc.platform === 'zol') this.zolStatus = acc.status || 'logged_out';
+                    if (acc.platform === 'xiaoheihe') this.xhStatus = acc.status || 'logged_out';
+                });
+            } catch (e) {
+                this.zolStatus = 'logged_out';
+                this.xhStatus = 'logged_out';
+                console.error('获取账号状态失败:', e);
+            }
+        },
+
+        async login(platform) {
+            if (platform === 'zol') this.zolLoading = true;
+            else this.xhLoading = true;
+
+            this.showAlert = true;
+            this.alertClass = 'alert-info';
+            this.alertMsg = '正在打开浏览器，请在浏览器中完成登录...';
+
+            try {
+                await fetch('/api/accounts/' + platform + '/login', { method: 'POST' });
+            } catch (e) {
+                this.showAlert = true;
+                this.alertClass = 'alert-danger';
+                this.alertMsg = '启动失败: ' + e.message;
+            } finally {
+                if (platform === 'zol') this.zolLoading = false;
+                else this.xhLoading = false;
+            }
+        },
+    }));
+});
+</script>
+{% endblock %}

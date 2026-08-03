@@ -1,0 +1,169 @@
+{% extends "base.html" %}
+{% block title %}仪表盘 - 自动化文章发布工具{% endblock %}
+{% block content %}
+<div x-data="dashboard" x-init="fetchData()" class="container">
+    <div class="d-flex justify-content-between align-items-center mb-4">
+        <h2 class="mb-0"><i class="bi bi-speedometer2 me-2"></i>仪表盘</h2>
+        <div class="d-flex gap-2">
+            <span class="badge bg-secondary fs-6" x-text="'队列: ' + status.queue_size"></span>
+            <span class="badge bg-success fs-6" x-text="'运行中' " x-show="status.running"></span>
+        </div>
+    </div>
+
+    <!-- 状态卡片 -->
+    <div class="row g-3 mb-4">
+        <div class="col-md-3">
+            <div class="card border-primary">
+                <div class="card-body text-center">
+                    <h1 class="text-primary" x-text="tasks.length"></h1>
+                    <small class="text-muted">总任务数</small>
+                </div>
+            </div>
+        </div>
+        <div class="col-md-3">
+            <div class="card border-warning">
+                <div class="card-body text-center">
+                    <h1 class="text-warning" x-text="tasks.filter(t => t.status === 'queued' || t.status === 'processing' || t.status === 'retrying').length"></h1>
+                    <small class="text-muted">进行中</small>
+                </div>
+            </div>
+        </div>
+        <div class="col-md-3">
+            <div class="card border-success">
+                <div class="card-body text-center">
+                    <h1 class="text-success" x-text="tasks.filter(t => t.status === 'completed').length"></h1>
+                    <small class="text-muted">已完成</small>
+                </div>
+            </div>
+        </div>
+        <div class="col-md-3">
+            <div class="card border-danger">
+                <div class="card-body text-center">
+                    <h1 class="text-danger" x-text="tasks.filter(t => t.status === 'failed').length"></h1>
+                    <small class="text-muted">失败</small>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 任务列表 -->
+    <div class="card">
+        <div class="card-header d-flex justify-content-between align-items-center">
+            <h5 class="mb-0">任务列表</h5>
+            <button class="btn btn-sm btn-outline-secondary" @click="fetchData">
+                <i class="bi bi-arrow-clockwise me-1"></i>刷新
+            </button>
+        </div>
+        <div class="table-responsive">
+            <table class="table table-hover mb-0">
+                <thead>
+                    <tr>
+                        <th>#</th>
+                        <th>文章</th>
+                        <th>平台</th>
+                        <th>标题</th>
+                        <th>状态</th>
+                        <th>重试</th>
+                        <th>创建时间</th>
+                        <th>操作</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <template x-if="tasks.length === 0">
+                        <tr>
+                            <td colspan="8" class="text-center text-muted py-4">
+                                <i class="bi bi-inbox fs-3 d-block mb-2"></i>
+                                暂无任务，去 <a href="/upload">上传文章</a>
+                            </td>
+                        </tr>
+                    </template>
+                    <template x-for="task in tasks" :key="task.id">
+                        <tr>
+                            <td x-text="task.id"></td>
+                            <td>
+                                <span class="text-truncate d-inline-block" style="max-width:150px"
+                                      x-text="task.article_filename || '-'"></span>
+                            </td>
+                            <td>
+                                <span class="badge bg-info" x-text="platformLabel(task.platform)"></span>
+                            </td>
+                            <td>
+                                <span class="text-truncate d-inline-block" style="max-width:200px"
+                                      x-text="task.title_used || '-'"></span>
+                            </td>
+                            <td>
+                                <span class="badge" :class="statusClass(task.status)" x-text="statusLabel(task.status)"></span>
+                            </td>
+                            <td>
+                                <small class="text-muted" x-text="task.retry_count + '/' + 3"></small>
+                            </td>
+                            <td>
+                                <small class="text-muted" x-text="formatTime(task.created_at)"></small>
+                            </td>
+                            <td>
+                                <a :href="'/task/' + task.id" class="btn btn-sm btn-outline-primary">
+                                    <i class="bi bi-eye"></i>
+                                </a>
+                            </td>
+                        </tr>
+                    </template>
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <!-- 自动刷新 -->
+    <div class="text-muted text-center mt-3">
+        <small>每 5 秒自动刷新</small>
+    </div>
+</div>
+
+<script>
+document.addEventListener('alpine:init', () => {
+    Alpine.data('dashboard', () => ({
+        tasks: [],
+        status: { queue_size: 0, running: false },
+        timer: null,
+
+        async fetchData() {
+            try {
+                const [taskRes, statusRes] = await Promise.all([
+                    fetch('/api/tasks'),
+                    fetch('/api/status'),
+                ]);
+                this.tasks = await taskRes.json();
+                this.status = await statusRes.json();
+            } catch (e) {}
+        },
+
+        platformLabel(p) {
+            return { zol: '中关村在线', xiaoheihe: '小黑盒' }[p] || p;
+        },
+
+        statusLabel(s) {
+            const m = {
+                queued: '排队中', processing: '处理中', completed: '已完成',
+                failed: '失败', retrying: '重试中', cancelled: '已取消'
+            };
+            return m[s] || s;
+        },
+
+        statusClass(s) {
+            const m = {
+                queued: 'bg-secondary', processing: 'bg-warning text-dark',
+                completed: 'bg-success', failed: 'bg-danger', retrying: 'bg-info',
+            };
+            return m[s] || 'bg-light text-dark';
+        },
+
+        formatTime(t) {
+            return t ? t.replace('T', ' ').substring(0, 19) : '-';
+        },
+
+        init() {
+            this.timer = setInterval(() => this.fetchData(), 5000);
+        },
+    }));
+});
+</script>
+{% endblock %}

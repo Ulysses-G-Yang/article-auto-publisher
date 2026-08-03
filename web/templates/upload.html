@@ -1,0 +1,215 @@
+{% extends "base.html" %}
+{% block title %}上传文章 - 自动化文章发布工具{% endblock %}
+{% block content %}
+<div x-data="uploader" class="container" style="max-width: 800px;">
+    <h2 class="mb-4"><i class="bi bi-cloud-upload me-2"></i>上传文章</h2>
+
+    <div class="card mb-4">
+        <div class="card-body">
+            <h5 class="card-title">选择 Word 文档</h5>
+            <p class="text-muted small">支持 .docx 格式，可同时选择多个文件</p>
+
+            <!-- 拖拽上传区域 -->
+            <div class="upload-zone border rounded-3 p-5 text-center mb-3"
+                 :class="{ 'border-primary bg-light': dragging }"
+                 @dragover.prevent="dragging = true"
+                 @dragleave.prevent="dragging = false"
+                 @drop.prevent="handleDrop($event)">
+                <i class="bi bi-file-earmark-word fs-1 text-muted mb-3 d-block"></i>
+                <p class="mb-2">拖拽 Word 文档到此处，或点击选择</p>
+                <input type="file" id="fileInput" accept=".docx" multiple
+                       @change="handleFiles($event)" class="d-none">
+                <button class="btn btn-primary" @click="$refs.fileInput.click()">
+                    <i class="bi bi-folder2-open me-1"></i>选择文件
+                </button>
+                <input type="file" x-ref="fileInput" accept=".docx" multiple
+                       @change="handleFiles($event)" class="d-none">
+            </div>
+
+            <!-- 已选文件列表 -->
+            <template x-if="files.length > 0">
+                <div class="mt-3">
+                    <h6>已选文件 (<span x-text="files.length"></span>)</h6>
+                    <div class="list-group">
+                        <template x-for="(f, i) in files" :key="i">
+                            <div class="list-group-item d-flex justify-content-between align-items-center">
+                                <div>
+                                    <i class="bi bi-file-earmark-word text-primary me-2"></i>
+                                    <span x-text="f.name"></span>
+                                    <small class="text-muted ms-2" x-text="formatSize(f.size)"></small>
+                                </div>
+                                <button class="btn btn-sm btn-outline-danger" @click="removeFile(i)">
+                                    <i class="bi bi-x-lg"></i>
+                                </button>
+                            </div>
+                        </template>
+                    </div>
+                </div>
+            </template>
+        </div>
+    </div>
+
+    <!-- 平台选择 -->
+    <div class="card mb-4">
+        <div class="card-body">
+            <h5 class="card-title">目标平台</h5>
+            <p class="text-muted small">选择要发布到的平台</p>
+            <div class="d-flex gap-3">
+                <label class="d-flex align-items-center">
+                    <input type="checkbox" x-model="platforms.zol" class="form-check-input me-2" checked>
+                    <span class="badge bg-info fs-6">中关村在线 (ZOL)</span>
+                </label>
+                <label class="d-flex align-items-center">
+                    <input type="checkbox" x-model="platforms.xiaoheihe" class="form-check-input me-2" checked>
+                    <span class="badge bg-purple fs-6">小黑盒</span>
+                </label>
+            </div>
+        </div>
+    </div>
+
+    <!-- 上传按钮 -->
+    <div class="d-flex gap-2 mb-4">
+        <button class="btn btn-primary btn-lg flex-grow-1" @click="startUpload"
+                :disabled="uploading || files.length === 0 || (!platforms.zol && !platforms.xiaoheihe)">
+            <template x-if="!uploading">
+                <span><i class="bi bi-rocket-takeoff me-1"></i>开始处理并发布</span>
+            </template>
+            <template x-if="uploading">
+                <span>
+                    <span class="spinner-border spinner-border-sm me-2"></span>
+                    处理中...
+                </span>
+            </template>
+        </button>
+        <button class="btn btn-outline-secondary" @click="files = []; results = [];">
+            <i class="bi bi-trash me-1"></i>清空
+        </button>
+    </div>
+
+    <!-- 处理进度 -->
+    <div class="progress mb-3" x-show="uploading">
+        <div class="progress-bar progress-bar-striped progress-bar-animated"
+             :style="'width: ' + progress + '%'" x-text="progress + '%'"></div>
+    </div>
+
+    <!-- 处理结果 -->
+    <template x-if="results.length > 0">
+        <div class="card">
+            <div class="card-header">
+                <h5 class="mb-0">处理结果</h5>
+            </div>
+            <div class="list-group list-group-flush">
+                <template x-for="r in results" :key="r.filename">
+                    <div class="list-group-item">
+                        <div class="d-flex justify-content-between align-items-start">
+                            <div>
+                                <h6 class="mb-1">
+                                    <template x-if="r.status === 'ok'">
+                                        <i class="bi bi-check-circle-fill text-success me-1"></i>
+                                    </template>
+                                    <template x-if="r.status === 'error'">
+                                        <i class="bi bi-x-circle-fill text-danger me-1"></i>
+                                    </template>
+                                    <span x-text="r.filename"></span>
+                                </h6>
+                                <template x-if="r.status === 'ok'">
+                                    <div class="small text-muted">
+                                        <span class="me-2">标题: <span x-text="r.title"></span></span>
+                                        <span class="me-2">字数: <span x-text="r.char_count"></span></span>
+                                        <span class="me-2">图片: <span x-text="r.image_count"></span></span>
+                                        <div class="mt-1">
+                                            <span class="badge bg-secondary me-1">ZOL: <span x-text="r.topic_zol || '未匹配'"></span></span>
+                                            <span class="badge bg-secondary">小黑盒: <span x-text="r.topic_xiaoheihe || '未匹配'"></span></span>
+                                        </div>
+                                        <div class="mt-1">
+                                            关键词:
+                                            <template x-for="kw in r.keywords" :key="kw">
+                                                <span class="badge bg-light text-dark me-1" x-text="kw"></span>
+                                            </template>
+                                        </div>
+                                        <div class="mt-1" x-show="r.tasks">
+                                            任务:
+                                            <template x-for="t in r.tasks" :key="t.task_id">
+                                                <a :href="'/task/' + t.task_id" class="badge bg-primary text-decoration-none me-1"
+                                                   x-text="platformLabel(t.platform) + ' #' + t.task_id"></a>
+                                            </template>
+                                        </div>
+                                    </div>
+                                </template>
+                                <template x-if="r.status === 'error'">
+                                    <p class="text-danger small mb-0" x-text="r.error"></p>
+                                </template>
+                            </div>
+                        </div>
+                    </div>
+                </template>
+            </div>
+        </div>
+    </template>
+</div>
+
+<script>
+document.addEventListener('alpine:init', () => {
+    Alpine.data('uploader', () => ({
+        files: [],
+        platforms: { zol: true, xiaoheihe: true },
+        uploading: false,
+        progress: 0,
+        results: [],
+        dragging: false,
+
+        handleFiles(event) {
+            const newFiles = Array.from(event.target.files);
+            this.files = [...this.files, ...newFiles];
+            event.target.value = '';
+        },
+
+        handleDrop(event) {
+            this.dragging = false;
+            const newFiles = Array.from(event.dataTransfer.files).filter(f => f.name.endsWith('.docx'));
+            this.files = [...this.files, ...newFiles];
+        },
+
+        removeFile(index) {
+            this.files.splice(index, 1);
+        },
+
+        formatSize(bytes) {
+            return bytes > 1024 * 1024
+                ? (bytes / (1024 * 1024)).toFixed(1) + ' MB'
+                : (bytes / 1024).toFixed(1) + ' KB';
+        },
+
+        platformLabel(p) {
+            return { zol: '中关村在线', xiaoheihe: '小黑盒' }[p] || p;
+        },
+
+        async startUpload() {
+            if (this.files.length === 0) return;
+            this.uploading = true;
+            this.progress = 0;
+            this.results = [];
+
+            const formData = new FormData();
+            this.files.forEach(f => formData.append('files', f));
+
+            const selectedPlatforms = [];
+            if (this.platforms.zol) selectedPlatforms.push('zol');
+            if (this.platforms.xiaoheihe) selectedPlatforms.push('xiaoheihe');
+            selectedPlatforms.forEach(p => formData.append('platforms', p));
+
+            try {
+                const res = await fetch('/api/upload', { method: 'POST', body: formData });
+                const data = await res.json();
+                this.progress = 100;
+                this.results = data.results || [];
+            } catch (e) {
+                alert('上传失败: ' + e.message);
+            } finally {
+                this.uploading = false;
+            }
+        },
+    }));
+});
+</script>
+{% endblock %}

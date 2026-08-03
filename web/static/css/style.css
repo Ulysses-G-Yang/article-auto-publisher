@@ -1,0 +1,91 @@
+/* 自动化文章发布工具 - 自定义样式 */
+
+:root {
+    --purple: #6f42c1;
+}
+
+/* 导航栏 */
+.navbar-brand {
+    font-size: 1.3rem;
+}
+
+/* 上传区域 */
+.upload-zone {
+    border: 2px dashed #dee2e6;
+    cursor: pointer;
+    transition: all 0.3s;
+}
+.upload-zone:hover {
+    border-color: #0d6efd;
+    background-color: #f8f9fa;
+}
+
+/* 卡片 */
+.card-header {
+    background-color: #f8f9fa;
+    border-bottom: 1px solid rgba(0,0,0,.125);
+}
+
+/* 平台颜色 */
+.badge.bg-purple {
+    background-color: var(--purple) !important;
+    color: #fff;
+}
+
+/* 日志容器 */
+.log-container {
+    border-radius: 0 0 var(--bs-card-border-radius) var(--bs-card-border-radius);
+}
+.log-line {
+    line-height: 1.6;
+}
+.log-line:hover {
+    background-color: rgba(255,255,255,0.05);
+}
+
+/* 进度条 */
+.progress {
+    height: 8px;
+}
+
+/* 表格 */
+.table td, .table th {
+    vertical-align: middle;
+}
+
+/* 响应式 */
+@media (max-width: 768px) {
+    .navbar-brand {
+        font-size: 1.1rem;
+    }
+    .card-title {
+        font-size: 1rem;
+    }
+}
+
+/* 过渡动画 */
+.fade-enter-active, .fade-leave-active {
+    transition: opacity 0.3s;
+}
+.fade-enter-from, .fade-leave-to {
+    opacity: 0;
+}
+
+/* 状态标记点 */
+.status-dot {
+    display: inline-block;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    margin-right: 6px;
+}
+.status-dot.queued { background-color: #6c757d; }
+.status-dot.processing { background-color: #ffc107; animation: pulse 1.5s infinite; }
+.status-dot.completed { background-color: #198754; }
+.status-dot.failed { background-color: #dc3545; }
+.status-dot.retrying { background-color: #0dcaf0; animation: pulse 1s infinite; }
+
+@keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.3; }
+}

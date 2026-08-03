@@ -1,0 +1,137 @@
+{% extends "base.html" %}
+{% block title %}任务详情 - 自动化文章发布工具{% endblock %}
+{% block content %}
+<div x-data="taskDetail" class="container" style="max-width: 900px;">
+    <nav aria-label="breadcrumb" class="mb-3">
+        <ol class="breadcrumb">
+            <li class="breadcrumb-item"><a href="/">仪表盘</a></li>
+            <li class="breadcrumb-item active">任务 #{{ task.id if task else '' }}</li>
+        </ol>
+    </nav>
+
+    {% if task %}
+    <!-- 任务概览 -->
+    <div class="card mb-4">
+        <div class="card-header d-flex justify-content-between align-items-center">
+            <h5 class="mb-0">任务 #{{ task.id }} 详情</h5>
+            <span class="badge fs-6 
+                {% if task.status == 'completed' %}bg-success
+                {% elif task.status == 'failed' %}bg-danger
+                {% elif task.status == 'processing' %}bg-warning text-dark
+                {% elif task.status == 'retrying' %}bg-info
+                {% else %}bg-secondary{% endif %}">
+                {{ {'queued':'排队中','processing':'处理中','completed':'已完成','failed':'失败','retrying':'重试中','cancelled':'已取消'}[task.status] }}
+            </span>
+        </div>
+        <div class="card-body">
+            <div class="row g-3">
+                <div class="col-md-6">
+                    <label class="text-muted small">平台</label>
+                    <p class="fw-bold">{{ '中关村在线' if task.platform == 'zol' else '小黑盒' }}</p>
+                </div>
+                <div class="col-md-6">
+                    <label class="text-muted small">文章</label>
+                    <p class="fw-bold">{{ article.filename if article else '-' }}</p>
+                </div>
+                <div class="col-md-6">
+                    <label class="text-muted small">使用标题</label>
+                    <p>{{ task.title_used or '-' }}</p>
+                </div>
+                <div class="col-md-6">
+                    <label class="text-muted small">匹配话题</label>
+                    <p>{{ task.topic_used or '-' }}</p>
+                </div>
+                <div class="col-md-4">
+                    <label class="text-muted small">重试次数</label>
+                    <p>{{ task.retry_count }}/3</p>
+                </div>
+                <div class="col-md-4">
+                    <label class="text-muted small">草稿链接</label>
+                    <p>
+                        {% if task.draft_url %}
+                        <a href="{{ task.draft_url }}" target="_blank">查看草稿 <i class="bi bi-box-arrow-up-right"></i></a>
+                        {% else %}-{% endif %}
+                    </p>
+                </div>
+                <div class="col-md-4">
+                    <label class="text-muted small">创建时间</label>
+                    <p>{{ task.created_at or '-' }}</p>
+                </div>
+            </div>
+            {% if task.error_message %}
+            <div class="alert alert-danger mt-3 mb-0">
+                <strong>错误信息：</strong>{{ task.error_message }}
+            </div>
+            {% endif %}
+        </div>
+    </div>
+
+    <!-- 文章预览 -->
+    {% if article %}
+    <div class="card mb-4">
+        <div class="card-header">
+            <h5 class="mb-0">文章内容预览</h5>
+        </div>
+        <div class="card-body">
+            {% set content = article.content_json %}
+            {% if content %}
+                {% set data = content|tojson|safe if content is string else content %}
+            {% endif %}
+            <p class="text-muted small">
+                字数: {{ article.char_count }} | 图片: {{ article.image_count }}
+            </p>
+            <div class="border rounded p-3 bg-light" style="max-height: 400px; overflow-y: auto;">
+                {% if article.content_text %}
+                    <pre class="mb-0" style="white-space: pre-wrap; font-family: inherit;">{{ article.content_text[:2000] }}
+                    {% if article.content_text|length > 2000 %}<span class="text-muted">... (更多内容已省略)</span>{% endif %}
+                    </pre>
+                {% endif %}
+            </div>
+        </div>
+    </div>
+    {% endif %}
+
+    <!-- 执行日志 -->
+    <div class="card">
+        <div class="card-header d-flex justify-content-between align-items-center">
+            <h5 class="mb-0">执行日志</h5>
+            <button class="btn btn-sm btn-outline-secondary" onclick="location.reload()">
+                <i class="bi bi-arrow-clockwise me-1"></i>刷新
+            </button>
+        </div>
+        <div class="card-body p-0">
+            <div class="log-container p-3" style="max-height: 500px; overflow-y: auto; background:#1e1e1e; color:#d4d4d4; font-family: 'Cascadia Code', 'Fira Code', monospace; font-size: 0.85rem;">
+                {% if logs %}
+                    {% for log in logs %}
+                    <div class="log-line mb-1">
+                        <span class="log-time" style="color:#888">{{ log.created_at }}</span>
+                        <span class="log-level ms-2 fw-bold
+                            {% if log.level == 'ERROR' %}text-danger
+                            {% elif log.level == 'WARN' %}text-warning
+                            {% else %}text-info{% endif %}">
+                            [{{ log.level }}]
+                        </span>
+                        <span class="ms-2">{{ log.message }}</span>
+                    </div>
+                    {% endfor %}
+                {% else %}
+                    <div class="text-muted text-center py-3">暂无日志</div>
+                {% endif %}
+            </div>
+        </div>
+    </div>
+    {% else %}
+    <div class="alert alert-warning">任务不存在</div>
+    {% endif %}
+</div>
+
+<script>
+document.addEventListener('alpine:init', () => {
+    Alpine.data('taskDetail', () => ({
+        task: {{ task|tojson if task else 'null' }},
+        article: {{ article|tojson if article else 'null' }},
+        logs: {{ logs|tojson if logs else '[]' }},
+    }));
+});
+</script>
+{% endblock %}

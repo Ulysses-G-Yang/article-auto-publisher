@@ -301,6 +301,59 @@ class RegressionTests(DatabaseTestCase):
             self.assertTrue(cookie_path.exists())
             kill_mock.assert_not_called()
 
+    def test_clear_platform_cookies_only_clears_requested_profile(self):
+        import app as app_module
+
+        old_base_dir = app_module.BASE_DIR
+        with tempfile.TemporaryDirectory() as temp_dir:
+            profile_base = Path(temp_dir) / "data" / "chrome_profiles"
+            zol_default = profile_base / "zol" / "Default"
+            zol_network = zol_default / "Network"
+            zol_network.mkdir(parents=True)
+            (zol_network / "Cookies").write_bytes(b"zol cookie database")
+            (zol_network / "Cookies-wal").write_bytes(b"wal")
+            (zol_default / "Local Storage").mkdir()
+            (zol_default / "Local Storage" / "leveldb").write_bytes(b"site data")
+
+            xh_cookie = profile_base / "xiaoheihe" / "Default" / "Network" / "Cookies"
+            xh_cookie.parent.mkdir(parents=True)
+            xh_cookie.write_bytes(b"xiaoheihe cookie database")
+
+            app_module.BASE_DIR = temp_dir
+            try:
+                self.assertTrue(app_module.clear_platform_cookies("zol"))
+            finally:
+                app_module.BASE_DIR = old_base_dir
+
+            self.assertFalse((zol_network / "Cookies").exists())
+            self.assertFalse((zol_network / "Cookies-wal").exists())
+            self.assertFalse((zol_default / "Local Storage").exists())
+            self.assertTrue(xh_cookie.exists())
+            self.assertFalse(app_module.clear_platform_cookies("unsupported"))
+
+    def test_logout_endpoint_resets_selected_account(self):
+        import app as app_module
+        from app import create_app
+
+        self.db.upsert_account(
+            "zol",
+            status="logged_in",
+            last_login_time="2026-08-06T14:30:00",
+        )
+        with patch.object(app_module, "clear_platform_cookies", return_value=True) as clear_mock:
+            response = create_app().test_client().post("/api/accounts/zol/logout")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json(), {
+            "status": "ok",
+            "platform": "zol",
+            "cookies_cleared": True,
+        })
+        clear_mock.assert_called_once_with("zol")
+        account = self.db.get_account("zol")
+        self.assertEqual(account["status"], "logged_out")
+        self.assertIsNone(account["last_login_time"])
+
     def test_existing_cookie_session_skips_login(self):
         from web import routes
 

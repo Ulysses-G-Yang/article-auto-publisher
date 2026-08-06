@@ -273,6 +273,40 @@ def register_routes(app):
         thread.start()
         return jsonify({"status": "login_started", "platform": platform})
 
+    @app.route("/api/accounts/<platform>/logout", methods=["POST"])
+    def api_accounts_logout(platform):
+        """退出登录：清除该平台 Profile 的 Cookie/站点会话数据并更新状态。"""
+        if platform not in ("zol", "xiaoheihe"):
+            return jsonify({
+                "status": "error",
+                "error_code": "UNSUPPORTED_PLATFORM",
+                "message": "不支持的平台",
+            }), 400
+
+        account = db.get_account(platform)
+        if account and account.get("status") == "logging_in":
+            return jsonify({
+                "status": "error",
+                "error_code": "LOGIN_IN_PROGRESS",
+                "message": "当前平台正在登录，请等待登录流程结束后再退出",
+            }), 409
+
+        # 在路由函数内导入，避免 app.py 启动时与 web.routes 互相导入。
+        from app import clear_platform_cookies
+
+        cleared = clear_platform_cookies(platform)
+        db.upsert_account(platform, status="logged_out", last_login_time=None)
+        logger.info("{} 退出登录: cookies_cleared={}", platform, cleared)
+        if not cleared:
+            logger.warning("{} 已重置账号状态，但没有清理到可删除的 Cookie 文件", platform)
+
+        # 不写 task_logs：task_id=0 不满足任务表外键，会导致退出接口本身失败。
+        return jsonify({
+            "status": "ok",
+            "platform": platform,
+            "cookies_cleared": cleared,
+        })
+
     return app
 
 

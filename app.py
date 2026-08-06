@@ -4,6 +4,7 @@ import os
 import asyncio
 import threading
 import signal
+import shutil
 
 # 确保模块路径
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -16,6 +17,58 @@ from core.logging_setup import configure_logging
 from loguru import logger
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+
+def clear_platform_cookies(platform: str) -> bool:
+    """清除指定平台的 Chrome Cookie/站点会话数据，实现账号切换。
+
+    只接受项目支持的平台，并且所有删除目标必须位于该平台自己的
+    ``data/chrome_profiles/{platform}`` 目录内；不会触碰另一个平台的 Profile。
+    """
+    if platform not in ("zol", "xiaoheihe"):
+        return False
+
+    profile_root = os.path.realpath(os.path.join(BASE_DIR, "data", "chrome_profiles"))
+    profile_base = os.path.realpath(os.path.join(profile_root, platform))
+    try:
+        if os.path.commonpath([profile_root, profile_base]) != profile_root:
+            logger.error("拒绝清理越界的 Chrome Profile: platform={}", platform)
+            return False
+    except ValueError:
+        return False
+
+    if not os.path.isdir(profile_base):
+        return False
+
+    cookie_paths = [
+        os.path.join(profile_base, "Default", "Network", "Cookies"),
+        os.path.join(profile_base, "Default", "Network", "Cookies-wal"),
+        os.path.join(profile_base, "Default", "Network", "Cookies-shm"),
+        os.path.join(profile_base, "Default", "Cookies"),
+        os.path.join(profile_base, "Default", "Local Storage"),
+        os.path.join(profile_base, "Default", "Session Storage"),
+        os.path.join(profile_base, "Default", "Web Data"),
+        os.path.join(profile_base, "Default", "Login Data"),
+    ]
+
+    cleared = False
+    for path in cookie_paths:
+        try:
+            target = os.path.realpath(path)
+            if os.path.commonpath([profile_base, target]) != profile_base:
+                logger.error("拒绝清理越界的 Cookie 路径: platform={}, path={}", platform, path)
+                continue
+            if os.path.isfile(path):
+                os.remove(path)
+                cleared = True
+            elif os.path.isdir(path):
+                shutil.rmtree(path)
+                cleared = True
+        except Exception as exc:
+            # Chrome 正在占用文件时可能清理失败；记录原因但继续尝试其他文件。
+            logger.warning("清理 {} Cookie 文件失败: path={}, error={}", platform, path, exc)
+
+    return cleared
 
 
 def kill_zombie_chrome():

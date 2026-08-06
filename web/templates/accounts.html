@@ -105,6 +105,23 @@
         transform: translateY(-1px);
     }
 
+    .account-actions {
+        align-items: stretch;
+        display: flex;
+        flex: 0 0 auto;
+        flex-direction: column;
+        gap: 0.25rem;
+        min-width: 7.5rem;
+    }
+
+    .account-logout-button {
+        transition: color 0.3s ease, opacity 0.3s ease;
+    }
+
+    .account-logout-button:hover:not(:disabled) {
+        color: #dc3545 !important;
+    }
+
     .account-toast-container {
         z-index: 1080;
     }
@@ -116,6 +133,10 @@
         }
 
         .account-login-button {
+            width: 100%;
+        }
+
+        .account-actions {
             width: 100%;
         }
     }
@@ -177,20 +198,37 @@
                     </div>
                 </div>
 
-                <button
-                    type="button"
-                    class="account-login-button btn"
-                    :class="loginButtonClass('zol')"
-                    @click="login('zol')"
-                    :disabled="isBusy('zol')"
-                >
-                    <template x-if="isWaiting('zol')">
-                        <span><span class="spinner-border spinner-border-sm me-1" aria-hidden="true"></span>等待扫码...</span>
-                    </template>
-                    <template x-if="!isWaiting('zol')">
-                        <span><i class="bi bi-box-arrow-in-right me-1"></i><span x-text="loginButtonText('zol')"></span></span>
-                    </template>
-                </button>
+                <div class="account-actions">
+                    <button
+                        type="button"
+                        class="account-login-button btn"
+                        :class="loginButtonClass('zol')"
+                        @click="login('zol')"
+                        :disabled="isBusy('zol')"
+                    >
+                        <template x-if="isWaiting('zol')">
+                            <span><span class="spinner-border spinner-border-sm me-1" aria-hidden="true"></span>等待扫码...</span>
+                        </template>
+                        <template x-if="!isWaiting('zol')">
+                            <span><i class="bi bi-box-arrow-in-right me-1"></i><span x-text="loginButtonText('zol')"></span></span>
+                        </template>
+                    </button>
+                    <button
+                        x-show="showLogoutButton('zol')"
+                        x-transition
+                        type="button"
+                        class="account-logout-button btn btn-link btn-sm text-decoration-none"
+                        :disabled="isLoggingOut('zol')"
+                        @click="logout('zol')"
+                    >
+                        <template x-if="!isLoggingOut('zol')">
+                            <span><i class="bi bi-box-arrow-left me-1"></i>退出登录</span>
+                        </template>
+                        <template x-if="isLoggingOut('zol')">
+                            <span><span class="spinner-border spinner-border-sm me-1"></span>清除中...</span>
+                        </template>
+                    </button>
+                </div>
             </div>
         </div>
     </div>
@@ -239,20 +277,37 @@
                     </div>
                 </div>
 
-                <button
-                    type="button"
-                    class="account-login-button btn"
-                    :class="loginButtonClass('xiaoheihe')"
-                    @click="login('xiaoheihe')"
-                    :disabled="isBusy('xiaoheihe')"
-                >
-                    <template x-if="isWaiting('xiaoheihe')">
-                        <span><span class="spinner-border spinner-border-sm me-1" aria-hidden="true"></span>等待扫码...</span>
-                    </template>
-                    <template x-if="!isWaiting('xiaoheihe')">
-                        <span><i class="bi bi-box-arrow-in-right me-1"></i><span x-text="loginButtonText('xiaoheihe')"></span></span>
-                    </template>
-                </button>
+                <div class="account-actions">
+                    <button
+                        type="button"
+                        class="account-login-button btn"
+                        :class="loginButtonClass('xiaoheihe')"
+                        @click="login('xiaoheihe')"
+                        :disabled="isBusy('xiaoheihe')"
+                    >
+                        <template x-if="isWaiting('xiaoheihe')">
+                            <span><span class="spinner-border spinner-border-sm me-1" aria-hidden="true"></span>等待扫码...</span>
+                        </template>
+                        <template x-if="!isWaiting('xiaoheihe')">
+                            <span><i class="bi bi-box-arrow-in-right me-1"></i><span x-text="loginButtonText('xiaoheihe')"></span></span>
+                        </template>
+                    </button>
+                    <button
+                        x-show="showLogoutButton('xiaoheihe')"
+                        x-transition
+                        type="button"
+                        class="account-logout-button btn btn-link btn-sm text-decoration-none"
+                        :disabled="isLoggingOut('xiaoheihe')"
+                        @click="logout('xiaoheihe')"
+                    >
+                        <template x-if="!isLoggingOut('xiaoheihe')">
+                            <span><i class="bi bi-box-arrow-left me-1"></i>退出登录</span>
+                        </template>
+                        <template x-if="isLoggingOut('xiaoheihe')">
+                            <span><span class="spinner-border spinner-border-sm me-1"></span>清除中...</span>
+                        </template>
+                    </button>
+                </div>
             </div>
         </div>
     </div>
@@ -289,6 +344,8 @@ document.addEventListener('alpine:init', () => {
         xhLastLogin: null,
         zolLoading: false,
         xhLoading: false,
+        zolLoggingOut: false,
+        xhLoggingOut: false,
         zolError: '登录流程未返回具体原因，请查看日志后重试。',
         xhError: '登录流程未返回具体原因，请查看日志后重试。',
         errorExpanded: {
@@ -346,7 +403,15 @@ document.addEventListener('alpine:init', () => {
         },
 
         isBusy(platform) {
-            return this.isWaiting(platform);
+            return this.isWaiting(platform) || this.isLoggingOut(platform);
+        },
+
+        showLogoutButton(platform) {
+            return this.getStatus(platform) === 'logged_in';
+        },
+
+        isLoggingOut(platform) {
+            return platform === 'zol' ? this.zolLoggingOut : this.xhLoggingOut;
         },
 
         loginButtonText(platform) {
@@ -469,6 +534,47 @@ document.addEventListener('alpine:init', () => {
 
         toggleError(platform) {
             this.errorExpanded[platform] = !this.errorExpanded[platform];
+        },
+
+        async logout(platform) {
+            if (!window.confirm(
+                `确定要退出 ${this.platformLabel(platform)} 登录吗？\n将清除 Cookie，下次需要重新扫码。`,
+            )) {
+                return;
+            }
+
+            const loggingOutKey = platform === 'zol' ? 'zolLoggingOut' : 'xhLoggingOut';
+            const statusKey = this.statusKey(platform);
+            const loadingKey = this.loadingKey(platform);
+            const lastLoginKey = this.lastLoginKey(platform);
+            const errorKey = this.errorKey(platform);
+
+            this[loggingOutKey] = true;
+            try {
+                const res = await fetch(`/api/accounts/${platform}/logout`, { method: 'POST' });
+                const data = await res.json().catch(() => ({}));
+                if (!res.ok || data.status === 'error') {
+                    throw new Error(data.message || `HTTP ${res.status}`);
+                }
+
+                this[statusKey] = 'logged_out';
+                this[loadingKey] = false;
+                this[lastLoginKey] = null;
+                this[errorKey] = '';
+                this.errorExpanded[platform] = false;
+                this.notify(
+                    data.cookies_cleared
+                        ? `${this.platformLabel(platform)} 已退出，Cookie 已清除`
+                        : `${this.platformLabel(platform)} 状态已重置`,
+                    data.cookies_cleared ? 'success' : 'info',
+                    3000,
+                );
+                this.syncPolling();
+            } catch (e) {
+                this.notify('退出登录失败: ' + (e.message || '未知错误'), 'danger', 5000);
+            } finally {
+                this[loggingOutKey] = false;
+            }
         },
 
         async cleanupBeforeLogin() {

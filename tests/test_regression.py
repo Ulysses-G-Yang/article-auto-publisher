@@ -3,6 +3,7 @@ import copy
 import shutil
 import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 from config import get_config
@@ -268,6 +269,37 @@ class RegressionTests(DatabaseTestCase):
         self.assertEqual(paused, 2)
         self.assertEqual(self.db.get_task(queued_id)["status"], "paused")
         self.assertEqual(self.db.get_task(retrying_id)["status"], "paused")
+
+    def test_cleanup_only_removes_profile_lock_files(self):
+        import app as app_module
+
+        old_base_dir = app_module.BASE_DIR
+        with tempfile.TemporaryDirectory() as temp_dir:
+            profile_base = Path(temp_dir) / "data" / "chrome_profiles"
+            lock_paths = []
+            for platform in ("zol", "xiaoheihe"):
+                profile_dir = profile_base / platform
+                profile_dir.mkdir(parents=True)
+                for lock_name in ("SingletonLock", "SingletonCookie", "SingletonSocket"):
+                    lock_path = profile_dir / lock_name
+                    lock_path.write_text("lock", encoding="utf-8")
+                    lock_paths.append(lock_path)
+
+            cookie_path = profile_base / "zol" / "Default" / "Network" / "Cookies"
+            cookie_path.parent.mkdir(parents=True)
+            cookie_path.write_bytes(b"cookie database")
+
+            app_module.BASE_DIR = temp_dir
+            try:
+                with patch.object(app_module.os, "kill") as kill_mock:
+                    cleaned = app_module.kill_zombie_chrome()
+            finally:
+                app_module.BASE_DIR = old_base_dir
+
+            self.assertEqual(cleaned, 6)
+            self.assertTrue(all(not path.exists() for path in lock_paths))
+            self.assertTrue(cookie_path.exists())
+            kill_mock.assert_not_called()
 
     def test_existing_cookie_session_skips_login(self):
         from web import routes

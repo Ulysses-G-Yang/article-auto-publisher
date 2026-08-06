@@ -4,7 +4,6 @@ import os
 import asyncio
 import threading
 import signal
-import subprocess
 
 # 确保模块路径
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -20,30 +19,11 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 
 def kill_zombie_chrome():
-    """杀掉所有使用项目 Chrome Profile 的僵尸进程"""
+    """只清理 Chrome Profile 的锁文件，保留 Cookie 会话"""
     profile_base = os.path.join(BASE_DIR, "data", "chrome_profiles")
-    killed = 0
-    try:
-        # 查找所有命令行包含 chrome_profiles 路径的 chrome 进程
-        result = subprocess.run(
-            ["wmic", "process", "where",
-             f"name='chrome.exe'", "get", "processid,commandline"],
-            capture_output=True, text=True, timeout=10,
-        )
-        for line in result.stdout.split("\n"):
-            if "chrome_profiles" in line and line.strip():
-                parts = line.strip().split()
-                if parts:
-                    pid = parts[-1]
-                    try:
-                        os.kill(int(pid), signal.SIGTERM)
-                        killed += 1
-                    except Exception:
-                        pass
-    except Exception:
-        pass
+    cleaned = 0
 
-    # 清理 SingletonLock 文件
+    # 只清理 Singleton 锁文件，不触碰 Chrome 进程和 Profile 数据。
     for platform in ["zol", "xiaoheihe"]:
         profile_dir = os.path.join(profile_base, platform)
         for lock_file in ["SingletonLock", "SingletonCookie", "SingletonSocket"]:
@@ -51,10 +31,11 @@ def kill_zombie_chrome():
             try:
                 if os.path.exists(lock_path):
                     os.remove(lock_path)
+                    cleaned += 1
             except Exception:
                 pass
 
-    return killed
+    return cleaned
 
 
 def create_app() -> Flask:
@@ -73,7 +54,7 @@ def create_app() -> Flask:
     # 注册路由
     register_routes(app)
 
-    # 添加清理僵尸进程的 API
+    # 添加清理 Profile 锁文件的 API；保留原有 /api/cleanup 端点兼容性。
     @app.route("/api/cleanup", methods=["POST"])
     def api_cleanup():
         killed = kill_zombie_chrome()
@@ -105,10 +86,10 @@ def start_queue_worker():
 
 
 def on_shutdown(signum, frame):
-    """服务器关闭时清理所有 Chrome 进程"""
-    logger.info("正在清理 Chrome 进程...")
-    killed = kill_zombie_chrome()
-    logger.info("已清理 {} 个项目 Chrome 进程", killed)
+    """服务器关闭时清理 Chrome Profile 锁文件"""
+    logger.info("正在清理 Chrome Profile 锁文件...")
+    cleaned = kill_zombie_chrome()
+    logger.info("已清理 {} 个 Chrome Profile 锁文件", cleaned)
     sys.exit(0)
 
 
@@ -118,9 +99,9 @@ if __name__ == "__main__":
     configure_logging(cfg["paths"]["logs"])
 
     # 启动前先清理上次残留的僵尸 Chrome
-    killed = kill_zombie_chrome()
-    if killed > 0:
-        logger.info("启动前清理了 {} 个项目 Chrome 进程", killed)
+    cleaned = kill_zombie_chrome()
+    if cleaned > 0:
+        logger.info("启动前清理了 {} 个 Chrome Profile 锁文件", cleaned)
 
     app = create_app()
 

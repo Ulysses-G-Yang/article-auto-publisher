@@ -6,7 +6,7 @@
 
     .account-card {
         border: 1px solid rgba(33, 37, 41, 0.08);
-        transition: border-color 0.25s ease, box-shadow 0.25s ease, transform 0.25s ease;
+        transition: border-color 0.3s ease, box-shadow 0.3s ease, transform 0.3s ease;
     }
 
     .account-card:hover {
@@ -97,6 +97,12 @@
 
     .account-login-button {
         min-width: 7.5rem;
+        transition: box-shadow 0.3s ease, transform 0.3s ease, background-color 0.3s ease;
+    }
+
+    .account-login-button:hover:not(:disabled) {
+        box-shadow: 0 0.35rem 0.75rem rgba(33, 37, 41, 0.16);
+        transform: translateY(-1px);
     }
 
     .account-toast-container {
@@ -251,45 +257,27 @@
         </div>
     </div>
 
-    <!-- 重新登录确认框 -->
-    <div x-show="confirmingPlatform" x-cloak class="modal-backdrop fade show"></div>
-    <div
-        x-show="confirmingPlatform"
-        x-cloak
-        x-transition
-        class="modal fade show d-block"
-        tabindex="-1"
-        role="dialog"
-        aria-modal="true"
-        @keydown.escape.window="cancelRelogin()"
-        @click.self="cancelRelogin()"
-    >
+    <!-- 重新登录确认框：使用 Bootstrap Modal 原生 API -->
+    <div x-ref="reloginModal" id="reloginModal" class="modal fade" tabindex="-1" aria-labelledby="reloginModalLabel" aria-hidden="true">
         <div class="modal-dialog modal-dialog-centered">
             <div class="modal-content">
                 <div class="modal-header">
-                    <h5 class="modal-title"><i class="bi bi-arrow-repeat me-2"></i>确认重新登录</h5>
-                    <button type="button" class="btn-close" aria-label="关闭" @click="cancelRelogin()"></button>
+                    <h5 class="modal-title" id="reloginModalLabel"><i class="bi bi-arrow-repeat me-2"></i>确认重新登录</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="关闭" @click="cancelRelogin()"></button>
                 </div>
                 <div class="modal-body">
                     当前登录态有效，确定要重新登录吗？重新登录后需要重新扫码。
                 </div>
                 <div class="modal-footer">
-                    <button type="button" class="btn btn-outline-secondary" @click="cancelRelogin()">取消</button>
-                    <button type="button" class="btn btn-primary" @click="confirmRelogin()">确定重新登录</button>
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal" @click="cancelRelogin()">取消</button>
+                    <button type="button" class="btn btn-danger" @click="confirmRelogin()">确定重新登录</button>
                 </div>
             </div>
         </div>
     </div>
 
-    <!-- Toast -->
-    <div class="account-toast-container position-fixed top-0 end-0 p-3" aria-live="polite" aria-atomic="true">
-        <div x-show="toastVisible" x-cloak x-transition class="toast show" :class="toastClass()" role="alert">
-            <div class="d-flex">
-                <div class="toast-body" x-text="toastMessage"></div>
-                <button type="button" class="btn-close btn-close-white me-2 m-auto" aria-label="关闭提示" @click="hideToast()"></button>
-            </div>
-        </div>
-    </div>
+    <!-- Toast：动态创建 Bootstrap Toast 实例，以支持不同提示时长 -->
+    <div id="account-toast-container" class="account-toast-container toast-container position-fixed top-0 end-0 p-3" aria-live="polite" aria-atomic="true"></div>
 </div>
 
 <script>
@@ -309,12 +297,23 @@ document.addEventListener('alpine:init', () => {
         },
         confirmingPlatform: null,
         statusTimer: null,
+        statusTimers: {
+            zol: null,
+            xiaoheihe: null,
+        },
+        reloginModal: null,
         toastTimer: null,
         toastVisible: false,
         toastType: 'info',
         toastMessage: '',
 
         init() {
+            if (window.bootstrap && this.$refs.reloginModal) {
+                this.reloginModal = bootstrap.Modal.getOrCreateInstance(this.$refs.reloginModal);
+                this.$refs.reloginModal.addEventListener('hidden.bs.modal', () => {
+                    this.confirmingPlatform = null;
+                });
+            }
             this.startPolling();
         },
 
@@ -367,10 +366,9 @@ document.addEventListener('alpine:init', () => {
             const raw = String(value).replace(' ', 'T').replace(/(\.\d{3})\d+$/, '$1');
             const date = new Date(raw);
             if (Number.isNaN(date.getTime())) return String(value);
-            return new Intl.DateTimeFormat('zh-CN', {
-                year: 'numeric', month: '2-digit', day: '2-digit',
-                hour: '2-digit', minute: '2-digit', second: '2-digit',
-            }).format(date);
+            const pad = number => String(number).padStart(2, '0');
+            return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} `
+                + `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
         },
 
         hasLoginInProgress() {
@@ -379,7 +377,6 @@ document.addEventListener('alpine:init', () => {
         },
 
         startPolling(immediate = true) {
-            if (this.statusTimer) return;
             if (immediate) {
                 this.checkStatus(true).finally(() => this.syncPolling());
             } else {
@@ -388,37 +385,51 @@ document.addEventListener('alpine:init', () => {
         },
 
         syncPolling() {
-            if (this.hasLoginInProgress()) {
-                if (!this.statusTimer) {
-                    this.statusTimer = window.setInterval(() => this.pollStatus(), 1500);
+            ['zol', 'xiaoheihe'].forEach(platform => {
+                const shouldPoll = this.getStatus(platform) === 'logging_in' || this[this.loadingKey(platform)];
+                const timer = this.statusTimers[platform];
+                if (shouldPoll && !timer) {
+                    this.statusTimers[platform] = window.setInterval(
+                        () => this.pollStatus(platform),
+                        1500,
+                    );
+                } else if (!shouldPoll && timer) {
+                    window.clearInterval(timer);
+                    this.statusTimers[platform] = null;
                 }
-            } else {
-                this.stopPolling();
-            }
+            });
+            // 保留原有 statusTimer 变量，便于旧页面逻辑兼容；实际轮询按平台独立管理。
+            this.statusTimer = this.statusTimers.zol || this.statusTimers.xiaoheihe || null;
         },
 
-        async pollStatus() {
-            await this.checkStatus(true);
+        async pollStatus(platform) {
+            await this.checkStatus(true, platform);
             this.syncPolling();
         },
 
-        stopPolling() {
-            if (this.statusTimer) {
-                window.clearInterval(this.statusTimer);
-                this.statusTimer = null;
-            }
+        stopPolling(platform = null) {
+            const platforms = platform ? [platform] : ['zol', 'xiaoheihe'];
+            platforms.forEach(item => {
+                if (this.statusTimers[item]) {
+                    window.clearInterval(this.statusTimers[item]);
+                    this.statusTimers[item] = null;
+                }
+            });
+            this.statusTimer = this.statusTimers.zol || this.statusTimers.xiaoheihe || null;
         },
 
-        async checkStatus(silent = false) {
+        async checkStatus(silent = false, onlyPlatform = null) {
             try {
                 const res = await fetch('/api/accounts');
                 const data = await res.json();
                 if (!res.ok || !Array.isArray(data)) {
                     throw new Error(`HTTP ${res.status}`);
                 }
-                data.forEach(acc => this.applyAccountStatus(acc));
+                data
+                    .filter(acc => !onlyPlatform || acc.platform === onlyPlatform)
+                    .forEach(acc => this.applyAccountStatus(acc));
             } catch (e) {
-                if (!silent) this.showToast('获取账号状态失败: ' + e.message, 'danger');
+                if (!silent) this.notify('获取账号状态失败: ' + e.message, 'danger', 5000);
             }
         },
 
@@ -445,11 +456,11 @@ document.addEventListener('alpine:init', () => {
                 this[loadingKey] = false;
                 this[errorKey] = acc.error_message || acc.error || this[errorKey]
                     || '登录失败，请重新登录。';
-                if (wasBusy) this.showToast(`${this.platformLabel(platform)} 登录失败`, 'danger');
+                if (wasBusy) this.notify(`${this.platformLabel(platform)} 登录失败`, 'danger', 5000);
             } else if (status === 'logged_in') {
                 this[loadingKey] = false;
                 if (previous === 'logging_in') {
-                    this.showToast(`${this.platformLabel(platform)} 已登录`, 'success');
+                    this.notify(`${this.platformLabel(platform)} 登录成功`, 'success', 3000);
                 }
             } else if (status === 'logged_out') {
                 this[loadingKey] = false;
@@ -467,10 +478,16 @@ document.addEventListener('alpine:init', () => {
                 if (!res.ok || data.status === 'error') {
                     throw new Error(data.message || `HTTP ${res.status}`);
                 }
+                const cleaned = Number(data.killed || 0);
+                this.notify(
+                    cleaned > 0 ? `已清理残留锁文件（${cleaned} 个）` : '已清理残留锁文件',
+                    'secondary',
+                    2000,
+                );
                 return true;
             } catch (e) {
                 // 清理只是登录前的辅助步骤，失败不能阻断后续登录。
-                this.showToast('清理 Chrome 进程失败，仍继续登录。', 'warning');
+                this.notify('清理残留锁文件失败，仍继续登录。', 'danger', 5000);
                 return false;
             }
         },
@@ -479,6 +496,7 @@ document.addEventListener('alpine:init', () => {
             if (this.isBusy(platform)) return;
             if (this.getStatus(platform) === 'logged_in') {
                 this.confirmingPlatform = platform;
+                if (this.reloginModal) this.reloginModal.show();
                 return;
             }
             this.startLogin(platform);
@@ -486,11 +504,13 @@ document.addEventListener('alpine:init', () => {
 
         cancelRelogin() {
             this.confirmingPlatform = null;
+            if (this.reloginModal) this.reloginModal.hide();
         },
 
         confirmRelogin() {
             const platform = this.confirmingPlatform;
             this.confirmingPlatform = null;
+            if (this.reloginModal) this.reloginModal.hide();
             if (platform) this.startLogin(platform);
         },
 
@@ -512,45 +532,68 @@ document.addEventListener('alpine:init', () => {
                 }
 
                 this[statusKey] = 'logging_in';
-                this.showToast(
+                this.notify(
                     data.status === 'already_logging_in'
                         ? '登录流程已在进行中，请在浏览器中完成扫码。'
                         : '浏览器已打开，请完成扫码或账号登录。',
                     'info',
+                    3000,
                 );
                 this.startPolling(false);
             } catch (e) {
                 this[loadingKey] = false;
                 this[statusKey] = 'login_failed';
                 this[errorKey] = e.message || '无法启动登录流程。';
-                this.showToast('启动登录失败: ' + this[errorKey], 'danger');
+                this.notify('启动登录失败: ' + this[errorKey], 'danger', 5000);
                 this.syncPolling();
             }
         },
 
-        toastClass() {
-            return {
-                'text-bg-success': this.toastType === 'success',
-                'text-bg-danger': this.toastType === 'danger',
-                'text-bg-warning': this.toastType === 'warning',
-                'text-bg-primary': this.toastType === 'info',
-            };
-        },
-
-        showToast(message, type = 'info') {
-            if (this.toastTimer) window.clearTimeout(this.toastTimer);
-            this.toastMessage = message;
-            this.toastType = type;
+        notify(message, type = 'info', delay = 3000) {
             this.toastVisible = true;
-            this.toastTimer = window.setTimeout(() => this.hideToast(), 3000);
-        },
+            this.toastType = type;
+            this.toastMessage = message;
 
-        hideToast() {
-            this.toastVisible = false;
-            if (this.toastTimer) {
-                window.clearTimeout(this.toastTimer);
-                this.toastTimer = null;
+            const container = document.getElementById('account-toast-container');
+            if (!container || !window.bootstrap) {
+                const legacyType = type === 'danger' ? 'error' : type === 'warning' ? 'warn' : type;
+                if (typeof window.showToast === 'function') window.showToast(message, legacyType);
+                return;
             }
+
+            const toast = document.createElement('div');
+            const toastClasses = {
+                success: 'text-bg-success',
+                secondary: 'text-bg-secondary',
+                danger: 'text-bg-danger',
+                warning: 'text-bg-warning',
+                info: 'text-bg-primary',
+            };
+            toast.className = `toast align-items-center ${toastClasses[type] || toastClasses.info} border-0`;
+            toast.setAttribute('role', 'alert');
+            toast.setAttribute('aria-live', 'assertive');
+            toast.setAttribute('aria-atomic', 'true');
+
+            const row = document.createElement('div');
+            row.className = 'd-flex';
+            const body = document.createElement('div');
+            body.className = 'toast-body';
+            body.textContent = message;
+            const close = document.createElement('button');
+            close.type = 'button';
+            close.className = 'btn-close btn-close-white me-2 m-auto';
+            close.setAttribute('data-bs-dismiss', 'toast');
+            close.setAttribute('aria-label', '关闭提示');
+            row.append(body, close);
+            toast.appendChild(row);
+            container.appendChild(toast);
+
+            const instance = bootstrap.Toast.getOrCreateInstance(toast, { delay });
+            toast.addEventListener('hidden.bs.toast', () => {
+                toast.remove();
+                if (!container.querySelector('.toast')) this.toastVisible = false;
+            }, { once: true });
+            instance.show();
         },
     }));
 });

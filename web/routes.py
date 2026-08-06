@@ -11,6 +11,7 @@ from flask import (
     current_app, send_from_directory,
 )
 from aiofiles import open as aio_open
+from loguru import logger
 
 from models.database import Database
 from core.docx_parser import DocxParser
@@ -162,7 +163,69 @@ def register_routes(app):
             article = db.get_article(task["article_id"])
             task["article_title"] = article["title"] if article else ""
             task["article_filename"] = article["filename"] if article else ""
+            task["can_resume"] = task["status"] in ("paused", "needs_selection")
         return jsonify(tasks)
+
+    @app.route("/api/tasks/<int:task_id>/resume", methods=["POST"])
+    def api_resume_task(task_id):
+        """显式恢复暂停/需要选择的任务，禁止恢复正在运行或已完成任务。"""
+        task = db.get_task(task_id)
+        if not task:
+            return jsonify({
+                "status": "error",
+                "error_code": "TASK_NOT_FOUND",
+                "message": "任务不存在",
+            }), 404
+
+        if task["status"] not in ("paused", "needs_selection"):
+            return jsonify({
+                "status": "error",
+                "error_code": "TASK_NOT_RESUMABLE",
+                "message": f"当前状态 {task['status']} 不允许恢复",
+            }), 409
+
+        account = db.get_account(task["platform"])
+        if not account or account.get("status") != "logged_in":
+            return jsonify({
+                "status": "need_login",
+                "error_code": "ACCOUNT_NOT_LOGGED_IN",
+                "message": "请先在账号页完成该平台登录",
+            }), 409
+
+        payload = request.get_json(silent=True) or {}
+        community = str(payload.get("community") or task.get("community_used") or "").strip()
+        topic = str(payload.get("topic") or task.get("topic_used") or "").strip()
+
+        # 自动搜索失败后，必须同时给出社区和话题，避免只选中一项仍被误报成功。
+        if task["platform"] == "xiaoheihe" and task["status"] == "needs_selection":
+            if not community or not topic:
+                return jsonify({
+                    "status": "error",
+                    "error_code": "SELECTION_REQUIRED",
+                    "message": "小黑盒需要同时填写社区和话题",
+                }), 400
+
+        selection_status = "manual" if (community or topic) else task.get("selection_status", "pending")
+        selection = {"community": community, "topic": topic}
+        db.update_task(
+            task_id,
+            status="queued",
+            error_message=None,
+            retry_count=0,
+            completed_at=None,
+            community_used=community or None,
+            topic_used=topic or None,
+            selection_status=selection_status,
+            selection_json=json.dumps(selection, ensure_ascii=False),
+        )
+        db.add_task_log(task_id, "INFO", "任务已手动恢复，等待重新执行")
+        get_queue_manager().enqueue(task_id)
+        logger.info("任务 {} 已恢复: platform={}, selection_status={}", task_id, task["platform"], selection_status)
+        return jsonify({
+            "status": "queued",
+            "task_id": task_id,
+            "selection_status": selection_status,
+        }), 202
 
     @app.route("/api/articles")
     def api_articles():
@@ -227,27 +290,54 @@ def _run_login_in_thread(platform: str):
         from platforms.xiaoheihe import XiaoheihePlatform
 
         plat = ZOLPlatform() if platform == "zol" else XiaoheihePlatform()
+        stage = "initialize"
         try:
             await plat.initialize()
+            stage = "check_existing_session"
+            if await plat.check_login():
+                db.upsert_account(platform, status="logged_in", last_login_time=datetime.now().isoformat())
+                logger.info("{} 已使用持久化浏览器 Profile 验证登录，无需再次登录", platform)
+                return
+
+            stage = "manual_login"
+            logger.info("{} 未检测到有效登录态，打开浏览器等待手动登录", platform)
             await plat.login()
-            # 登录完成后，实际访问平台页面验证登录态（不只看 Cookie）
+
+            stage = "verify_after_login"
             verified = await plat.check_login()
             if verified:
                 db.upsert_account(platform, status="logged_in", last_login_time=datetime.now().isoformat())
+                logger.info("{} 登录完成并验证成功", platform)
             else:
-                db.upsert_account(platform, status="login_failed")
-                print(f"登录后验证失败 [{platform}]: 页面未显示登录态")
+                raise RuntimeError("登录完成后页面仍未显示有效登录态")
         except Exception as e:
             db.upsert_account(platform, status="login_failed")
-            print(f"登录失败 [{platform}]: {e}")
+            current_url = ""
+            selector_count = "unknown"
+            try:
+                current_url = plat.page.url if plat.page else ""
+                if plat.page:
+                    selector_count = await plat.page.locator(
+                        ".user-name, .header-user, [class*='user-info'], [class*='nickname']"
+                    ).count()
+            except Exception:
+                pass
+            logger.error(
+                "登录失败: platform={}, stage={}, url={}, login_selector_count={}, error={}",
+                platform,
+                stage,
+                current_url,
+                selector_count,
+                e,
+            )
         finally:
             try:
                 await plat.cleanup()
             except Exception:
-                pass
+                logger.warning("{} 登录流程清理浏览器失败", platform)
 
     try:
         asyncio.run(_do_login())
     except Exception as e:
         db.upsert_account(platform, status="login_failed")
-        print(f"登录线程异常 [{platform}]: {e}")
+        logger.error("登录线程异常: platform={}, error={}", platform, e)

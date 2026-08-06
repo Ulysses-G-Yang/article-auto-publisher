@@ -12,6 +12,8 @@ DEFAULT_CONFIG = {
         "port": 5000,
         "debug": True,
         "secret_key": "change-me-in-production",
+        # 本轮回归只保存草稿；显式开启后才允许调用平台公开发布动作。
+        "publish_after_draft": False,
     },
     "paths": {
         "uploads": os.path.join(BASE_DIR, "uploads"),
@@ -19,7 +21,7 @@ DEFAULT_CONFIG = {
         "cookies": os.path.join(BASE_DIR, "data", "cookies"),
         "data": os.path.join(BASE_DIR, "data"),
         "database": os.path.join(BASE_DIR, "data", "app.db"),
-        "logs": os.path.join(BASE_DIR, "logs"),
+        "logs": os.path.join(BASE_DIR, "data", "logs"),
     },
     "platforms": {
         "zol": {

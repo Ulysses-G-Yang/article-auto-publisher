@@ -13,6 +13,8 @@ from flask import Flask
 
 from config import get_config
 from web.routes import register_routes
+from core.logging_setup import configure_logging
+from loguru import logger
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -58,6 +60,7 @@ def kill_zombie_chrome():
 def create_app() -> Flask:
     cfg = get_config()
     app_cfg = cfg["app"]
+    configure_logging(cfg["paths"]["logs"])
 
     app = Flask(
         __name__,
@@ -81,6 +84,13 @@ def create_app() -> Flask:
 
 def start_queue_worker():
     """在后台线程中启动队列 worker（只启动一次）"""
+    # 在创建 worker 前完成启动迁移，确保历史 queued/retrying/processing 任务
+    # 不会在新任务上传前后被误当成自动恢复对象。
+    from models.database import Database
+    paused = Database.get_instance().pause_unfinished_tasks()
+    if paused:
+        logger.info("启动时暂停 {} 个历史未完成任务", paused)
+
     def _run():
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
@@ -91,25 +101,26 @@ def start_queue_worker():
 
     t = threading.Thread(target=_run, daemon=True)
     t.start()
-    print("  队列 worker 已启动")
+    logger.info("队列 worker 已启动；历史未完成任务不会自动恢复")
 
 
 def on_shutdown(signum, frame):
     """服务器关闭时清理所有 Chrome 进程"""
-    print("\n  正在清理 Chrome 进程...")
+    logger.info("正在清理 Chrome 进程...")
     killed = kill_zombie_chrome()
-    print(f"  已清理 {killed} 个进程")
+    logger.info("已清理 {} 个项目 Chrome 进程", killed)
     sys.exit(0)
 
 
 if __name__ == "__main__":
     cfg = get_config()
     app_cfg = cfg["app"]
+    configure_logging(cfg["paths"]["logs"])
 
     # 启动前先清理上次残留的僵尸 Chrome
     killed = kill_zombie_chrome()
     if killed > 0:
-        print(f"  启动前清理了 {killed} 个僵尸 Chrome 进程")
+        logger.info("启动前清理了 {} 个项目 Chrome 进程", killed)
 
     app = create_app()
 
@@ -120,8 +131,7 @@ if __name__ == "__main__":
     # 启动队列 worker
     start_queue_worker()
 
-    print(f"\n  自动化文章发布工具启动中...")
-    print(f"  访问地址: http://{app_cfg['host']}:{app_cfg['port']}\n")
+    logger.info("自动化文章发布工具启动中，访问地址: http://{}:{}", app_cfg["host"], app_cfg["port"])
 
     app.run(
         host=app_cfg["host"],

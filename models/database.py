@@ -55,6 +55,7 @@ class Database:
                     keywords TEXT,
                     topic_zol TEXT,
                     topic_xiaoheihe TEXT,
+                    community_xiaoheihe TEXT,
                     image_count INTEGER DEFAULT 0,
                     char_count INTEGER DEFAULT 0,
                     status TEXT DEFAULT 'parsed',
@@ -82,6 +83,9 @@ class Database:
                     status TEXT DEFAULT 'queued',
                     title_used TEXT,
                     topic_used TEXT,
+                    community_used TEXT,
+                    selection_status TEXT DEFAULT 'not_required',
+                    selection_json TEXT,
                     error_message TEXT,
                     retry_count INTEGER DEFAULT 0,
                     draft_url TEXT,
@@ -113,6 +117,22 @@ class Database:
                     UNIQUE(platform, category_name)
                 );
             """)
+
+            # 兼容已有数据库：项目早期版本没有任务级社区/话题选择字段。
+            # 迁移必须幂等，服务重启时不能因为字段已存在而失败。
+            self._ensure_column(conn, "articles", "community_xiaoheihe", "TEXT")
+            self._ensure_column(conn, "tasks", "community_used", "TEXT")
+            self._ensure_column(conn, "tasks", "selection_status", "TEXT DEFAULT 'not_required'")
+            self._ensure_column(conn, "tasks", "selection_json", "TEXT")
+
+    @staticmethod
+    def _ensure_column(conn, table: str, column: str, definition: str):
+        """为旧 SQLite 数据库补字段；表名和字段名均来自代码常量。"""
+        columns = {
+            row[1] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()
+        }
+        if column not in columns:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
 
     # ==================== 账号操作 ====================
     def upsert_account(self, platform: str, **kwargs):
@@ -205,8 +225,8 @@ class Database:
     def create_task(self, article_id: int, platform: str) -> int:
         with self._get_conn() as conn:
             cur = conn.execute(
-                "INSERT INTO tasks (article_id, platform) VALUES (?,?)",
-                (article_id, platform),
+                "INSERT INTO tasks (article_id, platform, selection_status) VALUES (?,?,?)",
+                (article_id, platform, "pending" if platform == "xiaoheihe" else "not_required"),
             )
             return cur.lastrowid
 
@@ -242,6 +262,26 @@ class Database:
                 (limit,),
             ).fetchall()
             return [dict(r) for r in rows]
+
+    def pause_unfinished_tasks(self, reason: str = "服务启动时不自动恢复历史任务") -> int:
+        """服务启动时暂停遗留任务，避免旧任务自动打开浏览器。"""
+        with self._get_conn() as conn:
+            rows = conn.execute(
+                "SELECT id FROM tasks WHERE status IN ('queued','retrying','processing')"
+            ).fetchall()
+            for row in rows:
+                task_id = row["id"]
+                conn.execute(
+                    """UPDATE tasks
+                       SET status='paused', error_message=?, started_at=NULL
+                       WHERE id=?""",
+                    (reason, task_id),
+                )
+                conn.execute(
+                    "INSERT INTO task_logs (task_id, level, message) VALUES (?,?,?)",
+                    (task_id, "INFO", reason),
+                )
+            return len(rows)
 
     def add_task_log(self, task_id: int, level: str, message: str):
         with self._get_conn() as conn:

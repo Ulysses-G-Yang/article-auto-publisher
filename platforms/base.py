@@ -8,6 +8,7 @@ from typing import Optional
 from pathlib import Path
 
 from playwright.async_api import async_playwright, Browser, BrowserContext, Page
+from loguru import logger
 
 from human.simulator import HumanSimulator
 from models.database import Database
@@ -146,7 +147,8 @@ class BasePlatform(ABC):
         ...
 
     @abstractmethod
-    async def select_topic(self, topic: str):
+    async def select_topic(self, topic: str = "", community: str = "",
+                           selection_query: str = "", selection_override: dict = None):
         """选择话题/分类"""
         ...
 
@@ -164,6 +166,8 @@ class BasePlatform(ABC):
 
     async def publish(self, title: str, content_blocks: list,
                       images: list, topic: str = "",
+                      community: str = "", selection_query: str = "",
+                      selection_override: dict = None,
                       task_id: int = 0, db: Database = None,
                       auto_login: bool = True) -> dict:
         """执行完整发布流水线
@@ -181,6 +185,12 @@ class BasePlatform(ABC):
                     db.add_task_log(task_id, "INFO", "未登录，打开浏览器等待手动登录...")
                     await self.login()
                     db.add_task_log(task_id, "INFO", "登录完成")
+                    if not await self.check_login():
+                        return {
+                            "success": False,
+                            "error": f"{self.platform_name} 登录后验证失败",
+                            "need_login": True,
+                        }
                 else:
                     return {
                         "success": False,
@@ -203,10 +213,27 @@ class BasePlatform(ABC):
             await self.fill_content(content_blocks, images)
             await self.simulator.random_delay(1, 3)
 
-            # 5. 选择话题
-            if topic:
-                db.add_task_log(task_id, "INFO", f"选择话题: {topic}")
-                await self.select_topic(topic)
+            # 5. 选择平台分类。小黑盒即使没有缓存话题，也必须走实时搜索；
+            # 选择失败会返回 needs_selection，不能继续保存成假成功。
+            selection = {}
+            should_select = bool(topic or community or selection_query or self.platform_name == "xiaoheihe")
+            if should_select:
+                db.add_task_log(
+                    task_id,
+                    "INFO",
+                    f"选择社区/话题: community={community or '-'}, topic={topic or '-'}",
+                )
+                selection_result = await self.select_topic(
+                    topic=topic,
+                    community=community,
+                    selection_query=selection_query,
+                    selection_override=selection_override or {},
+                )
+                if selection_result is None:
+                    selection_result = {"success": True}
+                if not selection_result.get("success", False):
+                    return selection_result
+                selection = selection_result.get("selection") or {}
                 await self.simulator.random_delay()
 
             # 6. 模拟滚动检查
@@ -225,12 +252,24 @@ class BasePlatform(ABC):
                     "error": "草稿保存失败：未找到保存按钮或草稿箱未出现该草稿，请检查编辑器页面状态与登录态",
                 }
 
-            # 8. 真正发布（点击「发布」按钮）
-            db.add_task_log(task_id, "INFO", "提交发布...")
-            post_url = await self.publish_now(title)
-            await self.simulator.random_delay(1, 2)
+            # 本轮回归默认只保存草稿，避免验证时误公开发布；未来需要公开发布时
+            # 可显式打开 app.publish_after_draft 配置。
+            post_url = ""
+            if self.cfg.get("app", {}).get("publish_after_draft", False):
+                db.add_task_log(task_id, "INFO", "提交发布...")
+                post_url = await self.publish_now(title)
+                await self.simulator.random_delay(1, 2)
+            else:
+                db.add_task_log(task_id, "INFO", "按当前配置仅保存草稿，未公开发布")
 
-            return {"success": True, "draft_url": draft_url, "post_url": post_url or draft_url}
+            return {
+                "success": True,
+                "draft_url": draft_url,
+                "post_url": post_url,
+                "selection": selection,
+                "selection_status": "completed" if selection else "not_required",
+            }
 
         except Exception as e:
+            logger.exception("{} 发布流水线失败: {}", self.platform_name, e)
             return {"success": False, "error": str(e)}

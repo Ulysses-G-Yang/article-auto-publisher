@@ -21,6 +21,8 @@ class TaskStatus(Enum):
     COMPLETED = "completed"
     FAILED = "failed"
     RETRYING = "retrying"
+    PAUSED = "paused"
+    NEEDS_SELECTION = "needs_selection"
     CANCELLED = "cancelled"
 
 
@@ -65,25 +67,15 @@ class QueueManager:
 
     async def _worker(self):
         """后台 worker：循环处理队列中的任务"""
-        in_queue = set()  # 防止重复入队
         while self.running:
             try:
-                # 从数据库加载待处理任务（仅在队列为空时加载，避免重复）
-                if self.queue.empty():
-                    pending = self.db.get_pending_tasks(limit=5)
-                    for task in pending:
-                        tid = task["id"]
-                        if tid not in in_queue:
-                            self.queue.put_nowait(tid)
-                            in_queue.add(tid)
-
-                # 从队列取任务处理
+                # 只处理本次运行明确入队的任务；历史任务由服务启动流程暂停，
+                # 必须通过 /resume 显式恢复，避免重启时自动打开旧平台页面。
                 try:
                     task_id = await asyncio.wait_for(self.queue.get(), timeout=5.0)
                 except asyncio.TimeoutError:
                     continue
 
-                in_queue.discard(task_id)
                 await self._process_task(task_id)
                 self.queue.task_done()
 
@@ -97,6 +89,10 @@ class QueueManager:
         """处理单个任务"""
         task = self.db.get_task(task_id)
         if not task:
+            return
+
+        if task.get("status") not in ("queued", "retrying"):
+            logger.info("跳过非可执行任务 {}: {}", task_id, task.get("status"))
             return
 
         article = self.db.get_article(task["article_id"])
@@ -133,8 +129,22 @@ class QueueManager:
                 article.get("content_text", ""), title_raw, platform_name
             )
 
-            # 话题
+            # ZOL 使用缓存/手动话题；小黑盒使用文章关键词进行编辑器实时搜索。
             topic = article.get(f"topic_{platform_name}", "")
+            selection_override = {}
+            if task.get("selection_json"):
+                try:
+                    selection_override = json.loads(task["selection_json"]) or {}
+                except (TypeError, json.JSONDecodeError):
+                    selection_override = {}
+            community = (
+                selection_override.get("community")
+                or task.get("community_used")
+                or article.get("community_xiaoheihe", "")
+                or ""
+            )
+            if platform_name == "xiaoheihe":
+                topic = selection_override.get("topic") or task.get("topic_used") or topic
 
             # 执行发布流水线（worker 模式下不自动弹出登录窗口，避免与手动登录抢锁）
             result = await platform.publish(
@@ -142,17 +152,26 @@ class QueueManager:
                 content_blocks=content_json.get("blocks", []),
                 images=images,
                 topic=topic,
+                community=community,
+                selection_query=article.get("keywords", "") or title,
+                selection_override=selection_override,
                 task_id=task_id,
                 db=self.db,
                 auto_login=False,
             )
 
             if result.get("success"):
+                selection = result.get("selection") or {}
+                selected_topic = selection.get("topic") or topic
+                selected_community = selection.get("community") or community
                 self.db.update_task(
                     task_id,
                     status="completed",
                     title_used=title,
-                    topic_used=topic,
+                    topic_used=selected_topic,
+                    community_used=selected_community,
+                    selection_status=result.get("selection_status", "completed"),
+                    selection_json=json.dumps(selection, ensure_ascii=False) if selection else None,
                     draft_url=result.get("draft_url", ""),
                     completed_at=datetime.now().isoformat(),
                 )
@@ -170,6 +189,16 @@ class QueueManager:
                 self.db.update_task(task_id, status="failed", retry_count=task["retry_count"], error_message=error_msg)
                 self.db.add_task_log(task_id, "ERROR", error_msg)
                 logger.error(f"任务 {task_id} 失败: {error_msg}")
+            elif result.get("needs_selection"):
+                error_msg = result.get("error", "社区或话题需要手动选择")
+                self.db.update_task(
+                    task_id,
+                    status="needs_selection",
+                    selection_status="required",
+                    error_message=error_msg,
+                )
+                self.db.add_task_log(task_id, "WARN", error_msg)
+                logger.warning("任务 {} 需要手动选择: {}", task_id, error_msg)
             else:
                 raise Exception(result.get("error", "未知错误"))
 

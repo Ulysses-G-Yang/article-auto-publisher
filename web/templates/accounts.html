@@ -1,42 +1,188 @@
 {% extends "base.html" %}
 {% block title %}账号管理 - 自动化文章发布工具{% endblock %}
 {% block content %}
-<div x-data="accounts" x-init="checkStatus()" class="container" style="max-width: 700px;">
-    <h2 class="mb-4"><i class="bi bi-person-badge me-2"></i>平台账号管理</h2>
+<style>
+    [x-cloak] { display: none !important; }
 
-    <p class="text-muted mb-3">
+    .account-card {
+        border: 1px solid rgba(33, 37, 41, 0.08);
+        transition: border-color 0.25s ease, box-shadow 0.25s ease, transform 0.25s ease;
+    }
+
+    .account-card:hover {
+        box-shadow: 0 0.5rem 1.25rem rgba(33, 37, 41, 0.08);
+        transform: translateY(-1px);
+    }
+
+    .account-card-logged-in {
+        border-color: rgba(25, 135, 84, 0.35);
+    }
+
+    .account-platform {
+        display: flex;
+        align-items: flex-start;
+        gap: 0.9rem;
+        min-width: 0;
+    }
+
+    .platform-icon {
+        align-items: center;
+        border-radius: 0.9rem;
+        display: inline-flex;
+        flex: 0 0 3rem;
+        font-size: 1.45rem;
+        height: 3rem;
+        justify-content: center;
+        width: 3rem;
+    }
+
+    .platform-icon-zol {
+        background: rgba(13, 110, 253, 0.1);
+        color: #0d6efd;
+    }
+
+    .platform-icon-xh {
+        background: rgba(111, 66, 193, 0.12);
+        color: #6f42c1;
+    }
+
+    .account-meta {
+        min-width: 0;
+    }
+
+    .account-status-row {
+        align-items: center;
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.5rem;
+        margin-top: 0.65rem;
+    }
+
+    .account-last-login {
+        color: #6c757d;
+        display: block;
+        font-size: 0.8rem;
+        margin-top: 0.35rem;
+    }
+
+    .account-error-toggle {
+        color: #dc3545;
+        font-size: 0.8rem;
+        text-decoration: none;
+    }
+
+    .account-error-toggle:hover {
+        text-decoration: underline;
+    }
+
+    .account-error-detail {
+        background: rgba(220, 53, 69, 0.07);
+        border-left: 3px solid #dc3545;
+        border-radius: 0.25rem;
+        color: #842029;
+        font-size: 0.8rem;
+        margin-top: 0.45rem;
+        max-width: 32rem;
+        padding: 0.45rem 0.65rem;
+    }
+
+    .status-pulse {
+        animation: account-status-pulse 1.6s ease-in-out infinite;
+    }
+
+    @keyframes account-status-pulse {
+        0%, 100% { box-shadow: 0 0 0 0 rgba(255, 193, 7, 0.05); }
+        50% { box-shadow: 0 0 0 0.35rem rgba(255, 193, 7, 0.18); }
+    }
+
+    .account-login-button {
+        min-width: 7.5rem;
+    }
+
+    .account-toast-container {
+        z-index: 1080;
+    }
+
+    @media (max-width: 575.98px) {
+        .account-card-content {
+            align-items: stretch !important;
+            flex-direction: column;
+        }
+
+        .account-login-button {
+            width: 100%;
+        }
+    }
+</style>
+
+<div x-data="accounts" x-init="init()" class="container" style="max-width: 700px;">
+    <div class="d-flex align-items-center justify-content-between mb-2">
+        <h2 class="mb-0"><i class="bi bi-person-badge me-2"></i>平台账号管理</h2>
+        <span class="text-muted small" aria-live="polite">
+            <i class="bi bi-arrow-repeat me-1"></i>自动检测
+        </span>
+    </div>
+
+    <p class="text-muted mb-4">
         首次使用需要在各平台登录。登录 Cookie 会自动保存，后续无需重复登录。
     </p>
 
-    <!-- 清理僵尸进程按钮 -->
-    <div class="d-flex gap-2 mb-3">
-        <button class="btn btn-outline-danger btn-sm" @click="cleanupZombies()">
-            <i class="bi bi-trash me-1"></i>清理僵尸 Chrome 进程
-        </button>
-        <span x-show="cleanupMsg" class="align-self-center text-muted small" x-text="cleanupMsg"></span>
-    </div>
-
     <!-- ZOL -->
-    <div class="card mb-3">
-        <div class="card-body">
-            <div class="d-flex justify-content-between align-items-center">
-                <div>
-                    <h5 class="mb-1">
-                        <span class="badge bg-info me-2">ZOL</span>中关村在线
-                    </h5>
-                    <small class="text-muted">blog.zol.com.cn</small>
-                    <div class="mt-2">
-                        <span x-show="zolStatus === 'logged_in'" class="badge bg-success">已登录</span>
-                        <span x-show="zolStatus === 'logged_out'" class="badge bg-secondary">未登录</span>
-                        <span x-show="zolStatus === 'logging_in'" class="badge bg-warning text-dark">登录中...</span>
-                        <span x-show="zolStatus === 'unknown'" class="badge bg-secondary">未知状态</span>
-                        <span x-show="!zolStatus" class="badge bg-secondary">未检测</span>
+    <div class="account-card card mb-3" :class="cardClass('zol')">
+        <div class="card-body p-4">
+            <div class="account-card-content d-flex justify-content-between align-items-center gap-3">
+                <div class="account-platform">
+                    <div class="platform-icon platform-icon-zol" aria-hidden="true">
+                        <i class="bi bi-pc-display"></i>
+                    </div>
+                    <div class="account-meta">
+                        <h5 class="mb-1">中关村在线 <span class="badge bg-info-subtle text-info-emphasis ms-1">ZOL</span></h5>
+                        <small class="text-muted">blog.zol.com.cn</small>
+
+                        <div class="account-status-row">
+                            <span x-show="zolStatus === 'logged_in'" x-transition class="badge bg-success">
+                                <i class="bi bi-check-circle me-1"></i>已登录
+                            </span>
+                            <span x-show="zolStatus === 'logged_out'" x-transition class="badge bg-secondary">
+                                <i class="bi bi-circle me-1"></i>未登录
+                            </span>
+                            <span x-show="zolStatus === 'logging_in'" x-transition class="badge bg-warning text-dark status-pulse">
+                                <span class="spinner-grow spinner-grow-sm me-1" aria-hidden="true"></span>登录中...
+                            </span>
+                            <span x-show="zolStatus === 'login_failed'" x-transition class="badge bg-danger">
+                                <i class="bi bi-exclamation-circle me-1"></i>登录失败
+                            </span>
+                        </div>
+
+                        <small x-show="zolLastLogin" x-transition class="account-last-login">
+                            <i class="bi bi-clock me-1"></i>上次登录时间：<span x-text="formatLoginTime(zolLastLogin)"></span>
+                        </small>
+                        <button
+                            x-show="zolStatus === 'login_failed'"
+                            x-transition
+                            type="button"
+                            class="btn btn-link account-error-toggle p-0"
+                            @click="toggleError('zol')"
+                            :aria-expanded="errorExpanded.zol"
+                        >
+                            <i class="bi bi-info-circle me-1"></i><span x-text="errorExpanded.zol ? '收起失败原因' : '查看失败原因'"></span>
+                        </button>
+                        <div x-show="zolStatus === 'login_failed' && errorExpanded.zol" x-transition class="account-error-detail" x-text="zolError"></div>
                     </div>
                 </div>
-                <button class="btn btn-primary" @click="login('zol')" :disabled="zolLoading">
-                    <template x-if="!zolLoading">登录</template>
-                    <template x-if="zolLoading">
-                        <span class="spinner-border spinner-border-sm me-1"></span>等待扫码...
+
+                <button
+                    type="button"
+                    class="account-login-button btn"
+                    :class="loginButtonClass('zol')"
+                    @click="login('zol')"
+                    :disabled="isBusy('zol')"
+                >
+                    <template x-if="isWaiting('zol')">
+                        <span><span class="spinner-border spinner-border-sm me-1" aria-hidden="true"></span>等待扫码...</span>
+                    </template>
+                    <template x-if="!isWaiting('zol')">
+                        <span><i class="bi bi-box-arrow-in-right me-1"></i><span x-text="loginButtonText('zol')"></span></span>
                     </template>
                 </button>
             </div>
@@ -44,92 +190,366 @@
     </div>
 
     <!-- 小黑盒 -->
-    <div class="card mb-3">
-        <div class="card-body">
-            <div class="d-flex justify-content-between align-items-center">
-                <div>
-                    <h5 class="mb-1">
-                        <span class="badge bg-purple me-2">小黑盒</span>小黑盒
-                    </h5>
-                    <small class="text-muted">www.xiaoheihe.cn</small>
-                    <div class="mt-2">
-                        <span x-show="xhStatus === 'logged_in'" class="badge bg-success">已登录</span>
-                        <span x-show="xhStatus === 'logged_out'" class="badge bg-secondary">未登录</span>
-                        <span x-show="xhStatus === 'logging_in'" class="badge bg-warning text-dark">登录中...</span>
-                        <span x-show="xhStatus === 'unknown'" class="badge bg-secondary">未知状态</span>
-                        <span x-show="!xhStatus" class="badge bg-secondary">未检测</span>
+    <div class="account-card card mb-3" :class="cardClass('xiaoheihe')">
+        <div class="card-body p-4">
+            <div class="account-card-content d-flex justify-content-between align-items-center gap-3">
+                <div class="account-platform">
+                    <div class="platform-icon platform-icon-xh" aria-hidden="true">
+                        <i class="bi bi-controller"></i>
+                    </div>
+                    <div class="account-meta">
+                        <h5 class="mb-1">小黑盒 <span class="badge bg-purple">Xiaoheihe</span></h5>
+                        <small class="text-muted">www.xiaoheihe.cn</small>
+
+                        <div class="account-status-row">
+                            <span x-show="xhStatus === 'logged_in'" x-transition class="badge bg-success">
+                                <i class="bi bi-check-circle me-1"></i>已登录
+                            </span>
+                            <span x-show="xhStatus === 'logged_out'" x-transition class="badge bg-secondary">
+                                <i class="bi bi-circle me-1"></i>未登录
+                            </span>
+                            <span x-show="xhStatus === 'logging_in'" x-transition class="badge bg-warning text-dark status-pulse">
+                                <span class="spinner-grow spinner-grow-sm me-1" aria-hidden="true"></span>登录中...
+                            </span>
+                            <span x-show="xhStatus === 'login_failed'" x-transition class="badge bg-danger">
+                                <i class="bi bi-exclamation-circle me-1"></i>登录失败
+                            </span>
+                        </div>
+
+                        <small x-show="xhLastLogin" x-transition class="account-last-login">
+                            <i class="bi bi-clock me-1"></i>上次登录时间：<span x-text="formatLoginTime(xhLastLogin)"></span>
+                        </small>
+                        <button
+                            x-show="xhStatus === 'login_failed'"
+                            x-transition
+                            type="button"
+                            class="btn btn-link account-error-toggle p-0"
+                            @click="toggleError('xiaoheihe')"
+                            :aria-expanded="errorExpanded.xiaoheihe"
+                        >
+                            <i class="bi bi-info-circle me-1"></i><span x-text="errorExpanded.xiaoheihe ? '收起失败原因' : '查看失败原因'"></span>
+                        </button>
+                        <div x-show="xhStatus === 'login_failed' && errorExpanded.xiaoheihe" x-transition class="account-error-detail" x-text="xhError"></div>
                     </div>
                 </div>
-                <button class="btn btn-primary" @click="login('xiaoheihe')" :disabled="xhLoading">
-                    <template x-if="!xhLoading">登录</template>
-                    <template x-if="xhLoading">
-                        <span class="spinner-border spinner-border-sm me-1"></span>等待扫码...
+
+                <button
+                    type="button"
+                    class="account-login-button btn"
+                    :class="loginButtonClass('xiaoheihe')"
+                    @click="login('xiaoheihe')"
+                    :disabled="isBusy('xiaoheihe')"
+                >
+                    <template x-if="isWaiting('xiaoheihe')">
+                        <span><span class="spinner-border spinner-border-sm me-1" aria-hidden="true"></span>等待扫码...</span>
+                    </template>
+                    <template x-if="!isWaiting('xiaoheihe')">
+                        <span><i class="bi bi-box-arrow-in-right me-1"></i><span x-text="loginButtonText('xiaoheihe')"></span></span>
                     </template>
                 </button>
             </div>
         </div>
     </div>
 
-    <!-- 状态提示 -->
-    <div x-show="showAlert" class="alert" :class="alertClass" x-text="alertMsg" style="transition: all 0.3s;"></div>
+    <!-- 重新登录确认框 -->
+    <div x-show="confirmingPlatform" x-cloak class="modal-backdrop fade show"></div>
+    <div
+        x-show="confirmingPlatform"
+        x-cloak
+        x-transition
+        class="modal fade show d-block"
+        tabindex="-1"
+        role="dialog"
+        aria-modal="true"
+        @keydown.escape.window="cancelRelogin()"
+        @click.self="cancelRelogin()"
+    >
+        <div class="modal-dialog modal-dialog-centered">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title"><i class="bi bi-arrow-repeat me-2"></i>确认重新登录</h5>
+                    <button type="button" class="btn-close" aria-label="关闭" @click="cancelRelogin()"></button>
+                </div>
+                <div class="modal-body">
+                    当前登录态有效，确定要重新登录吗？重新登录后需要重新扫码。
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-outline-secondary" @click="cancelRelogin()">取消</button>
+                    <button type="button" class="btn btn-primary" @click="confirmRelogin()">确定重新登录</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Toast -->
+    <div class="account-toast-container position-fixed top-0 end-0 p-3" aria-live="polite" aria-atomic="true">
+        <div x-show="toastVisible" x-cloak x-transition class="toast show" :class="toastClass()" role="alert">
+            <div class="d-flex">
+                <div class="toast-body" x-text="toastMessage"></div>
+                <button type="button" class="btn-close btn-close-white me-2 m-auto" aria-label="关闭提示" @click="hideToast()"></button>
+            </div>
+        </div>
+    </div>
 </div>
 
 <script>
 document.addEventListener('alpine:init', () => {
     Alpine.data('accounts', () => ({
-        zolStatus: 'unknown',
-        xhStatus: 'unknown',
+        zolStatus: 'logged_out',
+        xhStatus: 'logged_out',
+        zolLastLogin: null,
+        xhLastLogin: null,
         zolLoading: false,
         xhLoading: false,
-        showAlert: false,
-        alertClass: 'alert-info',
-        alertMsg: '',
-        cleanupMsg: '',
+        zolError: '登录流程未返回具体原因，请查看日志后重试。',
+        xhError: '登录流程未返回具体原因，请查看日志后重试。',
+        errorExpanded: {
+            zol: false,
+            xiaoheihe: false,
+        },
+        confirmingPlatform: null,
+        statusTimer: null,
+        toastTimer: null,
+        toastVisible: false,
+        toastType: 'info',
+        toastMessage: '',
 
-        async cleanupZombies() {
-            this.cleanupMsg = '正在清理...';
-            try {
-                const res = await fetch('/api/cleanup', { method: 'POST' });
-                const data = await res.json();
-                this.cleanupMsg = `已清理 ${data.killed} 个僵尸进程`;
-                setTimeout(() => this.cleanupMsg = '', 5000);
-            } catch (e) {
-                this.cleanupMsg = '清理失败: ' + e.message;
+        init() {
+            this.startPolling();
+        },
+
+        statusKey(platform) {
+            return platform === 'zol' ? 'zolStatus' : 'xhStatus';
+        },
+
+        loadingKey(platform) {
+            return platform === 'zol' ? 'zolLoading' : 'xhLoading';
+        },
+
+        lastLoginKey(platform) {
+            return platform === 'zol' ? 'zolLastLogin' : 'xhLastLogin';
+        },
+
+        errorKey(platform) {
+            return platform === 'zol' ? 'zolError' : 'xhError';
+        },
+
+        platformLabel(platform) {
+            return platform === 'zol' ? 'ZOL' : '小黑盒';
+        },
+
+        getStatus(platform) {
+            return this[this.statusKey(platform)] || 'logged_out';
+        },
+
+        isWaiting(platform) {
+            return this.getStatus(platform) === 'logging_in' || this[this.loadingKey(platform)];
+        },
+
+        isBusy(platform) {
+            return this.isWaiting(platform);
+        },
+
+        loginButtonText(platform) {
+            return this.getStatus(platform) === 'logged_in' ? '重新登录' : '登录';
+        },
+
+        loginButtonClass(platform) {
+            return this.getStatus(platform) === 'logged_in' ? 'btn-secondary' : 'btn-primary';
+        },
+
+        cardClass(platform) {
+            return this.getStatus(platform) === 'logged_in' ? 'account-card-logged-in' : '';
+        },
+
+        formatLoginTime(value) {
+            if (!value) return '';
+            const raw = String(value).replace(' ', 'T').replace(/(\.\d{3})\d+$/, '$1');
+            const date = new Date(raw);
+            if (Number.isNaN(date.getTime())) return String(value);
+            return new Intl.DateTimeFormat('zh-CN', {
+                year: 'numeric', month: '2-digit', day: '2-digit',
+                hour: '2-digit', minute: '2-digit', second: '2-digit',
+            }).format(date);
+        },
+
+        hasLoginInProgress() {
+            return this.zolStatus === 'logging_in' || this.xhStatus === 'logging_in'
+                || this.zolLoading || this.xhLoading;
+        },
+
+        startPolling(immediate = true) {
+            if (this.statusTimer) return;
+            if (immediate) {
+                this.checkStatus(true).finally(() => this.syncPolling());
+            } else {
+                this.syncPolling();
             }
         },
 
-        async checkStatus() {
+        syncPolling() {
+            if (this.hasLoginInProgress()) {
+                if (!this.statusTimer) {
+                    this.statusTimer = window.setInterval(() => this.pollStatus(), 1500);
+                }
+            } else {
+                this.stopPolling();
+            }
+        },
+
+        async pollStatus() {
+            await this.checkStatus(true);
+            this.syncPolling();
+        },
+
+        stopPolling() {
+            if (this.statusTimer) {
+                window.clearInterval(this.statusTimer);
+                this.statusTimer = null;
+            }
+        },
+
+        async checkStatus(silent = false) {
             try {
                 const res = await fetch('/api/accounts');
                 const data = await res.json();
-                data.forEach(acc => {
-                    if (acc.platform === 'zol') this.zolStatus = acc.status || 'logged_out';
-                    if (acc.platform === 'xiaoheihe') this.xhStatus = acc.status || 'logged_out';
-                });
+                if (!res.ok || !Array.isArray(data)) {
+                    throw new Error(`HTTP ${res.status}`);
+                }
+                data.forEach(acc => this.applyAccountStatus(acc));
             } catch (e) {
-                this.zolStatus = 'logged_out';
-                this.xhStatus = 'logged_out';
-                console.error('获取账号状态失败:', e);
+                if (!silent) this.showToast('获取账号状态失败: ' + e.message, 'danger');
             }
         },
 
-        async login(platform) {
-            if (platform === 'zol') this.zolLoading = true;
-            else this.xhLoading = true;
+        applyAccountStatus(acc) {
+            const platform = acc.platform;
+            if (platform !== 'zol' && platform !== 'xiaoheihe') return;
 
-            this.showAlert = true;
-            this.alertClass = 'alert-info';
-            this.alertMsg = '正在打开浏览器，请在浏览器中完成登录...';
+            const statusKey = this.statusKey(platform);
+            const loadingKey = this.loadingKey(platform);
+            const lastLoginKey = this.lastLoginKey(platform);
+            const errorKey = this.errorKey(platform);
+            const previous = this[statusKey];
+            const wasBusy = previous === 'logging_in' || this[loadingKey];
+            const status = ['logged_in', 'logged_out', 'logging_in', 'login_failed'].includes(acc.status)
+                ? acc.status
+                : 'logged_out';
+
+            this[statusKey] = status;
+            this[lastLoginKey] = acc.last_login_time || null;
+
+            if (status === 'logging_in') {
+                this[errorKey] = '';
+            } else if (status === 'login_failed') {
+                this[loadingKey] = false;
+                this[errorKey] = acc.error_message || acc.error || this[errorKey]
+                    || '登录失败，请重新登录。';
+                if (wasBusy) this.showToast(`${this.platformLabel(platform)} 登录失败`, 'danger');
+            } else if (status === 'logged_in') {
+                this[loadingKey] = false;
+                if (previous === 'logging_in') {
+                    this.showToast(`${this.platformLabel(platform)} 已登录`, 'success');
+                }
+            } else if (status === 'logged_out') {
+                this[loadingKey] = false;
+            }
+        },
+
+        toggleError(platform) {
+            this.errorExpanded[platform] = !this.errorExpanded[platform];
+        },
+
+        async cleanupBeforeLogin() {
+            try {
+                const res = await fetch('/api/cleanup', { method: 'POST' });
+                const data = await res.json().catch(() => ({}));
+                if (!res.ok || data.status === 'error') {
+                    throw new Error(data.message || `HTTP ${res.status}`);
+                }
+                return true;
+            } catch (e) {
+                // 清理只是登录前的辅助步骤，失败不能阻断后续登录。
+                this.showToast('清理 Chrome 进程失败，仍继续登录。', 'warning');
+                return false;
+            }
+        },
+
+        login(platform) {
+            if (this.isBusy(platform)) return;
+            if (this.getStatus(platform) === 'logged_in') {
+                this.confirmingPlatform = platform;
+                return;
+            }
+            this.startLogin(platform);
+        },
+
+        cancelRelogin() {
+            this.confirmingPlatform = null;
+        },
+
+        confirmRelogin() {
+            const platform = this.confirmingPlatform;
+            this.confirmingPlatform = null;
+            if (platform) this.startLogin(platform);
+        },
+
+        async startLogin(platform) {
+            const loadingKey = this.loadingKey(platform);
+            const statusKey = this.statusKey(platform);
+            const errorKey = this.errorKey(platform);
+            this[loadingKey] = true;
+            this[errorKey] = '';
+            this.errorExpanded[platform] = false;
+
+            await this.cleanupBeforeLogin();
 
             try {
-                await fetch('/api/accounts/' + platform + '/login', { method: 'POST' });
+                const res = await fetch('/api/accounts/' + platform + '/login', { method: 'POST' });
+                const data = await res.json().catch(() => ({}));
+                if (!res.ok && !(res.status === 409 && data.status === 'already_logging_in')) {
+                    throw new Error(data.message || `HTTP ${res.status}`);
+                }
+
+                this[statusKey] = 'logging_in';
+                this.showToast(
+                    data.status === 'already_logging_in'
+                        ? '登录流程已在进行中，请在浏览器中完成扫码。'
+                        : '浏览器已打开，请完成扫码或账号登录。',
+                    'info',
+                );
+                this.startPolling(false);
             } catch (e) {
-                this.showAlert = true;
-                this.alertClass = 'alert-danger';
-                this.alertMsg = '启动失败: ' + e.message;
-            } finally {
-                if (platform === 'zol') this.zolLoading = false;
-                else this.xhLoading = false;
+                this[loadingKey] = false;
+                this[statusKey] = 'login_failed';
+                this[errorKey] = e.message || '无法启动登录流程。';
+                this.showToast('启动登录失败: ' + this[errorKey], 'danger');
+                this.syncPolling();
+            }
+        },
+
+        toastClass() {
+            return {
+                'text-bg-success': this.toastType === 'success',
+                'text-bg-danger': this.toastType === 'danger',
+                'text-bg-warning': this.toastType === 'warning',
+                'text-bg-primary': this.toastType === 'info',
+            };
+        },
+
+        showToast(message, type = 'info') {
+            if (this.toastTimer) window.clearTimeout(this.toastTimer);
+            this.toastMessage = message;
+            this.toastType = type;
+            this.toastVisible = true;
+            this.toastTimer = window.setTimeout(() => this.hideToast(), 3000);
+        },
+
+        hideToast() {
+            this.toastVisible = false;
+            if (this.toastTimer) {
+                window.clearTimeout(this.toastTimer);
+                this.toastTimer = null;
             }
         },
     }));

@@ -29,6 +29,7 @@ class MCPSettings:
     allowed_hosts: tuple[str, ...]
     allowed_origins: tuple[str, ...]
     task_db_path: str
+    trusted_proxy_ips: tuple[str, ...] = ()
 
 
 def _normalise_hosts(raw: str) -> tuple[str, ...]:
@@ -77,13 +78,29 @@ def _host_is_allowed(host: str | None, allowed_hosts: tuple[str, ...]) -> bool:
     )
 
 
+def _trusted_forwarded_host(request: Request, settings: MCPSettings) -> str | None:
+    """Use X-Forwarded-Host only when the direct peer is trusted."""
+
+    direct_host = request.headers.get("host")
+    peer_host = request.client.host if request.client else None
+    if peer_host in settings.trusted_proxy_ips:
+        forwarded_host = request.headers.get("x-forwarded-host")
+        if forwarded_host:
+            # Proxies may append values; the first value is the original host.
+            return forwarded_host.split(",", 1)[0].strip()
+    return direct_host
+
+
 def load_settings() -> MCPSettings:
     flask_base_url = os.getenv("FLASK_BASE_URL", "http://localhost:5000").strip().rstrip("/")
     parsed = urlsplit(flask_base_url)
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
         raise ValueError("FLASK_BASE_URL 必须是 HTTP(S) 地址")
 
-    port_raw = os.getenv("MCP_PORT", "8787").strip()
+    # 8765 is the LAN-facing MCP port used in the CS_Admin integration
+    # convention.  The Flask application remains an internal dependency on
+    # port 5000 and is never the MCP URL.
+    port_raw = os.getenv("MCP_PORT", "8765").strip()
     try:
         port = int(port_raw)
     except ValueError as exc:
@@ -97,6 +114,11 @@ def load_settings() -> MCPSettings:
         "MCP_TASK_DB",
         str(PROJECT_ROOT / "data" / "mcp_tasks.db"),
     )
+    trusted_proxy_ips = tuple(
+        item.strip()
+        for item in os.getenv("MCP_TRUSTED_PROXY_IPS", "").split(",")
+        if item.strip()
+    )
     return MCPSettings(
         flask_base_url=flask_base_url,
         # Keep local development safe by default.  LAN deployment can set
@@ -106,6 +128,7 @@ def load_settings() -> MCPSettings:
         allowed_hosts=allowed_hosts,
         allowed_origins=allowed_origins,
         task_db_path=task_db_path,
+        trusted_proxy_ips=trusted_proxy_ips,
     )
 
 
@@ -135,7 +158,7 @@ def create_server(settings: MCPSettings | None = None) -> MCPServer:
 
     @server.custom_route("/healthz", methods=["GET"])
     async def healthz(request: Request) -> JSONResponse:
-        if not _host_is_allowed(request.headers.get("host"), config.allowed_hosts):
+        if not _host_is_allowed(_trusted_forwarded_host(request, config), config.allowed_hosts):
             return JSONResponse({"error": "Invalid Host header"}, status_code=421)
         return JSONResponse({
             "status": "ok",

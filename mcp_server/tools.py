@@ -2,20 +2,27 @@
 
 from __future__ import annotations
 
+import os
 import tempfile
 import time
 import uuid
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Literal
+from typing import Annotated, Any, Awaitable, Callable, Literal
 from urllib.parse import urlsplit
 
 import httpx
 from loguru import logger
+from pydantic import Field
 
+from . import SERVER_ID
 from .flask_client import FlaskClient, FlaskClientError, safe_error_message
 from .task_store import TaskStore
 
 Platform = Literal["zol", "xiaoheihe"]
+PositiveTaskId = Annotated[int, Field(gt=0)]
+TaskToken = Annotated[str, Field(min_length=1, max_length=128)]
+SourceDownloadURL = Annotated[str, Field(min_length=1, max_length=2048)]
+OptionalShortText = Annotated[str | None, Field(max_length=200)]
 SUPPORTED_PLATFORMS = {"zol", "xiaoheihe"}
 MAX_DOWNLOAD_BYTES = 50 * 1024 * 1024
 
@@ -29,8 +36,18 @@ class ToolFailure(RuntimeError):
         self.message = message
 
 
+def _with_trace_fields(payload: dict[str, Any], request_id: str | None = None) -> dict[str, Any]:
+    """Add the stable CS_Admin tracing fields to every tool result."""
+
+    return {
+        "server_id": SERVER_ID,
+        "request_id": request_id or uuid.uuid4().hex,
+        **payload,
+    }
+
+
 def error_result(code: str, message: str) -> dict[str, Any]:
-    return {"error": {"code": code, "message": message[:500]}}
+    return _with_trace_fields({"error": {"code": code, "message": message[:500]}})
 
 
 def _safe_text(value: Any, default: str = "") -> str:
@@ -168,22 +185,54 @@ async def _execute(
     operation: Callable[[], Awaitable[dict[str, Any]]],
 ) -> dict[str, Any]:
     started = time.monotonic()
+    request_id = uuid.uuid4().hex
     try:
-        return await operation()
+        return _with_trace_fields(await operation(), request_id)
     except ToolFailure as exc:
-        return error_result(exc.code, exc.message)
+        return _with_trace_fields(
+            {"error": {"code": exc.code, "message": exc.message[:500]}},
+            request_id,
+        )
     except FlaskClientError as exc:
-        return error_result(exc.code, exc.message)
+        return _with_trace_fields(
+            {"error": {"code": exc.code, "message": exc.message[:500]}},
+            request_id,
+        )
     except Exception:
         logger.exception("MCP 工具执行异常: {}", tool_name)
-        return error_result("INTERNAL_ERROR", "MCP 工具内部错误")
+        return _with_trace_fields(
+            {"error": {"code": "INTERNAL_ERROR", "message": "MCP 工具内部错误"}},
+            request_id,
+        )
     finally:
         logger.info(
-            "MCP 调用完成: server_id=content.article-publisher tool={} args={} elapsed_ms={:.0f}",
+            "MCP 调用完成: server_id={} request_id={} tool={} args={} elapsed_ms={:.0f}",
+            SERVER_ID,
+            request_id,
             tool_name,
             _argument_summary(arguments),
             (time.monotonic() - started) * 1000,
         )
+
+
+def _configured_file_service_hosts() -> set[str]:
+    raw = os.getenv("MCP_FILE_SERVICE_ALLOWED_HOSTS", "")
+    return {
+        item.strip().lower().rstrip("/")
+        for item in raw.split(",")
+        if item.strip()
+    }
+
+
+def _host_allowed(url: str, allowed_hosts: set[str]) -> bool:
+    parsed = urlsplit(url)
+    hostname = (parsed.hostname or "").lower()
+    if not hostname:
+        return False
+    host_with_port = hostname
+    if parsed.port is not None:
+        host_with_port = f"{hostname}:{parsed.port}"
+    return hostname in allowed_hosts or host_with_port in allowed_hosts
 
 
 def _validate_source_url(source_download_url: str) -> str:
@@ -195,24 +244,32 @@ def _validate_source_url(source_download_url: str) -> str:
         raise ToolFailure("RESOURCE_RESTRICTED", "文件地址必须是受控的 HTTP(S) 下载地址")
     if parsed.username or parsed.password:
         raise ToolFailure("RESOURCE_RESTRICTED", "文件地址不能包含账号或密码")
+    allowed_hosts = _configured_file_service_hosts()
+    if not allowed_hosts:
+        raise ToolFailure("RESOURCE_RESTRICTED", "未配置受控文件服务白名单")
+    if not _host_allowed(value, allowed_hosts):
+        raise ToolFailure("RESOURCE_RESTRICTED", "文件地址主机不在受控文件服务白名单中")
     return value
 
 
-def _validate_redirect_url(value: str) -> None:
+def _validate_redirect_url(value: str, allowed_hosts: set[str]) -> None:
     parsed = urlsplit(value)
     if parsed.scheme not in {"http", "https"} or not parsed.netloc or parsed.username or parsed.password:
         raise ToolFailure("RESOURCE_RESTRICTED", "文件下载重定向地址不受支持")
+    if not _host_allowed(value, allowed_hosts):
+        raise ToolFailure("RESOURCE_RESTRICTED", "文件下载重定向主机不在受控文件服务白名单中")
 
 
 async def _download_docx(source_download_url: str, destination: Path) -> None:
     """Download only the CS_Admin-provided source file to a temporary path."""
     url = _validate_source_url(source_download_url)
+    allowed_hosts = _configured_file_service_hosts()
     timeout = httpx.Timeout(30.0, connect=10.0)
     try:
         async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
             async with client.stream("GET", url) as response:
                 final_url = str(response.url)
-                _validate_redirect_url(final_url)
+                _validate_redirect_url(final_url, allowed_hosts)
                 if response.status_code == 404:
                     raise ToolFailure("NOT_FOUND", "源文件下载地址不存在或已过期")
                 if response.status_code >= 400:
@@ -253,7 +310,13 @@ def register_tools(server: Any, client: FlaskClient, store: TaskStore) -> dict[s
             accounts = [item for item in accounts if item]
             by_platform = {item["platform"]: item for item in accounts}
             ordered = [by_platform[platform] for platform in ("zol", "xiaoheihe") if platform in by_platform]
-            return {"accounts": ordered}
+            return {
+                "count": len(ordered),
+                "empty": not ordered,
+                "items": ordered,
+                # Keep the original field as a backwards-compatible alias.
+                "accounts": ordered,
+            }
 
         return await _execute("list_accounts", {}, operation)
 
@@ -281,7 +344,14 @@ def register_tools(server: Any, client: FlaskClient, store: TaskStore) -> dict[s
     async def list_tasks() -> dict[str, Any]:
         async def operation() -> dict[str, Any]:
             tasks = await client.get_tasks()
-            return {"tasks": [_safe_task(task) for task in tasks]}
+            items = [_safe_task(task) for task in tasks]
+            return {
+                "count": len(items),
+                "empty": not items,
+                "items": items,
+                # Keep the original field as a backwards-compatible alias.
+                "tasks": items,
+            }
 
         return await _execute("list_tasks", {}, operation)
 
@@ -292,7 +362,7 @@ def register_tools(server: Any, client: FlaskClient, store: TaskStore) -> dict[s
         description="查询指定发布任务的按时间排序执行日志。不修改任何数据。",
         structured_output=True,
     )
-    async def get_task_logs(task_id: int) -> dict[str, Any]:
+    async def get_task_logs(task_id: PositiveTaskId) -> dict[str, Any]:
         async def operation() -> dict[str, Any]:
             checked_id = _safe_task_id(task_id)
             tasks = await client.get_tasks()
@@ -300,6 +370,8 @@ def register_tools(server: Any, client: FlaskClient, store: TaskStore) -> dict[s
                 raise ToolFailure("NOT_FOUND", f"任务 {checked_id} 不存在")
             logs = await client.get_task_logs(checked_id)
             return {
+                "count": len(logs),
+                "empty": not logs,
                 "task_id": checked_id,
                 "logs": [
                     {
@@ -377,7 +449,7 @@ def register_tools(server: Any, client: FlaskClient, store: TaskStore) -> dict[s
         description="轮询 start_login 创建的登录任务，返回等待扫码、登录成功或登录失败状态。",
         structured_output=True,
     )
-    async def get_login_result(task_id: str) -> dict[str, Any]:
+    async def get_login_result(task_id: TaskToken) -> dict[str, Any]:
         async def operation() -> dict[str, Any]:
             record = await store.get(str(task_id or "").strip())
             if not record or record.get("kind") != "login":
@@ -420,8 +492,8 @@ def register_tools(server: Any, client: FlaskClient, store: TaskStore) -> dict[s
         structured_output=True,
     )
     async def publish_article(
-        source_download_url: str,
-        platforms: list[Platform] | None = None,
+        source_download_url: SourceDownloadURL,
+        platforms: Annotated[list[Platform] | None, Field(min_length=1, max_length=2)] = None,
     ) -> dict[str, Any]:
         async def operation() -> dict[str, Any]:
             source_url = _validate_source_url(source_download_url)
@@ -485,7 +557,7 @@ def register_tools(server: Any, client: FlaskClient, store: TaskStore) -> dict[s
         description="轮询 publish_article 创建的发布任务，返回排队、发布中、需人工选择、完成或失败状态。",
         structured_output=True,
     )
-    async def get_publish_result(task_id: str) -> dict[str, Any]:
+    async def get_publish_result(task_id: TaskToken) -> dict[str, Any]:
         async def operation() -> dict[str, Any]:
             record = await store.get(str(task_id or "").strip())
             if not record or record.get("kind") != "publish":
@@ -541,9 +613,9 @@ def register_tools(server: Any, client: FlaskClient, store: TaskStore) -> dict[s
         structured_output=True,
     )
     async def resume_task(
-        task_id: int,
-        community: str | None = None,
-        topic: str | None = None,
+        task_id: PositiveTaskId,
+        community: OptionalShortText = None,
+        topic: OptionalShortText = None,
     ) -> dict[str, Any]:
         async def operation() -> dict[str, Any]:
             checked_id = _safe_task_id(task_id)
@@ -623,4 +695,11 @@ def register_tools(server: Any, client: FlaskClient, store: TaskStore) -> dict[s
 
 async def _list_articles(client: FlaskClient) -> dict[str, Any]:
     articles = await client.get_articles()
-    return {"articles": [_safe_article(article) for article in articles]}
+    items = [_safe_article(article) for article in articles]
+    return {
+        "count": len(items),
+        "empty": not items,
+        "items": items,
+        # Keep the original field as a backwards-compatible alias.
+        "articles": items,
+    }

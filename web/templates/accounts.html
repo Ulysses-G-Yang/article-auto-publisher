@@ -605,7 +605,9 @@ document.addEventListener('alpine:init', () => {
                 if (this.reloginModal) this.reloginModal.show();
                 return;
             }
-            this.startLogin(platform);
+            // 登录失败后重试需要清掉旧会话，避免后端 check_login 被过期 Cookie 误导。
+            const clearCookies = this.getStatus(platform) === 'login_failed';
+            this.startLogin(platform, { clearCookies });
         },
 
         cancelRelogin() {
@@ -617,10 +619,11 @@ document.addEventListener('alpine:init', () => {
             const platform = this.confirmingPlatform;
             this.confirmingPlatform = null;
             if (this.reloginModal) this.reloginModal.hide();
-            if (platform) this.startLogin(platform);
+            if (platform) this.startLogin(platform, { clearCookies: true });
         },
 
-        async startLogin(platform) {
+        async startLogin(platform, options = {}) {
+            const { clearCookies = false } = options;
             const loadingKey = this.loadingKey(platform);
             const statusKey = this.statusKey(platform);
             const errorKey = this.errorKey(platform);
@@ -629,6 +632,21 @@ document.addEventListener('alpine:init', () => {
             this.errorExpanded[platform] = false;
 
             await this.cleanupBeforeLogin();
+
+            // 重新登录或失败重试时先清理旧 Cookie；清理失败不阻断后续登录。
+            if (clearCookies) {
+                try {
+                    const clearResponse = await fetch(
+                        `/api/accounts/${platform}/clear-cookies`,
+                        { method: 'POST' },
+                    );
+                    if (!clearResponse.ok) {
+                        throw new Error(`HTTP ${clearResponse.status}`);
+                    }
+                } catch (e) {
+                    // 登录线程仍会继续执行，具体清理失败原因由后端日志记录。
+                }
+            }
 
             try {
                 const res = await fetch('/api/accounts/' + platform + '/login', { method: 'POST' });

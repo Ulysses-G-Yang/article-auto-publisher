@@ -57,7 +57,19 @@ class ZOLPlatform(BasePlatform):
                     "https://my.zol.com.cn/",
                     "https://blog.zol.com.cn/",
                 ])
-                cookie_names = {item.get("name", "") for item in cookies}
+                import time
+                now = time.time()
+                cookie_names = {
+                    item.get("name", "")
+                    for item in cookies
+                    if item.get("name", "") in {
+                        "last_userid", "lv", "zol_userid", "zol_sid",
+                    }
+                    and (
+                        item.get("expires", -1) == -1
+                        or item.get("expires", 0) > now
+                    )
+                }
             cookie_logged_in = bool(cookie_names.intersection({
                 "last_userid", "lv", "zol_userid", "zol_sid",
             }))
@@ -98,7 +110,19 @@ class ZOLPlatform(BasePlatform):
                     "https://my.zol.com.cn/",
                     "https://blog.zol.com.cn/",
                 ])
-                cookie_names = {item.get("name", "") for item in cookies}
+                import time
+                now = time.time()
+                cookie_names = {
+                    item.get("name", "")
+                    for item in cookies
+                    if item.get("name", "") in {
+                        "last_userid", "lv", "zol_userid", "zol_sid",
+                    }
+                    and (
+                        item.get("expires", -1) == -1
+                        or item.get("expires", 0) > now
+                    )
+                }
             return bool(page_state.get("hasUser") or page_state.get("hasLogout") or cookie_names.intersection({
                 "last_userid", "lv", "zol_userid", "zol_sid",
             }))
@@ -107,6 +131,8 @@ class ZOLPlatform(BasePlatform):
 
     async def login(self):
         """打开登录页，等待用户手动完成登录"""
+        # TODO: ZOL 可能已改版登录入口，需确认当前扫码登录页 URL
+        # 如果 my.zol.com.cn 不再显示扫码登录，需要更新此 URL
         await self.page.goto("https://my.zol.com.cn/", wait_until="domcontentloaded")
         await self.simulator.random_delay(1, 2)
 
@@ -124,8 +150,11 @@ class ZOLPlatform(BasePlatform):
         logger.info("ZOL 登录窗口已打开，请在浏览器中完成扫码或账号密码登录")
 
         # 等待用户完成登录——不调 evaluate 避免触发刷新
-        max_wait = 120  # 2分钟
-        for i in range(max_wait):
+        # 30 次 × 3 秒 = 90 秒超时；用户关掉浏览器时立即中止，不空转。
+        max_iters = 30
+        for _ in range(max_iters):
+            if self.page.is_closed():
+                raise RuntimeError("用户关闭了浏览器窗口，登录中止")
             # 用 locator 检测页面跳转（说明登录成功跳到首页）
             try:
                 url = self.page.url
@@ -146,7 +175,7 @@ class ZOLPlatform(BasePlatform):
                 pass
             await asyncio.sleep(3)
 
-        raise TimeoutError("登录超时，请重试")
+        raise TimeoutError("登录超时（90 秒），请重试")
 
     async def navigate_to_editor(self):
         """导航到博客编辑器"""

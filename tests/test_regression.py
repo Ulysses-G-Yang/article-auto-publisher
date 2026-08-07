@@ -354,6 +354,25 @@ class RegressionTests(DatabaseTestCase):
         self.assertEqual(account["status"], "logged_out")
         self.assertIsNone(account["last_login_time"])
 
+    def test_clear_cookies_endpoint_preserves_login_state(self):
+        import app as app_module
+        from app import create_app
+
+        self.db.upsert_account(
+            "zol",
+            status="logged_in",
+            last_login_time="2026-08-06T14:30:00",
+        )
+        with patch.object(app_module, "clear_platform_cookies", return_value=True) as clear_mock:
+            response = create_app().test_client().post("/api/accounts/zol/clear-cookies")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["cookies_cleared"], True)
+        clear_mock.assert_called_once_with("zol")
+        account = self.db.get_account("zol")
+        self.assertEqual(account["status"], "logged_in")
+        self.assertEqual(account["last_login_time"], "2026-08-06T14:30:00")
+
     def test_existing_cookie_session_skips_login(self):
         from web import routes
 
@@ -430,6 +449,33 @@ class RegressionTests(DatabaseTestCase):
         platform.context.cookies = AsyncMock(return_value=[{"name": "last_userid", "value": "opaque"}])
         with patch("platforms.zol.asyncio.sleep", new=AsyncMock()):
             self.assertTrue(asyncio.run(platform.check_login()))
+
+    def test_zol_cookie_check_rejects_expired_context_cookie(self):
+        import time
+
+        platform = ZOLPlatform()
+        page = FakePage("textarea")
+        page.url = "https://blog.zol.com.cn/post.php?act=add"
+        page.goto = AsyncMock()
+        page.evaluate = AsyncMock(return_value={
+            "url": page.url,
+            "hasLoginForm": False,
+            "hasUser": False,
+            "hasLogout": False,
+        })
+        page.locator = lambda selector: (
+            page.target if "textarea[name='content']" in selector else FakeLocator(count=0)
+        )
+        platform.page = page
+        platform.context = type("Context", (), {})()
+        platform.context.cookies = AsyncMock(return_value=[{
+            "name": "last_userid",
+            "value": "expired",
+            "expires": time.time() - 60,
+        }])
+
+        with patch("platforms.zol.asyncio.sleep", new=AsyncMock()):
+            self.assertFalse(asyncio.run(platform.check_login()))
 
     def test_zol_title_failure_is_explicit(self):
         platform = ZOLPlatform()

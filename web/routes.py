@@ -273,6 +273,29 @@ def register_routes(app):
         thread.start()
         return jsonify({"status": "login_started", "platform": platform})
 
+    @app.route("/api/accounts/<platform>/clear-cookies", methods=["POST"])
+    def api_accounts_clear_cookies(platform):
+        """仅清理指定平台 Cookie，不检查或更新账号登录状态。"""
+        if platform not in ("zol", "xiaoheihe"):
+            return jsonify({
+                "status": "error",
+                "error_code": "UNSUPPORTED_PLATFORM",
+                "message": "不支持的平台",
+            }), 400
+
+        # 在路由函数内导入，避免 app.py 启动时与 web.routes 互相导入。
+        from app import clear_platform_cookies
+
+        cleared = clear_platform_cookies(platform)
+        logger.info("{} 登录前 Cookie 清理: cookies_cleared={}", platform, cleared)
+        if not cleared:
+            logger.warning("{} 登录前没有清理到可删除的 Cookie 文件", platform)
+        return jsonify({
+            "status": "ok",
+            "platform": platform,
+            "cookies_cleared": cleared,
+        })
+
     @app.route("/api/accounts/<platform>/logout", methods=["POST"])
     def api_accounts_logout(platform):
         """退出登录：清除该平台 Profile 的 Cookie/站点会话数据并更新状态。"""

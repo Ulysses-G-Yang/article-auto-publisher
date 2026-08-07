@@ -1,8 +1,10 @@
 """小黑盒（Xiaoheihe）平台自动化"""
 import asyncio
+import json
+from pathlib import Path
 from loguru import logger
 
-from platforms.base import BasePlatform
+from platforms.base import BasePlatform, BrowserLifecycleError, SelectorError
 from human.simulator import HumanSimulator
 
 
@@ -27,6 +29,20 @@ class XiaoheihePlatform(BasePlatform):
     SAVE_DRAFT_BTN = "button.editor-publish__save-draft"           # 保存草稿
     DRAFT_BOX_BTN = "button.editor-publish__btn.sub-btn.margin-left"  # 草稿箱
     PUBLISH_NOW_BTN = "button.editor-publish__btn.main-btn"        # 发布
+
+    def _raise_if_page_closed(self, stage: str):
+        self._require_page_alive(stage)
+
+    async def _wait_first_visible(self, selector: str, timeout_ms: int = 5000):
+        """等待 SPA 弹窗/编辑器控件完成渲染，再返回第一个可见元素。"""
+        self._raise_if_page_closed(f"等待控件: {selector}")
+        deadline = asyncio.get_running_loop().time() + (timeout_ms / 1000)
+        while asyncio.get_running_loop().time() < deadline:
+            candidate = await self._first_visible(selector)
+            if candidate is not None:
+                return candidate
+            await asyncio.sleep(0.2)
+        raise TimeoutError(f"等待可见控件超时: {selector}")
 
     async def _is_logged_in_dom(self) -> bool:
         """读取当前页 DOM + 登录态 cookie 判断登录态（不依赖头像图片，避免误判）
@@ -87,16 +103,22 @@ class XiaoheihePlatform(BasePlatform):
         游客态不会有 heybox_id / nickname / pkey 等登录 cookie。
         """
         try:
+            self._raise_if_page_closed("小黑盒登录态检测")
             await self.page.goto("https://www.xiaoheihe.cn/", wait_until="domcontentloaded", timeout=15000)
             # 多等一会儿，确保 SPA 完成 hydration、cookie 已注入页面上下文
             await asyncio.sleep(4)
             return await self._is_logged_in_dom()
-        except Exception:
+        except BrowserLifecycleError:
+            raise
+        except Exception as exc:
+            if self._exception_means_browser_closed(exc):
+                raise BrowserLifecycleError("BROWSER_CONTEXT_CLOSED: 小黑盒登录态检测时页面已关闭") from exc
             return False
 
     async def login(self):
         """打开首页，点击右上角头像弹出二维码，等待扫码登录"""
         # 1. 访问首页
+        self._raise_if_page_closed("小黑盒打开登录页")
         await self.page.goto("https://www.xiaoheihe.cn/", wait_until="domcontentloaded")
         await asyncio.sleep(2)
 
@@ -104,12 +126,16 @@ class XiaoheihePlatform(BasePlatform):
         try:
             await self.page.click(self.LOGIN_TRIGGER, timeout=8000)
         except Exception as e:
+            if self._exception_means_browser_closed(e):
+                raise BrowserLifecycleError("BROWSER_CONTEXT_CLOSED: 小黑盒打开登录入口时页面已关闭") from e
             logger.warning("小黑盒点击用户入口失败，尝试重新打开: {}", e)
             await self.page.goto("https://www.xiaoheihe.cn/", wait_until="domcontentloaded")
             await asyncio.sleep(2)
             try:
                 await self.page.click(self.LOGIN_TRIGGER, timeout=8000)
             except Exception as e2:
+                if self._exception_means_browser_closed(e2):
+                    raise BrowserLifecycleError("BROWSER_CONTEXT_CLOSED: 小黑盒重试登录入口时页面已关闭") from e2
                 logger.error("小黑盒仍未找到登录入口: {}", e2)
 
         await asyncio.sleep(2)
@@ -133,8 +159,10 @@ class XiaoheihePlatform(BasePlatform):
         logger.info("小黑盒登录二维码已显示，请用 App 扫描右上角头像弹出的二维码")
 
         # 5. 等待登录完成：头像从默认游客图变为真实头像是成功信号
-        max_wait = 120  # 2分钟
-        for i in range(max_wait):
+        # 30 次 × 3 秒 = 90 秒超时；用户关掉浏览器时立即中止，不空转。
+        max_iters = 30
+        for _ in range(max_iters):
+            self._raise_if_page_closed("小黑盒等待登录")
             if await self._is_logged_in_dom():
                 logger.info("小黑盒登录成功")
                 await self.page.evaluate("""
@@ -150,7 +178,7 @@ class XiaoheihePlatform(BasePlatform):
                 return
             await asyncio.sleep(3)  # 每 3 秒检查一次，不频繁干扰页面
 
-        raise TimeoutError("登录超时，请重试")
+        raise RuntimeError("LOGIN_REQUIRED: 小黑盒登录超时（90 秒），请重新扫码")
 
     async def navigate_to_editor(self):
         """导航到小黑盒「文章」编辑器（真实路径：首页 → 发布内容 → 发布文章）
@@ -164,50 +192,75 @@ class XiaoheihePlatform(BasePlatform):
         /creator/editor/draft/article/local_xxx（该 URL 本身即草稿地址）。
         """
         self._editor_url = ""
+        self._raise_if_page_closed("小黑盒打开文章编辑器")
 
         # 先回首页，确保从干净状态进入
         await self.page.goto("https://www.xiaoheihe.cn/", wait_until="domcontentloaded")
         await self.simulator.random_delay(2, 4)
+        self._raise_if_page_closed("小黑盒首页发布入口")
 
         # 点击「发布内容」
         try:
-            await self.page.click(self.PUBLISH_BTN, timeout=10000)
+            publish_button = await self._wait_first_visible(self.PUBLISH_BTN, timeout_ms=10000)
+            await self._click_with_fallback(publish_button, timeout=10000)
         except Exception as e:
+            if self._exception_means_browser_closed(e):
+                raise BrowserLifecycleError("BROWSER_CONTEXT_CLOSED: 小黑盒打开发布菜单时页面已关闭") from e
             logger.warning("小黑盒点击发布内容失败，尝试创作中心兜底: {}", e)
             try:
                 await self.page.goto("https://www.xiaoheihe.cn/creator", wait_until="domcontentloaded")
                 await self.simulator.random_delay(2, 4)
-                await self.page.click(self.PUBLISH_BTN, timeout=10000)
+                publish_button = await self._wait_first_visible(self.PUBLISH_BTN, timeout_ms=10000)
+                await self._click_with_fallback(publish_button, timeout=10000)
             except Exception as fallback_error:
+                if self._exception_means_browser_closed(fallback_error):
+                    raise BrowserLifecycleError("BROWSER_CONTEXT_CLOSED: 小黑盒打开创作中心时页面已关闭") from fallback_error
                 logger.error("小黑盒创作中心兜底仍失败: {}", fallback_error)
         await self.simulator.random_delay(2, 3)
 
         # 点击「发布文章」类型标签
         try:
-            await self.page.locator(self.TAB_ARTICLE, has_text="发布文章").first.click(timeout=8000)
+            article_tab = self.page.locator(self.TAB_ARTICLE, has_text="发布文章").first
+            if await article_tab.count() == 0 or not await article_tab.is_visible():
+                raise TimeoutError("发布文章标签不可见")
+            await self._click_with_fallback(article_tab, timeout=8000)
         except Exception as e:
+            if self._exception_means_browser_closed(e):
+                raise BrowserLifecycleError("BROWSER_CONTEXT_CLOSED: 小黑盒选择文章类型时页面已关闭") from e
             logger.warning("小黑盒点击发布文章失败，回退到发布图文: {}", e)
             try:
-                await self.page.locator(self.TAB_ARTICLE, has_text="发布图文").first.click(timeout=8000)
+                image_tab = self.page.locator(self.TAB_ARTICLE, has_text="发布图文").first
+                if await image_tab.count() == 0 or not await image_tab.is_visible():
+                    raise TimeoutError("发布图文标签不可见")
+                await self._click_with_fallback(image_tab, timeout=8000)
             except Exception as fallback_error:
-                raise RuntimeError(f"小黑盒文章类型入口失败: {fallback_error}") from fallback_error
+                if self._exception_means_browser_closed(fallback_error):
+                    raise BrowserLifecycleError("BROWSER_CONTEXT_CLOSED: 小黑盒选择文章类型时页面已关闭") from fallback_error
+                raise SelectorError(f"小黑盒文章类型入口失败: {fallback_error}") from fallback_error
         await self.simulator.random_delay(3, 5)
 
         # 等待编辑器标题框出现（真实标题框：.editor-title__container 内的 contenteditable ProseMirror）
         try:
-            await self.page.wait_for_selector(self.TITLE_FIELD, timeout=15000)
+            await self._wait_first_visible(self.TITLE_FIELD, timeout_ms=15000)
         except Exception as e:
-            raise RuntimeError(f"小黑盒编辑器标题框未找到: {e}") from e
+            if isinstance(e, BrowserLifecycleError):
+                raise
+            raise SelectorError(f"小黑盒编辑器标题框未找到: {e}") from e
         try:
-            await self.page.wait_for_selector(self.BODY_FIELD, timeout=15000)
+            await self._wait_first_visible(self.BODY_FIELD, timeout_ms=15000)
         except Exception as e:
-            raise RuntimeError(f"小黑盒编辑器正文框未找到: {e}") from e
+            if isinstance(e, BrowserLifecycleError):
+                raise
+            raise SelectorError(f"小黑盒编辑器正文框未找到: {e}") from e
 
         # 记录编辑器 URL（同时是草稿 URL，供 save_draft/publish_now 回退定位）
         self._editor_url = self.page.url
+        if "creator/editor" not in (self._editor_url or ""):
+            raise SelectorError(f"小黑盒编辑器路由验证失败，当前 URL: {self._editor_url}")
 
     async def fill_title(self, title: str):
         """填写文章标题（真实字段：.editor-title__container 内的 contenteditable ProseMirror）"""
+        self._raise_if_page_closed("小黑盒填写标题")
         expected = " ".join((title or "").split())[:30]
         locator = self.page.locator(self.TITLE_FIELD).first
         try:
@@ -227,18 +280,23 @@ class XiaoheihePlatform(BasePlatform):
             logger.info("小黑盒标题输入并验证成功: {}", expected)
             return
         except Exception as e:
+            if self._exception_means_browser_closed(e):
+                raise BrowserLifecycleError("BROWSER_CONTEXT_CLOSED: 小黑盒填写标题时页面已关闭") from e
             logger.error("小黑盒标题输入失败: {}", e)
-            raise RuntimeError("小黑盒标题输入框未找到或验证失败") from e
+            raise SelectorError("小黑盒标题输入框未找到或验证失败") from e
 
     async def fill_content(self, content_blocks: list, images: list):
         """填写正文（真实字段：.article__edit-content--inner 内的 contenteditable ProseMirror）"""
+        self._raise_if_page_closed("小黑盒填写正文")
         editor = self.page.locator(self.BODY_FIELD).first
         try:
             if await editor.count() == 0 or not await editor.is_visible():
                 raise RuntimeError("正文编辑器不可见")
         except Exception as e:
+            if self._exception_means_browser_closed(e):
+                raise BrowserLifecycleError("BROWSER_CONTEXT_CLOSED: 小黑盒定位正文编辑器时页面已关闭") from e
             logger.error("小黑盒正文编辑区定位失败: {}", e)
-            raise RuntimeError("小黑盒正文编辑区未找到") from e
+            raise SelectorError("小黑盒正文编辑区未找到") from e
 
         await editor.click()
         await editor.fill("")
@@ -276,10 +334,17 @@ class XiaoheihePlatform(BasePlatform):
         actual_text = await editor.inner_text()
         missing = [part[:30] for part in expected_parts if part not in actual_text]
         if missing:
-            raise RuntimeError(f"小黑盒正文输入后验证失败，缺少文本片段: {missing}")
+            raise SelectorError(f"小黑盒正文输入后验证失败，缺少文本片段: {missing}")
         logger.info("小黑盒正文文字输入并验证成功: {} 个文本段落", len(expected_parts))
 
-        # 文字验证通过后再上传图片；图片失败只记录诊断，不抹掉正文。
+        expected_images = sum(
+            1 for block in content_blocks if block.get("type") == "image"
+        )
+        uploaded_images = 0
+        failed_images = []
+
+        # 文字验证通过后再上传图片；图片失败不抹掉正文，但必须返回结构化结果，
+        # 让上层把任务标记为 completed_with_warnings，而不是普通 completed。
         for block in content_blocks:
             if block.get("type") == "image":
                 img_path = block.get("local_path")
@@ -292,46 +357,198 @@ class XiaoheihePlatform(BasePlatform):
                     if not img_path:
                         img_path = images[0].get("local_path")
                 if img_path:
-                    await self._upload_image(img_path)
+                    upload_result = await self._upload_image(img_path) or {}
+                    if upload_result.get("success"):
+                        uploaded_images += 1
+                    else:
+                        failed_images.append({
+                            "filename": Path(str(img_path)).name,
+                            "error": upload_result.get("error", "图片上传失败"),
+                        })
                     await self.simulator.random_delay(0.2, 0.5)
+                else:
+                    failed_images.append({
+                        "filename": "",
+                        "error": "文章图片块没有对应本地文件",
+                    })
 
         # 图片操作可能触发编辑器重渲染，重新定位正文并做最终校验。
         editor = self.page.locator(self.BODY_FIELD).first
         actual_text = await editor.inner_text()
         missing = [part[:30] for part in expected_parts if part not in actual_text]
         if missing:
-            raise RuntimeError(f"小黑盒图片处理后正文验证失败，缺少文本片段: {missing}")
+            raise SelectorError(f"小黑盒图片处理后正文验证失败，缺少文本片段: {missing}")
         logger.info("小黑盒正文输入并最终验证成功: {} 个文本段落", len(expected_parts))
 
+        if expected_images == 0:
+            media_status = "not_required"
+            media_error = None
+        elif uploaded_images == expected_images:
+            media_status = "completed"
+            media_error = None
+        elif uploaded_images == 0:
+            media_status = "failed"
+            media_error = f"{expected_images} 张图片全部上传失败"
+        else:
+            media_status = "partial"
+            media_error = f"{expected_images - uploaded_images} 张图片上传失败"
+
+        if failed_images:
+            logger.warning(
+                "小黑盒图片处理结果: expected={}, uploaded={}, failed={}",
+                expected_images,
+                uploaded_images,
+                len(failed_images),
+            )
+        return {
+            "text_ok": True,
+            "expected_images": expected_images,
+            "uploaded_images": uploaded_images,
+            "failed_images": failed_images,
+            "media_status": media_status,
+            "media_error": media_error,
+        }
+
     async def _upload_image(self, image_path: str):
-        """上传图片到小黑盒文章编辑器（best-effort：工具栏图片按钮 + 文件选择框）"""
+        """上传单张图片并验证编辑器中的图片数量确实增加。"""
+        image_name = Path(str(image_path)).name
         try:
+            await self._dismiss_overlays()
+            editor = await self._first_visible(self.BODY_FIELD)
+            if editor is not None:
+                await editor.click(timeout=3000)
+
+            before_count = await self._editor_image_count()
             btn = self.page.locator(
                 "button.editor-menu-image__btn, button:has-text('图片'), "
                 "[data-action='upload-image'], button[title*='图片']"
             ).first
             if await btn.count() == 0:
-                logger.warning("小黑盒未找到图片上传按钮，跳过图片")
-                return
-            await btn.click(timeout=5000)
-            await self.simulator.random_delay(0.3, 0.8)
+                return {"success": False, "error": "未找到图片上传按钮"}
 
-            # file input 通常是隐藏的，等待 attached 而不是 visible。
-            file_input = await self.page.wait_for_selector(
-                "input[type='file']", timeout=1500, state="attached"
-            )
-            await file_input.set_input_files(image_path)
-            await self.simulator.random_delay(1, 2)
-            try:
-                await self.page.wait_for_selector(
-                    ".upload-success, img[src*='upload'], .editor-article__main img",
-                    timeout=10000,
-                    state="attached",
+            # 普通 click 前先把按钮滚动到编辑器内部可视区域；如果仍有可见遮罩，
+            # 不使用 force=True 绕过它，避免误触平台确认/安全弹窗。
+            if await self._has_visible_overlay():
+                return {"success": False, "error": "图片按钮仍被页面遮罩拦截"}
+
+            # 优先使用 file chooser，避免点击后全局 input 未及时挂载。
+            selected = False
+            expect_file_chooser = getattr(self.page, "expect_file_chooser", None)
+            if expect_file_chooser:
+                try:
+                    async with expect_file_chooser(timeout=3000) as chooser_info:
+                        await self._click_with_fallback(btn, timeout=5000)
+                    chooser = await chooser_info.value
+                    await chooser.set_files(image_path)
+                    selected = True
+                except Exception as exc:
+                    logger.debug("小黑盒 file chooser 不可用，回退隐藏 input: {}", exc)
+
+            if not selected:
+                await self._click_with_fallback(btn, timeout=5000)
+                await self.simulator.random_delay(0.3, 0.8)
+                file_input = await self.page.wait_for_selector(
+                    "input[type='file']", timeout=3000, state="attached"
                 )
-            except Exception:
-                logger.warning("小黑盒图片上传后未发现完成标记: {}", image_path)
+                await file_input.set_input_files(image_path)
+                selected = True
+
+            await self.simulator.random_delay(1, 2)
+            deadline = asyncio.get_running_loop().time() + 15
+            after_count = before_count
+            while asyncio.get_running_loop().time() < deadline:
+                after_count = await self._editor_image_count()
+                if after_count > before_count:
+                    logger.info("小黑盒图片上传并验证成功: {}", image_name)
+                    return {
+                        "success": True,
+                        "filename": image_name,
+                        "before_count": before_count,
+                        "after_count": after_count,
+                    }
+                await asyncio.sleep(0.5)
+            return {
+                "success": False,
+                "error": f"上传后编辑器图片数量未增加: before={before_count}, after={after_count}",
+            }
         except Exception as e:
-            logger.warning("小黑盒图片上传失败: {}", e)
+            if self._exception_means_browser_closed(e):
+                raise BrowserLifecycleError("BROWSER_CONTEXT_CLOSED: 小黑盒图片上传时页面已关闭") from e
+            logger.warning("小黑盒图片上传失败: filename={}, error={}", image_name, e)
+            return {"success": False, "error": str(e)}
+
+    async def _editor_image_count(self) -> int:
+        """读取编辑器正文区域中的图片数量，不把头像/预览图计入。"""
+        self._raise_if_page_closed("统计小黑盒编辑器图片")
+        selectors = (
+            ".article__edit-content--inner img",
+            ".article__edit-content--inner [data-type='image']",
+        )
+        counts = []
+        for selector in selectors:
+            try:
+                counts.append(await self.page.locator(selector).count())
+            except Exception:
+                counts.append(0)
+        return max(counts or [0])
+
+    async def _has_visible_overlay(self) -> bool:
+        """只检测仍然可见的遮罩；不通过删除 DOM 绕过平台提示。"""
+        selectors = (
+            ".hb-cpt__mask-wrapper",
+            ".modal-mask",
+            "[role='dialog']",
+            ".modal",
+        )
+        for selector in selectors:
+            try:
+                locator = self.page.locator(selector)
+                count = await locator.count()
+                for index in range(min(count, 10)):
+                    if await locator.nth(index).is_visible():
+                        return True
+            except Exception:
+                continue
+        return False
+
+    @staticmethod
+    def _normalize_query(value: str) -> str:
+        """防止关键词 JSON、数组或对象原文进入平台搜索框。"""
+        raw = str(value or "").strip()
+        if not raw:
+            return ""
+        try:
+            parsed = json.loads(raw)
+        except (TypeError, json.JSONDecodeError):
+            parsed = None
+        if isinstance(parsed, list):
+            words = []
+            for item in parsed:
+                if isinstance(item, dict):
+                    word = str(item.get("word") or "").strip()
+                else:
+                    word = str(item or "").strip()
+                if word:
+                    words.append(word)
+            return " ".join(words[:3])
+        if isinstance(parsed, dict) and parsed.get("word"):
+            return str(parsed["word"]).strip()
+        if raw.startswith(("[", "{")):
+            return ""
+        return " ".join(raw.replace(",", " ").replace("，", " ").replace("、", " ").split())[:100]
+
+    async def _visible_editor_text(self) -> str:
+        """读取编辑器可见文本，排除搜索/确认弹窗，避免用搜索框内容误判成功。"""
+        self._raise_if_page_closed("验证小黑盒选择结果")
+        return await self.page.evaluate("""
+            () => {
+                const clone = document.body ? document.body.cloneNode(true) : null;
+                if (!clone) return '';
+                clone.querySelectorAll('.modal, [role="dialog"], [class*="dialog"], .hb-cpt__mask-wrapper')
+                    .forEach((el) => el.remove());
+                return clone.innerText || '';
+            }
+        """)
 
     async def _legacy_select_topic(self, topic: str):
         """选择社区和话题（真实按钮：添加社区 / 添加话题，弹窗选择，不会跳走）
@@ -409,6 +626,7 @@ class XiaoheihePlatform(BasePlatform):
 
     async def _first_visible(self, selector: str):
         """返回选择器命中的第一个可见元素，避免误点页面背景元素。"""
+        self._raise_if_page_closed(f"查找控件: {selector}")
         locator = self.page.locator(selector)
         count = await locator.count()
         for index in range(min(count, 30)):
@@ -422,10 +640,33 @@ class XiaoheihePlatform(BasePlatform):
 
     async def _click_with_fallback(self, locator, timeout: int = 5000):
         """点击编辑器内部滚动容器中的控件，兼容元素可见但坐标不在视口的情况。"""
+        self._raise_if_page_closed("点击编辑器控件")
         try:
             await locator.click(timeout=timeout)
             return
         except Exception as first_error:
+            try:
+                # 小黑盒编辑器有自己的滚动容器。只调用 Playwright 默认的
+                # scroll_into_view 可能仍然留下「元素在视口外」，先滚动最近的
+                # 可滚动父节点，再让浏览器把控件放到中心位置。
+                await locator.evaluate("""
+                    el => {
+                        let node = el.parentElement;
+                        while (node && node !== document.body) {
+                            const style = getComputedStyle(node);
+                            const scrollable = /(auto|scroll)/.test(style.overflowY)
+                                && node.scrollHeight > node.clientHeight;
+                            if (scrollable) {
+                                node.scrollTop = Math.max(0, el.offsetTop - node.clientHeight / 2);
+                                break;
+                            }
+                            node = node.parentElement;
+                        }
+                        el.scrollIntoView({block: 'center', inline: 'nearest'});
+                    }
+                """)
+            except Exception:
+                pass
             try:
                 await locator.scroll_into_view_if_needed(timeout=2000)
             except Exception:
@@ -442,10 +683,13 @@ class XiaoheihePlatform(BasePlatform):
                     )
                     return
                 except Exception as final_error:
+                    if self._exception_means_browser_closed(final_error):
+                        raise BrowserLifecycleError("BROWSER_CONTEXT_CLOSED: 点击编辑器控件时页面已关闭") from final_error
                     raise final_error from first_error
 
     async def _select_from_editor_dialog(self, kind: str, query: str, result_selector: str):
         """在编辑器内实时搜索并选择社区/话题，返回实际选择名称。"""
+        query = self._normalize_query(query)
         if not query:
             return {
                 "success": False,
@@ -464,9 +708,10 @@ class XiaoheihePlatform(BasePlatform):
         try:
             await self._click_with_fallback(add_button)
             await self.simulator.random_delay(0.8, 1.5)
-            search = await self._first_visible(
+            search = await self._wait_first_visible(
                 ".modal input, [role='dialog'] input, [class*='dialog'] input, "
-                f"input[placeholder*='{kind}'], input[placeholder*='搜索']"
+                f"input[placeholder*='{kind}'], input[placeholder*='搜索']",
+                timeout_ms=5000,
             )
             if search is None:
                 return {
@@ -477,7 +722,7 @@ class XiaoheihePlatform(BasePlatform):
             await search.fill(query[:30])
             await self.simulator.random_delay(1, 2)
 
-            result = await self._first_visible(result_selector)
+            result = await self._wait_first_visible(result_selector, timeout_ms=5000)
             if result is None:
                 await self._dismiss_overlays()
                 return {
@@ -486,7 +731,19 @@ class XiaoheihePlatform(BasePlatform):
                     "error": f"小黑盒实时搜索没有找到{kind}: {query}",
                 }
 
-            selected_name = (await result.inner_text()).strip().splitlines()[0].strip() or query
+            selected_name = (await result.inner_text()).strip().splitlines()[0].strip()
+            if (
+                not selected_name
+                or selected_name == query
+                or selected_name.startswith(("[", "{"))
+                or "\"word\"" in selected_name
+            ):
+                await self._dismiss_overlays()
+                return {
+                    "success": False,
+                    "needs_selection": True,
+                    "error": f"小黑盒{kind}候选名称无效，拒绝把搜索词当作结果: {selected_name or query}",
+                }
             await self._click_with_fallback(result)
             await self.simulator.random_delay(0.5, 1.0)
 
@@ -494,6 +751,8 @@ class XiaoheihePlatform(BasePlatform):
             if confirm is not None:
                 await self._click_with_fallback(confirm, timeout=3000)
                 await self.simulator.random_delay(0.5, 1.0)
+
+            await self._dismiss_overlays()
 
             if "creator/editor" not in (self.page.url or ""):
                 await self._back_to_editor()
@@ -503,8 +762,8 @@ class XiaoheihePlatform(BasePlatform):
                     "error": f"小黑盒选择{kind}后离开编辑器",
                 }
 
-            body_text = await self.page.evaluate("() => document.body.innerText || ''")
-            if selected_name not in body_text and query[:8] not in body_text:
+            editor_text = await self._visible_editor_text()
+            if selected_name not in editor_text:
                 return {
                     "success": False,
                     "needs_selection": True,
@@ -513,6 +772,8 @@ class XiaoheihePlatform(BasePlatform):
             logger.info("小黑盒{}实时搜索选择成功: query={}, selected={}", kind, query, selected_name)
             return {"success": True, "value": selected_name}
         except Exception as exc:
+            if self._exception_means_browser_closed(exc):
+                raise BrowserLifecycleError(f"BROWSER_CONTEXT_CLOSED: 小黑盒{kind}选择时页面已关闭") from exc
             await self._dismiss_overlays()
             logger.error("小黑盒{}选择失败: query={}, error={}", kind, query, exc)
             return {
@@ -523,7 +784,7 @@ class XiaoheihePlatform(BasePlatform):
 
     async def select_community(self, community: str = "", selection_query: str = ""):
         """独立选择社区；无手动值时使用文章关键词实时搜索。"""
-        query = (community or selection_query or "").strip()
+        query = self._normalize_query(community or selection_query or "")
         return await self._select_from_editor_dialog(
             "社区",
             query,
@@ -536,15 +797,20 @@ class XiaoheihePlatform(BasePlatform):
                            selection_query: str = "", selection_override: dict = None):
         """自动优先选择社区和话题；无结果时进入 needs_selection。"""
         override = selection_override or {}
-        community_query = (override.get("community") or community or selection_query or topic or "").strip()
-        topic_query = (override.get("topic") or topic or selection_query or "").strip()
+        community_query = self._normalize_query(
+            override.get("community") or community or selection_query or topic or ""
+        )
+        topic_query = self._normalize_query(
+            override.get("topic") or topic or selection_query or ""
+        )
 
         community_result = await self.select_community(community_query, selection_query)
         if not community_result.get("success"):
             return community_result
         # 社区选择器和话题选择器使用不同的列表；社区选择完成后先关闭遮罩，
         # 防止下一步误把社区列表第一项当成话题。
-        await self._dismiss_overlays()
+        if self.page is not None:
+            await self._dismiss_overlays()
 
         topic_result = await self._select_from_editor_dialog(
             "话题",
@@ -559,37 +825,62 @@ class XiaoheihePlatform(BasePlatform):
         if not topic_result.get("success"):
             return topic_result
 
+        self._selected_values = {
+            "community": community_result.get("value") or community_query,
+            "topic": topic_result.get("value") or topic_query,
+        }
         return {
             "success": True,
-            "selection": {
-                "community": community_result.get("value") or community_query,
-                "topic": topic_result.get("value") or topic_query,
-            },
+            "selection": dict(self._selected_values),
         }
 
     async def _dismiss_overlays(self):
         """关闭可能残留的弹窗遮罩（如社区/话题选择未正常关闭时遗留的 mask），避免遮挡按钮点击。"""
         try:
+            self._raise_if_page_closed("关闭小黑盒弹窗遮罩")
+            # 一次 Escape 可能只关闭嵌套弹窗，连续两次再检查遮罩状态。
             await self.page.keyboard.press("Escape")
-            await self.simulator.random_delay(0.5, 1.0)
-            mask = self.page.locator(".hb-cpt__mask-wrapper, .modal-mask, [class*='mask'], .modal").first
-            if await mask.count() > 0:
-                try:
-                    await mask.click(timeout=2000)
-                except Exception:
-                    pass
-                await self.simulator.random_delay(0.5, 1.0)
-        except Exception:
+            await asyncio.sleep(0.2)
+            await self.page.keyboard.press("Escape")
+            await self.simulator.random_delay(0.3, 0.6)
+
+            for selector in (
+                "[role='dialog'] button[aria-label*='关闭']",
+                ".modal button[aria-label*='关闭']",
+                "[role='dialog'] button:has-text('取消'), .modal button:has-text('取消')",
+            ):
+                close_button = await self._first_visible(selector)
+                if close_button is not None:
+                    try:
+                        await self._click_with_fallback(close_button, timeout=2000)
+                    except Exception:
+                        pass
+
+            mask = self.page.locator(
+                ".hb-cpt__mask-wrapper, .modal-mask, [class*='mask']"
+            ).first
+            if await mask.count() > 0 and await mask.is_visible():
+                logger.warning("小黑盒仍存在可见遮罩，拒绝强制删除 DOM")
+            if await self._has_visible_overlay():
+                logger.warning("小黑盒弹窗/遮罩关闭后仍可见，后续点击将进行安全校验")
+        except BrowserLifecycleError:
+            raise
+        except Exception as exc:
+            if self._exception_means_browser_closed(exc):
+                raise BrowserLifecycleError("BROWSER_CONTEXT_CLOSED: 关闭弹窗遮罩时页面已关闭") from exc
             pass
 
     async def _back_to_editor(self):
         """若页面偏离了编辑器（被话题选择等带偏），回到编辑器 URL"""
         if getattr(self, "_editor_url", ""):
+            self._raise_if_page_closed("返回小黑盒文章编辑器")
             try:
                 await self.page.goto(self._editor_url, wait_until="domcontentloaded")
                 await self.simulator.random_delay(2, 4)
-            except Exception:
-                pass
+            except Exception as exc:
+                if self._exception_means_browser_closed(exc):
+                    raise BrowserLifecycleError("BROWSER_CONTEXT_CLOSED: 返回小黑盒编辑器时页面已关闭") from exc
+                logger.warning("小黑盒返回编辑器失败: {}", exc)
 
     async def save_draft(self, title: str = "") -> str:
         """保存草稿并返回草稿箱 URL；保存失败返回空串（绝不以当前页 URL 冒充成功）
@@ -598,6 +889,7 @@ class XiaoheihePlatform(BasePlatform):
         保存后去「草稿箱」(button.editor-publish__btn.sub-btn.margin-left) 验证标题是否出现，
         以草稿箱真实存在该草稿作为成功判据（直接回应「账号/草稿箱里都找不到」的投诉）。
         """
+        self._raise_if_page_closed("小黑盒保存草稿")
         # 若在编辑器外（被话题选择等带偏），先回到编辑器
         if "creator/editor" not in (self.page.url or ""):
             await self._back_to_editor()
@@ -612,6 +904,8 @@ class XiaoheihePlatform(BasePlatform):
             await self._dismiss_overlays()
             await self.page.click(self.SAVE_DRAFT_BTN, timeout=8000)
         except Exception as e:
+            if self._exception_means_browser_closed(e):
+                raise BrowserLifecycleError("BROWSER_CONTEXT_CLOSED: 小黑盒点击保存草稿时页面已关闭") from e
             logger.error("小黑盒点击保存草稿按钮失败: {}", e)
             return ""
 
@@ -623,6 +917,7 @@ class XiaoheihePlatform(BasePlatform):
     async def _verify_draft_in_drafts(self, title: str) -> str:
         """前往草稿箱，确认刚写的草稿存在，返回草稿箱 URL；不存在返回空串"""
         try:
+            self._raise_if_page_closed("小黑盒验证草稿箱")
             draft_box = self.page.locator(self.DRAFT_BOX_BTN, has_text="草稿箱").first
             if await draft_box.count() > 0:
                 await draft_box.click(timeout=5000)
@@ -632,10 +927,15 @@ class XiaoheihePlatform(BasePlatform):
                 await self.page.goto("https://www.xiaoheihe.cn/creator/draft", wait_until="domcontentloaded")
                 await self.simulator.random_delay(3, 5)
         except Exception as e:
+            if self._exception_means_browser_closed(e):
+                raise BrowserLifecycleError("BROWSER_CONTEXT_CLOSED: 打开小黑盒草稿箱时页面已关闭") from e
             logger.error("小黑盒打开草稿箱失败: {}", e)
             return ""
 
         drafts_url = self.page.url
+        if "/creator/draft" not in (drafts_url or ""):
+            logger.error("小黑盒草稿箱路由验证失败: {}", drafts_url)
+            return ""
 
         if title:
             keyword = title[:12]

@@ -11,6 +11,7 @@ from loguru import logger
 from models.database import Database
 from core.docx_parser import DocxParser, ParsedArticle, ContentBlock
 from core.nlp_analyzer import NLPAnalyzer
+from core.platform_guard import release as release_platform, try_acquire as try_acquire_platform
 from platforms.zol import ZOLPlatform
 from platforms.xiaoheihe import XiaoheihePlatform
 
@@ -19,11 +20,102 @@ class TaskStatus(Enum):
     QUEUED = "queued"
     PROCESSING = "processing"
     COMPLETED = "completed"
+    COMPLETED_WITH_WARNINGS = "completed_with_warnings"
     FAILED = "failed"
     RETRYING = "retrying"
     PAUSED = "paused"
     NEEDS_SELECTION = "needs_selection"
     CANCELLED = "cancelled"
+
+
+class TaskExecutionError(RuntimeError):
+    """把平台返回的错误码传给队列重试策略。"""
+
+    def __init__(self, message: str, error_code: str = None):
+        super().__init__(message)
+        self.error_code = error_code or "TASK_ERROR"
+
+
+MANUAL_RECOVERABLE_CODES = {
+    "BROWSER_CONTEXT_CLOSED",
+    "ZOL_BLOG_EDITOR_REDIRECT",
+    "ZOL_EDITOR_ROUTE_ERROR",
+    "ZOL_SECURITY_CHALLENGE",
+    "PLATFORM_BLOCKED",
+    "SELECTOR_ERROR",
+    "DRAFT_NOT_VERIFIED",
+}
+
+
+def normalize_selection_query(value, fallback: str = "", limit: int = 3) -> str:
+    """把文章关键词字段转换成平台搜索可用的纯文本。"""
+    if isinstance(value, (list, tuple)):
+        words = []
+        for item in value:
+            if isinstance(item, dict):
+                word = str(item.get("word") or "").strip()
+            else:
+                word = str(item or "").strip()
+            if word:
+                words.append(word)
+        return " ".join(words[:limit]) or str(fallback or "").strip()
+
+    raw = str(value or "").strip()
+    if raw:
+        try:
+            parsed = json.loads(raw)
+        except (TypeError, json.JSONDecodeError):
+            parsed = None
+        if isinstance(parsed, list):
+            return normalize_selection_query(parsed, fallback=fallback, limit=limit)
+        if isinstance(parsed, dict) and parsed.get("word"):
+            return str(parsed["word"]).strip()
+        if not raw.startswith(("[", "{")):
+            plain = raw.replace(",", " ").replace("，", " ").replace("、", " ")
+            return " ".join(plain.split())[:100] or str(fallback or "").strip()
+
+    return str(fallback or "").strip()
+
+
+def classify_task_error(exc: Exception) -> str:
+    """将 Playwright/平台异常归一成有限的可诊断错误码。"""
+    explicit = getattr(exc, "error_code", None)
+    text = str(exc)
+    upper = text.upper()
+
+    if "BROWSER_CONTEXT_CLOSED" in upper or any(
+        marker in text.lower()
+        for marker in (
+            "target page, context or browser has been closed",
+            "page has been closed",
+            "context has been closed",
+            "browser has been closed",
+            "target closed",
+        )
+    ):
+        return "BROWSER_CONTEXT_CLOSED"
+    if "ZOL_BLOG_EDITOR_REDIRECT" in upper:
+        return "ZOL_BLOG_EDITOR_REDIRECT"
+    if "ZOL_EDITOR_ROUTE_ERROR" in upper:
+        return "ZOL_EDITOR_ROUTE_ERROR"
+    if any(marker in upper for marker in ("SECURITY_CHALLENGE", "验证码", "风控", "安全验证")):
+        return "ZOL_SECURITY_CHALLENGE" if "ZOL" in upper else "PLATFORM_BLOCKED"
+    if "LOGIN_REQUIRED" in upper or "未登录" in text:
+        return "LOGIN_REQUIRED"
+    if "NEEDS_SELECTION" in upper or "没有找到社区" in text or "没有找到话题" in text:
+        return "SELECTION_REQUIRED"
+    if any(marker in upper for marker in (
+        "SELECTOR_ERROR", "VALIDATION_ERROR", "验证失败", "未找到", "找不到",
+        "OUTSIDE OF THE VIEWPORT", "ELEMENT IS OUTSIDE",
+    )):
+        return "SELECTOR_ERROR"
+    if "DRAFT_NOT_VERIFIED" in upper or "草稿保存失败" in text or "草稿箱未找到" in text:
+        return "DRAFT_NOT_VERIFIED"
+    if explicit and explicit != "PLATFORM_ERROR":
+        return explicit
+    if any(marker in upper for marker in ("NET::ERR", "NETWORK", "CONNECTION RESET")):
+        return "NETWORK_TRANSIENT"
+    return "TASK_ERROR"
 
 
 class QueueManager:
@@ -101,6 +193,17 @@ class QueueManager:
             return
 
         platform_name = task["platform"]
+        platform_claimed = try_acquire_platform(platform_name)
+        if not platform_claimed:
+            message = "PLATFORM_BUSY: 当前平台正在登录或执行其他任务，已暂停等待人工恢复"
+            self.db.update_task(
+                task_id,
+                status="paused",
+                error_code="PLATFORM_BUSY",
+                error_message=message,
+            )
+            self.db.add_task_log(task_id, "WARN", message)
+            return
         self.db.update_task(task_id, status="processing", started_at=datetime.now().isoformat())
         self.db.add_task_log(task_id, "INFO", f"开始处理: {platform_name}")
 
@@ -153,7 +256,7 @@ class QueueManager:
                 images=images,
                 topic=topic,
                 community=community,
-                selection_query=article.get("keywords", "") or title,
+                selection_query=normalize_selection_query(article.get("keywords", ""), fallback=title),
                 selection_override=selection_override,
                 task_id=task_id,
                 db=self.db,
@@ -164,29 +267,78 @@ class QueueManager:
                 selection = result.get("selection") or {}
                 selected_topic = selection.get("topic") or topic
                 selected_community = selection.get("community") or community
+                selection_status = result.get(
+                    "selection_status",
+                    "completed" if selection else "not_required",
+                )
+                media_status = result.get("media_status", "not_checked")
+                warnings = []
+                if selection_status == "needs_selection":
+                    warnings.append(result.get("selection_error") or "社区/话题未完成选择")
+                if media_status in ("failed", "partial"):
+                    warnings.append(result.get("media_error") or "图片未全部上传")
+                task_status = "completed_with_warnings" if warnings else "completed"
+                if selection_status == "needs_selection" and media_status in ("failed", "partial"):
+                    warning_code = "PARTIAL_METADATA"
+                elif selection_status == "needs_selection":
+                    warning_code = "SELECTION_REQUIRED"
+                elif media_status == "failed":
+                    warning_code = "IMAGES_ALL_FAILED"
+                elif media_status == "partial":
+                    warning_code = "PARTIAL_IMAGES"
+                else:
+                    warning_code = None
                 self.db.update_task(
                     task_id,
-                    status="completed",
+                    status=task_status,
                     title_used=title,
                     topic_used=selected_topic,
                     community_used=selected_community,
-                    selection_status=result.get("selection_status", "completed"),
+                    selection_status=selection_status,
                     selection_json=json.dumps(selection, ensure_ascii=False) if selection else None,
+                    error_code=warning_code,
+                    error_message="；".join(warnings) if warnings else None,
                     draft_url=result.get("draft_url", ""),
+                    media_status=media_status,
+                    expected_images=result.get("expected_images", 0),
+                    uploaded_images=result.get("uploaded_images", 0),
+                    failed_images_json=(
+                        json.dumps(result.get("failed_images") or [], ensure_ascii=False)
+                        if result.get("failed_images") else None
+                    ),
                     completed_at=datetime.now().isoformat(),
                 )
-                self.db.add_task_log(task_id, "INFO", f"草稿保存成功: {result.get('draft_url', '')}")
+                if warnings:
+                    self.db.add_task_log(
+                        task_id,
+                        "WARN",
+                        f"基础草稿保存成功，但附加内容未完成: {'；'.join(warnings)}",
+                    )
+                else:
+                    self.db.add_task_log(task_id, "INFO", f"草稿保存成功: {result.get('draft_url', '')}")
                 # 发布成功说明登录态有效，回写账号状态（修复账号页长期显示 login_failed 的问题）
                 self.db.upsert_account(
                     platform_name,
                     status="logged_in",
                     last_login_time=datetime.now().isoformat(),
                 )
-                logger.info(f"任务 {task_id} 完成")
+                logger.info("任务 {} 完成: status={}", task_id, task_status)
             elif result.get("need_login"):
                 # 需要重新登录：直接标记失败，提示去账号页登录，不再无谓重试
                 error_msg = result.get("error", "未登录")
-                self.db.update_task(task_id, status="failed", retry_count=task["retry_count"], error_message=error_msg)
+                self.db.update_task(
+                    task_id,
+                    status="failed",
+                    retry_count=task["retry_count"],
+                    error_code="LOGIN_REQUIRED",
+                    error_message=error_msg,
+                )
+                self.db.upsert_account(
+                    platform_name,
+                    status="logged_out",
+                    login_stage="needs_login",
+                    login_error=error_msg,
+                )
                 self.db.add_task_log(task_id, "ERROR", error_msg)
                 logger.error(f"任务 {task_id} 失败: {error_msg}")
             elif result.get("needs_selection"):
@@ -195,39 +347,71 @@ class QueueManager:
                     task_id,
                     status="needs_selection",
                     selection_status="required",
+                    error_code="SELECTION_REQUIRED",
                     error_message=error_msg,
                 )
                 self.db.add_task_log(task_id, "WARN", error_msg)
                 logger.warning("任务 {} 需要手动选择: {}", task_id, error_msg)
             else:
-                raise Exception(result.get("error", "未知错误"))
+                raise TaskExecutionError(
+                    result.get("error", "未知错误"),
+                    result.get("error_code") or "TASK_ERROR",
+                )
 
         except Exception as e:
             error_msg = str(e)
+            error_code = classify_task_error(e)
             retry_count = task["retry_count"] + 1
             max_retries = 3
 
-            if retry_count < max_retries:
-                self.db.update_task(task_id, status="retrying", retry_count=retry_count, error_message=error_msg)
-                self.db.add_task_log(task_id, "WARN", f"重试 {retry_count}/{max_retries}: {error_msg}")
+            if error_code in MANUAL_RECOVERABLE_CODES:
+                message = f"[{error_code}] {error_msg}；已暂停，请处理后手动恢复"
+                self.db.update_task(
+                    task_id,
+                    status="paused",
+                    retry_count=retry_count,
+                    error_code=error_code,
+                    error_message=message,
+                )
+                self.db.add_task_log(task_id, "WARN", message)
+                logger.warning("任务 {} 暂停等待人工处理: {}", task_id, message)
+            elif retry_count < max_retries:
+                self.db.update_task(
+                    task_id,
+                    status="retrying",
+                    retry_count=retry_count,
+                    error_code=error_code,
+                    error_message=error_msg,
+                )
+                self.db.add_task_log(task_id, "WARN", f"[{error_code}] 重试 {retry_count}/{max_retries}: {error_msg}")
                 await asyncio.sleep(10 * retry_count)
                 self.queue.put_nowait(task_id)
             else:
-                self.db.update_task(task_id, status="failed", retry_count=retry_count, error_message=error_msg)
-                self.db.add_task_log(task_id, "ERROR", f"最终失败: {error_msg}")
-                logger.error(f"任务 {task_id} 失败: {error_msg}")
+                self.db.update_task(
+                    task_id,
+                    status="failed",
+                    retry_count=retry_count,
+                    error_code=error_code,
+                    error_message=error_msg,
+                )
+                self.db.add_task_log(task_id, "ERROR", f"[{error_code}] 最终失败: {error_msg}")
+                logger.error("任务 {} 失败: [{}] {}", task_id, error_code, error_msg)
 
         finally:
             # 每个任务完成后必须清理浏览器，避免 Chrome SingletonLock 冲突
-            if platform_name in self._platforms and self._platforms[platform_name]:
-                try:
-                    await self._platforms[platform_name].cleanup()
-                    self.db.add_task_log(task_id, "INFO", "浏览器已关闭")
-                except Exception:
-                    pass
-                self._platforms[platform_name] = None
-                # 等待 Chrome 完全释放资源
-                await asyncio.sleep(3)
+            try:
+                if platform_name in self._platforms and self._platforms[platform_name]:
+                    try:
+                        await self._platforms[platform_name].cleanup()
+                        self.db.add_task_log(task_id, "INFO", "浏览器已关闭")
+                    except Exception as cleanup_error:
+                        logger.warning("任务 {} 浏览器清理失败: {}", task_id, cleanup_error)
+                    self._platforms[platform_name] = None
+                    # 等待 Chrome 完全释放资源
+                    await asyncio.sleep(3)
+            finally:
+                if platform_claimed:
+                    release_platform(platform_name)
 
     async def _get_platform(self, name: str):
         """获取或初始化平台实例"""

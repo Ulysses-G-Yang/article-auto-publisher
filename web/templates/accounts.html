@@ -519,7 +519,7 @@ document.addEventListener('alpine:init', () => {
                 this[errorKey] = '';
             } else if (status === 'login_failed') {
                 this[loadingKey] = false;
-                this[errorKey] = acc.error_message || acc.error || this[errorKey]
+                this[errorKey] = acc.login_error || acc.error_message || acc.error || this[errorKey]
                     || '登录失败，请重新登录。';
                 if (wasBusy) this.notify(`${this.platformLabel(platform)} 登录失败`, 'danger', 5000);
             } else if (status === 'logged_in') {

@@ -1,13 +1,118 @@
 """中关村在线（ZOL）博客平台自动化"""
 import asyncio
+import time
+from urllib.parse import urlparse
 from loguru import logger
 
-from platforms.base import BasePlatform
+from platforms.base import (
+    BasePlatform,
+    BrowserLifecycleError,
+    LoginRequiredError,
+    PlatformAccessError,
+    SelectorError,
+)
 from human.simulator import HumanSimulator
 
 
 class ZOLPlatform(BasePlatform):
     platform_name = "zol"
+
+    BLOG_HOST = "blog.zol.com.cn"
+    FORUM_HOST = "bbs.zol.com.cn"
+    LOGIN_HOST = "service.zol.com.cn"
+    CRITICAL_COOKIES = {"last_userid", "lv", "zol_userid", "zol_sid"}
+
+    def __init__(self):
+        super().__init__()
+        self.last_login_error = ""
+
+    @staticmethod
+    def _host(url: str) -> str:
+        try:
+            return (urlparse(url or "").hostname or "").lower()
+        except Exception:
+            return ""
+
+    @classmethod
+    def _is_blog_editor_url(cls, url: str) -> bool:
+        parsed = urlparse(url or "")
+        return (
+            parsed.hostname == cls.BLOG_HOST
+            and parsed.path.endswith("/post.php")
+            and "act=add" in (parsed.query or "")
+        )
+
+    @classmethod
+    def _is_login_url(cls, url: str) -> bool:
+        parsed = urlparse(url or "")
+        if parsed.hostname == cls.LOGIN_HOST:
+            return "login" in parsed.path.lower()
+        if parsed.hostname == "my.zol.com.cn":
+            # 登录成功后 ZOL 可能跳到 my.zol.cn/{username}；只有根路径仍视为
+            # 入口页，不能把已登录的个人中心路径误判成登录页。
+            return parsed.path in ("", "/")
+        return False
+
+    async def _valid_cookie_names(self) -> set[str]:
+        """只返回未过期的关键 Cookie 名称，不记录 Cookie 值。"""
+        if not self.context:
+            return set()
+        try:
+            # 不限制 URL，避免遗漏 service/blog 域名上的 HttpOnly 会话 Cookie。
+            cookies = await self.context.cookies()
+        except TypeError:
+            # 兼容旧版测试替身或 Playwright 兼容实现。
+            cookies = await self.context.cookies([
+                "https://my.zol.com.cn/",
+                "https://service.zol.com.cn/",
+                "https://blog.zol.com.cn/",
+                "https://bbs.zol.com.cn/",
+            ])
+        now = time.time()
+        return {
+            item.get("name", "")
+            for item in cookies
+            if item.get("name", "") in self.CRITICAL_COOKIES
+            and (
+                item.get("expires", -1) == -1
+                or item.get("expires", 0) > now
+            )
+        }
+
+    async def _read_page_state(self) -> dict:
+        self._require_page_alive("ZOL 页面状态探测")
+        return await self.page.evaluate("""
+            () => {
+                const visible = (el) => {
+                    if (!el) return false;
+                    const style = getComputedStyle(el);
+                    return style.display !== 'none' && style.visibility !== 'hidden'
+                        && el.offsetParent !== null;
+                };
+                const bodyText = document.body ? (document.body.innerText || '') : '';
+                const lowerText = bodyText.toLowerCase();
+                return {
+                    url: window.location.href,
+                    hasUser: visible(document.querySelector('.user-name, .header-user, .login-info, .nickname')),
+                    hasLogout: visible(document.querySelector('a[href*="logout"]')),
+                    hasLoginForm: [
+                        '#J_LoginUser', '#J_LoginPsw', '#J_LoginBtn',
+                        'a[href*="login"]', '.login-btn', '.login-entry'
+                    ].some(selector => visible(document.querySelector(selector))),
+                    hasSecurityChallenge: [
+                        '验证码', '安全验证', '风险验证', '异常登录', '滑块验证', 'captcha'
+                    ].some(marker => bodyText.includes(marker) || lowerText.includes(marker)),
+                };
+            }
+        """)
+
+    async def _editor_probe_count(self) -> int:
+        self._require_page_alive("ZOL 编辑器结构探测")
+        return await self.page.locator(
+            "#title, input[name='title'], .title-input input, .blog-title input, "
+            "textarea[name='content'], iframe.ke-edit-iframe, .ke-container iframe, "
+            "#content_ifr, iframe[id*='content'], [contenteditable='true']"
+        ).count()
 
     async def check_login(self) -> bool:
         """检查是否能进入真实 ZOL 博客编辑器。
@@ -17,124 +122,96 @@ class ZOLPlatform(BasePlatform):
         因此这里同时验证编辑器 URL、编辑器 DOM、页面登录提示和 HttpOnly Cookie。
         """
         try:
+            self.last_login_error = ""
+            self._require_page_alive("ZOL 登录态检测")
             await self.page.goto(
                 "https://blog.zol.com.cn/post.php?act=add",
                 wait_until="domcontentloaded",
                 timeout=15000,
             )
             await asyncio.sleep(3)
-            page_state = await self.page.evaluate("""
-                () => {
-                    const visible = (el) => {
-                        if (!el) return false;
-                        const style = getComputedStyle(el);
-                        return style.display !== 'none' && style.visibility !== 'hidden' && el.offsetParent !== null;
-                    };
-                    return {
-                        url: window.location.href,
-                        hasUser: visible(document.querySelector('.user-name, .header-user, .login-info, .nickname')),
-                        hasLogout: visible(document.querySelector('a[href*="logout"]')),
-                        hasLoginForm: [
-                            '#J_LoginUser', '#J_LoginPsw', '#J_LoginBtn',
-                        'a[href*="login"]', '.login-btn', '.login-entry'
-                        ].some(selector => visible(document.querySelector(selector))),
-                    };
-                }
-            """)
-            editor_probe = await self.page.locator(
-                "#title, input[name='title'], .title-input input, .blog-title input, "
-                "textarea[name='content'], iframe.ke-edit-iframe, .ke-container iframe, "
-                "#content_ifr, iframe[id*='content'], [contenteditable='true']"
-            ).count()
+            page_state = await self._read_page_state()
+            editor_probe = await self._editor_probe_count()
             current_url = page_state.get("url") or self.page.url or ""
-            if page_state.get("hasLoginForm"):
+            if self._host(current_url) == self.FORUM_HOST:
+                self.last_login_error = (
+                    "ZOL_BLOG_EDITOR_REDIRECT: 当前会话被重定向到论坛，"
+                    f"无法进入博客编辑器，当前 URL: {current_url}"
+                )
+                logger.warning(self.last_login_error)
                 return False
-            if "blog.zol.com.cn" not in current_url or editor_probe == 0:
+            if page_state.get("hasSecurityChallenge"):
+                self.last_login_error = "ZOL_SECURITY_CHALLENGE: 页面要求完成安全验证"
+                logger.warning(self.last_login_error)
                 return False
-            cookie_names = set()
-            if self.context:
-                cookies = await self.context.cookies([
-                    "https://my.zol.com.cn/",
-                    "https://blog.zol.com.cn/",
-                ])
-                import time
-                now = time.time()
-                cookie_names = {
-                    item.get("name", "")
-                    for item in cookies
-                    if item.get("name", "") in {
-                        "last_userid", "lv", "zol_userid", "zol_sid",
-                    }
-                    and (
-                        item.get("expires", -1) == -1
-                        or item.get("expires", 0) > now
-                    )
-                }
-            cookie_logged_in = bool(cookie_names.intersection({
-                "last_userid", "lv", "zol_userid", "zol_sid",
-            }))
-            return bool(
-                editor_probe > 0
-                and (page_state.get("hasUser") or page_state.get("hasLogout") or cookie_logged_in)
+            if page_state.get("hasLoginForm") or self._is_login_url(current_url):
+                self.last_login_error = "LOGIN_REQUIRED: ZOL 博客编辑器需要重新登录"
+                return False
+            if not self._is_blog_editor_url(current_url) or editor_probe == 0:
+                self.last_login_error = (
+                    "ZOL_EDITOR_UNAVAILABLE: 当前页面不是可用的博客编辑器，"
+                    f"url={current_url}, selector_count={editor_probe}"
+                )
+                logger.warning(self.last_login_error)
+                return False
+            cookie_names = await self._valid_cookie_names()
+            if not (page_state.get("hasUser") or page_state.get("hasLogout") or cookie_names):
+                self.last_login_error = "LOGIN_REQUIRED: ZOL 编辑器没有可验证的登录信号"
+                return False
+            logger.info(
+                "ZOL 博客编辑器登录态验证成功: url={}, selector_count={}, cookie_names={}",
+                current_url,
+                editor_probe,
+                sorted(cookie_names),
             )
+            return True
+        except BrowserLifecycleError:
+            raise
         except Exception as exc:
+            if self._exception_means_browser_closed(exc):
+                raise BrowserLifecycleError("BROWSER_CONTEXT_CLOSED: ZOL 登录态检测时页面已关闭") from exc
+            self.last_login_error = f"ZOL_LOGIN_CHECK_ERROR: {exc}"
             logger.warning("ZOL 登录态检测失败: url={}, error={}", getattr(self.page, "url", ""), exc)
             return False
 
     async def _check_login_current_page(self) -> bool:
         """检查当前页面是否已登录（不跳转，用于登录等待循环）"""
         try:
-            page_state = await self.page.evaluate("""
-                () => {
-                    const visible = (el) => {
-                        if (!el) return false;
-                        const style = getComputedStyle(el);
-                        return style.display !== 'none' && style.visibility !== 'hidden' && el.offsetParent !== null;
-                    };
-                    return {
-                        url: window.location.href,
-                        hasUser: visible(document.querySelector('.user-name, .header-user, .login-info, .nickname')),
-                        hasLogout: visible(document.querySelector('a[href*="logout"]')),
-                        hasLoginForm: [
-                            '#J_LoginUser', '#J_LoginPsw', '#J_LoginBtn',
-                            'a[href*="login"]', '.login-btn', '.login-entry'
-                        ].some(selector => visible(document.querySelector(selector))),
-                    };
-                }
-            """)
-            if page_state.get("hasLoginForm"):
+            page_state = await self._read_page_state()
+            current_url = page_state.get("url") or self.page.url or ""
+            if page_state.get("hasLoginForm") or page_state.get("hasSecurityChallenge"):
                 return False
-            cookie_names = set()
-            if self.context:
-                cookies = await self.context.cookies([
-                    "https://my.zol.com.cn/",
-                    "https://blog.zol.com.cn/",
-                ])
-                import time
-                now = time.time()
-                cookie_names = {
-                    item.get("name", "")
-                    for item in cookies
-                    if item.get("name", "") in {
-                        "last_userid", "lv", "zol_userid", "zol_sid",
-                    }
-                    and (
-                        item.get("expires", -1) == -1
-                        or item.get("expires", 0) > now
-                    )
-                }
-            return bool(page_state.get("hasUser") or page_state.get("hasLogout") or cookie_names.intersection({
-                "last_userid", "lv", "zol_userid", "zol_sid",
-            }))
-        except Exception:
+            if self._is_login_url(current_url):
+                return False
+            cookie_names = await self._valid_cookie_names()
+            return bool(page_state.get("hasUser") or page_state.get("hasLogout") or cookie_names)
+        except BrowserLifecycleError:
+            raise
+        except Exception as exc:
+            if self._exception_means_browser_closed(exc):
+                raise BrowserLifecycleError("BROWSER_CONTEXT_CLOSED: ZOL 登录等待页面已关闭") from exc
             return False
 
     async def login(self):
         """打开登录页，等待用户手动完成登录"""
+        self._require_page_alive("ZOL 打开登录页")
         # TODO: ZOL 可能已改版登录入口，需确认当前扫码登录页 URL
         # 如果 my.zol.com.cn 不再显示扫码登录，需要更新此 URL
         await self.page.goto("https://my.zol.com.cn/", wait_until="domcontentloaded")
         await self.simulator.random_delay(1, 2)
+
+        # 当前入口会跳到 service.zol.com.cn 的账号登录页，默认可能是账号登录。
+        # 如果页面提供扫码切换按钮，优先切换到二维码，但不尝试绕过验证码/风控。
+        try:
+            qr_toggle = self.page.locator(".login-change, [class*='login-change']").first
+            if await qr_toggle.count() > 0 and await qr_toggle.is_visible():
+                toggle_text = (await qr_toggle.inner_text()).strip()
+                if any(marker in toggle_text for marker in ("扫码", "二维码", "手机")):
+                    await qr_toggle.click(timeout=3000)
+                    await self.simulator.random_delay(0.5, 1.5)
+                    logger.info("ZOL 登录页已切换到扫码登录界面")
+        except Exception as exc:
+            logger.debug("ZOL 扫码登录界面切换失败，保留当前登录方式: {}", exc)
 
         # 在浏览器页面中显示提示
         await self.page.evaluate("""
@@ -175,25 +252,46 @@ class ZOLPlatform(BasePlatform):
                 pass
             await asyncio.sleep(3)
 
-        raise TimeoutError("登录超时（90 秒），请重试")
+        raise LoginRequiredError("LOGIN_REQUIRED: ZOL 登录超时（90 秒），请重新扫码或检查安全验证")
 
     async def navigate_to_editor(self):
         """导航到博客编辑器"""
-        await self.page.goto("https://blog.zol.com.cn/post.php?act=add", wait_until="domcontentloaded")
+        self._require_page_alive("ZOL 打开博客编辑器")
+        try:
+            await self.page.goto(
+                "https://blog.zol.com.cn/post.php?act=add",
+                wait_until="domcontentloaded",
+                timeout=15000,
+            )
+        except Exception as exc:
+            if self._exception_means_browser_closed(exc):
+                raise BrowserLifecycleError("BROWSER_CONTEXT_CLOSED: ZOL 编辑器导航时页面已关闭") from exc
+            raise
         await self.simulator.random_delay(2, 4)
-        if "blog.zol.com.cn" not in (self.page.url or ""):
-            raise RuntimeError(f"ZOL 编辑器跳转失败，当前 URL: {self.page.url}")
-        probe = await self.page.locator(
-            "#title, input[name='title'], .title-input input, .blog-title input, "
-            "textarea[name='content'], iframe.ke-edit-iframe, .ke-container iframe, "
-            "#content_ifr, iframe[id*='content'], [contenteditable='true']"
-        ).count()
+        self._require_page_alive("ZOL 验证博客编辑器")
+        current_url = self.page.url or ""
+        host = self._host(current_url)
+        if host == self.FORUM_HOST:
+            raise PlatformAccessError(
+                "ZOL_BLOG_EDITOR_REDIRECT: ZOL 博客编辑器跳转到论坛，"
+                f"当前 URL: {current_url}"
+            )
+        if self._is_login_url(current_url):
+            raise LoginRequiredError(
+                f"LOGIN_REQUIRED: ZOL 编辑器导航后仍在登录页，当前 URL: {current_url}"
+            )
+        if not self._is_blog_editor_url(current_url):
+            raise PlatformAccessError(
+                f"ZOL_EDITOR_ROUTE_ERROR: ZOL 编辑器跳转失败，当前 URL: {current_url}"
+            )
+        probe = await self._editor_probe_count()
         if probe == 0:
-            raise RuntimeError(f"ZOL 编辑器结构探测失败，当前 URL: {self.page.url}")
-        await self.simulator.simulate_scroll(self.page, scroll_times=2)
+            raise SelectorError(f"ZOL_EDITOR_SELECTOR_ERROR: 编辑器结构探测失败，当前 URL: {current_url}")
+        await self._safe_simulate_scroll(scroll_times=2, stage="ZOL 编辑器初始滚动")
 
     async def fill_title(self, title: str):
         """填写并验证博客标题，不再静默吞掉定位/输入失败。"""
+        self._require_page_alive("ZOL 填写标题")
         expected = (title or "")[:50]
         selectors = [
             "#title",
@@ -227,12 +325,15 @@ class ZOLPlatform(BasePlatform):
                 logger.info("ZOL 标题输入并验证成功: {}", expected[:30])
                 return
             except Exception as exc:
+                if self._exception_means_browser_closed(exc):
+                    raise BrowserLifecycleError("BROWSER_CONTEXT_CLOSED: ZOL 填写标题时页面已关闭") from exc
                 logger.debug("ZOL 标题候选选择器失败: selector={}, error={}", selector, exc)
 
-        raise RuntimeError("ZOL 标题输入框未找到或输入后校验失败")
+        raise SelectorError("ZOL_TITLE_SELECTOR_ERROR: ZOL 标题输入框未找到或输入后校验失败")
 
     async def fill_content(self, content_blocks: list, images: list):
         """支持 iframe、textarea、contenteditable 三类正文编辑器并验证文本。"""
+        self._require_page_alive("ZOL 填写正文")
         iframe_selectors = [
             "iframe.ke-edit-iframe",
             ".ke-container iframe",
@@ -275,7 +376,7 @@ class ZOLPlatform(BasePlatform):
                     logger.debug("ZOL 正文候选选择器失败: selector={}, error={}", selector, exc)
 
         if editor is None:
-            raise RuntimeError(f"ZOL 正文编辑器未找到，当前 URL: {self.page.url}")
+            raise SelectorError(f"ZOL_CONTENT_SELECTOR_ERROR: 正文编辑器未找到，当前 URL: {self.page.url}")
 
         text_parts = [
             block.get("text", "").strip()
@@ -326,7 +427,7 @@ class ZOLPlatform(BasePlatform):
             actual_text = await editor.inner_text()
         missing = [part[:30] for part in text_parts if part not in actual_text]
         if missing:
-            raise RuntimeError(f"ZOL 正文输入后验证失败，缺少文本片段: {missing}")
+            raise SelectorError(f"ZOL_CONTENT_VALIDATION_ERROR: 正文输入后验证失败，缺少文本片段: {missing}")
         logger.info("ZOL 正文输入并验证成功: {} 个文本段落", len(text_parts))
 
     async def _upload_image(self, image_path: str):
@@ -384,6 +485,7 @@ class ZOLPlatform(BasePlatform):
     async def select_topic(self, topic: str = "", community: str = "",
                            selection_query: str = "", selection_override: dict = None):
         """选择并验证 ZOL 分类/标签。"""
+        self._require_page_alive("ZOL 选择分类或标签")
         if not topic:
             return {"success": True, "selection": {}}
 
@@ -418,10 +520,11 @@ class ZOLPlatform(BasePlatform):
         except Exception as exc:
             logger.debug("ZOL 标签输入失败: {}", exc)
 
-        raise RuntimeError(f"ZOL 分类/标签未找到，无法选择: {topic}")
+        raise SelectorError(f"ZOL_TOPIC_SELECTOR_ERROR: 分类/标签未找到，无法选择: {topic}")
 
     async def save_draft(self, title: str = "") -> str:
         """保存草稿并在草稿箱验证真实标题。"""
+        self._require_page_alive("ZOL 保存草稿")
         if "blog.zol.com.cn" not in (self.page.url or "") or "post.php" not in (self.page.url or ""):
             logger.error("ZOL 保存草稿失败：当前页面不是博客编辑器，url={}", self.page.url)
             return ""
@@ -441,6 +544,11 @@ class ZOLPlatform(BasePlatform):
                 draft_url = self.platform_cfg.get("draft_url", "https://blog.zol.com.cn/post.php?act=draft")
                 await self.page.goto(draft_url, wait_until="domcontentloaded", timeout=15000)
                 await self.simulator.random_delay(2, 4)
+                self._require_page_alive("ZOL 验证草稿箱")
+                if self._host(self.page.url or "") != self.BLOG_HOST or "post.php" not in (self.page.url or ""):
+                    raise PlatformAccessError(
+                        f"ZOL_DRAFT_ROUTE_ERROR: 草稿箱跳转到非博客页面，当前 URL: {self.page.url}"
+                    )
                 keyword = (title or "")[:30]
                 found = await self.page.evaluate(
                     "(kw) => (document.body.innerText || '').includes(kw)", keyword
@@ -451,6 +559,8 @@ class ZOLPlatform(BasePlatform):
                 logger.warning("ZOL 草稿箱未找到标题: {}", keyword)
                 return ""
             except Exception as exc:
+                if self._exception_means_browser_closed(exc):
+                    raise BrowserLifecycleError("BROWSER_CONTEXT_CLOSED: ZOL 保存草稿时页面已关闭") from exc
                 logger.debug("ZOL 保存草稿候选按钮失败: selector={}, error={}", sel, exc)
                 continue
 

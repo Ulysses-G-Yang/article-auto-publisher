@@ -15,6 +15,36 @@ from models.database import Database
 from config import get_config
 
 
+class PlatformAutomationError(RuntimeError):
+    """带稳定错误码的平台自动化异常。"""
+
+    error_code = "PLATFORM_ERROR"
+
+
+class BrowserLifecycleError(PlatformAutomationError):
+    """页面、Context 或 Browser 已关闭，当前尝试不能继续。"""
+
+    error_code = "BROWSER_CONTEXT_CLOSED"
+
+
+class PlatformAccessError(PlatformAutomationError):
+    """已经打开平台页面，但没有进入目标业务页面。"""
+
+    error_code = "PLATFORM_ACCESS_ERROR"
+
+
+class LoginRequiredError(PlatformAutomationError):
+    """当前会话需要用户重新登录。"""
+
+    error_code = "LOGIN_REQUIRED"
+
+
+class SelectorError(PlatformAutomationError):
+    """页面仍然可用，但目标编辑器控件不存在或无法验证。"""
+
+    error_code = "SELECTOR_ERROR"
+
+
 class BasePlatform(ABC):
     """平台自动化基类，使用系统 Chrome 浏览器"""
 
@@ -28,6 +58,81 @@ class BasePlatform(ABC):
         self.browser: Optional[Browser] = None
         self.context: Optional[BrowserContext] = None
         self.page: Optional[Page] = None
+
+    @staticmethod
+    def _exception_means_browser_closed(exc: Exception) -> bool:
+        """识别 Playwright 的页面生命周期错误，避免把它当普通失败重试。"""
+        message = str(exc).lower()
+        return any(
+            marker in message
+            for marker in (
+                "target page, context or browser has been closed",
+                "page has been closed",
+                "context has been closed",
+                "browser has been closed",
+                "target closed",
+            )
+        )
+
+    def _require_page_alive(self, stage: str = ""):
+        """所有滚动/输入/点击前的统一页面生命周期检查。"""
+        page = self.page
+        if page is None:
+            raise BrowserLifecycleError(f"BROWSER_CONTEXT_CLOSED: 页面不存在，阶段={stage}")
+
+        try:
+            is_closed = getattr(page, "is_closed", None)
+            if callable(is_closed) and is_closed():
+                raise BrowserLifecycleError(
+                    f"BROWSER_CONTEXT_CLOSED: 页面已关闭，阶段={stage}"
+                )
+        except BrowserLifecycleError:
+            raise
+        except Exception as exc:
+            if self._exception_means_browser_closed(exc):
+                raise BrowserLifecycleError(
+                    f"BROWSER_CONTEXT_CLOSED: 无法读取页面状态，阶段={stage}"
+                ) from exc
+
+        if self.context is not None:
+            try:
+                # 访问 pages 会触发 Playwright Context 生命周期检查。
+                _ = self.context.pages
+            except Exception as exc:
+                if self._exception_means_browser_closed(exc):
+                    raise BrowserLifecycleError(
+                        f"BROWSER_CONTEXT_CLOSED: 浏览器上下文已关闭，阶段={stage}"
+                    ) from exc
+
+    async def _safe_simulate_scroll(self, scroll_times: int = None, stage: str = "滚动"):
+        """安全执行人类化滚动；页面关闭时只抛一次标准生命周期错误。"""
+        self._require_page_alive(stage)
+        try:
+            await self.simulator.simulate_scroll(self.page, scroll_times=scroll_times)
+            self._require_page_alive(stage)
+        except PlatformAutomationError:
+            raise
+        except Exception as exc:
+            if self._exception_means_browser_closed(exc):
+                raise BrowserLifecycleError(
+                    f"BROWSER_CONTEXT_CLOSED: 滚动时页面已关闭，阶段={stage}"
+                ) from exc
+            raise
+
+    async def _safe_random_mouse_movement(self, stage: str = "鼠标移动"):
+        """安全执行人类化鼠标移动。"""
+        self._require_page_alive(stage)
+        try:
+            await self.simulator.random_mouse_movement(self.page)
+            self._require_page_alive(stage)
+        except PlatformAutomationError:
+            raise
+        except Exception as exc:
+            if self._exception_means_browser_closed(exc):
+                raise BrowserLifecycleError(
+                    f"BROWSER_CONTEXT_CLOSED: 鼠标移动时页面已关闭，阶段={stage}"
+                ) from exc
+            raise
 
     async def initialize(self):
         """使用系统 Chrome 浏览器初始化，每个平台独立用户数据目录"""
@@ -186,16 +291,26 @@ class BasePlatform(ABC):
                     await self.login()
                     db.add_task_log(task_id, "INFO", "登录完成")
                     if not await self.check_login():
+                        login_error = getattr(self, "last_login_error", "") or (
+                            f"{self.platform_name} 登录后验证失败"
+                        )
+                        login_code = login_error.split(":", 1)[0] if ":" in login_error else "LOGIN_REQUIRED"
                         return {
                             "success": False,
-                            "error": f"{self.platform_name} 登录后验证失败",
-                            "need_login": True,
+                            "error_code": login_code,
+                            "error": login_error,
+                            "need_login": login_code == "LOGIN_REQUIRED",
                         }
                 else:
+                    login_error = getattr(self, "last_login_error", "") or (
+                        f"{self.platform_name} 未登录，请前往账号页完成扫码登录后再发布"
+                    )
+                    login_code = login_error.split(":", 1)[0] if ":" in login_error else "LOGIN_REQUIRED"
                     return {
                         "success": False,
-                        "error": f"{self.platform_name} 未登录，请前往账号页完成扫码登录后再发布",
-                        "need_login": True,
+                        "error_code": login_code,
+                        "error": login_error,
+                        "need_login": login_code == "LOGIN_REQUIRED",
                     }
 
             # 2. 导航到编辑器
@@ -210,12 +325,28 @@ class BasePlatform(ABC):
 
             # 4. 填写正文
             db.add_task_log(task_id, "INFO", "填写正文内容...")
-            await self.fill_content(content_blocks, images)
+            content_result = await self.fill_content(content_blocks, images)
+            if not isinstance(content_result, dict):
+                content_result = {
+                    "text_ok": True,
+                    "media_status": "not_checked",
+                    "expected_images": 0,
+                    "uploaded_images": 0,
+                    "failed_images": [],
+                }
+            if not content_result.get("text_ok", True):
+                return {
+                    "success": False,
+                    "error_code": "CONTENT_NOT_VERIFIED",
+                    "error": content_result.get("text_error", "正文写入后验证失败"),
+                }
             await self.simulator.random_delay(1, 3)
 
-            # 5. 选择平台分类。小黑盒即使没有缓存话题，也必须走实时搜索；
-            # 选择失败会返回 needs_selection，不能继续保存成假成功。
+            # 5. 选择平台分类。小黑盒没有候选时不伪造结果，
+            # 但基础文字草稿仍可保存，并在任务上标记 completed_with_warnings。
             selection = {}
+            selection_status = "not_required"
+            selection_error = None
             should_select = bool(topic or community or selection_query or self.platform_name == "xiaoheihe")
             if should_select:
                 db.add_task_log(
@@ -232,13 +363,24 @@ class BasePlatform(ABC):
                 if selection_result is None:
                     selection_result = {"success": True}
                 if not selection_result.get("success", False):
-                    return selection_result
-                selection = selection_result.get("selection") or {}
-                await self.simulator.random_delay()
+                    if selection_result.get("needs_selection"):
+                        selection_status = "needs_selection"
+                        selection_error = selection_result.get("error", "社区或话题未完成选择")
+                        db.add_task_log(task_id, "WARN", f"附加选择未完成，继续保存基础草稿: {selection_error}")
+                    else:
+                        return selection_result
+                else:
+                    selection = selection_result.get("selection") or {}
+                    selection_status = selection_result.get(
+                        "selection_status",
+                        "completed" if selection else "not_required",
+                    )
+                    await self.simulator.random_delay()
 
-            # 6. 模拟滚动检查
-            await self.simulator.simulate_scroll(self.page)
-            await self.simulator.random_mouse_movement(self.page)
+            # 6. 模拟滚动检查。页面可能在选择弹窗、平台跳转或用户操作时关闭，
+            # 必须先检查生命周期，不能再调用 page.mouse.wheel 触发重复错误。
+            await self._safe_simulate_scroll(stage="发布前滚动检查")
+            await self._safe_random_mouse_movement(stage="发布前鼠标检查")
 
             # 7. 保存草稿
             db.add_task_log(task_id, "INFO", "保存草稿...")
@@ -249,6 +391,7 @@ class BasePlatform(ABC):
             if not draft_url:
                 return {
                     "success": False,
+                    "error_code": "DRAFT_NOT_VERIFIED",
                     "error": "草稿保存失败：未找到保存按钮或草稿箱未出现该草稿，请检查编辑器页面状态与登录态",
                 }
 
@@ -267,9 +410,19 @@ class BasePlatform(ABC):
                 "draft_url": draft_url,
                 "post_url": post_url,
                 "selection": selection,
-                "selection_status": "completed" if selection else "not_required",
+                "selection_status": selection_status,
+                "selection_error": selection_error,
+                "media_status": content_result.get("media_status", "not_checked"),
+                "expected_images": content_result.get("expected_images", 0),
+                "uploaded_images": content_result.get("uploaded_images", 0),
+                "failed_images": content_result.get("failed_images", []),
+                "media_error": content_result.get("media_error"),
             }
 
         except Exception as e:
             logger.exception("{} 发布流水线失败: {}", self.platform_name, e)
-            return {"success": False, "error": str(e)}
+            return {
+                "success": False,
+                "error": str(e),
+                "error_code": getattr(e, "error_code", None),
+            }

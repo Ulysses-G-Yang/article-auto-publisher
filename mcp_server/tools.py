@@ -115,7 +115,11 @@ def _safe_task(task: dict[str, Any]) -> dict[str, Any]:
         "topic_used": _safe_text(task.get("topic_used")),
         "community_used": _safe_text(task.get("community_used")),
         "selection_status": task.get("selection_status"),
+        "media_status": task.get("media_status"),
+        "expected_images": task.get("expected_images", 0),
+        "uploaded_images": task.get("uploaded_images", 0),
         "retry_count": task.get("retry_count", 0),
+        "error_code": _safe_text(task.get("error_code")),
         "started_at": task.get("started_at"),
         "completed_at": task.get("completed_at"),
         "created_at": task.get("created_at"),
@@ -582,9 +586,13 @@ def register_tools(server: Any, client: FlaskClient, store: TaskStore) -> dict[s
                 current_status = "failed"
                 message = "至少一个平台的发布任务失败。"
                 result = {"tasks": views}
-            elif statuses and all(status == "completed" for status in statuses):
-                current_status = "completed"
-                message = "文章发布任务已完成。"
+            elif statuses and all(status in {"completed", "completed_with_warnings"} for status in statuses):
+                if any(status == "completed_with_warnings" for status in statuses):
+                    current_status = "completed_with_warnings"
+                    message = "基础草稿已保存，但部分社区、话题或图片需要后续处理。"
+                else:
+                    current_status = "completed"
+                    message = "文章发布任务已完成。"
                 result = {"tasks": views}
             elif any(status == "processing" for status in statuses):
                 current_status = "running"

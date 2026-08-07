@@ -8,7 +8,8 @@ from unittest.mock import AsyncMock, patch
 
 from config import get_config
 from models.database import Database
-from platforms.base import BasePlatform
+from core.queue_manager import classify_task_error, normalize_selection_query
+from platforms.base import BasePlatform, BrowserLifecycleError, PlatformAccessError
 from platforms.zol import ZOLPlatform
 from platforms.xiaoheihe import XiaoheihePlatform
 
@@ -219,7 +220,7 @@ class SelectionStub(BasePlatform):
         }
 
     async def save_draft(self, _title=""):
-        raise AssertionError("needs_selection 不能保存草稿")
+        return "https://example.test/draft"
 
 
 class DatabaseTestCase(unittest.TestCase):
@@ -260,6 +261,140 @@ class DatabaseTestCase(unittest.TestCase):
 
 
 class RegressionTests(DatabaseTestCase):
+    def test_create_app_recovers_orphaned_login_state(self):
+        from app import create_app
+
+        self.db.upsert_account(
+            "zol",
+            status="logging_in",
+            login_stage="awaiting_user_login",
+            login_attempt_id="old-attempt",
+        )
+        response = create_app().test_client().get("/api/accounts")
+        self.assertEqual(response.status_code, 200)
+        account = next(item for item in response.get_json() if item["platform"] == "zol")
+        self.assertEqual(account["status"], "logged_out")
+        self.assertEqual(account["login_stage"], "recovered_after_restart")
+        self.assertIn("服务启动", account["login_error"])
+
+    def test_platform_login_lease_prevents_duplicate_claim(self):
+        from web import routes
+
+        first = routes._claim_login(self.db, "zol")
+        second = routes._claim_login(self.db, "zol")
+        try:
+            self.assertTrue(first)
+            self.assertIsNone(second)
+            self.assertEqual(self.db.get_account("zol")["status"], "logging_in")
+        finally:
+            routes._release_login(
+                self.db,
+                "zol",
+                first,
+                status="logged_out",
+                login_stage="test_finished",
+                login_error=None,
+            )
+
+    def test_closed_page_gets_stable_browser_error(self):
+        platform = ZOLPlatform()
+
+        class ClosedPage:
+            def is_closed(self):
+                return True
+
+        platform.page = ClosedPage()
+        with self.assertRaises(BrowserLifecycleError) as ctx:
+            asyncio.run(platform._safe_simulate_scroll(scroll_times=1))
+        self.assertEqual(ctx.exception.error_code, "BROWSER_CONTEXT_CLOSED")
+        self.assertEqual(classify_task_error(ctx.exception), "BROWSER_CONTEXT_CLOSED")
+
+    def test_zol_forum_redirect_is_not_generic_retry_error(self):
+        platform = ZOLPlatform()
+        page = FakePage("textarea")
+
+        async def goto(*_args, **_kwargs):
+            page.url = "https://bbs.zol.com.cn/?act=add"
+
+        page.goto = goto
+        platform.page = page
+        platform.simulator.random_delay = AsyncMock()
+        with self.assertRaises(PlatformAccessError) as ctx:
+            asyncio.run(platform.navigate_to_editor())
+        self.assertIn("ZOL_BLOG_EDITOR_REDIRECT", str(ctx.exception))
+        self.assertEqual(classify_task_error(ctx.exception), "ZOL_BLOG_EDITOR_REDIRECT")
+
+    def test_queue_pauses_browser_closed_without_requeue(self):
+        from core.queue_manager import QueueManager
+
+        article_id = self.create_article()
+        task_id = self.db.create_task(article_id, "zol")
+        self.db.upsert_account("zol", status="logged_in")
+
+        class ClosedPublishPlatform:
+            async def publish(self, **_kwargs):
+                return {
+                    "success": False,
+                    "error_code": "BROWSER_CONTEXT_CLOSED",
+                    "error": "BROWSER_CONTEXT_CLOSED: page closed",
+                }
+
+            async def cleanup(self):
+                return None
+
+        async def run():
+            manager = QueueManager()
+            platform = ClosedPublishPlatform()
+            manager._platforms["zol"] = platform
+            manager._get_platform = AsyncMock(return_value=platform)
+            await manager._process_task(task_id)
+            return manager.queue.qsize()
+
+        queue_size = asyncio.run(run())
+        task = self.db.get_task(task_id)
+        self.assertEqual(queue_size, 0)
+        self.assertEqual(task["status"], "paused")
+        self.assertEqual(task["error_code"], "BROWSER_CONTEXT_CLOSED")
+
+    def test_queue_persists_draft_with_media_warning(self):
+        from core.queue_manager import QueueManager
+
+        article_id = self.create_article()
+        task_id = self.db.create_task(article_id, "xiaoheihe")
+        self.db.upsert_account("xiaoheihe", status="logged_in")
+
+        class WarningPublishPlatform:
+            async def publish(self, **_kwargs):
+                return {
+                    "success": True,
+                    "draft_url": "https://example.test/draft",
+                    "selection": {},
+                    "selection_status": "needs_selection",
+                    "selection_error": "没有候选社区",
+                    "media_status": "failed",
+                    "media_error": "2 张图片全部上传失败",
+                    "expected_images": 2,
+                    "uploaded_images": 0,
+                    "failed_images": [{"filename": "a.png", "error": "遮罩"}],
+                }
+
+            async def cleanup(self):
+                return None
+
+        async def run():
+            manager = QueueManager()
+            platform = WarningPublishPlatform()
+            manager._get_platform = AsyncMock(return_value=platform)
+            await manager._process_task(task_id)
+
+        asyncio.run(run())
+        task = self.db.get_task(task_id)
+        self.assertEqual(task["status"], "completed_with_warnings")
+        self.assertEqual(task["error_code"], "PARTIAL_METADATA")
+        self.assertEqual(task["media_status"], "failed")
+        self.assertEqual(task["expected_images"], 2)
+        self.assertEqual(task["uploaded_images"], 0)
+
     def test_startup_pauses_unfinished_tasks(self):
         article_id = self.create_article()
         queued_id = self.db.create_task(article_id, "zol")
@@ -269,6 +404,19 @@ class RegressionTests(DatabaseTestCase):
         self.assertEqual(paused, 2)
         self.assertEqual(self.db.get_task(queued_id)["status"], "paused")
         self.assertEqual(self.db.get_task(retrying_id)["status"], "paused")
+
+    def test_known_historical_errors_get_error_codes(self):
+        article_id = self.create_article()
+        task_id = self.db.create_task(article_id, "zol")
+        self.db.update_task(
+            task_id,
+            status="failed",
+            error_message="Mouse.wheel: Target page, context or browser has been closed",
+            error_code=None,
+        )
+        # 模拟服务重启时执行的幂等数据库迁移。
+        self.db._init_tables()
+        self.assertEqual(self.db.get_task(task_id)["error_code"], "BROWSER_CONTEXT_CLOSED")
 
     def test_cleanup_only_removes_profile_lock_files(self):
         import app as app_module
@@ -561,7 +709,7 @@ class RegressionTests(DatabaseTestCase):
         self.assertEqual(platform.select_community.await_args.args[0], "手动社区")
         self.assertEqual(platform._select_from_editor_dialog.await_args.args[0], "话题")
 
-    def test_base_pipeline_stops_before_draft_on_selection_failure(self):
+    def test_base_pipeline_saves_draft_when_selection_is_unavailable(self):
         platform = SelectionStub()
         platform.page = object()
         platform.simulator.random_delay = AsyncMock()
@@ -577,7 +725,33 @@ class RegressionTests(DatabaseTestCase):
             db=self.db,
             auto_login=False,
         ))
-        self.assertTrue(result["needs_selection"])
+        self.assertTrue(result["success"])
+        self.assertEqual(result["selection_status"], "needs_selection")
+        self.assertEqual(result["draft_url"], "https://example.test/draft")
+
+    def test_selection_query_parses_keyword_json(self):
+        value = '[{"word": "显示器", "weight": 1.2}, {"word": "桌面", "weight": 1.0}, {"word": "输出", "weight": 0.8}]'
+        self.assertEqual(normalize_selection_query(value, fallback="标题"), "显示器 桌面 输出")
+        self.assertEqual(normalize_selection_query("测试,正文", fallback="标题"), "测试 正文")
+        self.assertEqual(normalize_selection_query("", fallback="标题"), "标题")
+
+    def test_xiaoheihe_image_failures_are_reported(self):
+        platform = XiaoheihePlatform()
+        platform.page = FakeXiaoPage()
+        platform.simulator.random_delay = AsyncMock()
+        platform._upload_image = AsyncMock(return_value={
+            "success": False,
+            "error": "按钮被遮罩拦截",
+        })
+        result = asyncio.run(platform.fill_content([
+            {"type": "text", "text": "正文段"},
+            {"type": "image", "position": 1, "local_path": "D:/test/image.png"},
+        ], []))
+        self.assertTrue(result["text_ok"])
+        self.assertEqual(result["expected_images"], 1)
+        self.assertEqual(result["uploaded_images"], 0)
+        self.assertEqual(result["media_status"], "failed")
+        self.assertEqual(len(result["failed_images"]), 1)
 
 
 if __name__ == "__main__":

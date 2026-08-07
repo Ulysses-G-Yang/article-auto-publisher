@@ -16,13 +16,14 @@
             <h5 class="mb-0">任务 #{{ task.id }} 详情</h5>
             <span class="badge fs-6 
                 {% if task.status == 'completed' %}bg-success
+                {% elif task.status == 'completed_with_warnings' %}bg-warning text-dark
                 {% elif task.status == 'failed' %}bg-danger
                 {% elif task.status == 'processing' %}bg-warning text-dark
                 {% elif task.status == 'retrying' %}bg-info
                 {% elif task.status == 'needs_selection' %}bg-warning text-dark
                 {% elif task.status == 'paused' %}bg-secondary
                 {% else %}bg-secondary{% endif %}">
-                {{ {'queued':'排队中','processing':'处理中','completed':'已完成','failed':'失败','retrying':'重试中','paused':'已暂停','needs_selection':'待选择','cancelled':'已取消'}.get(task.status, task.status) }}
+                {{ {'queued':'排队中','processing':'处理中','completed':'已完成','completed_with_warnings':'草稿已保存（有警告）','failed':'失败','retrying':'重试中','paused':'已暂停','needs_selection':'待选择','cancelled':'已取消'}.get(task.status, task.status) }}
             </span>
         </div>
         <div class="card-body">
@@ -65,9 +66,21 @@
                     <label class="text-muted small">创建时间</label>
                     <p>{{ task.created_at or '-' }}</p>
                 </div>
+                {% if task.platform == 'xiaoheihe' and (task.expected_images or task.uploaded_images or task.media_status not in (None, 'not_checked')) %}
+                <div class="col-md-6">
+                    <label class="text-muted small">图片处理</label>
+                    <p>
+                        {{ task.uploaded_images or 0 }}/{{ task.expected_images or 0 }} 张
+                        {% if task.media_status == 'completed' %}<span class="text-success">已完成</span>
+                        {% elif task.media_status in ('failed', 'partial') %}<span class="text-warning">{{ task.media_status }}</span>
+                        {% else %}<span class="text-muted">{{ task.media_status or '未检查' }}</span>{% endif %}
+                    </p>
+                </div>
+                {% endif %}
             </div>
             {% if task.error_message %}
-            <div class="alert alert-danger mt-3 mb-0">
+            <div class="alert {% if task.status == 'completed_with_warnings' %}alert-warning{% else %}alert-danger{% endif %} mt-3 mb-0">
+                {% if task.error_code %}<strong>错误码：</strong>{{ task.error_code }}<br>{% endif %}
                 <strong>错误信息：</strong>{{ task.error_message }}
             </div>
             {% endif %}

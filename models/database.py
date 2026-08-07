@@ -40,6 +40,10 @@ class Database:
                     cookie_file TEXT,
                     status TEXT DEFAULT 'logged_out',
                     last_login_time TEXT,
+                    login_stage TEXT,
+                    login_error TEXT,
+                    login_attempt_id TEXT,
+                    login_started_at TEXT,
                     created_at TEXT DEFAULT (datetime('now', 'localtime')),
                     updated_at TEXT DEFAULT (datetime('now', 'localtime'))
                 );
@@ -86,7 +90,12 @@ class Database:
                     community_used TEXT,
                     selection_status TEXT DEFAULT 'not_required',
                     selection_json TEXT,
+                    media_status TEXT DEFAULT 'not_checked',
+                    expected_images INTEGER DEFAULT 0,
+                    uploaded_images INTEGER DEFAULT 0,
+                    failed_images_json TEXT,
                     error_message TEXT,
+                    error_code TEXT,
                     retry_count INTEGER DEFAULT 0,
                     draft_url TEXT,
                     started_at TEXT,
@@ -124,6 +133,28 @@ class Database:
             self._ensure_column(conn, "tasks", "community_used", "TEXT")
             self._ensure_column(conn, "tasks", "selection_status", "TEXT DEFAULT 'not_required'")
             self._ensure_column(conn, "tasks", "selection_json", "TEXT")
+            self._ensure_column(conn, "tasks", "media_status", "TEXT DEFAULT 'not_checked'")
+            self._ensure_column(conn, "tasks", "expected_images", "INTEGER DEFAULT 0")
+            self._ensure_column(conn, "tasks", "uploaded_images", "INTEGER DEFAULT 0")
+            self._ensure_column(conn, "tasks", "failed_images_json", "TEXT")
+            self._ensure_column(conn, "tasks", "error_code", "TEXT")
+            self._ensure_column(conn, "platform_accounts", "login_stage", "TEXT")
+            self._ensure_column(conn, "platform_accounts", "login_error", "TEXT")
+            self._ensure_column(conn, "platform_accounts", "login_attempt_id", "TEXT")
+            self._ensure_column(conn, "platform_accounts", "login_started_at", "TEXT")
+
+            # 为历史真实失败补齐错误码，避免旧任务仍然显示为不可恢复或继续
+            # 走旧的统一重试逻辑。迁移条件只匹配已知错误文本，不改成功任务。
+            conn.execute(
+                """UPDATE tasks SET error_code='BROWSER_CONTEXT_CLOSED'
+                   WHERE error_code IS NULL
+                     AND error_message LIKE '%Target page, context or browser has been closed%'"""
+            )
+            conn.execute(
+                """UPDATE tasks SET error_code='ZOL_BLOG_EDITOR_REDIRECT'
+                   WHERE error_code IS NULL
+                     AND error_message LIKE '%bbs.zol.com.cn%'"""
+            )
 
     @staticmethod
     def _ensure_column(conn, table: str, column: str, definition: str):
@@ -225,8 +256,15 @@ class Database:
     def create_task(self, article_id: int, platform: str) -> int:
         with self._get_conn() as conn:
             cur = conn.execute(
-                "INSERT INTO tasks (article_id, platform, selection_status) VALUES (?,?,?)",
-                (article_id, platform, "pending" if platform == "xiaoheihe" else "not_required"),
+                """INSERT INTO tasks
+                   (article_id, platform, selection_status, media_status)
+                   VALUES (?,?,?,?)""",
+                (
+                    article_id,
+                    platform,
+                    "pending" if platform == "xiaoheihe" else "not_required",
+                    "not_checked",
+                ),
             )
             return cur.lastrowid
 

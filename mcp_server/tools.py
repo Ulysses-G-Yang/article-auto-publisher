@@ -23,6 +23,7 @@ PositiveTaskId = Annotated[int, Field(gt=0)]
 TaskToken = Annotated[str, Field(min_length=1, max_length=128)]
 SourceDownloadURL = Annotated[str, Field(min_length=1, max_length=2048)]
 OptionalShortText = Annotated[str | None, Field(max_length=200)]
+DEFAULT_FILE_SERVICE_HOSTS = {"dev.sccsai.com"}
 SUPPORTED_PLATFORMS = {"zol", "xiaoheihe"}
 MAX_DOWNLOAD_BYTES = 50 * 1024 * 1024
 
@@ -216,7 +217,9 @@ async def _execute(
 
 
 def _configured_file_service_hosts() -> set[str]:
-    raw = os.getenv("MCP_FILE_SERVICE_ALLOWED_HOSTS", "")
+    raw = os.getenv("MCP_FILE_SERVICE_ALLOWED_HOSTS")
+    if raw is None:
+        return set(DEFAULT_FILE_SERVICE_HOSTS)
     return {
         item.strip().lower().rstrip("/")
         for item in raw.split(",")

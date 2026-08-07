@@ -224,7 +224,7 @@ $env:FLASK_BASE_URL = 'http://127.0.0.1:5000'
 $env:MCP_BIND_HOST = '10.0.0.28'
 $env:MCP_PORT = '8765'
 $env:MCP_ALLOWED_HOSTS = '10.0.0.28'
-$env:MCP_FILE_SERVICE_ALLOWED_HOSTS = '<CS_Admin文件服务Host>'
+$env:MCP_FILE_SERVICE_ALLOWED_HOSTS = 'dev.sccsai.com'
 python -m mcp_server.server
 ```
 

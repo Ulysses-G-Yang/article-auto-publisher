@@ -277,7 +277,12 @@ class QueueManager:
                     warnings.append(result.get("selection_error") or "社区/话题未完成选择")
                 if media_status in ("failed", "partial"):
                     warnings.append(result.get("media_error") or "图片未全部上传")
-                task_status = "completed_with_warnings" if warnings else "completed"
+                # 话题/社区未完成时，基础草稿可以保留，但任务必须停在
+                # needs_selection，不能被任务页或后续流程当成完整成功。
+                if selection_status == "needs_selection":
+                    task_status = "needs_selection"
+                else:
+                    task_status = "completed_with_warnings" if warnings else "completed"
                 if selection_status == "needs_selection" and media_status in ("failed", "partial"):
                     warning_code = "PARTIAL_METADATA"
                 elif selection_status == "needs_selection":

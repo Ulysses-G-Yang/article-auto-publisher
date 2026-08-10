@@ -29,6 +29,15 @@ class XiaoheihePlatform(BasePlatform):
     SAVE_DRAFT_BTN = "button.editor-publish__save-draft"           # 保存草稿
     DRAFT_BOX_BTN = "button.editor-publish__btn.sub-btn.margin-left"  # 草稿箱
     PUBLISH_NOW_BTN = "button.editor-publish__btn.main-btn"        # 发布
+    IMAGE_LOCAL_UPLOAD = (
+        ".editor-model__image-model .model-image__local-box "
+        ".editor-image-wrapper__box.upload, "
+        ".model-image__local-box .editor-image-wrapper__box.upload"
+    )
+    IMAGE_MODAL_CONFIRM = (
+        ".editor-model__image-model "
+        ".editor-__model-frame-bottom-btn:has-text('确定')"
+    )
 
     def _raise_if_page_closed(self, stage: str):
         self._require_page_alive(stage)
@@ -409,8 +418,52 @@ class XiaoheihePlatform(BasePlatform):
             "media_error": media_error,
         }
 
+    async def _find_file_input(self, timeout_ms: int = 3000):
+        """查找页面或 iframe 中已挂载的文件控件。"""
+        deadline = asyncio.get_running_loop().time() + timeout_ms / 1000
+        while asyncio.get_running_loop().time() < deadline:
+            scopes = [self.page]
+            try:
+                scopes.extend(list(getattr(self.page, "frames", []) or []))
+            except Exception:
+                pass
+            for scope in scopes:
+                try:
+                    locator = scope.locator("input[type='file']")
+                    if await locator.count() > 0:
+                        return locator.first
+                except Exception:
+                    continue
+            await asyncio.sleep(0.2)
+        return None
+
+    async def _set_file_from_trigger(self, trigger, image_path: str) -> bool:
+        """点击本地上传入口并设置文件；一次点击只触发一次。"""
+        expect_file_chooser = getattr(self.page, "expect_file_chooser", None)
+        if callable(expect_file_chooser):
+            try:
+                async with expect_file_chooser(timeout=4000) as chooser_info:
+                    await self._click_with_fallback(trigger, timeout=5000)
+                chooser = await chooser_info.value
+                await chooser.set_files(image_path)
+                return True
+            except Exception as exc:
+                logger.debug("小黑盒原生文件选择器未捕获，检查已挂载文件控件: {}", exc)
+        else:
+            await self._click_with_fallback(trigger, timeout=5000)
+
+        file_input = await self._find_file_input(timeout_ms=3000)
+        if file_input is None:
+            return False
+        try:
+            await file_input.set_input_files(image_path)
+            return True
+        except Exception as exc:
+            logger.debug("小黑盒设置文件控件失败: {}", exc)
+            return False
+
     async def _upload_image(self, image_path: str):
-        """上传单张图片并验证编辑器中的图片数量确实增加。"""
+        """通过真实的「本地上传」入口上传单张图片并验证编辑器图片数量。"""
         image_name = Path(str(image_path)).name
         try:
             await self._dismiss_overlays()
@@ -425,33 +478,34 @@ class XiaoheihePlatform(BasePlatform):
             ).first
             if await btn.count() == 0:
                 return {"success": False, "error": "未找到图片上传按钮"}
+            try:
+                if await btn.get_attribute("disabled") is not None or not await btn.is_enabled():
+                    return {"success": False, "error": "图片上传按钮当前被禁用，请先激活正文编辑器"}
+            except Exception:
+                pass
 
             # 普通 click 前先把按钮滚动到编辑器内部可视区域；如果仍有可见遮罩，
             # 不使用 force=True 绕过它，避免误触平台确认/安全弹窗。
             if await self._has_visible_overlay():
                 return {"success": False, "error": "图片按钮仍被页面遮罩拦截"}
 
-            # 优先使用 file chooser，避免点击后全局 input 未及时挂载。
-            selected = False
-            expect_file_chooser = getattr(self.page, "expect_file_chooser", None)
-            if expect_file_chooser:
-                try:
-                    async with expect_file_chooser(timeout=3000) as chooser_info:
-                        await self._click_with_fallback(btn, timeout=5000)
-                    chooser = await chooser_info.value
-                    await chooser.set_files(image_path)
-                    selected = True
-                except Exception as exc:
-                    logger.debug("小黑盒 file chooser 不可用，回退隐藏 input: {}", exc)
-
+            # 当前真实页面先打开「上传图片」弹窗，再点击弹窗内的本地上传入口；
+            # 直接等待 input[type=file] 会错过第二层控件。
+            await self._click_with_fallback(btn, timeout=5000)
+            await self.simulator.random_delay(0.3, 0.8)
+            local_upload = await self._first_visible(self.IMAGE_LOCAL_UPLOAD)
+            if local_upload is None:
+                return {"success": False, "error": "上传图片弹窗未找到本地上传入口"}
+            selected = await self._set_file_from_trigger(local_upload, image_path)
             if not selected:
-                await self._click_with_fallback(btn, timeout=5000)
-                await self.simulator.random_delay(0.3, 0.8)
-                file_input = await self.page.wait_for_selector(
-                    "input[type='file']", timeout=3000, state="attached"
-                )
-                await file_input.set_input_files(image_path)
-                selected = True
+                return {"success": False, "error": "本地上传入口未触发文件选择器"}
+
+            # 文件选择后先落在弹窗预览区，必须点击弹窗确定才会插入正文。
+            await self.simulator.random_delay(0.8, 1.5)
+            confirm = await self._first_visible(self.IMAGE_MODAL_CONFIRM)
+            if confirm is None:
+                return {"success": False, "error": "图片预览弹窗未找到确定按钮"}
+            await self._click_with_fallback(confirm, timeout=5000)
 
             await self.simulator.random_delay(1, 2)
             deadline = asyncio.get_running_loop().time() + 15
@@ -514,6 +568,13 @@ class XiaoheihePlatform(BasePlatform):
     @staticmethod
     def _normalize_query(value: str) -> str:
         """防止关键词 JSON、数组或对象原文进入平台搜索框。"""
+        if isinstance(value, (list, tuple)):
+            parts = []
+            for item in value:
+                normalized = XiaoheihePlatform._normalize_query(item)
+                if normalized:
+                    parts.append(normalized)
+            return " ".join(parts).strip()
         raw = str(value or "").strip()
         if not raw:
             return ""
@@ -536,6 +597,56 @@ class XiaoheihePlatform(BasePlatform):
         if raw.startswith(("[", "{")):
             return ""
         return " ".join(raw.replace(",", " ").replace("，", " ").replace("、", " ").split())[:100]
+
+    @classmethod
+    def _query_candidates(cls, value, split_terms: bool = False) -> list[str]:
+        """生成有限、可验证的实时搜索词，不把关键词 JSON 当候选名称。"""
+        values = value if isinstance(value, (list, tuple)) else [value]
+        candidates = []
+        for item in values:
+            normalized = cls._normalize_query(item)
+            if not normalized:
+                continue
+            expanded = normalized.split() if split_terms else [normalized]
+            for candidate in expanded:
+                candidate = candidate.strip()
+                if candidate and candidate not in candidates:
+                    candidates.append(candidate)
+        return candidates[:4]
+
+    @staticmethod
+    def _candidate_is_invalid(name: str, query: str) -> bool:
+        """拒绝搜索词回显、JSON/对象文本和空候选，避免误选。"""
+        value = " ".join(str(name or "").split()).strip()
+        compact_value = "".join(value.split())
+        compact_query = "".join(str(query or "").split())
+        return (
+            not value
+            or compact_value == compact_query
+            or value.startswith(("[", "{"))
+            or "\"word\"" in value
+            or value in {"搜索", "搜索结果", "无结果", "暂无结果"}
+        )
+
+    async def _extract_candidate_name(self, locator, query: str) -> str:
+        """从候选项读取真实显示名称，优先使用名称属性再读取文本行。"""
+        for attr in ("data-name", "data-title", "title", "aria-label"):
+            try:
+                value = await locator.get_attribute(attr)
+            except Exception:
+                value = None
+            if value and not self._candidate_is_invalid(value, query):
+                return " ".join(value.split()).strip()
+
+        try:
+            raw_text = await locator.inner_text()
+        except Exception:
+            raw_text = ""
+        for line in str(raw_text or "").splitlines():
+            value = " ".join(line.split()).strip()
+            if not self._candidate_is_invalid(value, query):
+                return value
+        return ""
 
     async def _visible_editor_text(self) -> str:
         """读取编辑器可见文本，排除搜索/确认弹窗，避免用搜索框内容误判成功。"""
@@ -687,7 +798,29 @@ class XiaoheihePlatform(BasePlatform):
                         raise BrowserLifecycleError("BROWSER_CONTEXT_CLOSED: 点击编辑器控件时页面已关闭") from final_error
                     raise final_error from first_error
 
-    async def _select_from_editor_dialog(self, kind: str, query: str, result_selector: str):
+    async def _select_from_editor_dialog(self, kind: str, query, result_selector: str):
+        """在有限候选查询中自动选择，所有候选都无效时返回 needs_selection。"""
+        queries = self._query_candidates(query)
+        if not queries:
+            return {
+                "success": False,
+                "needs_selection": True,
+                "error": f"小黑盒{kind}没有可用搜索关键词",
+            }
+        last_result = None
+        for candidate_query in queries:
+            last_result = await self._select_from_editor_dialog_once(
+                kind, candidate_query, result_selector
+            )
+            if last_result.get("success"):
+                return last_result
+        return last_result or {
+            "success": False,
+            "needs_selection": True,
+            "error": f"小黑盒{kind}没有找到有效候选",
+        }
+
+    async def _select_from_editor_dialog_once(self, kind: str, query: str, result_selector: str):
         """在编辑器内实时搜索并选择社区/话题，返回实际选择名称。"""
         query = self._normalize_query(query)
         if not query:
@@ -731,13 +864,8 @@ class XiaoheihePlatform(BasePlatform):
                     "error": f"小黑盒实时搜索没有找到{kind}: {query}",
                 }
 
-            selected_name = (await result.inner_text()).strip().splitlines()[0].strip()
-            if (
-                not selected_name
-                or selected_name == query
-                or selected_name.startswith(("[", "{"))
-                or "\"word\"" in selected_name
-            ):
+            selected_name = await self._extract_candidate_name(result, query)
+            if self._candidate_is_invalid(selected_name, query):
                 await self._dismiss_overlays()
                 return {
                     "success": False,
@@ -784,7 +912,7 @@ class XiaoheihePlatform(BasePlatform):
 
     async def select_community(self, community: str = "", selection_query: str = ""):
         """独立选择社区；无手动值时使用文章关键词实时搜索。"""
-        query = self._normalize_query(community or selection_query or "")
+        query = community or selection_query or ""
         return await self._select_from_editor_dialog(
             "社区",
             query,
@@ -797,11 +925,14 @@ class XiaoheihePlatform(BasePlatform):
                            selection_query: str = "", selection_override: dict = None):
         """自动优先选择社区和话题；无结果时进入 needs_selection。"""
         override = selection_override or {}
-        community_query = self._normalize_query(
-            override.get("community") or community or selection_query or topic or ""
+        explicit_community = override.get("community") or community or ""
+        community_query = explicit_community or self._query_candidates(
+            selection_query or topic or "", split_terms=True
         )
-        topic_query = self._normalize_query(
-            override.get("topic") or topic or selection_query or ""
+        explicit_topic = override.get("topic") or topic or ""
+        # 话题搜索使用单个关键词，不能把多个关键词拼成一个伪话题名称。
+        topic_query = explicit_topic or self._query_candidates(
+            selection_query or "", split_terms=True
         )
 
         community_result = await self.select_community(community_query, selection_query)
@@ -823,6 +954,12 @@ class XiaoheihePlatform(BasePlatform):
             ".search-result-item:not(.community-item), [role='dialog'] li",
         )
         if not topic_result.get("success"):
+            # 社区已经选中时保留部分结果，人工只需补选话题。
+            topic_result["selection"] = {
+                "community": community_result.get("value") or "",
+                "topic": "",
+            }
+            topic_result["selection_status"] = "needs_selection"
             return topic_result
 
         self._selected_values = {

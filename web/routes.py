@@ -258,12 +258,19 @@ def register_routes(app):
             "SELECTOR_ERROR",
             "DRAFT_NOT_VERIFIED",
         }
+        resumable_warning_codes = {
+            "IMAGES_ALL_FAILED",
+            "PARTIAL_IMAGES",
+        }
         for task in tasks:
             article = db.get_article(task["article_id"])
             task["article_title"] = article["title"] if article else ""
             task["article_filename"] = article["filename"] if article else ""
             task["can_resume"] = task["status"] in ("paused", "needs_selection") or (
                 task["status"] == "failed" and task.get("error_code") in resumable_failure_codes
+            ) or (
+                task["status"] == "completed_with_warnings"
+                and task.get("error_code") in resumable_warning_codes
             )
         return jsonify(tasks)
 
@@ -287,8 +294,15 @@ def register_routes(app):
             "SELECTOR_ERROR",
             "DRAFT_NOT_VERIFIED",
         }
+        resumable_warning_codes = {
+            "IMAGES_ALL_FAILED",
+            "PARTIAL_IMAGES",
+        }
         if task["status"] not in ("paused", "needs_selection") and not (
             task["status"] == "failed" and task.get("error_code") in resumable_failure_codes
+        ) and not (
+            task["status"] == "completed_with_warnings"
+            and task.get("error_code") in resumable_warning_codes
         ):
             return jsonify({
                 "status": "error",
@@ -310,11 +324,16 @@ def register_routes(app):
 
         # 自动搜索失败后，必须同时给出社区和话题，避免只选中一项仍被误报成功。
         if task["platform"] == "xiaoheihe" and task["status"] == "needs_selection":
-            if not community or not topic:
+            missing = []
+            if not community:
+                missing.append("社区")
+            if not topic:
+                missing.append("话题")
+            if missing:
                 return jsonify({
                     "status": "error",
                     "error_code": "SELECTION_REQUIRED",
-                    "message": "小黑盒需要同时填写社区和话题",
+                    "message": f"小黑盒还需要填写：{'、'.join(missing)}",
                 }), 400
 
         selection_status = "manual" if (community or topic) else task.get("selection_status", "pending")

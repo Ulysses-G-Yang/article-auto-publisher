@@ -364,6 +364,8 @@ class BasePlatform(ABC):
                     selection_result = {"success": True}
                 if not selection_result.get("success", False):
                     if selection_result.get("needs_selection"):
+                        # 即使话题失败，也保留已经成功选择的社区，供人工恢复时复用。
+                        selection = selection_result.get("selection") or {}
                         selection_status = "needs_selection"
                         selection_error = selection_result.get("error", "社区或话题未完成选择")
                         db.add_task_log(task_id, "WARN", f"附加选择未完成，继续保存基础草稿: {selection_error}")

@@ -389,7 +389,7 @@ class RegressionTests(DatabaseTestCase):
 
         asyncio.run(run())
         task = self.db.get_task(task_id)
-        self.assertEqual(task["status"], "completed_with_warnings")
+        self.assertEqual(task["status"], "needs_selection")
         self.assertEqual(task["error_code"], "PARTIAL_METADATA")
         self.assertEqual(task["media_status"], "failed")
         self.assertEqual(task["expected_images"], 2)
@@ -792,6 +792,44 @@ class RegressionTests(DatabaseTestCase):
         result = asyncio.run(platform.select_topic(selection_query="无结果"))
         self.assertFalse(result["success"])
         self.assertTrue(result["needs_selection"])
+
+    def test_xiaoheihe_topic_query_uses_single_keyword_candidates(self):
+        platform = XiaoheihePlatform()
+        self.assertEqual(
+            platform._query_candidates("显示器 桌面 输出", split_terms=True),
+            ["显示器", "桌面", "输出"],
+        )
+        self.assertEqual(
+            platform._query_candidates("显示器 桌面 输出"),
+            ["显示器 桌面 输出"],
+        )
+
+    def test_xiaoheihe_topic_failure_keeps_selected_community(self):
+        platform = XiaoheihePlatform()
+        platform.select_community = AsyncMock(return_value={
+            "success": True,
+            "value": "导师模拟器：桌面实验室",
+        })
+        platform._select_from_editor_dialog = AsyncMock(return_value={
+            "success": False,
+            "needs_selection": True,
+            "error": "话题候选名称无效",
+        })
+        result = asyncio.run(platform.select_topic(selection_query="显示器 桌面 输出"))
+        self.assertFalse(result["success"])
+        self.assertEqual(
+            result["selection"],
+            {"community": "导师模拟器：桌面实验室", "topic": ""},
+        )
+        self.assertEqual(result["selection_status"], "needs_selection")
+        topic_query = platform._select_from_editor_dialog.await_args.args[1]
+        self.assertEqual(topic_query, ["显示器", "桌面", "输出"])
+
+    def test_xiaoheihe_invalid_candidate_validation(self):
+        platform = XiaoheihePlatform()
+        self.assertTrue(platform._candidate_is_invalid("显示器 桌面 输出", "显示器 桌面 输出"))
+        self.assertTrue(platform._candidate_is_invalid('{"word": "显示器"}', "显示器"))
+        self.assertFalse(platform._candidate_is_invalid("导师模拟器：桌面实验室", "显示器"))
 
     def test_xiaoheihe_manual_override_is_forwarded(self):
         platform = XiaoheihePlatform()

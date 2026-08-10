@@ -598,6 +598,49 @@ class RegressionTests(DatabaseTestCase):
         with patch("platforms.zol.asyncio.sleep", new=AsyncMock()):
             self.assertTrue(asyncio.run(platform.check_login()))
 
+    def test_zol_login_config_uses_qr_entry(self):
+        login_url = get_config()["platforms"]["zol"]["login_url"]
+        self.assertEqual(
+            login_url,
+            "https://service.zol.com.cn/user/login.php?backurl=https%3A%2F%2Fwww.zol.com.cn%2F",
+        )
+
+    def test_zol_public_profile_is_not_login_success(self):
+        platform = ZOLPlatform()
+        page = FakePage("none")
+        page.url = "https://my.zol.cn/u9nltx/"
+        page.evaluate = AsyncMock(return_value={
+            "url": page.url,
+            "hasLoginForm": False,
+            "hasUser": True,
+            "hasLogout": False,
+            "hasSecurityChallenge": False,
+        })
+        platform.page = page
+
+        self.assertFalse(asyncio.run(platform._check_login_current_page()))
+
+    def test_zol_homepage_cookie_only_is_not_login_success(self):
+        platform = ZOLPlatform()
+        page = FakePage("none")
+        page.url = "https://www.zol.com.cn/"
+        page.evaluate = AsyncMock(return_value={
+            "url": page.url,
+            "hasLoginForm": False,
+            "hasUser": False,
+            "hasLogout": False,
+            "hasSecurityChallenge": False,
+        })
+        platform.page = page
+        platform.context = type("Context", (), {
+            "cookies": AsyncMock(return_value=[
+                {"name": "last_userid", "expires": -1},
+                {"name": "lv", "expires": -1},
+            ]),
+        })()
+
+        self.assertFalse(asyncio.run(platform._check_login_current_page()))
+
     def test_zol_cookie_check_rejects_expired_context_cookie(self):
         import time
 

@@ -26,7 +26,8 @@ DEFAULT_CONFIG = {
     "platforms": {
         "zol": {
             "name": "中关村在线",
-            "login_url": "https://my.zol.com.cn/",
+            # 当前 ZOL 登录页默认展示“手机扫码 安全登录”；不要再从个人中心入口绕转。
+            "login_url": "https://service.zol.com.cn/user/login.php?backurl=https%3A%2F%2Fwww.zol.com.cn%2F",
             "editor_url": "https://blog.zol.com.cn/post.php?act=add",
             "draft_url": "https://blog.zol.com.cn/post.php?act=draft",
             "title_max_length": 50,

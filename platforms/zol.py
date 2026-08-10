@@ -97,7 +97,7 @@ class ZOLPlatform(BasePlatform):
                     hasLogout: visible(document.querySelector('a[href*="logout"]')),
                     hasLoginForm: [
                         '#J_LoginUser', '#J_LoginPsw', '#J_LoginBtn',
-                        'a[href*="login"]', '.login-btn', '.login-entry'
+                        'input[type="password"]', '.login-form', '.login-box'
                     ].some(selector => visible(document.querySelector(selector))),
                     hasSecurityChallenge: [
                         '验证码', '安全验证', '风险验证', '异常登录', '滑块验证', 'captcha'
@@ -183,8 +183,16 @@ class ZOLPlatform(BasePlatform):
                 return False
             if self._is_login_url(current_url):
                 return False
-            cookie_names = await self._valid_cookie_names()
-            return bool(page_state.get("hasUser") or page_state.get("hasLogout") or cookie_names)
+            # my.zol.cn/{username}/ 是公开个人主页，未登录也能访问；页面中的
+            # .nickname 不能证明当前 Profile 已认证。个人中心只有出现退出入口
+            # 时才作为登录信号，避免扫码未完成却被误判为成功。
+            host = self._host(current_url)
+            if host == "my.zol.cn" and not page_state.get("hasLogout"):
+                return False
+            return bool(
+                page_state.get("hasLogout")
+                or (host not in {self.LOGIN_HOST, "my.zol.cn"} and page_state.get("hasUser"))
+            )
         except BrowserLifecycleError:
             raise
         except Exception as exc:
@@ -195,23 +203,24 @@ class ZOLPlatform(BasePlatform):
     async def login(self):
         """打开登录页，等待用户手动完成登录"""
         self._require_page_alive("ZOL 打开登录页")
-        # TODO: ZOL 可能已改版登录入口，需确认当前扫码登录页 URL
-        # 如果 my.zol.com.cn 不再显示扫码登录，需要更新此 URL
-        await self.page.goto("https://my.zol.com.cn/", wait_until="domcontentloaded")
+        # 当前实际扫码入口是 service.zol.com.cn 的登录页；该 URL 默认展示二维码。
+        # 不再使用 my.zol.com.cn/，它会落到个人中心或账号登录页，无法稳定提示扫码。
+        login_url = self.platform_cfg.get(
+            "login_url",
+            "https://service.zol.com.cn/user/login.php?backurl=https%3A%2F%2Fwww.zol.com.cn%2F",
+        )
+        await self.page.goto(login_url, wait_until="domcontentloaded")
         await self.simulator.random_delay(1, 2)
 
-        # 当前入口会跳到 service.zol.com.cn 的账号登录页，默认可能是账号登录。
-        # 如果页面提供扫码切换按钮，优先切换到二维码，但不尝试绕过验证码/风控。
+        # 当前入口默认是二维码；只记录页面是否有二维码提示，不模拟验证码或绕过风控。
         try:
-            qr_toggle = self.page.locator(".login-change, [class*='login-change']").first
-            if await qr_toggle.count() > 0 and await qr_toggle.is_visible():
-                toggle_text = (await qr_toggle.inner_text()).strip()
-                if any(marker in toggle_text for marker in ("扫码", "二维码", "手机")):
-                    await qr_toggle.click(timeout=3000)
-                    await self.simulator.random_delay(0.5, 1.5)
-                    logger.info("ZOL 登录页已切换到扫码登录界面")
+            qr_count = await self.page.get_by_text("手机扫码", exact=False).count()
+            if qr_count > 0:
+                logger.info("ZOL 登录页已打开手机扫码安全登录界面")
+            else:
+                logger.warning("ZOL 登录页未找到手机扫码提示，保留页面等待人工处理: url={}", self.page.url)
         except Exception as exc:
-            logger.debug("ZOL 扫码登录界面切换失败，保留当前登录方式: {}", exc)
+            logger.debug("ZOL 扫码页面提示探测失败，保留当前登录页面: {}", exc)
 
         # 在浏览器页面中显示提示
         await self.page.evaluate("""
@@ -226,30 +235,29 @@ class ZOLPlatform(BasePlatform):
 
         logger.info("ZOL 登录窗口已打开，请在浏览器中完成扫码或账号密码登录")
 
-        # 等待用户完成登录——不调 evaluate 避免触发刷新
+        # 等待用户完成登录。离开扫码页后必须立即验证博客编辑器，不能只凭
+        # last_userid/lv 等可长期存在的 Cookie 或首页昵称判断登录成功。
         # 30 次 × 3 秒 = 90 秒超时；用户关掉浏览器时立即中止，不空转。
         max_iters = 30
+        login_page_url = self.page.url or login_url
         for _ in range(max_iters):
             if self.page.is_closed():
                 raise RuntimeError("用户关闭了浏览器窗口，登录中止")
-            # 用 locator 检测页面跳转（说明登录成功跳到首页）
-            try:
-                url = self.page.url
-                if await self._check_login_current_page():
-                    await self.page.evaluate("""
-                        () => {
-                            const hint = document.getElementById('wb-login-hint');
-                            if (hint) {
-                                hint.style.background = '#198754';
-                                hint.innerHTML = '登录成功！<br><small>3秒后关闭此窗口...</small>';
-                            }
-                        }
-                    """)
-                    await asyncio.sleep(3)
-                    logger.info("ZOL 登录成功")
+            current_url = self.page.url or ""
+            left_login_page = (
+                current_url != login_page_url
+                and not self._is_login_url(current_url)
+            )
+            current_page_has_auth_signal = await self._check_login_current_page()
+            if left_login_page or current_page_has_auth_signal:
+                logger.info("ZOL 登录页已跳转，开始验证博客编辑器: url={}", current_url)
+                if await self.check_login():
+                    logger.info("ZOL 登录并进入博客编辑器验证成功")
                     return
-            except Exception:
-                pass
+                reason = getattr(self, "last_login_error", "") or (
+                    "LOGIN_REQUIRED: ZOL 登录后未能验证博客编辑器"
+                )
+                raise RuntimeError(reason)
             await asyncio.sleep(3)
 
         raise LoginRequiredError("LOGIN_REQUIRED: ZOL 登录超时（90 秒），请重新扫码或检查安全验证")

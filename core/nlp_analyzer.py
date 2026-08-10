@@ -112,7 +112,8 @@ class NLPAnalyzer:
                 raw_title = "".join(key_words) + "相关文章"
 
         # 各平台标题长度限制
-        limits = {"zol": 50, "xiaoheihe": 30}
+        # ZOL 创作者中心当前页面限制标题为 5~35 个字。
+        limits = {"zol": 35, "xiaoheihe": 30}
         max_len = limits.get(platform, 30)
 
         # 清理标题

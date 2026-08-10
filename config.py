@@ -26,11 +26,12 @@ DEFAULT_CONFIG = {
     "platforms": {
         "zol": {
             "name": "中关村在线",
-            # 当前 ZOL 登录页默认展示“手机扫码 安全登录”；不要再从个人中心入口绕转。
-            "login_url": "https://service.zol.com.cn/user/login.php?backurl=https%3A%2F%2Fwww.zol.com.cn%2F",
-            "editor_url": "https://blog.zol.com.cn/post.php?act=add",
-            "draft_url": "https://blog.zol.com.cn/post.php?act=draft",
-            "title_max_length": 50,
+            # ZOL 当前投稿/创作者中心入口；扫码在页面的“APP扫码登录”标签中生成。
+            "login_url": "https://post.zol.com.cn/v2/login",
+            "editor_url": "https://post.zol.com.cn/v2/create/article",
+            "draft_url": "https://post.zol.com.cn/v2/manage/works/draft",
+            # 创作者中心当前页面提示标题长度为 5~35 个字。
+            "title_max_length": 35,
             "tag_max_count": 5,
         },
         "xiaoheihe": {

@@ -1,5 +1,6 @@
-"""中关村在线（ZOL）博客平台自动化"""
+"""中关村在线（ZOL）创作者中心自动化"""
 import asyncio
+import re
 import time
 from urllib.parse import urlparse
 from loguru import logger
@@ -17,7 +18,8 @@ from human.simulator import HumanSimulator
 class ZOLPlatform(BasePlatform):
     platform_name = "zol"
 
-    BLOG_HOST = "blog.zol.com.cn"
+    CREATOR_HOST = "post.zol.com.cn"
+    BLOG_HOST = "blog.zol.com.cn"  # 旧博客入口，仅用于识别历史重定向
     FORUM_HOST = "bbs.zol.com.cn"
     LOGIN_HOST = "service.zol.com.cn"
     CRITICAL_COOKIES = {"last_userid", "lv", "zol_userid", "zol_sid"}
@@ -36,17 +38,24 @@ class ZOLPlatform(BasePlatform):
     @classmethod
     def _is_blog_editor_url(cls, url: str) -> bool:
         parsed = urlparse(url or "")
-        return (
+        legacy_editor = (
             parsed.hostname == cls.BLOG_HOST
             and parsed.path.endswith("/post.php")
             and "act=add" in (parsed.query or "")
         )
+        creator_editor = (
+            parsed.hostname == cls.CREATOR_HOST
+            and parsed.path.rstrip("/") == "/v2/create/article"
+        )
+        return legacy_editor or creator_editor
 
     @classmethod
     def _is_login_url(cls, url: str) -> bool:
         parsed = urlparse(url or "")
         if parsed.hostname == cls.LOGIN_HOST:
             return "login" in parsed.path.lower()
+        if parsed.hostname == cls.CREATOR_HOST:
+            return parsed.path.rstrip("/") in ("", "/v2/login")
         if parsed.hostname == "my.zol.com.cn":
             # 登录成功后 ZOL 可能跳到 my.zol.cn/{username}；只有根路径仍视为
             # 入口页，不能把已登录的个人中心路径误判成登录页。
@@ -79,6 +88,58 @@ class ZOLPlatform(BasePlatform):
             )
         }
 
+    async def _bridge_creator_cookies(self):
+        """把同一登录会话补到创作者中心使用的 .zol.com.cn 域。"""
+        if not self.context:
+            return 0
+        try:
+            cookies = await self.context.cookies()
+        except TypeError:
+            cookies = await self.context.cookies([
+                "https://service.zol.com.cn/",
+                "https://post.zol.com.cn/",
+                "https://open-api.zol.com.cn/",
+            ])
+
+        auth_names = {
+            "zol_sid", "zol_userid", "zol_check", "zol_cipher",
+            "toKen", "userName", "userId", "last_userid",
+        }
+        existing = {
+            (item.get("name", ""), item.get("domain", "").lower())
+            for item in cookies
+        }
+        now = time.time()
+        clones = []
+        for item in cookies:
+            domain = (item.get("domain") or "").lower()
+            name = item.get("name", "")
+            expires = item.get("expires", -1)
+            if domain != ".zol.com" or name not in auth_names:
+                continue
+            if expires not in (-1, None) and expires <= now:
+                continue
+            if (name, ".zol.com.cn") in existing:
+                continue
+            clone = {
+                key: item[key]
+                for key in (
+                    "name", "value", "path", "expires",
+                    "httpOnly", "secure", "sameSite",
+                )
+                if key in item
+            }
+            clone["domain"] = ".zol.com.cn"
+            clones.append(clone)
+
+        if clones:
+            await self.context.add_cookies(clones)
+            logger.info(
+                "ZOL 创作者中心会话域兼容完成: cloned_cookie_count={}",
+                len(clones),
+            )
+        return len(clones)
+
     async def _read_page_state(self) -> dict:
         self._require_page_alive("ZOL 页面状态探测")
         return await self.page.evaluate("""
@@ -97,7 +158,8 @@ class ZOLPlatform(BasePlatform):
                     hasLogout: visible(document.querySelector('a[href*="logout"]')),
                     hasLoginForm: [
                         '#J_LoginUser', '#J_LoginPsw', '#J_LoginBtn',
-                        'input[type="password"]', '.login-form', '.login-box'
+                        'input[type="password"]', '.login-form', '.login-box',
+                        '#login .ant-tabs'
                     ].some(selector => visible(document.querySelector(selector))),
                     hasSecurityChallenge: [
                         '验证码', '安全验证', '风险验证', '异常登录', '滑块验证', 'captcha'
@@ -111,11 +173,43 @@ class ZOLPlatform(BasePlatform):
         return await self.page.locator(
             "#title, input[name='title'], .title-input input, .blog-title input, "
             "textarea[name='content'], iframe.ke-edit-iframe, .ke-container iframe, "
-            "#content_ifr, iframe[id*='content'], [contenteditable='true']"
+            "#content_ifr, iframe[id*='content'], [contenteditable='true'], "
+            "#article-editor input.main-title, .tox-edit-area iframe, "
+            ".tox-edit-area [contenteditable='true'], .mce-content-body"
         ).count()
 
+    async def _creator_api_login_state(self) -> dict:
+        """验证创作者中心后端会话，而不是只看前端路由和缓存用户信息。"""
+        self._require_page_alive("ZOL 创作者中心 API 登录态探测")
+        try:
+            return await self.page.evaluate("""
+                async () => {
+                    try {
+                        const response = await fetch(
+                            'https://open-api.zol.com.cn/api/v1/creator.user.getinfo',
+                            { credentials: 'include' }
+                        );
+                        const payload = await response.json().catch(() => ({}));
+                        const data = payload && payload.data ? payload.data : payload;
+                        return {
+                            ok: response.ok,
+                            errcode: payload && payload.errcode,
+                            has_user: Boolean(data && (data.userId || data.user_id)),
+                        };
+                    } catch (error) {
+                        return { ok: false, error: String(error || 'request failed') };
+                    }
+                }
+            """)
+        except Exception as exc:
+            if self._exception_means_browser_closed(exc):
+                raise BrowserLifecycleError(
+                    "BROWSER_CONTEXT_CLOSED: ZOL 创作者中心 API 探测时页面已关闭"
+                ) from exc
+            return {"ok": False, "error": str(exc)}
+
     async def check_login(self) -> bool:
-        """检查是否能进入真实 ZOL 博客编辑器。
+        """检查是否能进入真实 ZOL 创作者中心编辑器。
 
         个人中心 Cookie 存在并不等于博客编辑器可用；过期或域不完整的
         Cookie 可能仍能打开 ``my.zol.com.cn``，但编辑器会重定向到论坛登录页。
@@ -124,8 +218,13 @@ class ZOLPlatform(BasePlatform):
         try:
             self.last_login_error = ""
             self._require_page_alive("ZOL 登录态检测")
+            editor_url = self.platform_cfg.get(
+                "editor_url", "https://post.zol.com.cn/v2/create/article"
+            )
+            if self._host(editor_url) == self.CREATOR_HOST:
+                await self._bridge_creator_cookies()
             await self.page.goto(
-                "https://blog.zol.com.cn/post.php?act=add",
+                editor_url,
                 wait_until="domcontentloaded",
                 timeout=15000,
             )
@@ -138,6 +237,10 @@ class ZOLPlatform(BasePlatform):
                     "ZOL_BLOG_EDITOR_REDIRECT: 当前会话被重定向到论坛，"
                     f"无法进入博客编辑器，当前 URL: {current_url}"
                 )
+                logger.warning(self.last_login_error)
+                return False
+            if self._host(current_url) == self.CREATOR_HOST and current_url.rstrip("/").endswith("/v2/403"):
+                self.last_login_error = "ZOL_CREATOR_ACCESS_DENIED: ZOL 创作者中心拒绝当前账号访问"
                 logger.warning(self.last_login_error)
                 return False
             if page_state.get("hasSecurityChallenge"):
@@ -154,6 +257,21 @@ class ZOLPlatform(BasePlatform):
                 )
                 logger.warning(self.last_login_error)
                 return False
+            if self._host(current_url) == self.CREATOR_HOST:
+                api_state = await self._creator_api_login_state()
+                if not api_state.get("ok") or api_state.get("errcode") not in (0, None) or not api_state.get("has_user"):
+                    self.last_login_error = (
+                        "ZOL_CREATOR_SESSION_INVALID: 创作者中心编辑器可见，"
+                        f"但后端会话无效，errcode={api_state.get('errcode', 'unknown')}"
+                    )
+                    logger.warning(self.last_login_error)
+                    return False
+                logger.info(
+                    "ZOL 创作者中心编辑器登录态验证成功: url={}, selector_count={}, api_session=ok",
+                    current_url,
+                    editor_probe,
+                )
+                return True
             cookie_names = await self._valid_cookie_names()
             if not (page_state.get("hasUser") or page_state.get("hasLogout") or cookie_names):
                 self.last_login_error = "LOGIN_REQUIRED: ZOL 编辑器没有可验证的登录信号"
@@ -203,24 +321,56 @@ class ZOLPlatform(BasePlatform):
     async def login(self):
         """打开登录页，等待用户手动完成登录"""
         self._require_page_alive("ZOL 打开登录页")
-        # 当前实际扫码入口是 service.zol.com.cn 的登录页；该 URL 默认展示二维码。
-        # 不再使用 my.zol.com.cn/，它会落到个人中心或账号登录页，无法稳定提示扫码。
+        # 当前 ZOL 投稿使用创作者中心；旧 service 登录页只建立通用会话，
+        # 扫码后仍可能无法进入创作者中心，因此不再作为默认入口。
         login_url = self.platform_cfg.get(
             "login_url",
-            "https://service.zol.com.cn/user/login.php?backurl=https%3A%2F%2Fwww.zol.com.cn%2F",
+            "https://post.zol.com.cn/v2/login",
         )
         await self.page.goto(login_url, wait_until="domcontentloaded")
         await self.simulator.random_delay(1, 2)
 
-        # 当前入口默认是二维码；只记录页面是否有二维码提示，不模拟验证码或绕过风控。
-        try:
-            qr_count = await self.page.get_by_text("手机扫码", exact=False).count()
-            if qr_count > 0:
-                logger.info("ZOL 登录页已打开手机扫码安全登录界面")
-            else:
-                logger.warning("ZOL 登录页未找到手机扫码提示，保留页面等待人工处理: url={}", self.page.url)
-        except Exception as exc:
-            logger.debug("ZOL 扫码页面提示探测失败，保留当前登录页面: {}", exc)
+        if self._host(login_url) == self.CREATOR_HOST:
+            # 创作者中心默认是“账号登录”，二维码位于 APP 扫码标签的跨域 iframe 中。
+            qr_tab = self.page.get_by_role("tab", name="APP扫码登录", exact=True).first
+            if await qr_tab.count() == 0 or not await qr_tab.is_visible():
+                raise SelectorError("ZOL_QR_TAB_NOT_FOUND: 未找到创作者中心 APP 扫码登录标签")
+            await qr_tab.click(timeout=5000)
+            qr_frame_locator = self.page.locator(
+                "iframe[src*='siteLogin.php'][src*='loginType=qrcode']"
+            ).first
+            if await qr_frame_locator.count() == 0:
+                raise SelectorError("ZOL_QR_IFRAME_NOT_FOUND: 创作者中心二维码 iframe 未生成")
+            await qr_frame_locator.wait_for(state="visible", timeout=8000)
+            qr_frame = self.page.frame_locator(
+                "iframe[src*='siteLogin.php'][src*='loginType=qrcode']"
+            )
+            qr_image = qr_frame.locator("img[src*='getQrAddr.php']").first
+            await qr_image.wait_for(state="visible", timeout=8000)
+            logger.info("ZOL 创作者中心已打开并确认 APP 手机扫码登录二维码")
+        else:
+            # 兼容旧配置：旧页面默认是短信登录，必须点击可见切换按钮。
+            try:
+                qr_panel = self.page.locator(".code-login").first
+                if not await qr_panel.is_visible():
+                    qr_toggle = self.page.locator("#tel-login .login-change").first
+                    if await qr_toggle.count() == 0 or not await qr_toggle.is_visible():
+                        raise SelectorError("ZOL_QR_TOGGLE_NOT_FOUND: 未找到可见的扫码切换按钮")
+                    await qr_toggle.click(timeout=5000)
+                    await self.simulator.random_delay(0.5, 1.5)
+
+                qr_panel = self.page.locator(".code-login").first
+                qr_nodes = self.page.locator(
+                    ".code-login #output img, .code-login #output canvas, .code-login #output svg"
+                )
+                if not await qr_panel.is_visible():
+                    raise SelectorError("ZOL_QR_NOT_RENDERED: 扫码面板可见但二维码未生成")
+                await qr_nodes.first.wait_for(state="visible", timeout=5000)
+                logger.info("ZOL 旧登录页已切换并确认手机扫码安全登录界面")
+            except Exception as exc:
+                if isinstance(exc, SelectorError):
+                    raise
+                logger.warning("ZOL 旧扫码页面切换/探测失败: {}", exc)
 
         # 在浏览器页面中显示提示
         await self.page.evaluate("""
@@ -265,9 +415,12 @@ class ZOLPlatform(BasePlatform):
     async def navigate_to_editor(self):
         """导航到博客编辑器"""
         self._require_page_alive("ZOL 打开博客编辑器")
+        editor_url = self.platform_cfg.get(
+            "editor_url", "https://post.zol.com.cn/v2/create/article"
+        )
         try:
             await self.page.goto(
-                "https://blog.zol.com.cn/post.php?act=add",
+                editor_url,
                 wait_until="domcontentloaded",
                 timeout=15000,
             )
@@ -300,8 +453,19 @@ class ZOLPlatform(BasePlatform):
     async def fill_title(self, title: str):
         """填写并验证博客标题，不再静默吞掉定位/输入失败。"""
         self._require_page_alive("ZOL 填写标题")
-        expected = (title or "")[:50]
+        expected = re.sub(r"\s+", " ", (title or "").strip())
+        max_length = int(self.platform_cfg.get("title_max_length", 35))
+        if len(expected) < 5:
+            raise SelectorError("ZOL_TITLE_VALIDATION_ERROR: 标题至少需要 5 个字")
+        if len(expected) > max_length:
+            raise SelectorError(
+                f"ZOL_TITLE_VALIDATION_ERROR: 标题超过当前平台限制 {max_length} 个字，"
+                f"实际 {len(expected)} 个字"
+            )
         selectors = [
+            "input.main-title",
+            ".main-title",
+            "input[placeholder*='请输入文章标题']",
             "#title",
             "input[name='title']",
             ".title-input input",
@@ -315,6 +479,10 @@ class ZOLPlatform(BasePlatform):
                 if await locator.count() == 0 or not await locator.is_visible():
                     continue
                 tag_name = await locator.evaluate("el => el.tagName.toLowerCase()")
+                if tag_name not in ("input", "textarea") and not await locator.get_attribute("contenteditable"):
+                    # .main-title 是当前 Ant Design 输入框的外层 span，
+                    # 真正可编辑节点由后面的 placeholder 选择器定位。
+                    continue
                 if tag_name in ("input", "textarea"):
                     await locator.fill(expected)
                     actual = await locator.input_value()
@@ -326,7 +494,8 @@ class ZOLPlatform(BasePlatform):
                         "el => el.dispatchEvent(new InputEvent('input', {bubbles: true, inputType: 'insertText'}))"
                     )
                     actual = await locator.inner_text()
-                if actual.strip() != expected.strip():
+                actual_normalized = re.sub(r"\s+", " ", actual.strip())
+                if actual_normalized != expected:
                     raise RuntimeError(
                         f"ZOL 标题验证失败: expected={expected!r}, actual={actual!r}"
                     )
@@ -343,6 +512,9 @@ class ZOLPlatform(BasePlatform):
         """支持 iframe、textarea、contenteditable 三类正文编辑器并验证文本。"""
         self._require_page_alive("ZOL 填写正文")
         iframe_selectors = [
+            ".tox-edit-area iframe",
+            "iframe.tox-edit-area__iframe",
+            "iframe[title='Rich Text Area']",
             "iframe.ke-edit-iframe",
             ".ke-container iframe",
             "#content_ifr",
@@ -367,6 +539,8 @@ class ZOLPlatform(BasePlatform):
 
         if editor is None:
             editor_selectors = [
+                ".mce-content-body",
+                "#tinymce",
                 "textarea[name='content']",
                 "#content",
                 "div.ke-edit",
@@ -392,8 +566,13 @@ class ZOLPlatform(BasePlatform):
             if block.get("type") in ("text", "heading") and block.get("text", "").strip()
         ]
         tag_name = await editor.evaluate("el => el.tagName.toLowerCase()")
-        if tag_name == "textarea":
-            expected_value = "\n\n".join(text_parts)
+        expected_value = "\n\n".join(text_parts)
+        # TinyMCE 的正文实际位于跨域 iframe 内的 body。对 textarea、
+        # contenteditable 和 iframe body 统一使用 locator.fill，避免把
+        # page.keyboard 的输入错误地发送到标题输入框或父页面。
+        if tag_name in ("textarea", "body"):
+            await editor.fill(expected_value)
+        elif not any(block.get("type") == "image" for block in content_blocks):
             await editor.fill(expected_value)
         else:
             await editor.click()
@@ -533,29 +712,53 @@ class ZOLPlatform(BasePlatform):
     async def save_draft(self, title: str = "") -> str:
         """保存草稿并在草稿箱验证真实标题。"""
         self._require_page_alive("ZOL 保存草稿")
-        if "blog.zol.com.cn" not in (self.page.url or "") or "post.php" not in (self.page.url or ""):
+        current_url = self.page.url or ""
+        if not self._is_blog_editor_url(current_url):
             logger.error("ZOL 保存草稿失败：当前页面不是博客编辑器，url={}", self.page.url)
             return ""
-        # ZOL 保存草稿按钮
-        draft_selectors = [
-            "button:has-text('保存草稿')",
-            "input[value='保存草稿']",
-            ".draft-btn",
-            "#save_draft",
-            "a:has-text('草稿')",
-        ]
+        if self._host(current_url) == self.CREATOR_HOST:
+            draft_selectors = [
+                ".foot-item:has-text('存草稿')",
+                ".foot-item-text:has-text('存草稿')",
+                "button:has-text('存草稿')",
+                "[role='button']:has-text('存草稿')",
+                "button:has-text('保存草稿')",
+            ]
+            draft_url = self.platform_cfg.get(
+                "draft_url", "https://post.zol.com.cn/v2/manage/works/draft"
+            )
+        else:
+            # 兼容旧博客编辑器。
+            draft_selectors = [
+                "button:has-text('保存草稿')",
+                "input[value='保存草稿']",
+                ".draft-btn",
+                "#save_draft",
+                "a:has-text('草稿')",
+            ]
+            draft_url = self.platform_cfg.get(
+                "draft_url", "https://blog.zol.com.cn/post.php?act=draft"
+            )
 
         for sel in draft_selectors:
             try:
                 await self.page.click(sel, timeout=3000)
                 await self.simulator.random_delay(2, 5)
-                draft_url = self.platform_cfg.get("draft_url", "https://blog.zol.com.cn/post.php?act=draft")
                 await self.page.goto(draft_url, wait_until="domcontentloaded", timeout=15000)
                 await self.simulator.random_delay(2, 4)
                 self._require_page_alive("ZOL 验证草稿箱")
-                if self._host(self.page.url or "") != self.BLOG_HOST or "post.php" not in (self.page.url or ""):
+                draft_page_url = self.page.url or ""
+                creator_draft = (
+                    self._host(draft_page_url) == self.CREATOR_HOST
+                    and "/v2/manage/works/draft" in draft_page_url
+                )
+                legacy_draft = (
+                    self._host(draft_page_url) == self.BLOG_HOST
+                    and "post.php" in draft_page_url
+                )
+                if not (creator_draft or legacy_draft):
                     raise PlatformAccessError(
-                        f"ZOL_DRAFT_ROUTE_ERROR: 草稿箱跳转到非博客页面，当前 URL: {self.page.url}"
+                        f"ZOL_DRAFT_ROUTE_ERROR: 草稿箱跳转到非博客页面，当前 URL: {draft_page_url}"
                     )
                 keyword = (title or "")[:30]
                 found = await self.page.evaluate(
@@ -563,7 +766,7 @@ class ZOLPlatform(BasePlatform):
                 ) if keyword else False
                 if found:
                     logger.info("ZOL 草稿验证成功: {}", keyword)
-                    return self.page.url
+                    return draft_page_url
                 logger.warning("ZOL 草稿箱未找到标题: {}", keyword)
                 return ""
             except Exception as exc:

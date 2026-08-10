@@ -215,11 +215,12 @@ class Database:
 
     def update_article_topics(self, article_id: int, topic_zol: str, topic_xiaoheihe: str, title: str = None):
         with self._get_conn() as conn:
-            params = [topic_zol, topic_xiaoheihe, article_id]
+            params = [topic_zol, topic_xiaoheihe]
             extra = ""
             if title:
                 extra = ", title=?"
-                params.insert(0, title)
+                params.append(title)
+            params.append(article_id)
             conn.execute(
                 f"UPDATE articles SET topic_zol=?, topic_xiaoheihe=?{extra} WHERE id=?",
                 params,

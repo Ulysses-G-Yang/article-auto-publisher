@@ -405,6 +405,14 @@ class RegressionTests(DatabaseTestCase):
         self.assertEqual(self.db.get_task(queued_id)["status"], "paused")
         self.assertEqual(self.db.get_task(retrying_id)["status"], "paused")
 
+    def test_update_article_topics_keeps_title_and_platform_topics_in_order(self):
+        article_id = self.create_article()
+        self.db.update_article_topics(article_id, "ZOL话题", "小黑盒话题", "测试标题")
+        article = self.db.get_article(article_id)
+        self.assertEqual(article["topic_zol"], "ZOL话题")
+        self.assertEqual(article["topic_xiaoheihe"], "小黑盒话题")
+        self.assertEqual(article["title"], "测试标题")
+
     def test_known_historical_errors_get_error_codes(self):
         article_id = self.create_article()
         task_id = self.db.create_task(article_id, "zol")
@@ -598,12 +606,57 @@ class RegressionTests(DatabaseTestCase):
         with patch("platforms.zol.asyncio.sleep", new=AsyncMock()):
             self.assertTrue(asyncio.run(platform.check_login()))
 
-    def test_zol_login_config_uses_qr_entry(self):
-        login_url = get_config()["platforms"]["zol"]["login_url"]
-        self.assertEqual(
-            login_url,
-            "https://service.zol.com.cn/user/login.php?backurl=https%3A%2F%2Fwww.zol.com.cn%2F",
+    def test_zol_creator_cookie_bridge_copies_auth_scope_without_logging_values(self):
+        platform = ZOLPlatform()
+        platform.context = type("Context", (), {})()
+        platform.context.cookies = AsyncMock(return_value=[
+            {
+                "name": "zol_sid",
+                "value": "opaque-session",
+                "domain": ".zol.com",
+                "path": "/",
+                "expires": 4102444800,
+                "httpOnly": True,
+                "secure": True,
+                "sameSite": "Lax",
+            },
+            {
+                "name": "ip_ck",
+                "value": "opaque-analytics",
+                "domain": ".zol.com",
+                "path": "/",
+                "expires": 4102444800,
+            },
+        ])
+        platform.context.add_cookies = AsyncMock()
+
+        count = asyncio.run(platform._bridge_creator_cookies())
+
+        self.assertEqual(count, 1)
+        copied = platform.context.add_cookies.await_args.args[0]
+        self.assertEqual(copied[0]["name"], "zol_sid")
+        self.assertEqual(copied[0]["domain"], ".zol.com.cn")
+
+    def test_zol_creator_routes_are_configured(self):
+        zol_cfg = get_config()["platforms"]["zol"]
+        self.assertEqual(zol_cfg["login_url"], "https://post.zol.com.cn/v2/login")
+        self.assertEqual(zol_cfg["editor_url"], "https://post.zol.com.cn/v2/create/article")
+        self.assertEqual(zol_cfg["draft_url"], "https://post.zol.com.cn/v2/manage/works/draft")
+        self.assertTrue(
+            ZOLPlatform._is_blog_editor_url(
+                "https://post.zol.com.cn/v2/create/article"
+            )
         )
+
+    def test_zol_title_generation_matches_creator_center_limit(self):
+        from core.nlp_analyzer import NLPAnalyzer
+
+        title = NLPAnalyzer().generate_title(
+            "正文内容",
+            "开学季买49英寸显示器，先量宿舍桌再下单并检查电脑接口和线材带宽",
+            "zol",
+        )
+        self.assertLessEqual(len(title), 35)
 
     def test_zol_public_profile_is_not_login_success(self):
         platform = ZOLPlatform()

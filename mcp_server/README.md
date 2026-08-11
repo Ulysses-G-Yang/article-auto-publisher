@@ -27,7 +27,16 @@
 
 ## 安装与启动
 
-先启动现有 Flask 服务（内部地址 `http://127.0.0.1:5000`），再在项目根目录执行：
+第二台 Windows 电脑推荐先在项目根目录执行自动初始化脚本：
+
+```powershell
+.\scripts\setup_windows.ps1
+.\scripts\start_production_windows.ps1
+```
+
+脚本会自动创建 Python 3.12 环境、安装依赖、创建空运行目录并生成被 Git 忽略的生产配置；不会复制测试数据库、Cookie 或 Chrome Profile。Git、Conda 和 Google Chrome 需要预先安装。
+
+手动启动时，先启动现有 Flask 服务（内部地址 `http://127.0.0.1:5000`），再在项目根目录执行：
 
 ```powershell
 python -m pip install -r requirements.txt

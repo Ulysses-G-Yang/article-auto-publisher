@@ -17,6 +17,8 @@ conda run -n article-publisher-py312 python scripts/check_environment.py       p
 conda run -n article-publisher-py312 python -m compileall                       passed
 ```
 
+- PowerShell 5.1 解析：`setup_windows.ps1`、`start_production_windows.ps1`、`stop_production_windows.ps1` 均通过。
+
 覆盖范围包括：
 
 - ZOL Cookie 有效/过期识别、标题和 iframe/textarea/contenteditable 正文输入；
@@ -32,6 +34,7 @@ conda run -n article-publisher-py312 python -m compileall                       
 - Flask `/api/status`：HTTP 200，队列运行中，当前无待处理任务。
 - MCP `/healthz`：HTTP 200，`server_id=content.article-publisher`。
 - `127.0.0.1:8765` 的其他 AutoMatrix 进程未停止；本项目 MCP 使用 `10.0.0.28:8765`。
+- 第二台 Windows 电脑可通过 `scripts/setup_windows.ps1` 自动创建 Python 环境、依赖和空运行目录；生产服务由 `scripts/start_production_windows.ps1` 启动。
 
 ## 真实回归结果
 

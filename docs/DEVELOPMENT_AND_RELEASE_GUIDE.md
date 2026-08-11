@@ -200,6 +200,43 @@ python -m mcp_server.server
 
 生产机器必须是独立 Windows 电脑，并保持用户桌面会话可用；浏览器自动化不能作为没有桌面的 Windows 服务运行。
 
+### 8.1 第二台 Windows 电脑一键初始化
+
+不需要手动创建 `D:\article-auto-publisher` 目录。`gh repo clone` 或 `git clone` 会自动创建目录；拉取后运行项目自带脚本即可创建 Python 环境、安装依赖、创建空的生产运行目录并生成本机配置。
+
+前置条件只有三项：Git/GitHub SSH、Conda、Google Chrome Stable。项目当前使用系统 Chrome 的 `channel=chrome`，不会导入日常 Chrome Profile。
+
+```powershell
+gh repo clone Ulysses-G-Yang/article-auto-publisher D:\article-auto-publisher -- --branch agent/account-management-publishing-fixes
+cd D:\article-auto-publisher
+git checkout 97c8a8b8afcc63150763f2033e7a506825060834
+.\scripts\setup_windows.ps1
+.\scripts\start_production_windows.ps1
+```
+
+没有 `gh` 时可以使用：
+
+```powershell
+git clone --branch agent/account-management-publishing-fixes git@github.com:Ulysses-G-Yang/article-auto-publisher.git D:\article-auto-publisher
+cd D:\article-auto-publisher
+git checkout 97c8a8b8afcc63150763f2033e7a506825060834
+.\scripts\setup_windows.ps1
+```
+
+`setup_windows.ps1` 会自动创建 `data`、`uploads`、`images` 和日志目录，创建 `article-publisher-py312`，安装 `requirements-dev.txt`，执行环境检查、编译检查和 pytest，并在 `data\production_env.ps1` 生成生产变量。该文件位于 `data/` 下，已被 Git 忽略，不会提交密钥。
+
+脚本不会复制或清除任何已有数据库、Cookie、Chrome Profile 或上传文件；新电脑首次运行天然是空的生产运行时。需要指定固定局域网 IP 时可运行：
+
+```powershell
+.\scripts\setup_windows.ps1 -McpBindHost 10.0.0.42
+```
+
+服务脚本默认隐藏两个 Python 控制台窗口，日志在 `data\logs`，Chrome 仍会以有头模式打开。停止服务：
+
+```powershell
+.\scripts\stop_production_windows.ps1
+```
+
 生产配置至少：
 
 ```text

@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "文章自动发布": {
+      "type": "streamable_http",
+      "url": "http://10.0.0.28:8765/mcp",
+      "headers": {},
+      "tool_prefix": "content_article_publisher",
+      "include_instructions": true,
+      "timeout": 10,
+      "read_timeout": 300,
+      "description": "上传 docx 文章并自动发布到 ZOL 和小黑盒平台，支持账号登录管理、任务状态查询和发布日志查看"
+    }
+  }
+}

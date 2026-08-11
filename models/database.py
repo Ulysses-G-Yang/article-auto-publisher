@@ -40,6 +40,10 @@ class Database:
                     cookie_file TEXT,
                     status TEXT DEFAULT 'logged_out',
                     last_login_time TEXT,
+                    login_stage TEXT,
+                    login_error TEXT,
+                    login_attempt_id TEXT,
+                    login_started_at TEXT,
                     created_at TEXT DEFAULT (datetime('now', 'localtime')),
                     updated_at TEXT DEFAULT (datetime('now', 'localtime'))
                 );
@@ -55,6 +59,7 @@ class Database:
                     keywords TEXT,
                     topic_zol TEXT,
                     topic_xiaoheihe TEXT,
+                    community_xiaoheihe TEXT,
                     image_count INTEGER DEFAULT 0,
                     char_count INTEGER DEFAULT 0,
                     status TEXT DEFAULT 'parsed',
@@ -82,7 +87,15 @@ class Database:
                     status TEXT DEFAULT 'queued',
                     title_used TEXT,
                     topic_used TEXT,
+                    community_used TEXT,
+                    selection_status TEXT DEFAULT 'not_required',
+                    selection_json TEXT,
+                    media_status TEXT DEFAULT 'not_checked',
+                    expected_images INTEGER DEFAULT 0,
+                    uploaded_images INTEGER DEFAULT 0,
+                    failed_images_json TEXT,
                     error_message TEXT,
+                    error_code TEXT,
                     retry_count INTEGER DEFAULT 0,
                     draft_url TEXT,
                     started_at TEXT,
@@ -113,6 +126,44 @@ class Database:
                     UNIQUE(platform, category_name)
                 );
             """)
+
+            # 兼容已有数据库：项目早期版本没有任务级社区/话题选择字段。
+            # 迁移必须幂等，服务重启时不能因为字段已存在而失败。
+            self._ensure_column(conn, "articles", "community_xiaoheihe", "TEXT")
+            self._ensure_column(conn, "tasks", "community_used", "TEXT")
+            self._ensure_column(conn, "tasks", "selection_status", "TEXT DEFAULT 'not_required'")
+            self._ensure_column(conn, "tasks", "selection_json", "TEXT")
+            self._ensure_column(conn, "tasks", "media_status", "TEXT DEFAULT 'not_checked'")
+            self._ensure_column(conn, "tasks", "expected_images", "INTEGER DEFAULT 0")
+            self._ensure_column(conn, "tasks", "uploaded_images", "INTEGER DEFAULT 0")
+            self._ensure_column(conn, "tasks", "failed_images_json", "TEXT")
+            self._ensure_column(conn, "tasks", "error_code", "TEXT")
+            self._ensure_column(conn, "platform_accounts", "login_stage", "TEXT")
+            self._ensure_column(conn, "platform_accounts", "login_error", "TEXT")
+            self._ensure_column(conn, "platform_accounts", "login_attempt_id", "TEXT")
+            self._ensure_column(conn, "platform_accounts", "login_started_at", "TEXT")
+
+            # 为历史真实失败补齐错误码，避免旧任务仍然显示为不可恢复或继续
+            # 走旧的统一重试逻辑。迁移条件只匹配已知错误文本，不改成功任务。
+            conn.execute(
+                """UPDATE tasks SET error_code='BROWSER_CONTEXT_CLOSED'
+                   WHERE error_code IS NULL
+                     AND error_message LIKE '%Target page, context or browser has been closed%'"""
+            )
+            conn.execute(
+                """UPDATE tasks SET error_code='ZOL_BLOG_EDITOR_REDIRECT'
+                   WHERE error_code IS NULL
+                     AND error_message LIKE '%bbs.zol.com.cn%'"""
+            )
+
+    @staticmethod
+    def _ensure_column(conn, table: str, column: str, definition: str):
+        """为旧 SQLite 数据库补字段；表名和字段名均来自代码常量。"""
+        columns = {
+            row[1] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()
+        }
+        if column not in columns:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
 
     # ==================== 账号操作 ====================
     def upsert_account(self, platform: str, **kwargs):
@@ -164,11 +215,12 @@ class Database:
 
     def update_article_topics(self, article_id: int, topic_zol: str, topic_xiaoheihe: str, title: str = None):
         with self._get_conn() as conn:
-            params = [topic_zol, topic_xiaoheihe, article_id]
+            params = [topic_zol, topic_xiaoheihe]
             extra = ""
             if title:
                 extra = ", title=?"
-                params.insert(0, title)
+                params.append(title)
+            params.append(article_id)
             conn.execute(
                 f"UPDATE articles SET topic_zol=?, topic_xiaoheihe=?{extra} WHERE id=?",
                 params,
@@ -205,8 +257,15 @@ class Database:
     def create_task(self, article_id: int, platform: str) -> int:
         with self._get_conn() as conn:
             cur = conn.execute(
-                "INSERT INTO tasks (article_id, platform) VALUES (?,?)",
-                (article_id, platform),
+                """INSERT INTO tasks
+                   (article_id, platform, selection_status, media_status)
+                   VALUES (?,?,?,?)""",
+                (
+                    article_id,
+                    platform,
+                    "pending" if platform == "xiaoheihe" else "not_required",
+                    "not_checked",
+                ),
             )
             return cur.lastrowid
 
@@ -242,6 +301,26 @@ class Database:
                 (limit,),
             ).fetchall()
             return [dict(r) for r in rows]
+
+    def pause_unfinished_tasks(self, reason: str = "服务启动时不自动恢复历史任务") -> int:
+        """服务启动时暂停遗留任务，避免旧任务自动打开浏览器。"""
+        with self._get_conn() as conn:
+            rows = conn.execute(
+                "SELECT id FROM tasks WHERE status IN ('queued','retrying','processing')"
+            ).fetchall()
+            for row in rows:
+                task_id = row["id"]
+                conn.execute(
+                    """UPDATE tasks
+                       SET status='paused', error_message=?, started_at=NULL
+                       WHERE id=?""",
+                    (reason, task_id),
+                )
+                conn.execute(
+                    "INSERT INTO task_logs (task_id, level, message) VALUES (?,?,?)",
+                    (task_id, "INFO", reason),
+                )
+            return len(rows)
 
     def add_task_log(self, task_id: int, level: str, message: str):
         with self._get_conn() as conn:

@@ -16,11 +16,14 @@
             <h5 class="mb-0">任务 #{{ task.id }} 详情</h5>
             <span class="badge fs-6 
                 {% if task.status == 'completed' %}bg-success
+                {% elif task.status == 'completed_with_warnings' %}bg-warning text-dark
                 {% elif task.status == 'failed' %}bg-danger
                 {% elif task.status == 'processing' %}bg-warning text-dark
                 {% elif task.status == 'retrying' %}bg-info
+                {% elif task.status == 'needs_selection' %}bg-warning text-dark
+                {% elif task.status == 'paused' %}bg-secondary
                 {% else %}bg-secondary{% endif %}">
-                {{ {'queued':'排队中','processing':'处理中','completed':'已完成','failed':'失败','retrying':'重试中','cancelled':'已取消'}[task.status] }}
+                {{ {'queued':'排队中','processing':'处理中','completed':'已完成','completed_with_warnings':'草稿已保存（有警告）','failed':'失败','retrying':'重试中','paused':'已暂停','needs_selection':'待选择','cancelled':'已取消'}.get(task.status, task.status) }}
             </span>
         </div>
         <div class="card-body">
@@ -41,6 +44,12 @@
                     <label class="text-muted small">匹配话题</label>
                     <p>{{ task.topic_used or '-' }}</p>
                 </div>
+                {% if task.platform == 'xiaoheihe' %}
+                <div class="col-md-6">
+                    <label class="text-muted small">使用社区</label>
+                    <p>{{ task.community_used or '-' }}</p>
+                </div>
+                {% endif %}
                 <div class="col-md-4">
                     <label class="text-muted small">重试次数</label>
                     <p>{{ task.retry_count }}/3</p>
@@ -57,10 +66,60 @@
                     <label class="text-muted small">创建时间</label>
                     <p>{{ task.created_at or '-' }}</p>
                 </div>
+                {% if task.expected_images or task.uploaded_images or task.media_status not in (None, 'not_checked') %}
+                <div class="col-md-6">
+                    <label class="text-muted small">图片处理</label>
+                    <p>
+                        {{ task.uploaded_images or 0 }}/{{ task.expected_images or 0 }} 张
+                        {% if task.media_status == 'completed' %}<span class="text-success">已完成</span>
+                        {% elif task.media_status in ('failed', 'partial') %}<span class="text-warning">{{ task.media_status }}</span>
+                        {% else %}<span class="text-muted">{{ task.media_status or '未检查' }}</span>{% endif %}
+                    </p>
+                </div>
+                {% endif %}
             </div>
             {% if task.error_message %}
-            <div class="alert alert-danger mt-3 mb-0">
+            <div class="alert {% if task.status == 'completed_with_warnings' %}alert-warning{% else %}alert-danger{% endif %} mt-3 mb-0">
+                {% if task.error_code %}<strong>错误码：</strong>{{ task.error_code }}<br>{% endif %}
                 <strong>错误信息：</strong>{{ task.error_message }}
+            </div>
+            {% endif %}
+
+            {% if task.status == 'needs_selection' %}
+            <div class="alert alert-warning mt-3 mb-0" x-data="selectionForm">
+                <strong>自动选择没有找到结果。</strong>
+                <span class="d-block small mb-2">填写平台中的真实名称后继续，任务不会直接发布。</span>
+                <div class="row g-2">
+                    {% if task.platform == 'xiaoheihe' %}
+                    <div class="col-md-6">
+                        <label class="form-label small">社区</label>
+                        <input class="form-control" x-model="community" placeholder="例如：游戏名称社区">
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label small">话题</label>
+                        <input class="form-control" x-model="topic" placeholder="例如：攻略心得">
+                    </div>
+                    {% else %}
+                    <div class="col-md-6">
+                        <label class="form-label small">分类/话题</label>
+                        <input class="form-control" x-model="topic" placeholder="填写 ZOL 分类或话题">
+                    </div>
+                    {% endif %}
+                </div>
+                <button class="btn btn-sm btn-primary mt-3" @click="resume()" :disabled="submitting">
+                    <span x-show="submitting" class="spinner-border spinner-border-sm me-1"></span>
+                    继续执行
+                </button>
+                <span class="small ms-2" x-show="message" x-text="message"></span>
+            </div>
+            {% elif task.status == 'paused' %}
+            <div class="alert alert-secondary mt-3 mb-0" x-data="selectionForm">
+                服务重启时不会自动恢复历史任务。确认账号已登录后，可以手动恢复。
+                <button class="btn btn-sm btn-primary ms-2" @click="resume()" :disabled="submitting">
+                    <span x-show="submitting" class="spinner-border spinner-border-sm me-1"></span>
+                    恢复任务
+                </button>
+                <span class="small ms-2" x-show="message" x-text="message"></span>
             </div>
             {% endif %}
         </div>
@@ -131,6 +190,31 @@ document.addEventListener('alpine:init', () => {
         task: {{ task|tojson if task else 'null' }},
         article: {{ article|tojson if article else 'null' }},
         logs: {{ logs|tojson if logs else '[]' }},
+    }));
+    Alpine.data('selectionForm', () => ({
+        community: {{ (task.community_used if task and task.community_used else '')|tojson }},
+        topic: {{ (task.topic_used if task and task.topic_used else '')|tojson }},
+        submitting: false,
+        message: '',
+        async resume() {
+            this.submitting = true;
+            this.message = '';
+            try {
+                const response = await fetch('/api/tasks/{{ task.id if task else 0 }}/resume', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({community: this.community, topic: this.topic}),
+                });
+                const data = await response.json().catch(() => ({}));
+                if (!response.ok) throw new Error(data.message || data.error_code || `HTTP ${response.status}`);
+                this.message = '已恢复，任务进入队列';
+                setTimeout(() => location.reload(), 800);
+            } catch (error) {
+                this.message = error.message;
+            } finally {
+                this.submitting = false;
+            }
+        },
     }));
 });
 </script>

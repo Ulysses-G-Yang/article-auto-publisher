@@ -31,8 +31,8 @@
         <div class="col-md-3">
             <div class="card border-success">
                 <div class="card-body text-center">
-                    <h1 class="text-success" x-text="tasks.filter(t => t.status === 'completed').length"></h1>
-                    <small class="text-muted">已完成</small>
+                    <h1 class="text-success" x-text="tasks.filter(t => t.status === 'completed' || t.status === 'completed_with_warnings').length"></h1>
+                    <small class="text-muted">草稿已保存</small>
                 </div>
             </div>
         </div>
@@ -143,6 +143,7 @@ document.addEventListener('alpine:init', () => {
         statusLabel(s) {
             const m = {
                 queued: '排队中', processing: '处理中', completed: '已完成',
+                completed_with_warnings: '草稿已保存（有警告）',
                 failed: '失败', retrying: '重试中', cancelled: '已取消'
             };
             return m[s] || s;
@@ -151,7 +152,8 @@ document.addEventListener('alpine:init', () => {
         statusClass(s) {
             const m = {
                 queued: 'bg-secondary', processing: 'bg-warning text-dark',
-                completed: 'bg-success', failed: 'bg-danger', retrying: 'bg-info',
+                completed: 'bg-success', completed_with_warnings: 'bg-warning text-dark',
+                failed: 'bg-danger', retrying: 'bg-info',
             };
             return m[s] || 'bg-light text-dark';
         },

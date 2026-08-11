@@ -4,7 +4,7 @@ import os
 import asyncio
 import threading
 import signal
-import subprocess
+import shutil
 
 # 确保模块路径
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -13,35 +13,72 @@ from flask import Flask
 
 from config import get_config
 from web.routes import register_routes
+from core.logging_setup import configure_logging
+from loguru import logger
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+_QUEUE_START_LOCK = threading.Lock()
+_QUEUE_STARTED = False
+
+
+def clear_platform_cookies(platform: str) -> bool:
+    """清除指定平台的 Chrome Cookie/站点会话数据，实现账号切换。
+
+    只接受项目支持的平台，并且所有删除目标必须位于该平台自己的
+    ``data/chrome_profiles/{platform}`` 目录内；不会触碰另一个平台的 Profile。
+    """
+    if platform not in ("zol", "xiaoheihe"):
+        return False
+
+    profile_root = os.path.realpath(os.path.join(BASE_DIR, "data", "chrome_profiles"))
+    profile_base = os.path.realpath(os.path.join(profile_root, platform))
+    try:
+        if os.path.commonpath([profile_root, profile_base]) != profile_root:
+            logger.error("拒绝清理越界的 Chrome Profile: platform={}", platform)
+            return False
+    except ValueError:
+        return False
+
+    if not os.path.isdir(profile_base):
+        return False
+
+    cookie_paths = [
+        os.path.join(profile_base, "Default", "Network", "Cookies"),
+        os.path.join(profile_base, "Default", "Network", "Cookies-wal"),
+        os.path.join(profile_base, "Default", "Network", "Cookies-shm"),
+        os.path.join(profile_base, "Default", "Cookies"),
+        os.path.join(profile_base, "Default", "Local Storage"),
+        os.path.join(profile_base, "Default", "Session Storage"),
+        os.path.join(profile_base, "Default", "Web Data"),
+        os.path.join(profile_base, "Default", "Login Data"),
+    ]
+
+    cleared = False
+    for path in cookie_paths:
+        try:
+            target = os.path.realpath(path)
+            if os.path.commonpath([profile_base, target]) != profile_base:
+                logger.error("拒绝清理越界的 Cookie 路径: platform={}, path={}", platform, path)
+                continue
+            if os.path.isfile(path):
+                os.remove(path)
+                cleared = True
+            elif os.path.isdir(path):
+                shutil.rmtree(path)
+                cleared = True
+        except Exception as exc:
+            # Chrome 正在占用文件时可能清理失败；记录原因但继续尝试其他文件。
+            logger.warning("清理 {} Cookie 文件失败: path={}, error={}", platform, path, exc)
+
+    return cleared
 
 
 def kill_zombie_chrome():
-    """杀掉所有使用项目 Chrome Profile 的僵尸进程"""
+    """只清理 Chrome Profile 的锁文件，保留 Cookie 会话"""
     profile_base = os.path.join(BASE_DIR, "data", "chrome_profiles")
-    killed = 0
-    try:
-        # 查找所有命令行包含 chrome_profiles 路径的 chrome 进程
-        result = subprocess.run(
-            ["wmic", "process", "where",
-             f"name='chrome.exe'", "get", "processid,commandline"],
-            capture_output=True, text=True, timeout=10,
-        )
-        for line in result.stdout.split("\n"):
-            if "chrome_profiles" in line and line.strip():
-                parts = line.strip().split()
-                if parts:
-                    pid = parts[-1]
-                    try:
-                        os.kill(int(pid), signal.SIGTERM)
-                        killed += 1
-                    except Exception:
-                        pass
-    except Exception:
-        pass
+    cleaned = 0
 
-    # 清理 SingletonLock 文件
+    # 只清理 Singleton 锁文件，不触碰 Chrome 进程和 Profile 数据。
     for platform in ["zol", "xiaoheihe"]:
         profile_dir = os.path.join(profile_base, platform)
         for lock_file in ["SingletonLock", "SingletonCookie", "SingletonSocket"]:
@@ -49,15 +86,17 @@ def kill_zombie_chrome():
             try:
                 if os.path.exists(lock_path):
                     os.remove(lock_path)
-            except Exception:
-                pass
+                    cleaned += 1
+            except Exception as exc:
+                logger.warning("清理 Chrome Profile 锁文件失败: path={}, error={}", lock_path, exc)
 
-    return killed
+    return cleaned
 
 
 def create_app() -> Flask:
     cfg = get_config()
     app_cfg = cfg["app"]
+    configure_logging(cfg["paths"]["logs"])
 
     app = Flask(
         __name__,
@@ -70,7 +109,7 @@ def create_app() -> Flask:
     # 注册路由
     register_routes(app)
 
-    # 添加清理僵尸进程的 API
+    # 添加清理 Profile 锁文件的 API；保留原有 /api/cleanup 端点兼容性。
     @app.route("/api/cleanup", methods=["POST"])
     def api_cleanup():
         killed = kill_zombie_chrome()
@@ -81,6 +120,20 @@ def create_app() -> Flask:
 
 def start_queue_worker():
     """在后台线程中启动队列 worker（只启动一次）"""
+    global _QUEUE_STARTED
+    with _QUEUE_START_LOCK:
+        if _QUEUE_STARTED:
+            logger.debug("队列 worker 已启动，跳过重复启动")
+            return
+        _QUEUE_STARTED = True
+
+    # 在创建 worker 前完成启动迁移，确保历史 queued/retrying/processing 任务
+    # 不会在新任务上传前后被误当成自动恢复对象。
+    from models.database import Database
+    paused = Database.get_instance().pause_unfinished_tasks()
+    if paused:
+        logger.info("启动时暂停 {} 个历史未完成任务", paused)
+
     def _run():
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
@@ -89,27 +142,35 @@ def start_queue_worker():
         loop.run_until_complete(qm.start())
         loop.run_forever()
 
-    t = threading.Thread(target=_run, daemon=True)
-    t.start()
-    print("  队列 worker 已启动")
+    try:
+        t = threading.Thread(target=_run, daemon=True, name="article-publisher-queue")
+        t.start()
+        logger.info("队列 worker 已启动；历史未完成任务不会自动恢复")
+    except Exception:
+        with _QUEUE_START_LOCK:
+            _QUEUE_STARTED = False
+        raise
 
 
 def on_shutdown(signum, frame):
-    """服务器关闭时清理所有 Chrome 进程"""
-    print("\n  正在清理 Chrome 进程...")
-    killed = kill_zombie_chrome()
-    print(f"  已清理 {killed} 个进程")
+    """服务器关闭时清理 Chrome Profile 锁文件"""
+    logger.info("正在清理 Chrome Profile 锁文件...")
+    cleaned = kill_zombie_chrome()
+    logger.info("已清理 {} 个 Chrome Profile 锁文件", cleaned)
     sys.exit(0)
 
 
 if __name__ == "__main__":
     cfg = get_config()
     app_cfg = cfg["app"]
+    if app_cfg.get("environment") == "production":
+        raise RuntimeError("生产环境请使用 run_flask_production.py，不要使用 Flask 开发服务器")
+    configure_logging(cfg["paths"]["logs"])
 
     # 启动前先清理上次残留的僵尸 Chrome
-    killed = kill_zombie_chrome()
-    if killed > 0:
-        print(f"  启动前清理了 {killed} 个僵尸 Chrome 进程")
+    cleaned = kill_zombie_chrome()
+    if cleaned > 0:
+        logger.info("启动前清理了 {} 个 Chrome Profile 锁文件", cleaned)
 
     app = create_app()
 
@@ -120,12 +181,11 @@ if __name__ == "__main__":
     # 启动队列 worker
     start_queue_worker()
 
-    print(f"\n  自动化文章发布工具启动中...")
-    print(f"  访问地址: http://{app_cfg['host']}:{app_cfg['port']}\n")
+    logger.info("自动化文章发布工具启动中，访问地址: http://{}:{}", app_cfg["host"], app_cfg["port"])
 
     app.run(
         host=app_cfg["host"],
         port=app_cfg["port"],
-        debug=True,
+        debug=bool(app_cfg.get("debug", False)),
         use_reloader=False,
     )

@@ -1,0 +1,56 @@
+schema_version: 1
+platform: xiaoheihe
+display_name: 小黑盒
+
+publish:
+  login_url: https://www.xiaoheihe.cn/
+  editor_url: https://www.xiaoheihe.cn/creator/editor
+  response_timeout_ms: 30000
+  submit_endpoint:
+    url_contains: /api/post/submit
+    method: POST
+    evidence:
+      level: assumed
+      source: 用户提供的阶段一接口假设，需真实发布后验证
+      verified_at: null
+  post_id_paths:
+    - post_id
+    - data.post_id
+  platform_url_paths:
+    - platform_url
+    - post_url
+    - url
+    - data.platform_url
+    - data.post_url
+    - data.url
+  selectors:
+    title: ".editor-title__container [contenteditable='true'], .editor-title__container .ProseMirror"
+    body: ".article__edit-content--inner [contenteditable='true'], .article__edit-content--inner .ProseMirror"
+    file_input: "input[type='file']"
+    publish_button: "button.editor-publish__btn.main-btn"
+    confirm_button: "button:has-text('确认发布'), button:has-text('确定')"
+    logged_in_probe: "button.nav-user-trigger"
+    community_button: "button:has-text('添加社区')"
+    topic_button: "button:has-text('添加话题')"
+    dialog_search: ".modal input, [role='dialog'] input, input[placeholder*='搜索']"
+    dialog_result: ".search-result-item, [role='dialog'] li"
+
+collector:
+  endpoint:
+    url: https://www.xiaoheihe.cn/__unverified_metrics_endpoint__
+    method: GET
+    evidence:
+      level: legacy_unverified
+      source: 重型老系统将小黑盒 analytics 标为 UNTRUSTED_SCRIPT_EVIDENCE
+      verified_at: null
+  required_headers:
+    - User-Agent
+  required_cookies:
+    - heybox_id
+    - pkey
+  query_params:
+    post_id: "{external_article_id}"
+  json_paths: {}
+  response_timeout_seconds: 20
+  max_attempts: 3
+  pagination: null

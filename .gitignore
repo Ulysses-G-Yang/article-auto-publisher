@@ -6,6 +6,7 @@ data/
 # ---- Python caches ----
 __pycache__/
 *.pyc
+*.egg-info/
 
 # ---- Backup / scratch ----
 *.old

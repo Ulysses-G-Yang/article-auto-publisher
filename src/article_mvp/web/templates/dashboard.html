@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>小黑盒发布与数据采集 MVP</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='dashboard.css') }}">
+</head>
+<body>
+  <main class="shell">
+    <header class="hero">
+      <div>
+        <p class="eyebrow">ARTICLE MVP · PHASE 1</p>
+        <h1>小黑盒发布与数据采集</h1>
+        <p class="subtitle">只读运行看板 · 映射、指标、采集状态与接口证据</p>
+      </div>
+      <div class="actions">
+        <span id="last-updated" class="updated">等待加载</span>
+        <button id="refresh" type="button">刷新数据</button>
+      </div>
+    </header>
+
+    <section id="alert" class="alert hidden" role="alert"></section>
+
+    <section class="cards" aria-label="运行摘要">
+      <article class="card"><span>平台文章</span><strong id="total-articles">—</strong></article>
+      <article class="card"><span>已映射</span><strong id="mapped-articles">—</strong></article>
+      <article class="card"><span>指标快照</span><strong id="total-snapshots">—</strong></article>
+      <article class="card"><span>最近采集</span><strong id="latest-run">—</strong></article>
+    </section>
+
+    <section class="panel evidence-panel">
+      <div class="panel-heading">
+        <div><p class="kicker">CONTRACT</p><h2>接口证据状态</h2></div>
+        <span id="collector-gate" class="badge">加载中</span>
+      </div>
+      <div class="evidence-grid">
+        <div><span>发布接口</span><strong id="publish-evidence">—</strong><p id="publish-source">—</p></div>
+        <div><span>采集接口</span><strong id="collector-evidence">—</strong><p id="collector-source">—</p></div>
+      </div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-heading"><div><p class="kicker">CONTENT MAP</p><h2>平台文章与最新指标</h2></div></div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>映射</th><th>平台文章</th><th>阅读</th><th>点赞</th><th>评论</th><th>收藏</th><th>收益</th><th>快照时间</th></tr></thead>
+          <tbody id="articles-body"></tbody>
+        </table>
+        <p id="articles-empty" class="empty hidden">尚无平台文章映射。完成一次安全门发布验收后会显示在这里。</p>
+      </div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-heading"><div><p class="kicker">COLLECTION RUNS</p><h2>最近采集运行</h2></div></div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>运行 ID</th><th>状态</th><th>处理数量</th><th>错误类型</th><th>开始时间</th><th>结束时间</th></tr></thead>
+          <tbody id="runs-body"></tbody>
+        </table>
+        <p id="runs-empty" class="empty hidden">尚无采集运行记录。接口契约 verified 后才能开始真实采集。</p>
+      </div>
+    </section>
+  </main>
+  <script src="{{ url_for('static', filename='dashboard.js') }}" defer></script>
+</body>
+</html>

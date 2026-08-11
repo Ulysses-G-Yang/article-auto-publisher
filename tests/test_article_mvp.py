@@ -527,7 +527,13 @@ def test_dashboard_shows_safe_summary_without_raw_payloads(tmp_path):
         client = app.test_client()
         page_response = client.get("/")
         assert page_response.status_code == 200
-        assert "发布与采集数据中心" in page_response.get_data(as_text=True)
+        page_html = page_response.get_data(as_text=True)
+        assert "发布与采集数据中心" in page_html
+        assert "vendor/coreui/coreui.min.css" in page_html
+        assert "vendor/gridstack/gridstack-all.js" in page_html
+        assert 'data-module-toggle="summary"' in page_html
+        assert client.get("/assets/vendor/coreui/coreui.min.css").status_code == 200
+        assert client.get("/assets/vendor/gridstack/gridstack-all.js").status_code == 200
         assert client.get("/healthz").status_code == 200
 
         api_response = client.get("/api/dashboard")

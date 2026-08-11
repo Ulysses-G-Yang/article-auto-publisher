@@ -25,7 +25,15 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 "article_mvp.platforms.xiaoheihe" = ["config.yaml"]
-"article_mvp.web" = ["templates/*.html", "static/*.css", "static/*.js"]
+"article_mvp.web" = [
+    "templates/*.html",
+    "static/*.css",
+    "static/*.js",
+    "static/vendor/coreui/*",
+    "static/vendor/coreui-icons/css/*",
+    "static/vendor/coreui-icons/fonts/*",
+    "static/vendor/gridstack/*",
+]
 
 [tool.ruff]
 target-version = "py310"

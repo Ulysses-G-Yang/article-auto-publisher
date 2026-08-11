@@ -276,6 +276,16 @@ class RegressionTests(DatabaseTestCase):
             asset_response = client.get("/data-center/assets/dashboard.js")
             self.assertEqual(asset_response.status_code, 200)
             asset_response.close()
+            coreui_response = client.get(
+                "/data-center/assets/vendor/coreui/coreui.min.css"
+            )
+            self.assertEqual(coreui_response.status_code, 200)
+            coreui_response.close()
+            gridstack_response = client.get(
+                "/data-center/assets/vendor/gridstack/gridstack-all.js"
+            )
+            self.assertEqual(gridstack_response.status_code, 200)
+            gridstack_response.close()
             self.assertIn("/data-center/", client.get("/").get_data(as_text=True))
 
             api_response = client.get("/data-center/api/dashboard")

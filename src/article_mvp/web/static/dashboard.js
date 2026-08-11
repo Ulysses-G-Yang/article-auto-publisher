@@ -1,36 +1,65 @@
 const byId = (id) => document.getElementById(id);
 
-function text(id, value, fallback = "—") {
-  byId(id).textContent = value ?? fallback;
+const LAYOUT_STORAGE_KEY = "article-mvp.dashboard-layout.v1";
+const THEME_STORAGE_KEY = "article-mvp.dashboard-theme.v1";
+const SIDEBAR_STORAGE_KEY = "article-mvp.sidebar-collapsed.v1";
+
+const DEFAULT_LAYOUT = [
+  { id: "summary", x: 0, y: 0, w: 12, h: 2 },
+  { id: "current-tasks", x: 0, y: 2, w: 8, h: 5 },
+  { id: "contract", x: 8, y: 2, w: 4, h: 5 },
+  { id: "articles", x: 0, y: 7, w: 8, h: 5 },
+  { id: "runs", x: 8, y: 7, w: 4, h: 5 },
+];
+
+let dashboardGrid;
+let dashboardEditing = false;
+let currentTasks = [];
+let savedLayoutState = null;
+
+function setText(id, value, fallback = "—") {
+  const target = byId(id);
+  if (target) target.textContent = value ?? fallback;
 }
 
 function formatTime(value) {
   if (!value) return "—";
   const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? value : date.toLocaleString("zh-CN", { hour12: false });
+  return Number.isNaN(date.getTime())
+    ? value
+    : date.toLocaleString("zh-CN", { hour12: false });
+}
+
+function platformLabel(platform) {
+  if (platform === "xiaoheihe") return "小黑盒";
+  if (platform === "zol") return "中关村在线";
+  return platform || "—";
 }
 
 function statusNode(value) {
   const span = document.createElement("span");
-  span.className = `status ${value || ""}`;
+  span.className = `status-label ${value || ""}`;
   span.textContent = value || "—";
   return span;
 }
 
-function cell(row, value) {
-  const td = document.createElement("td");
-  if (value instanceof Node) td.appendChild(value);
-  else td.textContent = value ?? "—";
-  row.appendChild(td);
+function appendCell(row, value, options = {}) {
+  const cell = document.createElement("td");
+  if (value instanceof Node) cell.appendChild(value);
+  else cell.textContent = value ?? "—";
+  if (options.title && value) cell.title = String(value);
+  row.appendChild(cell);
 }
 
 function renderArticles(articles) {
   const body = byId("articles-body");
   body.replaceChildren();
-  byId("articles-empty").classList.toggle("hidden", articles.length > 0);
+  byId("articles-empty").classList.toggle("d-none", articles.length > 0);
+
   for (const article of articles) {
     const row = document.createElement("tr");
-    cell(row, statusNode(article.status));
+    appendCell(row, statusNode(article.status));
+
     const articleCell = document.createElement("span");
     if (article.platform_url) {
       const link = document.createElement("a");
@@ -39,15 +68,18 @@ function renderArticles(articles) {
       link.rel = "noopener noreferrer";
       link.textContent = article.external_article_id;
       articleCell.appendChild(link);
-    } else articleCell.textContent = article.external_article_id;
-    cell(row, articleCell);
+    } else {
+      articleCell.textContent = article.external_article_id;
+    }
+    appendCell(row, articleCell);
+
     const metric = article.latest_metric;
-    cell(row, metric?.read_count);
-    cell(row, metric?.like_count);
-    cell(row, metric?.comment_count);
-    cell(row, metric?.collect_count);
-    cell(row, metric?.revenue);
-    cell(row, formatTime(metric?.snapshot_time));
+    appendCell(row, metric?.read_count);
+    appendCell(row, metric?.like_count);
+    appendCell(row, metric?.comment_count);
+    appendCell(row, metric?.collect_count);
+    appendCell(row, metric?.revenue);
+    appendCell(row, formatTime(metric?.snapshot_time));
     body.appendChild(row);
   }
 }
@@ -55,82 +87,329 @@ function renderArticles(articles) {
 function renderRuns(runs) {
   const body = byId("runs-body");
   body.replaceChildren();
-  byId("runs-empty").classList.toggle("hidden", runs.length > 0);
+  byId("runs-empty").classList.toggle("d-none", runs.length > 0);
+
   for (const run of runs) {
     const row = document.createElement("tr");
-    cell(row, run.id);
-    cell(row, statusNode(run.status));
-    cell(row, run.articles_processed);
-    cell(row, run.error_type);
-    cell(row, formatTime(run.started_at));
-    cell(row, formatTime(run.finished_at));
+    appendCell(row, `#${run.id}`);
+    appendCell(row, statusNode(run.status));
+    appendCell(row, run.articles_processed);
+    appendCell(row, formatTime(run.started_at));
     body.appendChild(row);
   }
 }
 
-function renderCurrentTasks(workflow) {
-  const summary = workflow?.summary || {};
-  text("current-total-articles", summary.total_articles, "0");
-  text("current-total-tasks", summary.total_tasks, "0");
-  text("current-xhh-tasks", summary.xiaoheihe_tasks, "0");
-  text("current-saved-drafts", summary.saved_drafts, "0");
+function taskMatchesSearch(task, query) {
+  if (!query) return true;
+  const searchable = [
+    task.id,
+    task.article_title,
+    task.title_used,
+    task.platform,
+    platformLabel(task.platform),
+    task.status,
+  ].join(" ").toLocaleLowerCase("zh-CN");
+  return searchable.includes(query);
+}
 
-  const state = byId("current-workflow-state");
-  state.textContent = workflow?.available ? "同库只读" : "当前任务不可用";
-  state.classList.toggle("ok", Boolean(workflow?.available));
-
-  const tasks = workflow?.tasks || [];
+function renderCurrentTaskRows(tasks) {
+  const query = byId("task-search").value.trim().toLocaleLowerCase("zh-CN");
+  const visibleTasks = tasks.filter((task) => taskMatchesSearch(task, query));
   const body = byId("current-tasks-body");
   body.replaceChildren();
-  byId("current-tasks-empty").classList.toggle("hidden", tasks.length > 0);
-  for (const task of tasks) {
+  byId("current-tasks-empty").classList.toggle("d-none", visibleTasks.length > 0);
+
+  for (const task of visibleTasks) {
     const row = document.createElement("tr");
     const taskLink = document.createElement("a");
     taskLink.href = `/task/${task.id}`;
     taskLink.textContent = `#${task.id}`;
-    cell(row, taskLink);
-    cell(row, task.article_title);
-    cell(row, task.platform === "xiaoheihe" ? "小黑盒" : "中关村在线");
-    cell(row, statusNode(task.status));
-    cell(row, task.title_used);
-    cell(row, formatTime(task.created_at));
+    appendCell(row, taskLink);
+    appendCell(row, task.article_title, { title: true });
+    appendCell(row, platformLabel(task.platform));
+    appendCell(row, statusNode(task.status));
+    appendCell(row, task.title_used, { title: true });
+    appendCell(row, formatTime(task.created_at));
     body.appendChild(row);
   }
 }
 
-async function refresh() {
-  const alert = byId("alert");
-  const button = byId("refresh");
-  button.disabled = true;
-  alert.classList.add("hidden");
-  try {
-    const apiUrl = document.body.dataset.dashboardApi;
-    const response = await fetch(apiUrl, { headers: { Accept: "application/json" } });
-    const payload = await response.json();
-    if (!response.ok) throw new Error(payload.message || payload.error || "加载失败");
-    renderCurrentTasks(payload.current_workflow);
-    text("total-articles", payload.summary.total_articles);
-    text("mapped-articles", payload.summary.mapped_articles);
-    text("total-snapshots", payload.summary.total_snapshots);
-    text("latest-run", payload.summary.latest_run_status);
-    text("publish-evidence", payload.contract.publish_evidence);
-    text("publish-source", payload.contract.publish_source);
-    text("collector-evidence", payload.contract.collector_evidence);
-    text("collector-source", payload.contract.collector_source);
-    const gate = byId("collector-gate");
-    gate.textContent = payload.contract.collector_enabled ? "HTTPX ENABLED" : "COLLECTOR BLOCKED";
-    gate.classList.toggle("ok", payload.contract.collector_enabled);
-    renderArticles(payload.articles);
-    renderRuns(payload.runs);
-    text("last-updated", `更新于 ${new Date().toLocaleTimeString("zh-CN", { hour12: false })}`);
-  } catch (error) {
-    alert.textContent = `看板加载失败：${error.message}`;
-    alert.classList.remove("hidden");
-  } finally {
-    button.disabled = false;
+function renderCurrentWorkflow(workflow) {
+  const summary = workflow?.summary || {};
+  setText("current-total-articles", summary.total_articles, "0");
+  setText("current-total-tasks", summary.total_tasks, "0");
+  setText("current-xhh-tasks", summary.xiaoheihe_tasks, "0");
+  setText("current-saved-drafts", summary.saved_drafts, "0");
+
+  const state = byId("current-workflow-state");
+  const available = Boolean(workflow?.available);
+  state.textContent = available ? "同库只读" : "当前任务不可用";
+  state.className = available
+    ? "badge text-bg-success-subtle text-success-emphasis"
+    : "badge text-bg-danger-subtle text-danger-emphasis";
+
+  currentTasks = workflow?.tasks || [];
+  renderCurrentTaskRows(currentTasks);
+}
+
+function renderContract(contract) {
+  setText("publish-evidence", contract.publish_evidence);
+  setText("publish-source", contract.publish_source);
+  setText("collector-evidence", contract.collector_evidence);
+  setText("collector-source", contract.collector_source);
+
+  const gate = byId("collector-gate");
+  if (contract.collector_enabled) {
+    gate.textContent = "HTTPX ENABLED";
+    gate.className = "badge text-bg-success-subtle text-success-emphasis";
+  } else {
+    gate.textContent = "COLLECTOR BLOCKED";
+    gate.className = "badge text-bg-warning-subtle text-warning-emphasis";
   }
 }
 
-byId("refresh").addEventListener("click", refresh);
-refresh();
-setInterval(refresh, 15000);
+async function refreshDashboard() {
+  const alert = byId("alert");
+  const button = byId("refresh");
+  button.disabled = true;
+  button.classList.add("is-loading");
+  alert.classList.add("d-none");
+
+  try {
+    const response = await fetch(document.body.dataset.dashboardApi, {
+      headers: { Accept: "application/json" },
+      cache: "no-store",
+    });
+    const payload = await response.json();
+    if (!response.ok) {
+      throw new Error(payload.message || payload.error || "加载失败");
+    }
+
+    renderCurrentWorkflow(payload.current_workflow);
+    setText("total-articles", payload.summary.total_articles, "0");
+    setText("mapped-articles", payload.summary.mapped_articles, "0");
+    setText("total-snapshots", payload.summary.total_snapshots, "0");
+    setText("latest-run", payload.summary.latest_run_status, "暂无运行");
+    renderContract(payload.contract);
+    renderArticles(payload.articles || []);
+    renderRuns(payload.runs || []);
+    setText(
+      "last-updated",
+      `更新于 ${new Date().toLocaleTimeString("zh-CN", { hour12: false })}`,
+    );
+  } catch (error) {
+    alert.textContent = `看板加载失败：${error.message}`;
+    alert.classList.remove("d-none");
+  } finally {
+    button.disabled = false;
+    button.classList.remove("is-loading");
+  }
+}
+
+function readLayoutState() {
+  try {
+    const value = JSON.parse(localStorage.getItem(LAYOUT_STORAGE_KEY));
+    if (!value || !Array.isArray(value.widgets) || !Array.isArray(value.hidden)) {
+      return null;
+    }
+    return value;
+  } catch (_error) {
+    return null;
+  }
+}
+
+function moduleElement(moduleId) {
+  return document.querySelector(`[data-module="${moduleId}"]`);
+}
+
+function syncModuleToggles(hiddenModules) {
+  const hidden = new Set(hiddenModules);
+  document.querySelectorAll("[data-module-toggle]").forEach((input) => {
+    input.checked = !hidden.has(input.dataset.moduleToggle);
+  });
+}
+
+function hideModule(moduleId) {
+  const element = moduleElement(moduleId);
+  if (!element || element.hidden) return;
+  dashboardGrid.removeWidget(element, false, false);
+  element.hidden = true;
+}
+
+function showModule(moduleId) {
+  const element = moduleElement(moduleId);
+  if (!element || !element.hidden) return;
+  element.hidden = false;
+  dashboardGrid.makeWidget(element);
+  const savedWidget = savedLayoutState?.widgets.find((item) => item.id === moduleId);
+  const defaultWidget = DEFAULT_LAYOUT.find((item) => item.id === moduleId);
+  if (savedWidget || defaultWidget) {
+    dashboardGrid.update(element, savedWidget || defaultWidget);
+  }
+}
+
+function applyLayoutState(state) {
+  if (!state) return;
+  dashboardGrid.load(state.widgets, false);
+  for (const moduleId of state.hidden) hideModule(moduleId);
+  syncModuleToggles(state.hidden);
+}
+
+function updateResponsiveSummaryHeight() {
+  if (!dashboardGrid) return;
+  const summary = moduleElement("summary");
+  if (!summary || summary.hidden) return;
+
+  let height = 2;
+  if (window.innerWidth < 576) height = 6;
+  else if (window.innerWidth < 992) height = 4;
+  else {
+    height = savedLayoutState?.widgets.find((item) => item.id === "summary")?.h || 2;
+  }
+
+  if (summary.gridstackNode?.h !== height) {
+    dashboardGrid.update(summary, { h: height });
+  }
+}
+
+function serializeLayout() {
+  const widgets = dashboardGrid.save(false, false).map((item) => ({
+    id: item.id,
+    x: item.x,
+    y: item.y,
+    w: item.w,
+    h: item.h,
+  }));
+  const hidden = Array.from(document.querySelectorAll("[data-module][hidden]"))
+    .map((element) => element.dataset.module);
+  return { widgets, hidden };
+}
+
+function showToast(message) {
+  setText("layout-toast-message", message);
+  window.coreui.Toast.getOrCreateInstance(byId("layout-toast"), { delay: 2200 }).show();
+}
+
+function setEditMode(enabled) {
+  dashboardEditing = enabled;
+  document.body.classList.toggle("dashboard-editing", enabled);
+  byId("edit-toolbar").classList.toggle("d-none", !enabled);
+  dashboardGrid.enableMove(enabled);
+  dashboardGrid.enableResize(enabled);
+
+  const button = byId("edit-dashboard");
+  button.classList.toggle("btn-primary", !enabled);
+  button.classList.toggle("btn-outline-primary", enabled);
+  button.querySelector("i").className = enabled ? "cil-check-circle" : "cil-pencil";
+  button.querySelector("span").textContent = enabled ? "完成编辑" : "编辑看板";
+}
+
+function saveLayout() {
+  savedLayoutState = serializeLayout();
+  localStorage.setItem(LAYOUT_STORAGE_KEY, JSON.stringify(savedLayoutState));
+  setEditMode(false);
+  showToast("看板布局已保存");
+}
+
+function restoreDefaultLayout() {
+  localStorage.removeItem(LAYOUT_STORAGE_KEY);
+  for (const item of DEFAULT_LAYOUT) showModule(item.id);
+  dashboardGrid.load(DEFAULT_LAYOUT, false);
+  savedLayoutState = { widgets: DEFAULT_LAYOUT.map((item) => ({ ...item })), hidden: [] };
+  syncModuleToggles([]);
+  showToast("已恢复默认布局");
+}
+
+function initGrid() {
+  dashboardGrid = window.GridStack.init({
+    column: 12,
+    cellHeight: 88,
+    margin: 8,
+    animate: true,
+    float: false,
+    disableDrag: true,
+    disableResize: true,
+    draggable: { handle: ".widget-drag-handle" },
+    resizable: { handles: "e, se, s, sw, w" },
+    columnOpts: {
+      breakpoints: [
+        { w: 700, c: 1, layout: "moveScale" },
+        { w: 1000, c: 6, layout: "moveScale" },
+        { w: 1400, c: 12, layout: "moveScale" },
+      ],
+    },
+  }, byId("dashboard-grid"));
+
+  savedLayoutState = readLayoutState();
+  applyLayoutState(savedLayoutState);
+  updateResponsiveSummaryHeight();
+}
+
+function setTheme(theme) {
+  const selected = theme === "dark" ? "dark" : "light";
+  document.documentElement.setAttribute("data-coreui-theme", selected);
+  byId("theme-icon").className = selected === "dark" ? "cil-sun" : "cil-moon";
+  localStorage.setItem(THEME_STORAGE_KEY, selected);
+}
+
+function initTheme() {
+  setTheme(localStorage.getItem(THEME_STORAGE_KEY) || "light");
+}
+
+function toggleSidebar() {
+  if (window.innerWidth < 992) {
+    document.body.classList.toggle("sidebar-mobile-open");
+    return;
+  }
+  const collapsed = document.body.classList.toggle("sidebar-collapsed");
+  localStorage.setItem(SIDEBAR_STORAGE_KEY, String(collapsed));
+  window.setTimeout(() => dashboardGrid?.onResize(), 220);
+}
+
+function initSidebar() {
+  if (window.innerWidth >= 992 && localStorage.getItem(SIDEBAR_STORAGE_KEY) === "true") {
+    document.body.classList.add("sidebar-collapsed");
+  }
+  byId("sidebar-toggle").addEventListener("click", toggleSidebar);
+  byId("sidebar-close").addEventListener("click", () => {
+    document.body.classList.remove("sidebar-mobile-open");
+  });
+  byId("sidebar-backdrop").addEventListener("click", () => {
+    document.body.classList.remove("sidebar-mobile-open");
+  });
+  document.querySelectorAll(".sidebar a").forEach((link) => {
+    link.addEventListener("click", () => document.body.classList.remove("sidebar-mobile-open"));
+  });
+  window.addEventListener("resize", updateResponsiveSummaryHeight);
+}
+
+function bindInteractions() {
+  byId("refresh").addEventListener("click", refreshDashboard);
+  byId("task-search").addEventListener("input", () => renderCurrentTaskRows(currentTasks));
+  byId("edit-dashboard").addEventListener("click", () => setEditMode(!dashboardEditing));
+  byId("save-layout").addEventListener("click", saveLayout);
+  byId("reset-layout").addEventListener("click", restoreDefaultLayout);
+  byId("theme-toggle").addEventListener("click", () => {
+    const current = document.documentElement.getAttribute("data-coreui-theme");
+    setTheme(current === "dark" ? "light" : "dark");
+  });
+
+  document.querySelectorAll("[data-module-toggle]").forEach((input) => {
+    input.addEventListener("change", () => {
+      const moduleId = input.dataset.moduleToggle;
+      if (input.checked) showModule(moduleId);
+      else hideModule(moduleId);
+    });
+  });
+}
+
+function initializeDashboard() {
+  initTheme();
+  initGrid();
+  initSidebar();
+  bindInteractions();
+  refreshDashboard();
+  window.setInterval(refreshDashboard, 15000);
+}
+
+initializeDashboard();

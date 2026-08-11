@@ -56,19 +56,24 @@ function ConvertTo-PowerShellLiteral {
 }
 
 Write-Host "[1/6] 检查项目版本和系统前置条件" -ForegroundColor Cyan
-if (-not (Test-Path -LiteralPath (Join-Path $ProjectRoot ".git"))) {
-    throw "当前目录不是 Git 仓库。请先执行 git clone，再运行本脚本。"
+$gitRepository = Test-Path -LiteralPath (Join-Path $ProjectRoot ".git")
+if ($gitRepository) {
+    $GitCommand = Get-CommandPath "git"
+} else {
+    Write-Warning "当前是源码压缩包模式，未检测到 .git；跳过 Git commit 校验。"
 }
-
-$GitCommand = Get-CommandPath "git"
 $CondaCommand = Get-CommandPath "conda"
 
-$currentCommit = (& $GitCommand rev-parse HEAD).Trim()
-if ($LASTEXITCODE -ne 0) {
-    throw "无法读取当前 Git commit。"
-}
-if ($ExpectedCommit -and $currentCommit -ne $ExpectedCommit) {
-    throw "当前代码不是已验证发行 commit。期望 $ExpectedCommit，实际 $currentCommit。请先 checkout 正确版本，或显式传入 -ExpectedCommit。"
+if ($gitRepository) {
+    $currentCommit = (& $GitCommand rev-parse HEAD).Trim()
+    if ($LASTEXITCODE -ne 0) {
+        throw "无法读取当前 Git commit。"
+    }
+    if ($ExpectedCommit -and $currentCommit -ne $ExpectedCommit) {
+        throw "当前代码不是已验证发行 commit。期望 $ExpectedCommit，实际 $currentCommit。请先 checkout 正确版本，或显式传入 -ExpectedCommit。"
+    }
+} else {
+    $currentCommit = "source-package"
 }
 Write-Host "代码版本: $currentCommit" -ForegroundColor Green
 

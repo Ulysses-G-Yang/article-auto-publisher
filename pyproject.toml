@@ -15,7 +15,6 @@ dependencies = [
     "playwright>=1.49.0,<2.0.0",
     "pydantic>=2.10.0,<3.0.0",
     "PyYAML>=6.0.2,<7.0.0",
-    "waitress>=3.0.0,<4.0.0",
 ]
 
 [tool.setuptools]

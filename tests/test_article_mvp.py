@@ -459,7 +459,33 @@ def test_new_package_has_no_legacy_runtime_imports():
 def test_dashboard_shows_safe_summary_without_raw_payloads(tmp_path):
     url = database_url(tmp_path)
     runtime = AsyncRuntime()
-    app = create_dashboard_app(database_url=url, runtime=runtime)
+
+    def current_workflow_provider():
+        return {
+            "available": True,
+            "summary": {
+                "total_articles": 19,
+                "total_tasks": 24,
+                "xiaoheihe_tasks": 10,
+                "saved_drafts": 17,
+            },
+            "tasks": [
+                {
+                    "id": 7,
+                    "platform": "xiaoheihe",
+                    "status": "completed",
+                    "article_title": "现役任务",
+                    "title_used": "安全标题",
+                    "created_at": "2026-08-11T09:00:00",
+                }
+            ],
+        }
+
+    app = create_dashboard_app(
+        database_url=url,
+        runtime=runtime,
+        current_workflow_provider=current_workflow_provider,
+    )
 
     async def seed_dashboard() -> None:
         async with session_scope(url) as session:
@@ -501,7 +527,7 @@ def test_dashboard_shows_safe_summary_without_raw_payloads(tmp_path):
         client = app.test_client()
         page_response = client.get("/")
         assert page_response.status_code == 200
-        assert "小黑盒发布与数据采集" in page_response.get_data(as_text=True)
+        assert "发布与采集数据中心" in page_response.get_data(as_text=True)
         assert client.get("/healthz").status_code == 200
 
         api_response = client.get("/api/dashboard")
@@ -512,6 +538,8 @@ def test_dashboard_shows_safe_summary_without_raw_payloads(tmp_path):
         assert payload["articles"][0]["latest_metric"]["read_count"] == 320
         assert payload["articles"][0]["latest_metric"]["revenue"] == "1.2500"
         assert payload["contract"]["collector_enabled"] is False
+        assert payload["current_workflow"]["summary"]["total_tasks"] == 24
+        assert payload["current_workflow"]["tasks"][0]["article_title"] == "现役任务"
         serialized = api_response.get_data(as_text=True)
         assert "must-not-be-visible" not in serialized
         assert "raw_data" not in serialized

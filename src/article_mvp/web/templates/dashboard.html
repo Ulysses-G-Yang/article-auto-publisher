@@ -3,18 +3,19 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>小黑盒发布与数据采集 MVP</title>
-  <link rel="stylesheet" href="{{ url_for('static', filename='dashboard.css') }}">
+  <title>发布与采集数据中心</title>
+  <link rel="stylesheet" href="{{ url_for('article_mvp_dashboard.static', filename='dashboard.css') }}">
 </head>
-<body>
+<body data-dashboard-api="{{ url_for('article_mvp_dashboard.api_dashboard') }}">
   <main class="shell">
     <header class="hero">
       <div>
         <p class="eyebrow">ARTICLE MVP · PHASE 1</p>
-        <h1>小黑盒发布与数据采集</h1>
-        <p class="subtitle">只读运行看板 · 映射、指标、采集状态与接口证据</p>
+        <h1>发布与采集数据中心</h1>
+        <p class="subtitle">现役发布任务、小黑盒文章映射、指标与采集状态</p>
       </div>
       <div class="actions">
+        <a class="back-link" href="/">返回发布仪表盘</a>
         <span id="last-updated" class="updated">等待加载</span>
         <button id="refresh" type="button">刷新数据</button>
       </div>
@@ -22,8 +23,29 @@
 
     <section id="alert" class="alert hidden" role="alert"></section>
 
+    <section class="panel current-panel">
+      <div class="panel-heading">
+        <div><p class="kicker">CURRENT WORKFLOW</p><h2>当前发布任务</h2></div>
+        <span id="current-workflow-state" class="badge ok">同库只读</span>
+      </div>
+      <div class="cards current-cards" aria-label="当前发布摘要">
+        <article class="card"><span>现有文章</span><strong id="current-total-articles">—</strong></article>
+        <article class="card"><span>全部任务</span><strong id="current-total-tasks">—</strong></article>
+        <article class="card"><span>小黑盒任务</span><strong id="current-xhh-tasks">—</strong></article>
+        <article class="card"><span>草稿已保存</span><strong id="current-saved-drafts">—</strong></article>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>任务</th><th>文章</th><th>平台</th><th>状态</th><th>发布标题</th><th>创建时间</th></tr></thead>
+          <tbody id="current-tasks-body"></tbody>
+        </table>
+        <p id="current-tasks-empty" class="empty hidden">当前发布工作流还没有任务。</p>
+      </div>
+    </section>
+
+    <div class="section-title"><p class="kicker">NEW DATA PIPELINE</p><h2>小黑盒发布映射与指标</h2></div>
     <section class="cards" aria-label="运行摘要">
-      <article class="card"><span>平台文章</span><strong id="total-articles">—</strong></article>
+      <article class="card"><span>已发布平台文章</span><strong id="total-articles">—</strong></article>
       <article class="card"><span>已映射</span><strong id="mapped-articles">—</strong></article>
       <article class="card"><span>指标快照</span><strong id="total-snapshots">—</strong></article>
       <article class="card"><span>最近采集</span><strong id="latest-run">—</strong></article>
@@ -62,6 +84,6 @@
       </div>
     </section>
   </main>
-  <script src="{{ url_for('static', filename='dashboard.js') }}" defer></script>
+  <script src="{{ url_for('article_mvp_dashboard.static', filename='dashboard.js') }}" defer></script>
 </body>
 </html>

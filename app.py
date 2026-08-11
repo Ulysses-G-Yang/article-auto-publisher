@@ -7,16 +7,20 @@ import signal
 import shutil
 
 # 确保模块路径
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, BASE_DIR)
+sys.path.insert(0, os.path.join(BASE_DIR, "src"))
 
 from flask import Flask
 
+from article_mvp.web import create_dashboard_blueprint
 from config import get_config
-from web.routes import register_routes
 from core.logging_setup import configure_logging
 from loguru import logger
+from models.database import Database
+from web.article_mvp_bridge import build_current_workflow_snapshot
+from web.routes import register_routes
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 _QUEUE_START_LOCK = threading.Lock()
 _QUEUE_STARTED = False
 
@@ -108,6 +112,19 @@ def create_app() -> Flask:
 
     # 注册路由
     register_routes(app)
+
+    # 新数据层保持独立包边界，但通过 Blueprint 接入现役 5000 端口。
+    # Provider 仅返回脱敏任务摘要，新包不会反向导入现役发布模块。
+    database_path = os.path.abspath(cfg["paths"]["database"]).replace("\\", "/")
+    dashboard_database_url = f"sqlite+aiosqlite:///{database_path}"
+    current_db = Database.get_instance()
+    app.register_blueprint(
+        create_dashboard_blueprint(
+            database_url=dashboard_database_url,
+            current_workflow_provider=lambda: build_current_workflow_snapshot(current_db),
+        ),
+        url_prefix="/data-center",
+    )
 
     # 添加清理 Profile 锁文件的 API；保留原有 /api/cleanup 端点兼容性。
     @app.route("/api/cleanup", methods=["POST"])

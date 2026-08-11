@@ -68,15 +68,47 @@ function renderRuns(runs) {
   }
 }
 
+function renderCurrentTasks(workflow) {
+  const summary = workflow?.summary || {};
+  text("current-total-articles", summary.total_articles, "0");
+  text("current-total-tasks", summary.total_tasks, "0");
+  text("current-xhh-tasks", summary.xiaoheihe_tasks, "0");
+  text("current-saved-drafts", summary.saved_drafts, "0");
+
+  const state = byId("current-workflow-state");
+  state.textContent = workflow?.available ? "同库只读" : "当前任务不可用";
+  state.classList.toggle("ok", Boolean(workflow?.available));
+
+  const tasks = workflow?.tasks || [];
+  const body = byId("current-tasks-body");
+  body.replaceChildren();
+  byId("current-tasks-empty").classList.toggle("hidden", tasks.length > 0);
+  for (const task of tasks) {
+    const row = document.createElement("tr");
+    const taskLink = document.createElement("a");
+    taskLink.href = `/task/${task.id}`;
+    taskLink.textContent = `#${task.id}`;
+    cell(row, taskLink);
+    cell(row, task.article_title);
+    cell(row, task.platform === "xiaoheihe" ? "小黑盒" : "中关村在线");
+    cell(row, statusNode(task.status));
+    cell(row, task.title_used);
+    cell(row, formatTime(task.created_at));
+    body.appendChild(row);
+  }
+}
+
 async function refresh() {
   const alert = byId("alert");
   const button = byId("refresh");
   button.disabled = true;
   alert.classList.add("hidden");
   try {
-    const response = await fetch("/api/dashboard", { headers: { Accept: "application/json" } });
+    const apiUrl = document.body.dataset.dashboardApi;
+    const response = await fetch(apiUrl, { headers: { Accept: "application/json" } });
     const payload = await response.json();
     if (!response.ok) throw new Error(payload.message || payload.error || "加载失败");
+    renderCurrentTasks(payload.current_workflow);
     text("total-articles", payload.summary.total_articles);
     text("mapped-articles", payload.summary.mapped_articles);
     text("total-snapshots", payload.summary.total_snapshots);

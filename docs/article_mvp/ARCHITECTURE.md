@@ -1,7 +1,11 @@
 # 小黑盒单链路 MVP 架构
 
-新入口位于 `src/article_mvp`。根目录原有 Flask、MCP、发布器以及
-`D:\Backup\Documents\text-restored` 均不是新包的运行时依赖。
+新数据模块位于 `src/article_mvp`，由现役 Flask 服务以 Blueprint 方式挂载到
+`/data-center/`。依赖方向只能是现役入口调用新包；新包不得反向导入根目录的
+`core`、`models`、`web`、MCP 或平台发布器。
+
+尚未交付的重型老项目以及 `D:\Backup\Documents\text-restored` 均不是运行时
+依赖，不得加入 `PYTHONPATH`、安装或执行。
 
 阶段一数据流：
 
@@ -29,11 +33,12 @@ PublishRequest
 $env:PYTHONPATH = "src"
 python -m article_mvp.tools.init_db
 python -m article_mvp.tools.probe_xhh
-python -m article_mvp.tools.run_dashboard
 ```
 
-看板默认监听 `http://127.0.0.1:5100`，只展示映射、归一化指标、
-采集运行状态和接口证据等级，不返回原始平台响应或登录材料。
+看板不再启动第二个端口。启动现役服务后访问
+`http://127.0.0.1:5000/data-center/`。页面同时展示现役发布任务的脱敏只读摘要、
+新映射、归一化指标、采集运行状态和接口证据等级，不返回原始平台响应、文章
+正文或登录材料。
 
 公开发布属于人工验收门，不能加入自动测试：
 

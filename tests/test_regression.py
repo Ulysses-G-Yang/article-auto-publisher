@@ -261,6 +261,35 @@ class DatabaseTestCase(unittest.TestCase):
 
 
 class RegressionTests(DatabaseTestCase):
+    def test_data_center_is_mounted_on_current_flask_service(self):
+        from app import create_app
+
+        article_id = self.create_article()
+        task_id = self.db.create_task(article_id, "xiaoheihe")
+        self.db.update_task(task_id, status="completed", title_used="已保存草稿")
+        app = create_app()
+        try:
+            client = app.test_client()
+            page_response = client.get("/data-center/")
+            self.assertEqual(page_response.status_code, 200)
+            self.assertIn("发布与采集数据中心", page_response.get_data(as_text=True))
+            asset_response = client.get("/data-center/assets/dashboard.js")
+            self.assertEqual(asset_response.status_code, 200)
+            asset_response.close()
+            self.assertIn("/data-center/", client.get("/").get_data(as_text=True))
+
+            api_response = client.get("/data-center/api/dashboard")
+            self.assertEqual(api_response.status_code, 200)
+            payload = api_response.get_json()
+            self.assertEqual(payload["current_workflow"]["summary"]["total_articles"], 1)
+            self.assertEqual(payload["current_workflow"]["summary"]["total_tasks"], 1)
+            self.assertEqual(payload["current_workflow"]["summary"]["xiaoheihe_tasks"], 1)
+            self.assertEqual(payload["current_workflow"]["summary"]["saved_drafts"], 1)
+            self.assertEqual(payload["summary"]["total_articles"], 0)
+            self.assertNotIn("测试正文", api_response.get_data(as_text=True))
+        finally:
+            app.extensions["article_mvp_dashboard"].close()
+
     def test_create_app_recovers_orphaned_login_state(self):
         from app import create_app
 

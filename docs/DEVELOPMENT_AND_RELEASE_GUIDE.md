@@ -204,7 +204,7 @@ python -m mcp_server.server
 
 不需要手动创建 `D:\article-auto-publisher` 目录。`gh repo clone` 或 `git clone` 会自动创建目录；拉取后运行项目自带脚本即可创建 Python 环境、安装依赖、创建空的生产运行目录并生成本机配置。
 
-前置条件只有三项：Git/GitHub SSH、Conda、Google Chrome Stable。项目当前使用系统 Chrome 的 `channel=chrome`，不会导入日常 Chrome Profile。
+Git 克隆模式的前置条件有三项：Git/GitHub SSH、Conda、Google Chrome Stable。项目当前使用系统 Chrome 的 `channel=chrome`，不会导入日常 Chrome Profile。若使用本项目提供的源码压缩包，安装脚本会跳过 Git 校验，但仍需要 Conda 和 Chrome。
 
 ```powershell
 gh repo clone Ulysses-G-Yang/article-auto-publisher D:\article-auto-publisher -- --branch agent/account-management-publishing-fixes

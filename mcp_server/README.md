@@ -34,7 +34,7 @@
 .\scripts\start_production_windows.ps1
 ```
 
-脚本会自动创建 Python 3.12 环境、安装依赖、创建空运行目录并生成被 Git 忽略的生产配置；不会复制测试数据库、Cookie 或 Chrome Profile。Git、Conda 和 Google Chrome 需要预先安装。
+脚本会自动创建 Python 3.12 环境、安装依赖、创建空运行目录并生成被 Git 忽略的生产配置；不会复制测试数据库、Cookie 或 Chrome Profile。Git/ GitHub SSH 用于克隆模式；源码压缩包模式不要求 Git，但 Conda 和 Google Chrome 仍需要预先安装。
 
 手动启动时，先启动现有 Flask 服务（内部地址 `http://127.0.0.1:5000`），再在项目根目录执行：
 

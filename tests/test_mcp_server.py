@@ -119,6 +119,29 @@ class MCPServerTests(unittest.TestCase):
         self.assertEqual(result["status"], "awaiting_user_action")
         self.assertEqual(result["result"]["needs"], ["community", "topic"])
 
+
+    def test_publish_poll_maps_zol_topic_selection(self):
+        task_id = "publish-zol-selection"
+        self.run_async(self.store.create(
+            task_id,
+            "publish",
+            "pending",
+            internal_task_ids=[21],
+        ))
+        self.client.tasks = [
+            {
+                "id": 21,
+                "platform": "zol",
+                "status": "needs_selection",
+                "article_title": "测试",
+                "topic_used": None,
+                "community_used": None,
+            },
+        ]
+        result = self.run_async(self.handlers["get_publish_result"](task_id))
+        self.assertEqual(result["status"], "awaiting_user_action")
+        self.assertEqual(result["result"]["needs"], ["topic"])
+
     def test_healthz_is_available_without_mcp_session(self):
         settings = MCPSettings(
             "http://localhost:5000",

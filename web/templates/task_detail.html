@@ -66,7 +66,7 @@
                     <label class="text-muted small">创建时间</label>
                     <p>{{ task.created_at or '-' }}</p>
                 </div>
-                {% if task.platform == 'xiaoheihe' and (task.expected_images or task.uploaded_images or task.media_status not in (None, 'not_checked')) %}
+                {% if task.expected_images or task.uploaded_images or task.media_status not in (None, 'not_checked') %}
                 <div class="col-md-6">
                     <label class="text-muted small">图片处理</label>
                     <p>

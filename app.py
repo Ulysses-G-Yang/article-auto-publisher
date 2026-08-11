@@ -17,6 +17,8 @@ from core.logging_setup import configure_logging
 from loguru import logger
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+_QUEUE_START_LOCK = threading.Lock()
+_QUEUE_STARTED = False
 
 
 def clear_platform_cookies(platform: str) -> bool:
@@ -85,8 +87,8 @@ def kill_zombie_chrome():
                 if os.path.exists(lock_path):
                     os.remove(lock_path)
                     cleaned += 1
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.warning("清理 Chrome Profile 锁文件失败: path={}, error={}", lock_path, exc)
 
     return cleaned
 
@@ -118,6 +120,13 @@ def create_app() -> Flask:
 
 def start_queue_worker():
     """在后台线程中启动队列 worker（只启动一次）"""
+    global _QUEUE_STARTED
+    with _QUEUE_START_LOCK:
+        if _QUEUE_STARTED:
+            logger.debug("队列 worker 已启动，跳过重复启动")
+            return
+        _QUEUE_STARTED = True
+
     # 在创建 worker 前完成启动迁移，确保历史 queued/retrying/processing 任务
     # 不会在新任务上传前后被误当成自动恢复对象。
     from models.database import Database
@@ -133,9 +142,14 @@ def start_queue_worker():
         loop.run_until_complete(qm.start())
         loop.run_forever()
 
-    t = threading.Thread(target=_run, daemon=True)
-    t.start()
-    logger.info("队列 worker 已启动；历史未完成任务不会自动恢复")
+    try:
+        t = threading.Thread(target=_run, daemon=True, name="article-publisher-queue")
+        t.start()
+        logger.info("队列 worker 已启动；历史未完成任务不会自动恢复")
+    except Exception:
+        with _QUEUE_START_LOCK:
+            _QUEUE_STARTED = False
+        raise
 
 
 def on_shutdown(signum, frame):
@@ -149,6 +163,8 @@ def on_shutdown(signum, frame):
 if __name__ == "__main__":
     cfg = get_config()
     app_cfg = cfg["app"]
+    if app_cfg.get("environment") == "production":
+        raise RuntimeError("生产环境请使用 run_flask_production.py，不要使用 Flask 开发服务器")
     configure_logging(cfg["paths"]["logs"])
 
     # 启动前先清理上次残留的僵尸 Chrome
@@ -170,6 +186,6 @@ if __name__ == "__main__":
     app.run(
         host=app_cfg["host"],
         port=app_cfg["port"],
-        debug=True,
+        debug=bool(app_cfg.get("debug", False)),
         use_reloader=False,
     )

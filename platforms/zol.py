@@ -1,7 +1,9 @@
 """中关村在线（ZOL）创作者中心自动化"""
 import asyncio
+import os
 import re
 import time
+from pathlib import Path
 from urllib.parse import urlparse
 from loguru import logger
 
@@ -23,6 +25,10 @@ class ZOLPlatform(BasePlatform):
     FORUM_HOST = "bbs.zol.com.cn"
     LOGIN_HOST = "service.zol.com.cn"
     CRITICAL_COOKIES = {"last_userid", "lv", "zol_userid", "zol_sid"}
+    IMAGE_BUTTON = "button[title='图片上传'], button[aria-label='图片上传']"
+    IMAGE_MODAL = ".ant-modal-wrap:visible"
+    TOPIC_BUTTON = "button:has-text('选择话题')"
+    TOPIC_MODAL = ".ant-modal-wrap:visible"
 
     def __init__(self):
         super().__init__()
@@ -509,7 +515,7 @@ class ZOLPlatform(BasePlatform):
         raise SelectorError("ZOL_TITLE_SELECTOR_ERROR: ZOL 标题输入框未找到或输入后校验失败")
 
     async def fill_content(self, content_blocks: list, images: list):
-        """支持 iframe、textarea、contenteditable 三类正文编辑器并验证文本。"""
+        """填写正文、插入图片，并验证文字和图片数量。"""
         self._require_page_alive("ZOL 填写正文")
         iframe_selectors = [
             ".tox-edit-area iframe",
@@ -567,32 +573,43 @@ class ZOLPlatform(BasePlatform):
         ]
         tag_name = await editor.evaluate("el => el.tagName.toLowerCase()")
         expected_value = "\n\n".join(text_parts)
-        # TinyMCE 的正文实际位于跨域 iframe 内的 body。对 textarea、
-        # contenteditable 和 iframe body 统一使用 locator.fill，避免把
-        # page.keyboard 的输入错误地发送到标题输入框或父页面。
-        if tag_name in ("textarea", "body"):
-            await editor.fill(expected_value)
-        elif not any(block.get("type") == "image" for block in content_blocks):
+        expected_images = sum(
+            1 for block in content_blocks if block.get("type") == "image"
+        )
+        uploaded_images = 0
+        failed_images = []
+        has_images = expected_images > 0
+
+        # 没有图片时直接 fill；有图片时按 DOCX 块顺序写入，确保图片出现在
+        # 对应段落之间。当前真实 ZOL 页面是 TinyMCE iframe，但保留 textarea/
+        # contenteditable 兼容路径，方便页面改版和离线测试。
+        if not has_images:
             await editor.fill(expected_value)
         else:
             await editor.click()
             await self.page.keyboard.press("Control+A")
             await self.page.keyboard.press("Backspace")
-            first_text = True
+            previous_kind = None
             for block in content_blocks:
                 btype = block.get("type")
                 block_text = (block.get("text") or "").strip()
                 if btype in ("text", "heading") and block_text:
-                    if not first_text:
+                    await editor.click()
+                    await self.page.keyboard.press("Control+End")
+                    if previous_kind == "text":
                         await self.page.keyboard.press("Enter")
+                        await self.page.keyboard.press("Enter")
+                    elif previous_kind == "image":
                         await self.page.keyboard.press("Enter")
                     for index, line in enumerate(block_text.splitlines() or [block_text]):
                         if line:
                             await self.page.keyboard.insert_text(line)
                         if index < len(block_text.splitlines()) - 1:
                             await self.page.keyboard.press("Enter")
-                    first_text = False
+                    previous_kind = "text"
                 elif btype == "image":
+                    await editor.click()
+                    await self.page.keyboard.press("Control+End")
                     image_file = next(
                         (
                             img.get("local_path")
@@ -602,7 +619,22 @@ class ZOLPlatform(BasePlatform):
                         None,
                     ) or (images[0].get("local_path") if images else None)
                     if image_file:
-                        await self._upload_image(image_file)
+                        upload_result = await self._upload_image(image_file) or {}
+                        if upload_result.get("success"):
+                            uploaded_images += 1
+                        else:
+                            failed_images.append({
+                                "filename": Path(str(image_file)).name,
+                                "error": upload_result.get("error", "ZOL 图片上传失败"),
+                                "error_code": upload_result.get("error_code"),
+                            })
+                    else:
+                        failed_images.append({
+                            "filename": "",
+                            "error": "文章图片块没有对应本地文件",
+                            "error_code": "ZOL_IMAGE_FILE_MISSING",
+                        })
+                    previous_kind = "image"
                 await self.simulator.random_delay(0.3, 1.0)
             await editor.evaluate(
                 "el => el.dispatchEvent(new InputEvent('input', {bubbles: true, inputType: 'insertText'}))"
@@ -615,99 +647,379 @@ class ZOLPlatform(BasePlatform):
         missing = [part[:30] for part in text_parts if part not in actual_text]
         if missing:
             raise SelectorError(f"ZOL_CONTENT_VALIDATION_ERROR: 正文输入后验证失败，缺少文本片段: {missing}")
-        logger.info("ZOL 正文输入并验证成功: {} 个文本段落", len(text_parts))
+        if expected_images == 0:
+            media_status = "not_required"
+            media_error = None
+            media_error_code = None
+        elif uploaded_images == expected_images:
+            media_status = "completed"
+            media_error = None
+            media_error_code = None
+        elif uploaded_images == 0:
+            media_status = "failed"
+            media_error = f"{expected_images} 张图片全部上传失败"
+            media_error_code = "ZOL_IMAGES_ALL_FAILED"
+        else:
+            media_status = "partial"
+            media_error = f"{expected_images - uploaded_images} 张图片上传失败"
+            media_error_code = "ZOL_IMAGES_PARTIAL"
+
+        logger.info(
+            "ZOL 正文验证成功: text_parts={}, images={}/{}, media_status={}",
+            len(text_parts),
+            uploaded_images,
+            expected_images,
+            media_status,
+        )
+        return {
+            "text_ok": True,
+            "expected_images": expected_images,
+            "uploaded_images": uploaded_images,
+            "failed_images": failed_images,
+            "media_status": media_status,
+            "media_error": media_error,
+            "media_error_code": media_error_code,
+        }
+
+    async def _editor_image_count(self) -> int:
+        """只统计 ZOL 正文编辑器 iframe 内的图片。"""
+        self._require_page_alive("ZOL 统计编辑器图片")
+        for selector in ("#editor_ifr", "iframe.tox-edit-area__iframe"):
+            try:
+                iframe = self.page.locator(selector).first
+                if await iframe.count() > 0:
+                    return await self.page.frame_locator(selector).locator("body img").count()
+            except Exception as exc:
+                if self._exception_means_browser_closed(exc):
+                    raise BrowserLifecycleError("BROWSER_CONTEXT_CLOSED: ZOL 统计图片时页面已关闭") from exc
+                logger.debug("ZOL iframe 图片统计失败: selector={}, error={}", selector, exc)
+        try:
+            return await self.page.locator(
+                ".mce-content-body img, #tinymce img, [contenteditable='true'] img"
+            ).count()
+        except Exception as exc:
+            if self._exception_means_browser_closed(exc):
+                raise BrowserLifecycleError("BROWSER_CONTEXT_CLOSED: ZOL 统计图片时页面已关闭") from exc
+            return 0
 
     async def _upload_image(self, image_path: str):
-        """上传图片到 ZOL 编辑器"""
+        """通过真实 ZOL 图片弹窗上传一张图片并验证 iframe 图片数量。"""
+        image_name = Path(str(image_path)).name
+        if not image_path or not os.path.isfile(str(image_path)):
+            return {
+                "success": False,
+                "error_code": "ZOL_IMAGE_FILE_MISSING",
+                "error": f"图片文件不存在: {image_name}",
+            }
+
+        before_count = await self._editor_image_count()
         try:
-            # 点击图片上传按钮
-            img_btn_selectors = [
-                ".ke-toolbar-icon[title*='图片']",
-                ".ke-icon-image",
-                "a[title='插入图片']",
-                "button[title*='图片']",
-            ]
-            for sel in img_btn_selectors:
-                try:
-                    await self.page.click(sel, timeout=3000)
-                    await self.simulator.random_delay(0.5, 1.5)
-                    break
-                except Exception:
-                    continue
+            self._require_page_alive("ZOL 打开图片弹窗")
+            # 上一次上传即使已经插入图片，Ant Design 弹窗也可能仍在做关闭动画；
+            # 先收拢残留弹窗，避免它拦截下一次工具栏点击。
+            await self._close_image_modal()
+            button = self.page.locator(self.IMAGE_BUTTON).first
+            if await button.count() == 0 or not await button.is_visible():
+                return {
+                    "success": False,
+                    "error_code": "ZOL_IMAGE_UPLOAD_CONTROL_NOT_FOUND",
+                    "error": "未找到 ZOL 图片上传按钮",
+                }
+            await button.click(timeout=5000)
+            modal = self.page.locator(self.IMAGE_MODAL).last
+            await modal.wait_for(state="visible", timeout=5000)
 
-            # 查找文件上传输入框
-            upload_selectors = [
-                "input[type='file']",
-                ".ke-upload-area input[type='file']",
-                "#ke-upload-file",
-            ]
-            for sel in upload_selectors:
-                try:
-                    file_input = await self.page.wait_for_selector(sel, timeout=3000)
-                    if file_input:
-                        await file_input.set_input_files(image_path)
-                        await self.simulator.random_delay(2, 4)
-                        break
-                except Exception:
-                    continue
+            file_input = modal.locator(".local_upload input[type='file']").first
+            if await file_input.count() == 0:
+                file_input = modal.locator("input[type='file']").first
+            if await file_input.count() == 0:
+                return {
+                    "success": False,
+                    "error_code": "ZOL_IMAGE_UPLOAD_CONTROL_NOT_FOUND",
+                    "error": "图片弹窗中未找到本地上传控件",
+                }
+            await file_input.set_input_files(str(Path(image_path).resolve()))
+            await self.page.wait_for_timeout(300)
 
-            # 点击确认上传按钮
-            confirm_selectors = [
-                ".ke-dialog-btn-ok",
-                ".upload-btn-confirm",
-                "button:has-text('确定')",
-                "input[value='确定']",
-            ]
-            for sel in confirm_selectors:
-                try:
-                    await self.page.click(sel, timeout=2000)
-                    await self.simulator.random_delay(1, 2)
-                    break
-                except Exception:
-                    continue
+            insert_button = modal.get_by_role("button", name="插入编辑器", exact=True)
+            if await insert_button.count() == 0:
+                insert_button = modal.locator("button:has-text('插入编辑器')").first
+            if await insert_button.count() == 0:
+                return {
+                    "success": False,
+                    "error_code": "ZOL_IMAGE_UPLOAD_FAILED",
+                    "error": "图片上传后未出现插入编辑器按钮",
+                }
+            ready_deadline = asyncio.get_running_loop().time() + 15
+            while not await insert_button.is_enabled():
+                if asyncio.get_running_loop().time() >= ready_deadline:
+                    return {
+                        "success": False,
+                        "error_code": "ZOL_IMAGE_UPLOAD_FAILED",
+                        "error": "图片上传后插入编辑器按钮在 15 秒内仍不可用",
+                    }
+                await asyncio.sleep(0.5)
+            await insert_button.click(timeout=5000)
 
-        except Exception as e:
-            logger.warning("ZOL 图片上传失败: {}", e)
+            deadline = asyncio.get_running_loop().time() + 15
+            after_count = before_count
+            while asyncio.get_running_loop().time() < deadline:
+                after_count = await self._editor_image_count()
+                if after_count > before_count:
+                    await self._close_image_modal(modal)
+                    logger.info(
+                        "ZOL 图片上传并验证成功: filename={}, before={}, after={}",
+                        image_name,
+                        before_count,
+                        after_count,
+                    )
+                    return {
+                        "success": True,
+                        "filename": image_name,
+                        "before_count": before_count,
+                        "after_count": after_count,
+                    }
+                await asyncio.sleep(0.5)
+            return {
+                "success": False,
+                "error_code": "ZOL_IMAGE_UPLOAD_VERIFY_FAILED",
+                "error": f"图片插入后编辑器数量未增加: before={before_count}, after={after_count}",
+            }
+        except BrowserLifecycleError:
+            raise
+        except Exception as exc:
+            if self._exception_means_browser_closed(exc):
+                raise BrowserLifecycleError("BROWSER_CONTEXT_CLOSED: ZOL 图片上传时页面已关闭") from exc
+            logger.warning("ZOL 图片上传失败: filename={}, error={}", image_name, exc)
+            return {
+                "success": False,
+                "error_code": "ZOL_IMAGE_UPLOAD_FAILED",
+                "error": str(exc),
+            }
+        finally:
+            # 所有失败分支都必须关闭弹窗，否则后续图片和正文键盘输入会被遮罩截获。
+            await self._close_image_modal()
+
+    async def _close_image_modal(self, modal=None):
+        """关闭 ZOL 图片弹窗；只处理弹窗，不触碰 Cookie/Profile。"""
+        try:
+            active = modal or self.page.locator(self.IMAGE_MODAL).last
+            if await active.count() == 0 or not await active.is_visible():
+                return
+            close = active.locator("button[aria-label='Close'], .ant-modal-close").first
+            if await close.count() > 0:
+                await close.click(force=True)
+            else:
+                cancel = active.get_by_role("button", name="取 消", exact=True).first
+                if await cancel.count() > 0:
+                    await cancel.click(force=True)
+            try:
+                await active.wait_for(state="hidden", timeout=3000)
+            except Exception:
+                # 关闭动画偶尔不触发 hidden，下一次按钮点击前仍会再次执行兜底关闭。
+                logger.debug("ZOL 图片弹窗未在预期时间内隐藏")
+        except Exception as exc:
+            if self._exception_means_browser_closed(exc):
+                raise BrowserLifecycleError("BROWSER_CONTEXT_CLOSED: ZOL 关闭图片弹窗时页面已关闭") from exc
+            logger.debug("ZOL 关闭图片弹窗失败: {}", exc)
+
+    @staticmethod
+    def _normalize_topic(value: str) -> str:
+        return re.sub(r"\s+", " ", str(value or "").strip()).lower()
+
+    @classmethod
+    def _topic_queries(cls, topic: str = "", selection_query: str = "") -> list[str]:
+        """生成有限的实时搜索词，不把整篇关键词 JSON 直接输入平台。"""
+        queries = []
+
+        def add(value: str):
+            normalized = re.sub(r"\s+", " ", str(value or "").strip())
+            if normalized and normalized not in queries:
+                queries.append(normalized[:50])
+
+        add(topic)
+        raw = re.sub(r"[，、,。；;|/]+", " ", str(selection_query or ""))
+        add(raw)
+        for part in re.split(r"\s+", raw):
+            if len(part.strip()) >= 2:
+                add(part)
+        return queries[:6]
+
+    @classmethod
+    def _pick_topic_candidate(
+        cls,
+        candidates: list[str],
+        query: str,
+    ) -> str:
+        """只接受精确或唯一包含匹配，避免把搜索词本身当候选。"""
+        unique = []
+        seen = set()
+        for candidate in candidates:
+            value = re.sub(r"\s+", " ", str(candidate or "").strip())
+            key = cls._normalize_topic(value)
+            if value and key not in seen:
+                seen.add(key)
+                unique.append(value)
+        normalized_query = cls._normalize_topic(query)
+        exact = [item for item in unique if cls._normalize_topic(item) == normalized_query]
+        if len(exact) == 1:
+            return exact[0]
+        contained = [
+            item for item in unique
+            if normalized_query
+            and (
+                normalized_query in cls._normalize_topic(item)
+                or cls._normalize_topic(item) in normalized_query
+            )
+        ]
+        return contained[0] if len(contained) == 1 else ""
+
+    async def _close_topic_modal(self):
+        try:
+            modal = self.page.locator(self.TOPIC_MODAL).last
+            if await modal.count() and await modal.is_visible():
+                close = modal.locator("button[aria-label='Close'], .ant-modal-close").first
+                if await close.count():
+                    await close.click(force=True)
+                else:
+                    cancel = modal.get_by_role("button", name="取 消", exact=True).first
+                    if await cancel.count():
+                        await cancel.click(force=True)
+        except Exception as exc:
+            if self._exception_means_browser_closed(exc):
+                raise BrowserLifecycleError("BROWSER_CONTEXT_CLOSED: ZOL 关闭话题弹窗时页面已关闭") from exc
+
+    async def _topic_candidates(self, modal) -> list[str]:
+        items = modal.locator(".list .item .title")
+        candidates = []
+        for index in range(await items.count()):
+            value = re.sub(r"\s+", " ", (await items.nth(index).inner_text()).strip())
+            if value and value not in candidates:
+                candidates.append(value)
+        return candidates
+
+    async def _verify_topic_selected(self, expected: str) -> bool:
+        tags = self.page.locator("span.ant-tag, .ant-tag")
+        target = self._normalize_topic(expected)
+        for index in range(await tags.count()):
+            try:
+                if not await tags.nth(index).is_visible():
+                    continue
+                actual = self._normalize_topic(await tags.nth(index).inner_text())
+                if actual == target:
+                    return True
+            except Exception as exc:
+                if self._exception_means_browser_closed(exc):
+                    raise BrowserLifecycleError("BROWSER_CONTEXT_CLOSED: ZOL 验证话题时页面已关闭") from exc
+        return False
 
     async def select_topic(self, topic: str = "", community: str = "",
                            selection_query: str = "", selection_override: dict = None):
-        """选择并验证 ZOL 分类/标签。"""
-        self._require_page_alive("ZOL 选择分类或标签")
-        if not topic:
-            return {"success": True, "selection": {}}
+        """实时搜索 ZOL 话题并验证编辑器中的真实标签。"""
+        self._require_page_alive("ZOL 选择话题")
+        override = selection_override or {}
+        explicit_topic = str(override.get("topic") or topic or "").strip()
+        queries = self._topic_queries(explicit_topic, selection_query)
+        if not queries:
+            return {"success": True, "selection": {}, "selection_status": "not_required"}
 
-        category_selectors = [
-            "#category", "#catselect", "select[name='cate_id']",
-            ".category-select", "select[name='category']",
-        ]
-        for selector in category_selectors:
-            select = self.page.locator(selector).first
-            try:
-                if await select.count() == 0 or not await select.is_visible():
-                    continue
-                await select.select_option(label=topic)
-                selected = await select.locator("option:checked").inner_text()
-                if topic not in selected:
-                    raise RuntimeError(f"ZOL 分类验证失败: expected={topic}, actual={selected}")
-                logger.info("ZOL 分类选择并验证成功: {}", topic)
-                return {"success": True, "selection": {"topic": selected}}
-            except Exception as exc:
-                logger.debug("ZOL 分类选择器失败: selector={}, error={}", selector, exc)
+        button = self.page.locator(self.TOPIC_BUTTON).filter(has_text="选择话题").first
+        if await button.count() == 0 or not await button.is_visible():
+            return {
+                "success": False,
+                "needs_selection": True,
+                "error_code": "ZOL_SELECTION_CONTROL_NOT_FOUND",
+                "error": "未找到 ZOL 选择话题按钮",
+                "selection": {"kind": "topic", "query": queries[0], "candidates": []},
+            }
 
-        tag_selector = "input[name='tags'], #tags, .tag-input input"
-        tag_input = self.page.locator(tag_selector).first
+        all_candidates = []
         try:
-            if await tag_input.count() > 0 and await tag_input.is_visible():
-                await tag_input.fill(topic)
-                actual = await tag_input.input_value()
-                if topic not in actual:
-                    raise RuntimeError(f"ZOL 标签验证失败: expected={topic}, actual={actual}")
-                logger.info("ZOL 标签输入并验证成功: {}", topic)
-                return {"success": True, "selection": {"topic": topic}}
-        except Exception as exc:
-            logger.debug("ZOL 标签输入失败: {}", exc)
+            await button.click(timeout=5000)
+            modal = self.page.locator(self.TOPIC_MODAL).last
+            await modal.wait_for(state="visible", timeout=5000)
+            search = modal.locator("input[placeholder='搜索话题']").first
+            if await search.count() == 0:
+                return {
+                    "success": False,
+                    "needs_selection": True,
+                    "error_code": "ZOL_SELECTION_CONTROL_NOT_FOUND",
+                    "error": "ZOL 话题弹窗中未找到搜索框",
+                    "selection": {"kind": "topic", "query": queries[0], "candidates": []},
+                }
 
-        raise SelectorError(f"ZOL_TOPIC_SELECTOR_ERROR: 分类/标签未找到，无法选择: {topic}")
+            for query in queries:
+                await search.fill(query)
+                await self.page.wait_for_timeout(800)
+                candidates = await self._topic_candidates(modal)
+                for candidate in candidates:
+                    if candidate not in all_candidates:
+                        all_candidates.append(candidate)
+                selected = self._pick_topic_candidate(candidates, query)
+                if not selected:
+                    continue
+
+                item = modal.locator(".list .item .title").filter(has_text=selected).first
+                if await item.count() == 0:
+                    continue
+                await item.click(timeout=5000)
+                confirm = modal.get_by_role("button", name="确 定", exact=True).first
+                if await confirm.count() == 0:
+                    return {
+                        "success": False,
+                        "needs_selection": True,
+                        "error_code": "ZOL_SELECTION_CONTROL_NOT_FOUND",
+                        "error": "ZOL 话题弹窗中未找到确定按钮",
+                        "selection": {"kind": "topic", "query": query, "candidates": all_candidates},
+                    }
+                await confirm.click(timeout=5000)
+                await modal.wait_for(state="hidden", timeout=5000)
+                if not await self._verify_topic_selected(selected):
+                    return {
+                        "success": False,
+                        "needs_selection": True,
+                        "error_code": "ZOL_SELECTION_VERIFY_FAILED",
+                        "error": f"ZOL 话题已点击但页面未出现真实标签: {selected}",
+                        "selection": {"kind": "topic", "query": query, "candidates": all_candidates},
+                    }
+                logger.info("ZOL 话题选择并验证成功: query={}, topic={}", query, selected)
+                return {
+                    "success": True,
+                    "selection": {"kind": "topic", "topic": selected, "query": query},
+                    "selection_status": "completed",
+                }
+        except BrowserLifecycleError:
+            raise
+        except Exception as exc:
+            if self._exception_means_browser_closed(exc):
+                raise BrowserLifecycleError("BROWSER_CONTEXT_CLOSED: ZOL 话题选择时页面已关闭") from exc
+            logger.warning("ZOL 话题选择失败: error={}", exc)
+            await self._close_topic_modal()
+            return {
+                "success": False,
+                "needs_selection": True,
+                "error_code": "ZOL_SELECTION_VERIFY_FAILED",
+                "error": f"ZOL 话题选择流程失败: {exc}",
+                "selection": {"kind": "topic", "query": queries[0], "candidates": all_candidates},
+            }
+
+        await self._close_topic_modal()
+        error_code = "ZOL_SELECTION_NO_CANDIDATE" if not all_candidates else "ZOL_SELECTION_AMBIGUOUS"
+        return {
+            "success": False,
+            "needs_selection": True,
+            "error_code": error_code,
+            "error": (
+                "ZOL 未找到可自动确认的话题候选"
+                if not all_candidates
+                else "ZOL 话题候选不唯一，等待人工选择"
+            ),
+            "selection": {
+                "kind": "topic",
+                "query": queries[0],
+                "candidates": all_candidates[:30],
+            },
+        }
 
     async def save_draft(self, title: str = "") -> str:
         """保存草稿并在草稿箱验证真实标题。"""

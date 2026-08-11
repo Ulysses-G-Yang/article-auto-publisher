@@ -261,6 +261,8 @@ def register_routes(app):
         resumable_warning_codes = {
             "IMAGES_ALL_FAILED",
             "PARTIAL_IMAGES",
+            "ZOL_IMAGES_ALL_FAILED",
+            "ZOL_IMAGES_PARTIAL",
         }
         for task in tasks:
             article = db.get_article(task["article_id"])
@@ -297,6 +299,8 @@ def register_routes(app):
         resumable_warning_codes = {
             "IMAGES_ALL_FAILED",
             "PARTIAL_IMAGES",
+            "ZOL_IMAGES_ALL_FAILED",
+            "ZOL_IMAGES_PARTIAL",
         }
         if task["status"] not in ("paused", "needs_selection") and not (
             task["status"] == "failed" and task.get("error_code") in resumable_failure_codes
@@ -322,10 +326,11 @@ def register_routes(app):
         community = str(payload.get("community") or task.get("community_used") or "").strip()
         topic = str(payload.get("topic") or task.get("topic_used") or "").strip()
 
-        # 自动搜索失败后，必须同时给出社区和话题，避免只选中一项仍被误报成功。
-        if task["platform"] == "xiaoheihe" and task["status"] == "needs_selection":
+        # 自动搜索失败后，小黑盒必须同时给出社区和话题；ZOL 至少需要
+        # 一个真实的分类/话题名称，避免只恢复队列却再次误报成功。
+        if task["status"] == "needs_selection":
             missing = []
-            if not community:
+            if task["platform"] == "xiaoheihe" and not community:
                 missing.append("社区")
             if not topic:
                 missing.append("话题")
@@ -333,7 +338,7 @@ def register_routes(app):
                 return jsonify({
                     "status": "error",
                     "error_code": "SELECTION_REQUIRED",
-                    "message": f"小黑盒还需要填写：{'、'.join(missing)}",
+                    "message": f"{('小黑盒' if task['platform'] == 'xiaoheihe' else 'ZOL')}还需要填写：{'、'.join(missing)}",
                 }), 400
 
         selection_status = "manual" if (community or topic) else task.get("selection_status", "pending")

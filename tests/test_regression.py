@@ -888,5 +888,61 @@ class RegressionTests(DatabaseTestCase):
         self.assertEqual(len(result["failed_images"]), 1)
 
 
+    def test_zol_topic_match_rejects_ambiguous_candidates(self):
+        self.assertEqual(
+            ZOLPlatform._pick_topic_candidate(["显示器分屏", "显示器推荐"], "显示器"),
+            "",
+        )
+        self.assertEqual(
+            ZOLPlatform._pick_topic_candidate(["显示器分屏", "显示器推荐"], "显示器分屏"),
+            "显示器分屏",
+        )
+        self.assertEqual(
+            ZOLPlatform._pick_topic_candidate(["显示器分屏"], "分屏"),
+            "显示器分屏",
+        )
+
+    def test_zol_image_failure_is_reported_in_content_result(self):
+        platform = ZOLPlatform()
+        platform.page = FakePage("iframe")
+        platform.simulator.random_delay = AsyncMock()
+        platform._upload_image = AsyncMock(return_value={
+            "success": False,
+            "error_code": "ZOL_IMAGE_UPLOAD_CONTROL_NOT_FOUND",
+            "error": "未找到图片按钮",
+        })
+        result = asyncio.run(platform.fill_content([
+            {"type": "text", "text": "正文段"},
+            {"type": "image", "position": 1},
+        ], [{"position_index": 1, "local_path": "D:/test/image.png"}]))
+        self.assertTrue(result["text_ok"])
+        self.assertEqual(result["expected_images"], 1)
+        self.assertEqual(result["uploaded_images"], 0)
+        self.assertEqual(result["media_status"], "failed")
+        self.assertEqual(result["media_error_code"], "ZOL_IMAGES_ALL_FAILED")
+        self.assertEqual(result["failed_images"][0]["error_code"], "ZOL_IMAGE_UPLOAD_CONTROL_NOT_FOUND")
+
+    def test_zol_partial_image_failure_is_not_reported_as_complete(self):
+        platform = ZOLPlatform()
+        platform.page = FakePage("iframe")
+        platform.simulator.random_delay = AsyncMock()
+        platform._upload_image = AsyncMock(side_effect=[
+            {"success": True, "filename": "one.png"},
+            {"success": False, "error_code": "ZOL_IMAGE_UPLOAD_VERIFY_FAILED", "error": "数量未增加"},
+        ])
+        result = asyncio.run(platform.fill_content([
+            {"type": "text", "text": "正文段"},
+            {"type": "image", "position": 1},
+            {"type": "image", "position": 2},
+        ], [
+            {"position_index": 1, "local_path": "D:/test/one.png"},
+            {"position_index": 2, "local_path": "D:/test/two.png"},
+        ]))
+        self.assertEqual(result["media_status"], "partial")
+        self.assertEqual(result["media_error_code"], "ZOL_IMAGES_PARTIAL")
+        self.assertEqual(result["uploaded_images"], 1)
+        self.assertEqual(len(result["failed_images"]), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

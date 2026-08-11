@@ -347,6 +347,7 @@ class BasePlatform(ABC):
             selection = {}
             selection_status = "not_required"
             selection_error = None
+            selection_error_code = None
             should_select = bool(topic or community or selection_query or self.platform_name == "xiaoheihe")
             if should_select:
                 db.add_task_log(
@@ -368,6 +369,7 @@ class BasePlatform(ABC):
                         selection = selection_result.get("selection") or {}
                         selection_status = "needs_selection"
                         selection_error = selection_result.get("error", "社区或话题未完成选择")
+                        selection_error_code = selection_result.get("error_code") or "SELECTION_REQUIRED"
                         db.add_task_log(task_id, "WARN", f"附加选择未完成，继续保存基础草稿: {selection_error}")
                     else:
                         return selection_result
@@ -414,11 +416,13 @@ class BasePlatform(ABC):
                 "selection": selection,
                 "selection_status": selection_status,
                 "selection_error": selection_error,
+                "selection_error_code": selection_error_code,
                 "media_status": content_result.get("media_status", "not_checked"),
                 "expected_images": content_result.get("expected_images", 0),
                 "uploaded_images": content_result.get("uploaded_images", 0),
                 "failed_images": content_result.get("failed_images", []),
                 "media_error": content_result.get("media_error"),
+                "media_error_code": content_result.get("media_error_code"),
             }
 
         except Exception as e:

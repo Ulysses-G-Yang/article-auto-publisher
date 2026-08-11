@@ -44,6 +44,10 @@ MANUAL_RECOVERABLE_CODES = {
     "PLATFORM_BLOCKED",
     "SELECTOR_ERROR",
     "DRAFT_NOT_VERIFIED",
+    "ZOL_SELECTION_CONTROL_NOT_FOUND",
+    "ZOL_SELECTION_VERIFY_FAILED",
+    "ZOL_IMAGE_UPLOAD_CONTROL_NOT_FOUND",
+    "ZOL_IMAGE_UPLOAD_VERIFY_FAILED",
 }
 
 
@@ -246,7 +250,7 @@ class QueueManager:
                 or article.get("community_xiaoheihe", "")
                 or ""
             )
-            if platform_name == "xiaoheihe":
+            if platform_name in ("xiaoheihe", "zol"):
                 topic = selection_override.get("topic") or task.get("topic_used") or topic
 
             # 执行发布流水线（worker 模式下不自动弹出登录窗口，避免与手动登录抢锁）
@@ -286,11 +290,11 @@ class QueueManager:
                 if selection_status == "needs_selection" and media_status in ("failed", "partial"):
                     warning_code = "PARTIAL_METADATA"
                 elif selection_status == "needs_selection":
-                    warning_code = "SELECTION_REQUIRED"
+                    warning_code = result.get("selection_error_code") or "SELECTION_REQUIRED"
                 elif media_status == "failed":
-                    warning_code = "IMAGES_ALL_FAILED"
+                    warning_code = result.get("media_error_code") or "IMAGES_ALL_FAILED"
                 elif media_status == "partial":
-                    warning_code = "PARTIAL_IMAGES"
+                    warning_code = result.get("media_error_code") or "PARTIAL_IMAGES"
                 else:
                     warning_code = None
                 self.db.update_task(
@@ -352,7 +356,7 @@ class QueueManager:
                     task_id,
                     status="needs_selection",
                     selection_status="required",
-                    error_code="SELECTION_REQUIRED",
+                    error_code=result.get("error_code") or "SELECTION_REQUIRED",
                     error_message=error_msg,
                 )
                 self.db.add_task_log(task_id, "WARN", error_msg)

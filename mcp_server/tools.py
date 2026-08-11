@@ -580,8 +580,20 @@ def register_tools(server: Any, client: FlaskClient, store: TaskStore) -> dict[s
             statuses = [str(by_id[value].get("status") or "") for value in internal_ids]
             if any(status == "needs_selection" for status in statuses):
                 current_status = "awaiting_user_action"
-                message = "小黑盒需要选择社区和话题，请提供后使用 resume_task 恢复。"
-                result: dict[str, Any] = {"tasks": views, "needs": ["community", "topic"]}
+                needs = []
+                for view in views:
+                    if view.get("status") != "needs_selection":
+                        continue
+                    if view.get("platform") == "xiaoheihe":
+                        if not view.get("community_used"):
+                            needs.append("community")
+                        if not view.get("topic_used"):
+                            needs.append("topic")
+                    elif view.get("platform") == "zol" and not view.get("topic_used"):
+                        needs.append("topic")
+                needs = list(dict.fromkeys(needs)) or ["topic"]
+                message = "请补充平台所需的社区/话题选择后使用 resume_task 恢复。"
+                result: dict[str, Any] = {"tasks": views, "needs": needs}
             elif any(status in {"failed", "cancelled"} for status in statuses):
                 current_status = "failed"
                 message = "至少一个平台的发布任务失败。"
@@ -620,7 +632,7 @@ def register_tools(server: Any, client: FlaskClient, store: TaskStore) -> dict[s
 
     @server.tool(
         name="resume_task",
-        description="恢复 paused 或 needs_selection 的发布任务；小黑盒 needs_selection 必须同时提供 community 和 topic。",
+        description="恢复 paused 或 needs_selection 的发布任务；小黑盒需要 community 和 topic，ZOL 需要 topic。",
         structured_output=True,
     )
     async def resume_task(

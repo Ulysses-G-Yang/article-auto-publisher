@@ -2,6 +2,7 @@
 
 import os
 from collections.abc import Awaitable, Callable
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -75,6 +76,7 @@ class XiaoheihePublisher(BasePublisher):
                 self.page,
                 session,
                 task_id=request.task_id,
+                title=request.title,
             )
 
         self.profile_dir.mkdir(parents=True, exist_ok=True)
@@ -97,6 +99,7 @@ class XiaoheihePublisher(BasePublisher):
                     page,
                     session,
                     task_id=request.task_id,
+                    title=request.title,
                 )
             finally:
                 if context is not None:
@@ -180,6 +183,7 @@ class XiaoheihePublisher(BasePublisher):
         session: AsyncSession,
         *,
         task_id: int,
+        title: str | None = None,
         trigger: Callable[[Page], Awaitable[None]] | None = None,
     ) -> PlatformArticle:
         """捕获发布响应并写入映射；调用方持有事务并负责 commit。"""
@@ -244,12 +248,17 @@ class XiaoheihePublisher(BasePublisher):
         platform_url = str(platform_url_value).strip() if platform_url_value else None
         if not platform_url and "/creator/editor" not in (page.url or ""):
             platform_url = page.url or None
+        published_at = self._parse_platform_datetime(
+            self._first_path(payload, self.config.publish.published_at_paths)
+        )
 
         return await self._persist_mapping(
             session,
             task_id=task_id,
             external_article_id=external_article_id,
+            title=title,
             platform_url=platform_url,
+            published_at=published_at,
             payload=payload,
             response_url=response.url,
             response_status=response.status,
@@ -264,13 +273,49 @@ class XiaoheihePublisher(BasePublisher):
                 continue
         return None
 
+    @staticmethod
+    def _parse_platform_datetime(value: Any) -> datetime | None:
+        """接受常见 ISO 8601 或秒/毫秒时间戳；无法确认时保留为空。"""
+
+        if value in (None, "") or isinstance(value, bool):
+            return None
+        if isinstance(value, datetime):
+            parsed = value
+        elif isinstance(value, (int, float)):
+            seconds = float(value)
+            if abs(seconds) >= 100_000_000_000:
+                seconds /= 1000
+            try:
+                parsed = datetime.fromtimestamp(seconds, tz=timezone.utc)
+            except (OSError, OverflowError, ValueError):
+                return None
+        elif isinstance(value, str):
+            raw = value.strip()
+            if not raw:
+                return None
+            if raw.replace(".", "", 1).isdigit():
+                return XiaoheihePublisher._parse_platform_datetime(float(raw))
+            try:
+                parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+            except ValueError:
+                return None
+        else:
+            return None
+
+        if parsed.tzinfo is None:
+            # 平台未声明时区时无法安全判断是 UTC 还是北京时间，宁可保留为空。
+            return None
+        return parsed.astimezone(timezone.utc)
+
     async def _persist_mapping(
         self,
         session: AsyncSession,
         *,
         task_id: int,
         external_article_id: str,
+        title: str | None,
         platform_url: str | None,
+        published_at: datetime | None,
         payload: dict[str, Any],
         response_url: str,
         response_status: int,
@@ -305,7 +350,9 @@ class XiaoheihePublisher(BasePublisher):
             task_id=task_id,
             platform=self.platform,
             external_article_id=external_article_id,
+            title=title,
             platform_url=platform_url,
+            published_at=published_at,
             status=PlatformArticleStatus.MAPPED,
             extra_data={
                 "publish_response": redact_sensitive(payload),

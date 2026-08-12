@@ -44,6 +44,8 @@ class MetricValues(BaseModel):
     like_count: int | None = Field(default=None, ge=0)
     comment_count: int | None = Field(default=None, ge=0)
     collect_count: int | None = Field(default=None, ge=0)
+    exposure_count: int | None = Field(default=None, ge=0)
+    share_count: int | None = Field(default=None, ge=0)
     revenue: Decimal | None = Field(default=None, ge=0)
     snapshot_time: datetime | None = None
     raw_data: dict = Field(default_factory=dict)

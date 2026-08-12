@@ -71,6 +71,7 @@ class PublishConfig(BaseModel):
     submit_endpoint: EndpointConfig
     post_id_paths: list[str] = Field(min_length=1)
     platform_url_paths: list[str] = Field(default_factory=list)
+    published_at_paths: list[str] = Field(default_factory=list)
     selectors: SelectorConfig
 
 

@@ -7,6 +7,8 @@ from pathlib import Path
 from threading import Lock
 
 from sqlalchemy import event
+from sqlalchemy.engine import Connection
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -80,6 +82,53 @@ async def init_db(database_url: str | None = None) -> None:
     engine = get_engine(database_url)
     async with engine.begin() as connection:
         await connection.run_sync(Base.metadata.create_all)
+        await connection.run_sync(_upgrade_sqlite_schema)
+
+
+_SQLITE_ADDITIVE_COLUMNS: dict[str, dict[str, str]] = {
+    "platform_articles": {
+        "title": "VARCHAR(255)",
+        "published_at": "DATETIME",
+    },
+    "metric_snapshots": {
+        "exposure_count": "INTEGER",
+        "share_count": "INTEGER",
+    },
+}
+
+
+def _upgrade_sqlite_schema(connection: Connection) -> None:
+    """为阶段一已有 SQLite 数据库执行安全、幂等的只增列升级。
+
+    ``MetaData.create_all()`` 只会创建缺失的表，不会给旧表增加新列。阶段一
+    尚未引入完整迁移框架，因此仅对已知的可空列执行显式升级；不删除、不改名，
+    也不重建任何表。未来出现非增量 Schema 变化时应改用正式迁移工具。
+    """
+
+    if connection.dialect.name != "sqlite":
+        return
+
+    for table_name, columns in _SQLITE_ADDITIVE_COLUMNS.items():
+        existing = _sqlite_column_names(connection, table_name)
+        for column_name, sql_type in columns.items():
+            if column_name in existing:
+                continue
+            try:
+                connection.exec_driver_sql(
+                    f'ALTER TABLE "{table_name}" '
+                    f'ADD COLUMN "{column_name}" {sql_type}'
+                )
+            except OperationalError:
+                # 多个启动入口并发初始化时，另一连接可能刚刚完成同一增列。
+                # 只有确认目标列已经存在才可吞掉异常，其他数据库错误继续上抛。
+                if column_name not in _sqlite_column_names(connection, table_name):
+                    raise
+            existing.add(column_name)
+
+
+def _sqlite_column_names(connection: Connection, table_name: str) -> set[str]:
+    rows = connection.exec_driver_sql(f'PRAGMA table_info("{table_name}")').all()
+    return {str(row[1]) for row in rows}
 
 
 @asynccontextmanager

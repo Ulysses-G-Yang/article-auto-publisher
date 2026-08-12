@@ -182,6 +182,8 @@ class XiaoheiheCollector(BaseCollector):
             "like_count",
             "comment_count",
             "collect_count",
+            "exposure_count",
+            "share_count",
             "revenue",
             "snapshot_time",
         ):

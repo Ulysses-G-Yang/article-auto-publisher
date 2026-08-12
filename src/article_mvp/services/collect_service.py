@@ -85,6 +85,8 @@ class CollectService:
                     like_count=values.like_count,
                     comment_count=values.comment_count,
                     collect_count=values.collect_count,
+                    exposure_count=values.exposure_count,
+                    share_count=values.share_count,
                     revenue=values.revenue,
                     snapshot_time=snapshot_time,
                     raw_data=values.raw_data,

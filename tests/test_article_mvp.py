@@ -5,6 +5,7 @@ from __future__ import annotations
 # ruff: noqa: E402, I001
 
 import ast
+import sqlite3
 import sys
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -124,6 +125,8 @@ def verified_config():
         "like_count": "data.stats.like",
         "comment_count": "data.stats.comment",
         "collect_count": "data.stats.collect",
+        "exposure_count": "data.stats.exposure",
+        "share_count": "data.stats.share",
         "revenue": "data.stats.revenue",
         "snapshot_time": "data.snapshot_time",
     }
@@ -173,6 +176,7 @@ async def test_publish_capture_maps_nested_post_id_and_redacts(tmp_path):
             "data": {
                 "post_id": 7788,
                 "post_url": "https://www.xiaoheihe.cn/app/bbs/link/7788",
+                "publish_time": "2026-08-12T09:42:00+08:00",
                 "token": "must-not-persist",
             }
         }
@@ -185,6 +189,7 @@ async def test_publish_capture_maps_nested_post_id_and_redacts(tmp_path):
             page,
             session,
             task_id=21,
+            title="正式发布标题",
             trigger=no_op_trigger,
         )
         assert mapping.id is not None
@@ -192,9 +197,90 @@ async def test_publish_capture_maps_nested_post_id_and_redacts(tmp_path):
     async with session_scope(url) as session:
         saved = await session.scalar(select(PlatformArticle))
         assert saved.external_article_id == "7788"
+        assert saved.title == "正式发布标题"
+        assert saved.published_at.replace(tzinfo=timezone.utc) == datetime(
+            2026, 8, 12, 1, 42, tzinfo=timezone.utc
+        )
         assert saved.status is PlatformArticleStatus.MAPPED
         assert saved.extra_data["publish_response"]["data"]["token"] == "[REDACTED]"
         assert page.predicate(response)
+    await dispose_db()
+
+
+@pytest.mark.asyncio
+async def test_init_db_upgrades_existing_sqlite_without_losing_data(tmp_path):
+    database_path = tmp_path / "legacy.db"
+    connection = sqlite3.connect(database_path)
+    try:
+        connection.executescript(
+            """
+            CREATE TABLE platform_articles (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                task_id INTEGER NOT NULL,
+                platform VARCHAR(32) NOT NULL,
+                external_article_id VARCHAR(128) NOT NULL,
+                platform_url VARCHAR(1024),
+                status VARCHAR(16) NOT NULL,
+                extra_data JSON NOT NULL,
+                created_at DATETIME NOT NULL
+            );
+            CREATE TABLE metric_snapshots (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                article_id INTEGER NOT NULL,
+                read_count INTEGER NOT NULL,
+                like_count INTEGER,
+                comment_count INTEGER,
+                collect_count INTEGER,
+                revenue NUMERIC(18, 4),
+                snapshot_time DATETIME NOT NULL,
+                raw_data JSON NOT NULL,
+                FOREIGN KEY(article_id) REFERENCES platform_articles(id)
+            );
+            INSERT INTO platform_articles (
+                task_id, platform, external_article_id, platform_url,
+                status, extra_data, created_at
+            ) VALUES (
+                88, 'xiaoheihe', 'legacy-post', NULL,
+                'MAPPED', '{}', '2026-08-11 00:00:00'
+            );
+            """
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    url = f"sqlite+aiosqlite:///{database_path.as_posix()}"
+    await dispose_db()
+    await init_db(url)
+    await init_db(url)
+
+    engine = get_engine(url)
+    async with engine.connect() as async_connection:
+        platform_columns = {
+            row[1]
+            for row in (
+                await async_connection.exec_driver_sql(
+                    'PRAGMA table_info("platform_articles")'
+                )
+            ).all()
+        }
+        metric_columns = {
+            row[1]
+            for row in (
+                await async_connection.exec_driver_sql(
+                    'PRAGMA table_info("metric_snapshots")'
+                )
+            ).all()
+        }
+    assert {"title", "published_at"} <= platform_columns
+    assert {"exposure_count", "share_count"} <= metric_columns
+
+    async with session_scope(url) as session:
+        article = await session.scalar(select(PlatformArticle))
+        assert article.task_id == 88
+        assert article.external_article_id == "legacy-post"
+        assert article.title is None
+        assert article.published_at is None
     await dispose_db()
 
 
@@ -282,6 +368,8 @@ async def test_collector_fetches_and_normalizes_verified_contract():
                 "like": 4,
                 "comment": 5,
                 "collect": 6,
+                "exposure": 456,
+                "share": 8,
                 "revenue": "7.2500",
             },
             "snapshot_time": "2026-08-11T08:30:45Z",
@@ -305,8 +393,27 @@ async def test_collector_fetches_and_normalizes_verified_contract():
         raw = await collector.fetch_raw(article, client, auth)
     metrics = collector.normalize(raw)
     assert metrics.read_count == 123
+    assert metrics.exposure_count == 456
+    assert metrics.share_count == 8
     assert str(metrics.revenue) == "7.2500"
     assert metrics.raw_data["data"]["user_token"] == "[REDACTED]"
+
+
+def test_collector_keeps_missing_optional_metrics_as_none():
+    config = verified_config()
+    collector = XiaoheiheCollector(config=config)
+    metrics = collector.normalize({"data": {"stats": {"read": 12}}})
+    assert metrics.read_count == 12
+    assert metrics.like_count is None
+    assert metrics.comment_count is None
+    assert metrics.collect_count is None
+    assert metrics.exposure_count is None
+    assert metrics.share_count is None
+    assert metrics.revenue is None
+
+
+def test_publisher_rejects_ambiguous_naive_platform_time():
+    assert XiaoheihePublisher._parse_platform_datetime("2026-08-12 09:42:00") is None
 
 
 @pytest.mark.asyncio
@@ -367,7 +474,15 @@ async def test_collect_service_writes_idempotent_snapshot_and_runs(tmp_path, mon
 
     payload = {
         "data": {
-            "stats": {"read": 9, "like": 1, "comment": 2, "collect": 3, "revenue": None},
+            "stats": {
+                "read": 9,
+                "like": 1,
+                "comment": 2,
+                "collect": 3,
+                "exposure": 90,
+                "share": 4,
+                "revenue": None,
+            },
             "snapshot_time": "2026-08-11T08:30:45Z",
         }
     }
@@ -385,6 +500,8 @@ async def test_collect_service_writes_idempotent_snapshot_and_runs(tmp_path, mon
         runs = (await session.scalars(select(CollectionRun))).all()
         assert len(snapshots) == 1
         assert snapshots[0].read_count == 9
+        assert snapshots[0].exposure_count == 90
+        assert snapshots[0].share_count == 4
         assert len(runs) == 2
         assert {run.status for run in runs} == {CollectionRunStatus.SUCCESS}
     await dispose_db()
@@ -493,8 +610,10 @@ def test_dashboard_shows_safe_summary_without_raw_payloads(tmp_path):
                 task_id=91,
                 platform="xiaoheihe",
                 external_article_id="post-dashboard",
+                title="正式文章标题",
                 platform_url="https://www.xiaoheihe.cn/app/bbs/link/post-dashboard",
                 status=PlatformArticleStatus.MAPPED,
+                published_at=datetime(2026, 8, 11, 8, 0, tzinfo=timezone.utc),
                 extra_data={"token": "must-not-be-visible"},
             )
             session.add(article)
@@ -506,6 +625,8 @@ def test_dashboard_shows_safe_summary_without_raw_payloads(tmp_path):
                     like_count=12,
                     comment_count=3,
                     collect_count=7,
+                    exposure_count=640,
+                    share_count=5,
                     revenue=Decimal("1.2500"),
                     snapshot_time=datetime(2026, 8, 11, 9, 30, tzinfo=timezone.utc),
                     raw_data={"cookie": "must-not-be-visible"},
@@ -542,6 +663,10 @@ def test_dashboard_shows_safe_summary_without_raw_payloads(tmp_path):
         assert payload["summary"]["total_articles"] == 1
         assert payload["summary"]["total_snapshots"] == 1
         assert payload["articles"][0]["latest_metric"]["read_count"] == 320
+        assert payload["articles"][0]["title"] == "正式文章标题"
+        assert payload["articles"][0]["published_at"] == "2026-08-11T08:00:00+00:00"
+        assert payload["articles"][0]["latest_metric"]["exposure_count"] == 640
+        assert payload["articles"][0]["latest_metric"]["share_count"] == 5
         assert payload["articles"][0]["latest_metric"]["revenue"] == "1.2500"
         assert payload["contract"]["collector_enabled"] is False
         assert payload["current_workflow"]["summary"]["total_tasks"] == 24

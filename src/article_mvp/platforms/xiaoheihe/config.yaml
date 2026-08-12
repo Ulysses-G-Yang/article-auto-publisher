@@ -23,6 +23,11 @@ publish:
     - data.platform_url
     - data.post_url
     - data.url
+  published_at_paths:
+    - published_at
+    - publish_time
+    - data.published_at
+    - data.publish_time
   selectors:
     title: ".editor-title__container [contenteditable='true'], .editor-title__container .ProseMirror"
     body: ".article__edit-content--inner [contenteditable='true'], .article__edit-content--inner .ProseMirror"

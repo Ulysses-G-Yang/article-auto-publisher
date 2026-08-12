@@ -31,14 +31,13 @@ from account_sessions.leases import AccountProfileLease
 from account_sessions.identity import _clean
 from account_sessions.models import AccountActivity, PlatformAccount
 from account_sessions.permissions import LOCAL_WEB_CONTEXT, AccessContext
-from account_sessions.web import (
-    DEFAULT_ARTICLE_BODY,
-    DEFAULT_ARTICLE_TITLE,
-    create_account_session_blueprint,
-)
+from account_sessions.web import create_account_session_blueprint
 from article_mvp.errors import PlatformBusyError
 from platforms.base import PlatformAutomationError
 from platforms.xiaoheihe import XiaoheihePlatform
+
+SAMPLE_ARTICLE_TITLE = "账号域投递契约样例"
+SAMPLE_ARTICLE_BODY = "这是一段仅用于账号投递服务测试的样例正文。"
 
 
 def run(coroutine):
@@ -81,7 +80,7 @@ async def insert_account(
 
 def delivery_payload(account_id: str, *, mode: str = "DRAFT") -> dict:
     return {
-        "article": {"title": DEFAULT_ARTICLE_TITLE, "body": DEFAULT_ARTICLE_BODY},
+        "article": {"title": SAMPLE_ARTICLE_TITLE, "body": SAMPLE_ARTICLE_BODY},
         "platform": "xiaoheihe",
         "account_id": account_id,
         "mode": mode,
@@ -104,9 +103,7 @@ def test_database_schema_pragmas_and_idempotent_initialization(tmp_path: Path) -
     with sqlite3.connect(database_path) as connection:
         tables = {
             row[0]
-            for row in connection.execute(
-                "SELECT name FROM sqlite_master WHERE type='table'"
-            )
+            for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")
         }
         assert {
             "platform_accounts",
@@ -142,9 +139,7 @@ def test_platform_filter_is_dynamic_and_never_leaks_sensitive_fields(
         )
     )
 
-    accounts = run(
-        service.list_accounts("xiaoheihe", LOCAL_WEB_CONTEXT, usable_only=True)
-    )
+    accounts = run(service.list_accounts("xiaoheihe", LOCAL_WEB_CONTEXT, usable_only=True))
     assert [item["display_name"] for item in accounts] == ["小黑盒真实昵称"]
     assert accounts[0]["masked_platform_user_id"].endswith("1234")
     assert "platform_user_id" not in accounts[0]
@@ -304,7 +299,7 @@ def test_draft_executor_records_platform_logs_and_success(tmp_path: Path) -> Non
         async def publish(self, **kwargs) -> dict:
             assert kwargs["delivery_mode"] == "DRAFT"
             assert kwargs["auto_login"] is False
-            assert kwargs["content_blocks"][0]["text"] == DEFAULT_ARTICLE_BODY
+            assert kwargs["content_blocks"][0]["text"] == SAMPLE_ARTICLE_BODY
             kwargs["db"].add_task_log(0, "INFO", "平台草稿保存完成")
             return {
                 "success": True,
@@ -336,9 +331,7 @@ def test_draft_executor_records_platform_logs_and_success(tmp_path: Path) -> Non
     )
     request = DeliveryRequest.model_validate(delivery_payload(account.account_id))
     queued = run(delivery.request_delivery(request, LOCAL_WEB_CONTEXT))
-    completed = run(
-        delivery.execute_operation(queued["operation_id"], LOCAL_WEB_CONTEXT)
-    )
+    completed = run(delivery.execute_operation(queued["operation_id"], LOCAL_WEB_CONTEXT))
 
     assert completed["status"] == "DRAFT_SAVED"
     assert completed["draft_url"].endswith("/drafts/1")
@@ -364,15 +357,11 @@ def test_publish_requires_single_use_confirmation_and_gate_stays_closed(
     profile = make_profile(tmp_path, "xiaoheihe", "publish")
     account = run(insert_account(database, profile))
     delivery = DeliveryService(accounts, public_publish_enabled=False)
-    request = DeliveryRequest.model_validate(
-        delivery_payload(account.account_id, mode="PUBLISH")
-    )
+    request = DeliveryRequest.model_validate(delivery_payload(account.account_id, mode="PUBLISH"))
 
     with pytest.raises(ConfirmationRequiredError) as required:
         run(delivery.request_delivery(request, LOCAL_WEB_CONTEXT))
-    confirmed = request.model_copy(
-        update={"confirmation_token": required.value.token}
-    )
+    confirmed = request.model_copy(update={"confirmation_token": required.value.token})
     with pytest.raises(PublicPublishDisabledError):
         run(delivery.request_delivery(confirmed, LOCAL_WEB_CONTEXT))
     with pytest.raises(Exception) as reused:
@@ -414,9 +403,7 @@ def test_blueprint_matches_frontend_contract_and_injects_article(tmp_path: Path)
     assert page.status_code == 302
     assert page.headers["Location"] == "/upload"
 
-    accounts_response = client.get(
-        "/api/platforms/xiaoheihe/accounts?usable=true"
-    )
+    accounts_response = client.get("/api/platforms/xiaoheihe/accounts?usable=true")
     assert accounts_response.status_code == 200
     accounts_payload = accounts_response.get_json()
     assert accounts_payload["platform"] == "xiaoheihe"
@@ -430,14 +417,10 @@ def test_blueprint_matches_frontend_contract_and_injects_article(tmp_path: Path)
     assert operation.status_code == 202
     assert operation.get_json()["account"]["account_id"] == account.account_id
     assert operation.get_json()["status"] == "QUEUED"
-    activity = client.get(
-        f"/api/account-sessions/{account.account_id}/activity"
-    )
+    activity = client.get(f"/api/account-sessions/{account.account_id}/activity")
     assert activity.status_code == 200
     assert activity.get_json()["account_id"] == account.account_id
-    assert [event["action"] for event in activity.get_json()["activities"]] == [
-        "DELIVERY_QUEUED"
-    ]
+    assert [event["action"] for event in activity.get_json()["activities"]] == ["DELIVERY_QUEUED"]
 
     publish_payload = delivery_payload(account.account_id, mode="PUBLISH")
     confirmation = client.post("/api/delivery-operations", json=publish_payload)

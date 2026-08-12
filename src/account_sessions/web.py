@@ -21,14 +21,8 @@ from account_sessions.permissions import (
     PermissionDeniedError,
 )
 from account_sessions.runtime import AccountRuntime
-from content_studio.service import SEED_BODY, SEED_TITLE
 
 LOGGER = logging.getLogger(__name__)
-
-# 兼容旧 Python 调用方；页面入口已改为重定向，真实系统种子由 content_studio
-# 幂等创建，不再通过模板常量预填。
-DEFAULT_ARTICLE_BODY = SEED_BODY
-DEFAULT_ARTICLE_TITLE = SEED_TITLE
 
 
 class AccountSessionRuntimeState:

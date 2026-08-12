@@ -12,7 +12,7 @@
 
 * { box-sizing: border-box; }
 html { scroll-behavior: smooth; }
-body { min-width: 320px; overflow-x: hidden; background: var(--app-canvas); font-family: Inter, "Microsoft YaHei", "PingFang SC", system-ui, sans-serif; }
+body { min-width: 320px; background: var(--app-canvas); font-family: Inter, "Microsoft YaHei", "PingFang SC", system-ui, sans-serif; }
 [x-cloak], [hidden] { display: none !important; }
 .sidebar { --cui-sidebar-width: var(--app-sidebar-width); width: var(--app-sidebar-width); background: var(--app-sidebar); transition: width .2s ease, transform .2s ease; z-index: 1040; }
 .sidebar-header { display: flex; min-height: var(--app-header-height); align-items: center; justify-content: space-between; padding: 0 1rem; border-color: rgba(255,255,255,.08) !important; }

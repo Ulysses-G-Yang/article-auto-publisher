@@ -79,6 +79,21 @@ def test_block_editor_has_drag_keyboard_and_mobile_alternatives() -> None:
     assert "@media (max-width: 575.98px)" in styles
 
 
+def test_mobile_studio_does_not_hide_or_clip_overflow() -> None:
+    base_styles = read("web/static/css/style.css")
+    studio_styles = read("web/static/css/content-studio.css")
+
+    body_rule = base_styles.split("body {", 1)[1].split("}", 1)[0]
+    assert "overflow-x: hidden" not in body_rule
+    assert ".studio-shell { width: 100%; max-width: 1500px; min-width: 0;" in studio_styles
+    assert ".studio-layout { display: grid; width: 100%; min-width: 0;" in studio_styles
+    assert ".studio-card { width: 100%; min-width: 0;" in studio_styles
+    assert ".content-block { display: grid; width: 100%; min-width: 0;" in studio_styles
+    assert ".studio-card-header > .d-flex .btn { flex: 1 1 calc(50% - .5rem);" in studio_styles
+    assert "#draft-title, .block-content textarea { width: 100%; min-width: 0; max-width: 100%; }" in studio_styles
+    assert ".block-actions { grid-column: 1 / -1; justify-content: flex-end; }" in studio_styles
+
+
 def test_accounts_load_after_platform_without_auto_selection() -> None:
     template = read("web/templates/upload.html")
     script = read("web/static/js/content-studio.js")

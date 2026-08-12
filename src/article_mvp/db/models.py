@@ -77,7 +77,12 @@ class PlatformArticle(Base):
     task_id: Mapped[int] = mapped_column(Integer, nullable=False)
     platform: Mapped[str] = mapped_column(String(32), nullable=False)
     external_article_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    title: Mapped[str | None] = mapped_column(String(255), nullable=True)
     platform_url: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+    published_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
     status: Mapped[PlatformArticleStatus] = mapped_column(
         string_enum(
             PlatformArticleStatus,
@@ -122,6 +127,14 @@ class MetricSnapshot(Base):
             "collect_count IS NULL OR collect_count >= 0",
             name="ck_metric_snapshots_collect_nonnegative",
         ),
+        CheckConstraint(
+            "exposure_count IS NULL OR exposure_count >= 0",
+            name="ck_metric_snapshots_exposure_nonnegative",
+        ),
+        CheckConstraint(
+            "share_count IS NULL OR share_count >= 0",
+            name="ck_metric_snapshots_share_nonnegative",
+        ),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
@@ -134,6 +147,8 @@ class MetricSnapshot(Base):
     like_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
     comment_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
     collect_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    exposure_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    share_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
     revenue: Mapped[Decimal | None] = mapped_column(Numeric(18, 4), nullable=True)
     snapshot_time: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     raw_data: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)

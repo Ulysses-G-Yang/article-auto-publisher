@@ -73,9 +73,11 @@ class DashboardQueryService:
                 "task_id": article.task_id,
                 "platform": article.platform,
                 "external_article_id": article.external_article_id,
+                "title": article.title,
                 "platform_url": article.platform_url,
                 "status": article.status.value,
                 "created_at": iso_utc(article.created_at),
+                "published_at": iso_utc(article.published_at),
                 "latest_metric": None
                 if snapshot is None
                 else {
@@ -83,6 +85,8 @@ class DashboardQueryService:
                     "like_count": snapshot.like_count,
                     "comment_count": snapshot.comment_count,
                     "collect_count": snapshot.collect_count,
+                    "exposure_count": snapshot.exposure_count,
+                    "share_count": snapshot.share_count,
                     "revenue": decimal_text(snapshot.revenue),
                     "snapshot_time": iso_utc(snapshot.snapshot_time),
                 },

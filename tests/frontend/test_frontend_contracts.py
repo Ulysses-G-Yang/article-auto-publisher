@@ -24,6 +24,23 @@ def test_dashboard_has_accessible_switchable_metric_cards() -> None:
     assert 'setAttribute("aria-expanded"' in script
 
 
+def test_dashboard_combines_two_independent_api_sources() -> None:
+    template = read("src/article_mvp/web/templates/dashboard.html")
+    script = read("src/article_mvp/web/static/dashboard.js")
+
+    assert 'data-dashboard-api="{{ url_for(\'article_mvp_dashboard.api_dashboard\') }}"' in template
+    assert 'data-legacy-summary-api="/api/legacy-summary"' in template
+    assert "loadDashboardData()" in script
+    assert "loadLegacySummary()" in script
+    assert "Promise.allSettled" in script
+    assert "renderDashboardFailure(error)" in script
+    assert "renderLegacySummaryFailure()" in script
+    assert script.count("if (dashboardPayload) {") >= 2
+    assert "旧发布摘要暂不可用" in script
+    assert "新看板加载失败" in script
+    assert "payload.current_workflow" not in script
+
+
 def test_nullable_metrics_do_not_fall_back_to_zero() -> None:
     script = read("src/article_mvp/web/static/dashboard.js")
 

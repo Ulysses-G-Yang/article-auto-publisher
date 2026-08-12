@@ -285,6 +285,25 @@ def test_target_duplicates_and_frozen_version_are_enforced(tmp_path: Path) -> No
         with pytest.raises(DraftTargetConflictError):
             await service.replace_targets(draft["draft_id"], duplicate, LOCAL_WEB_CONTEXT)
 
+        from content_studio.errors import DraftValidationError
+
+        with pytest.raises(DraftValidationError, match="保持登录态策略尚未同步"):
+            await service.replace_targets(
+                draft["draft_id"],
+                ReplaceTargetsRequest(
+                    revision=draft["revision"],
+                    targets=[
+                        {
+                            "platform": "xiaoheihe",
+                            "account_id": account.account_id,
+                            "mode": "DRAFT",
+                            "persist_login": False,
+                        }
+                    ],
+                ),
+                LOCAL_WEB_CONTEXT,
+            )
+
         targeted = await service.replace_targets(
             draft["draft_id"],
             ReplaceTargetsRequest(

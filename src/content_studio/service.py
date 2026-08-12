@@ -271,6 +271,10 @@ class ContentStudioService:
             )
             if account.status != "ACTIVE" or account.session_status != "VALID":
                 raise DraftValidationError(f"账号 {account.display_name} 当前不可用于投递")
+            if item.persist_login is not None and item.persist_login != account.persist_login:
+                raise DraftValidationError(
+                    f"账号 {account.display_name} 的保持登录态策略尚未同步，请重试"
+                )
             resolved.append((item, account))
 
         try:
@@ -301,11 +305,7 @@ class ContentStudioService:
                             account_id=item.account_id,
                             account_display_name=account.display_name,
                             mode=item.mode,
-                            persist_login=(
-                                account.persist_login
-                                if item.persist_login is None
-                                else item.persist_login
-                            ),
+                            persist_login=account.persist_login,
                             position=position,
                         )
                     )

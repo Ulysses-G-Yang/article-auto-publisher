@@ -21,6 +21,8 @@ DEFAULT_CONFIG = {
         "secret_key": "change-me-in-production",
         # 本轮回归只保存草稿；显式开启后才允许调用平台公开发布动作。
         "publish_after_draft": False,
+        # 旧“上传 DOCX 即创建任务并入队”默认关闭；仅用于紧急回滚。
+        "legacy_upload_queue_enabled": False,
     },
     "paths": {
         "uploads": os.path.join(BASE_DIR, "uploads"),
@@ -113,6 +115,10 @@ def _apply_environment_overrides(cfg: dict) -> None:
     cfg["app"]["publish_after_draft"] = _env_bool(
         "PUBLISH_AFTER_DRAFT",
         bool(cfg["app"].get("publish_after_draft", False)),
+    )
+    cfg["app"]["legacy_upload_queue_enabled"] = _env_bool(
+        "LEGACY_UPLOAD_QUEUE_ENABLED",
+        bool(cfg["app"].get("legacy_upload_queue_enabled", False)),
     )
     if os.getenv("APP_SECRET_KEY"):
         cfg["app"]["secret_key"] = os.environ["APP_SECRET_KEY"]

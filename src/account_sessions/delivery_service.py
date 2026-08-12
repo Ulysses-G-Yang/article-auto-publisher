@@ -9,9 +9,12 @@ import hmac
 import os
 import secrets
 import uuid
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from datetime import datetime, timedelta, timezone
 from typing import Any
+
+from sqlalchemy import select, update
+from sqlalchemy.exc import IntegrityError
 
 from account_sessions.account_service import (
     AccountSessionService,
@@ -57,10 +60,13 @@ class DeliveryService:
         *,
         platform_factory: Callable[[PlatformAccount], Any] | None = None,
         public_publish_enabled: bool | None = None,
+        content_resolver: Callable[[str], Awaitable[tuple[str, list[dict], list[dict]]]]
+        | None = None,
     ) -> None:
         self.accounts = accounts
         self.database = accounts.database
         self.platform_factory = platform_factory or accounts.platform_factory
+        self.content_resolver = content_resolver
         self.public_publish_enabled = (
             _env_flag("ACCOUNT_SESSIONS_ALLOW_PUBLIC_PUBLISH")
             if public_publish_enabled is None
@@ -71,6 +77,12 @@ class DeliveryService:
         self,
         request: DeliveryRequest,
         access: AccessContext,
+        *,
+        frozen_content_hash: str | None = None,
+        content_reference: str | None = None,
+        confirmation_scope: str | None = None,
+        request_key: str | None = None,
+        persist_login_snapshot: bool | None = None,
     ) -> dict:
         capability = "draft.create" if request.mode == "DRAFT" else "publish.request"
         account = await self.accounts.require_account(
@@ -79,51 +91,94 @@ class DeliveryService:
             access,
             capability,
         )
+        if request_key:
+            existing = await self._load_operation_by_request_key(request_key)
+            if existing is not None:
+                operation, existing_account = existing
+                self._assert_idempotent_match(
+                    operation,
+                    request=request,
+                    access=access,
+                    content_reference=content_reference,
+                    persist_login_snapshot=persist_login_snapshot,
+                )
+                return operation_payload(operation, existing_account)
         if account.status != "ACTIVE" or account.session_status != "VALID":
             raise AccountUnavailableError("所选账号登录态当前不可用")
 
         if request.mode == "PUBLISH":
             if not request.confirmation_token:
-                raise await self._new_confirmation(request, account, access)
-            await self._consume_confirmation(request, account, access)
+                raise await self._new_confirmation(
+                    request,
+                    account,
+                    access,
+                    frozen_content_hash=frozen_content_hash,
+                    confirmation_scope=confirmation_scope,
+                )
+            await self._consume_confirmation(
+                request,
+                account,
+                access,
+                frozen_content_hash=frozen_content_hash,
+                confirmation_scope=confirmation_scope,
+            )
             access.require("publish.execute", account.account_id)
             if not self.public_publish_enabled:
-                raise PublicPublishDisabledError(
-                    "公开发布总开关保持关闭；本阶段只允许保存草稿"
-                )
+                raise PublicPublishDisabledError("公开发布总开关保持关闭；本阶段只允许保存草稿")
 
         operation_id = str(uuid.uuid4())
         operation = DeliveryOperation(
             operation_id=operation_id,
+            request_key=request_key,
             account_id=account.account_id,
             platform=account.platform,
             mode=request.mode,
             source=access.source,
             actor_id=access.actor_id,
-            title=request.article.title,
-            body=request.article.body,
-            content_version=content_version(
-                request.article.title,
-                request.article.body,
+            title=(
+                "[Content Studio immutable version]" if content_reference else request.article.title
+            ),
+            body=(
+                "[Content Studio content reference]" if content_reference else request.article.body
+            ),
+            content_reference=content_reference,
+            persist_login_snapshot=persist_login_snapshot,
+            content_version=(
+                frozen_content_hash or content_version(request.article.title, request.article.body)
             ),
             account_display_name_snapshot=account.display_name,
             status="QUEUED",
             confirmation_used=request.mode == "PUBLISH",
         )
-        async with self.database.session() as session:
-            session.add(operation)
-            session.add(
-                activity_for(
-                    account,
-                    access,
-                    action="DELIVERY_QUEUED",
-                    message=(
-                        "草稿保存执行单已创建"
-                        if request.mode == "DRAFT"
-                        else "公开发布执行单已创建"
-                    ),
-                    operation_id=operation_id,
+        try:
+            async with self.database.session() as session:
+                session.add(operation)
+                session.add(
+                    activity_for(
+                        account,
+                        access,
+                        action="DELIVERY_QUEUED",
+                        message=(
+                            "草稿保存执行单已创建"
+                            if request.mode == "DRAFT"
+                            else "公开发布执行单已创建"
+                        ),
+                        operation_id=operation_id,
+                    )
                 )
+        except IntegrityError:
+            if not request_key:
+                raise
+            existing = await self._load_operation_by_request_key(request_key)
+            if existing is None:
+                raise
+            operation, account = existing
+            self._assert_idempotent_match(
+                operation,
+                request=request,
+                access=access,
+                content_reference=content_reference,
+                persist_login_snapshot=persist_login_snapshot,
             )
         return operation_payload(operation, account)
 
@@ -138,16 +193,32 @@ class DeliveryService:
         if operation.status != "QUEUED":
             return operation_payload(operation, account)
 
-        await self._mark_started(operation_id, account, access)
-        platform = self.platform_factory(account)
+        if not await self._mark_started(operation_id, account, access):
+            current, current_account = await self._load_operation(operation_id)
+            return operation_payload(current, current_account)
         buffered_log = BufferedPlatformLog()
+        platform = None
         try:
+            platform = self.platform_factory(account)
+            if operation.content_reference:
+                if self.content_resolver is None:
+                    raise AccountUnavailableError(
+                        "内容版本解析器不可用",
+                        error_code="CONTENT_VERSION_UNAVAILABLE",
+                    )
+                resolved_title, content_blocks, images = await self.content_resolver(
+                    operation.content_reference
+                )
+            else:
+                resolved_title = operation.title
+                content_blocks = [{"type": "text", "text": operation.body}]
+                images = []
             with self.accounts._lease(account, purpose=operation.mode):
                 await platform.initialize()
                 result = await platform.publish(
-                    title=operation.title,
-                    content_blocks=[{"type": "text", "text": operation.body}],
-                    images=[],
+                    title=resolved_title,
+                    content_blocks=content_blocks,
+                    images=images,
                     task_id=0,
                     db=buffered_log,
                     auto_login=False,
@@ -157,6 +228,11 @@ class DeliveryService:
                 raise AccountUnavailableError(
                     result.get("error") or "平台未确认投递成功",
                     error_code=result.get("error_code") or "DELIVERY_FAILED",
+                )
+            if result.get("media_status") in {"partial", "failed"}:
+                raise AccountUnavailableError(
+                    "图片未完整写入平台，已拒绝把本次投递标记为成功",
+                    error_code=(result.get("media_error_code") or "PLATFORM_MEDIA_INCOMPLETE"),
                 )
             if operation.mode == "PUBLISH" and not result.get("post_url"):
                 raise AccountUnavailableError(
@@ -180,7 +256,15 @@ class DeliveryService:
             )
             raise
         finally:
-            if not account.persist_login and platform.context is not None:
+            if (
+                platform is not None
+                and not (
+                    account.persist_login
+                    if operation.persist_login_snapshot is None
+                    else operation.persist_login_snapshot
+                )
+                and platform.context is not None
+            ):
                 try:
                     await platform.context.clear_cookies()
                     await self._record_session_cleanup(
@@ -199,7 +283,17 @@ class DeliveryService:
                     )
                 finally:
                     await self._mark_session_login_required(account.account_id)
-            await platform.cleanup()
+            if platform is not None:
+                try:
+                    await platform.cleanup()
+                except Exception as exc:
+                    await self._record_session_cleanup(
+                        account,
+                        access,
+                        operation_id,
+                        success=False,
+                        error=exc,
+                    )
 
     async def get_operation(
         self,
@@ -210,15 +304,40 @@ class DeliveryService:
         access.require("logs.read", account.account_id)
         return operation_payload(operation, account)
 
+    async def reconcile_interrupted_operations(self) -> None:
+        """启动恢复：QUEUED 可续跑，RUNNING 标为结果未知，绝不自动重放。"""
+
+        now = datetime.now(timezone.utc)
+        async with self.database.session() as session:
+            interrupted = list(
+                (
+                    await session.scalars(
+                        select(DeliveryOperation).where(DeliveryOperation.status == "RUNNING")
+                    )
+                ).all()
+            )
+            for operation in interrupted:
+                operation.status = "RESULT_UNKNOWN"
+                operation.error_code = "DELIVERY_RESULT_UNKNOWN"
+                operation.error_message = "服务中断时平台操作正在执行，请人工核对平台结果"
+                operation.completed_at = now
+
     async def _new_confirmation(
         self,
         request: DeliveryRequest,
         account: PlatformAccount,
         access: AccessContext,
+        *,
+        frozen_content_hash: str | None = None,
+        confirmation_scope: str | None = None,
     ) -> ConfirmationRequiredError:
         token = secrets.token_urlsafe(32)
         expires = datetime.now(timezone.utc) + timedelta(minutes=5)
-        fingerprint = _fingerprint(request)
+        fingerprint = _fingerprint(
+            request,
+            frozen_content_hash=frozen_content_hash,
+            confirmation_scope=confirmation_scope,
+        )
         async with self.database.session() as session:
             session.add(
                 PublishConfirmation(
@@ -253,6 +372,9 @@ class DeliveryService:
         request: DeliveryRequest,
         account: PlatformAccount,
         access: AccessContext,
+        *,
+        frozen_content_hash: str | None = None,
+        confirmation_scope: str | None = None,
     ) -> None:
         token_hash = _token_hash(request.confirmation_token or "")
         now = datetime.now(timezone.utc)
@@ -268,7 +390,14 @@ class DeliveryService:
                 and expires_at > now
                 and confirmation.account_id == account.account_id
                 and confirmation.actor_id == access.actor_id
-                and hmac.compare_digest(confirmation.fingerprint, _fingerprint(request))
+                and hmac.compare_digest(
+                    confirmation.fingerprint,
+                    _fingerprint(
+                        request,
+                        frozen_content_hash=frozen_content_hash,
+                        confirmation_scope=confirmation_scope,
+                    ),
+                )
             )
             if not valid:
                 raise ConfirmationInvalidError("公开发布确认令牌已失效或与当前内容不匹配")
@@ -287,18 +416,62 @@ class DeliveryService:
                 raise AccountNotFoundError("投递账号不存在")
             return operation, account
 
+    async def _load_operation_by_request_key(
+        self,
+        request_key: str,
+    ) -> tuple[DeliveryOperation, PlatformAccount] | None:
+        async with self.database.session() as session:
+            operation = await session.scalar(
+                select(DeliveryOperation).where(DeliveryOperation.request_key == request_key)
+            )
+            if operation is None:
+                return None
+            account = await session.get(PlatformAccount, operation.account_id)
+            if account is None:
+                raise AccountNotFoundError("投递账号不存在")
+            return operation, account
+
+    @staticmethod
+    def _assert_idempotent_match(
+        operation: DeliveryOperation,
+        *,
+        request: DeliveryRequest,
+        access: AccessContext,
+        content_reference: str | None,
+        persist_login_snapshot: bool | None,
+    ) -> None:
+        if (
+            operation.account_id != request.account_id
+            or operation.platform != request.platform
+            or operation.mode != request.mode
+            or operation.actor_id != access.actor_id
+            or operation.source != access.source
+            or operation.content_reference != content_reference
+            or operation.persist_login_snapshot != persist_login_snapshot
+        ):
+            raise AccountUnavailableError(
+                "投递幂等键与既有执行单不匹配",
+                error_code="DELIVERY_IDEMPOTENCY_CONFLICT",
+            )
+
     async def _mark_started(
         self,
         operation_id: str,
         account: PlatformAccount,
         access: AccessContext,
-    ) -> None:
+    ) -> bool:
         async with self.database.session() as session:
-            operation = await session.get(DeliveryOperation, operation_id)
-            if operation is None or operation.status != "QUEUED":
-                raise AccountUnavailableError("执行单状态已变化，不能重复执行")
-            operation.status = "RUNNING"
-            operation.started_at = datetime.now(timezone.utc)
+            claimed = await session.execute(
+                update(DeliveryOperation)
+                .where(
+                    DeliveryOperation.operation_id == operation_id,
+                    DeliveryOperation.status == "QUEUED",
+                )
+                .values(status="RUNNING", started_at=datetime.now(timezone.utc))
+                .execution_options(synchronize_session=False)
+            )
+            if claimed.rowcount != 1:
+                return False
             session.add(
                 activity_for(
                     account,
@@ -308,6 +481,7 @@ class DeliveryService:
                     operation_id=operation_id,
                 )
             )
+            return True
 
     async def _mark_completed(
         self,
@@ -321,9 +495,7 @@ class DeliveryService:
             operation = await session.get(DeliveryOperation, operation_id)
             if operation is None:
                 raise AccountNotFoundError("投递执行单不存在")
-            operation.status = (
-                "DRAFT_SAVED" if operation.mode == "DRAFT" else "PUBLISHED"
-            )
+            operation.status = "DRAFT_SAVED" if operation.mode == "DRAFT" else "PUBLISHED"
             operation.draft_url = result.get("draft_url")
             operation.platform_url = result.get("post_url") or None
             operation.completed_at = datetime.now(timezone.utc)
@@ -387,15 +559,13 @@ class DeliveryService:
                     account,
                     access,
                     action=(
-                        "SESSION_CLEARED_AFTER_OPERATION"
-                        if success
-                        else "SESSION_CLEANUP_FAILED"
+                        "SESSION_CLEARED_AFTER_OPERATION" if success else "SESSION_CLEANUP_FAILED"
                     ),
                     level="INFO" if success else "WARN",
                     message=(
                         "保持登录态已关闭，本次操作结束后已清除目标账号会话"
                         if success
-                        else f"操作已结束，但目标账号会话清理失败: {error}"
+                        else f"操作已结束，但目标账号会话清理失败: {safe_error_message(error)}"
                     ),
                     operation_id=operation_id,
                 )
@@ -452,12 +622,21 @@ def _append_buffered_logs(
         )
 
 
-def _fingerprint(request: DeliveryRequest) -> str:
+def _fingerprint(
+    request: DeliveryRequest,
+    *,
+    frozen_content_hash: str | None = None,
+    confirmation_scope: str | None = None,
+) -> str:
     return delivery_fingerprint(
         platform=request.platform,
         account_id=request.account_id,
         title=request.article.title,
-        body=request.article.body,
+        body=(
+            f"content-version:{frozen_content_hash};target:{confirmation_scope or '-'}"
+            if frozen_content_hash
+            else request.article.body
+        ),
         mode=request.mode,
     )
 

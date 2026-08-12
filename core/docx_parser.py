@@ -1,13 +1,10 @@
 """.docx 文档解析器 —— 提取文本 + 图片，保持顺序和位置关系"""
-import os
-import io
+
 import json
-from pathlib import Path
+import os
 from dataclasses import dataclass, field
-from typing import List, Optional
 
 from docx import Document
-from docx.opc.constants import RELATIONSHIP_TYPE as RT
 from PIL import Image
 
 from config import get_config
@@ -16,31 +13,33 @@ from config import get_config
 @dataclass
 class ContentBlock:
     """内容块：文本或图片"""
+
     type: str  # "text" | "image" | "heading"
-    text: Optional[str] = None
-    style_name: Optional[str] = None
-    image_filename: Optional[str] = None
-    image_path: Optional[str] = None
-    image_width: Optional[int] = None
-    image_height: Optional[int] = None
+    text: str | None = None
+    style_name: str | None = None
+    image_filename: str | None = None
+    image_path: str | None = None
+    image_width: int | None = None
+    image_height: int | None = None
     position: int = 0
 
 
 @dataclass
 class ParsedArticle:
     """解析后的文章"""
+
     filename: str
     original_path: str
-    blocks: List[ContentBlock] = field(default_factory=list)
+    blocks: list[ContentBlock] = field(default_factory=list)
     plain_text: str = ""
     image_count: int = 0
     char_count: int = 0
 
 
 class DocxParser:
-    def __init__(self):
+    def __init__(self, images_dir: str | None = None):
         cfg = get_config()
-        self.images_dir = cfg["paths"]["images"]
+        self.images_dir = images_dir or cfg["paths"]["images"]
         os.makedirs(self.images_dir, exist_ok=True)
 
     def parse(self, filepath: str) -> ParsedArticle:
@@ -75,88 +74,64 @@ class DocxParser:
                 if para is None:
                     continue
 
-                # 检查段落中的图片
-                has_image = False
+                # 逐 Run 保留同一段落里的文字与图片。旧实现一旦发现图片就会
+                # 丢弃整段文字，常见的“文字 + 内嵌图片 + 文字”会导入不完整。
+                paragraph_parts = []
                 for run in para.runs:
-                    drawings = run._element.findall(".//{http://schemas.openxmlformats.org/wordprocessingml/2006/main}drawing")
-                    blips = run._element.findall(".//{http://schemas.openxmlformats.org/drawingml/2006/main}blip")
-
-                    for blip in blips:
-                        embed = blip.get("{http://schemas.openxmlformats.org/officeDocument/2006/relationships}embed")
+                    run_text = run.text.strip()
+                    if run_text:
+                        paragraph_parts.append(("text", run_text))
+                    for blip in run._element.findall(
+                        ".//{http://schemas.openxmlformats.org/drawingml/2006/main}blip"
+                    ):
+                        embed = blip.get(
+                            "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}embed"
+                        )
                         if embed and embed in image_parts:
-                            image_part = image_parts[embed]
-                            img_filename = os.path.basename(image_part.partname)
-                            img_path = os.path.join(article_images_dir, img_filename)
+                            paragraph_parts.append(("image", image_parts[embed]))
 
-                            if not os.path.exists(img_path):
-                                with open(img_path, "wb") as f:
-                                    f.write(image_part.blob)
+                # 部分 Word 生成器不会把纯文字暴露为标准 Run，保留段落级兜底。
+                if not paragraph_parts and para.text.strip():
+                    paragraph_parts.append(("text", para.text.strip()))
 
-                            width, height = self._get_image_size(img_path)
-                            article.image_count += 1
-
-                            block = ContentBlock(
-                                type="image",
-                                image_filename=img_filename,
-                                image_path=img_path,
-                                image_width=width,
-                                image_height=height,
-                                position=position,
-                            )
-                            article.blocks.append(block)
-                            position += 1
-                            has_image = True
-
-                # 处理段落中的图片（另一种嵌入方式：内联形状）
-                if not has_image:
-                    inline_shapes = para._element.findall(
-                        ".//{http://schemas.openxmlformats.org/wordprocessingml/2006/main}drawing"
-                    )
-                    for drawing in inline_shapes:
-                        blips = drawing.findall(".//{http://schemas.openxmlformats.org/drawingml/2006/main}blip")
-                        for blip in blips:
-                            embed = blip.get("{http://schemas.openxmlformats.org/officeDocument/2006/relationships}embed")
-                            if embed and embed in image_parts:
-                                image_part = image_parts[embed]
-                                img_filename = os.path.basename(image_part.partname)
-                                img_path = os.path.join(article_images_dir, img_filename)
-
-                                if not os.path.exists(img_path):
-                                    with open(img_path, "wb") as f:
-                                        f.write(image_part.blob)
-
-                                width, height = self._get_image_size(img_path)
-                                article.image_count += 1
-
-                                block = ContentBlock(
-                                    type="image",
-                                    image_filename=img_filename,
-                                    image_path=img_path,
-                                    image_width=width,
-                                    image_height=height,
-                                    position=position,
-                                )
-                                article.blocks.append(block)
-                                position += 1
-                                has_image = True
-
-                # 如果没有图片，处理为文本块
-                if not has_image:
-                    text = para.text.strip()
-                    if text:
-                        # 判断是否为标题
-                        is_heading = para.style and para.style.name and ("Heading" in para.style.name or "Title" in para.style.name)
-                        block_type = "heading" if is_heading else "text"
+                is_heading = bool(
+                    para.style
+                    and para.style.name
+                    and ("Heading" in para.style.name or "Title" in para.style.name)
+                )
+                for part_type, value in paragraph_parts:
+                    if part_type == "text":
                         block = ContentBlock(
-                            type=block_type,
-                            text=text,
+                            type="heading" if is_heading else "text",
+                            text=value,
                             style_name=para.style.name if para.style else None,
                             position=position,
                         )
                         article.blocks.append(block)
-                        text_parts.append(text)
-                        article.char_count += len(text)
+                        text_parts.append(value)
+                        article.char_count += len(value)
                         position += 1
+                        continue
+
+                    image_part = value
+                    img_filename = os.path.basename(image_part.partname)
+                    img_path = os.path.join(article_images_dir, img_filename)
+                    if not os.path.exists(img_path):
+                        with open(img_path, "wb") as f:
+                            f.write(image_part.blob)
+                    width, height = self._get_image_size(img_path)
+                    article.blocks.append(
+                        ContentBlock(
+                            type="image",
+                            image_filename=img_filename,
+                            image_path=img_path,
+                            image_width=width,
+                            image_height=height,
+                            position=position,
+                        )
+                    )
+                    article.image_count += 1
+                    position += 1
 
             # 处理表格
             elif child.tag.endswith("}tbl"):
@@ -184,15 +159,24 @@ class DocxParser:
 
     def _extract_table_text(self, tbl_element) -> str:
         """提取表格文本"""
-        rows = tbl_element.findall("{http://schemas.openxmlformats.org/wordprocessingml/2006/main}tr")
+        rows = tbl_element.findall(
+            "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}tr"
+        )
         lines = []
         for row in rows:
             cells = row.findall("{http://schemas.openxmlformats.org/wordprocessingml/2006/main}tc")
             cell_texts = []
             for cell in cells:
-                paras = cell.findall("{http://schemas.openxmlformats.org/wordprocessingml/2006/main}p")
+                paras = cell.findall(
+                    "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}p"
+                )
                 cell_text = " ".join(
-                    "".join(t.text or "" for t in p.iterfind(".//{http://schemas.openxmlformats.org/wordprocessingml/2006/main}t"))
+                    "".join(
+                        t.text or ""
+                        for t in p.iterfind(
+                            ".//{http://schemas.openxmlformats.org/wordprocessingml/2006/main}t"
+                        )
+                    )
                     for p in paras
                 )
                 cell_texts.append(cell_text.strip())

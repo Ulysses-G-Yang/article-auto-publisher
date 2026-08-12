@@ -1,4 +1,4 @@
-"""账号会话域独立异步数据库生命周期。"""
+"""Content Studio 独立异步数据库生命周期。"""
 
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -12,17 +12,17 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 
-from account_sessions.models import Base
-from account_sessions.runtime_paths import default_database_path
+from content_studio.models import Base
+from content_studio.runtime_paths import default_database_path
 
 
 def sqlite_url(path: str | Path) -> str:
-    resolved = Path(path).resolve()
+    resolved = Path(path).expanduser().resolve()
     resolved.parent.mkdir(parents=True, exist_ok=True)
     return f"sqlite+aiosqlite:///{resolved.as_posix()}"
 
 
-class AccountDatabase:
+class ContentDatabase:
     def __init__(self, database_url: str | None = None) -> None:
         self.database_url = database_url or sqlite_url(default_database_path())
         self.engine: AsyncEngine = create_async_engine(
@@ -50,34 +50,26 @@ class AccountDatabase:
     async def initialize(self) -> None:
         async with self.engine.begin() as connection:
             await connection.run_sync(Base.metadata.create_all)
-            await connection.run_sync(self._upgrade_delivery_operation_schema)
+            await connection.run_sync(self._upgrade_plan_target_schema)
 
     @staticmethod
-    def _upgrade_delivery_operation_schema(connection) -> None:
-        """为既有账号数据库幂等补充内容域版本引用。"""
+    def _upgrade_plan_target_schema(connection) -> None:
+        """幂等补充目标级执行租约，支持已有 Content Studio 数据库。"""
 
         columns = {
             row[1]
             for row in connection.exec_driver_sql(
-                "PRAGMA table_info(delivery_operations)"
+                "PRAGMA table_info(delivery_plan_targets)"
             ).fetchall()
         }
-        if "content_reference" not in columns:
+        if "execution_claim_id" not in columns:
             connection.exec_driver_sql(
-                "ALTER TABLE delivery_operations ADD COLUMN content_reference VARCHAR(128)"
+                "ALTER TABLE delivery_plan_targets ADD COLUMN execution_claim_id VARCHAR(36)"
             )
-        if "request_key" not in columns:
+        if "execution_claim_expires_at" not in columns:
             connection.exec_driver_sql(
-                "ALTER TABLE delivery_operations ADD COLUMN request_key VARCHAR(128)"
+                "ALTER TABLE delivery_plan_targets ADD COLUMN execution_claim_expires_at DATETIME"
             )
-        if "persist_login_snapshot" not in columns:
-            connection.exec_driver_sql(
-                "ALTER TABLE delivery_operations ADD COLUMN persist_login_snapshot BOOLEAN"
-            )
-        connection.exec_driver_sql(
-            "CREATE UNIQUE INDEX IF NOT EXISTS ux_delivery_operations_request_key "
-            "ON delivery_operations(request_key) WHERE request_key IS NOT NULL"
-        )
 
     @asynccontextmanager
     async def session(self) -> AsyncIterator[AsyncSession]:

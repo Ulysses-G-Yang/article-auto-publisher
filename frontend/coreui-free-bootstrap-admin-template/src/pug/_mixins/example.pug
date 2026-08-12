@@ -1,0 +1,15 @@
+mixin example(url, classNames)
+  .example
+    ul.nav.nav-underline-border(role="tablist")
+      li.nav-item
+        a.nav-link.active(data-coreui-toggle="tab" href="#preview-"+count role="tab")
+          +inlineSvg('node_modules/@coreui/icons/svg/free/cil-media-play.svg').icon.me-2
+          | Preview
+      if url
+        li.nav-item
+          a.nav-link(href=url target="_blank")
+            +inlineSvg('node_modules/@coreui/icons/svg/free/cil-code.svg').icon.me-2
+            | Code
+    .tab-content.rounded-bottom(class=classNames)
+      .tab-pane.p-3.active.preview(role="tabpanel" id="preview-"+count++ )
+        block

@@ -161,26 +161,17 @@ class BasePlatform(ABC):
         chrome_profile_dir.mkdir(parents=True, exist_ok=True)
 
         # Singleton 既可能是异常残留，也可能是活动 Chrome 的占用凭据。
-        # 账号会话严格模式绝不删除；旧流程暂时保留原兼容路径。
+        # 无论新旧入口都不能擅自删除；占用者退出后由 Chrome 自行清理。
         singleton_names = ("SingletonLock", "SingletonCookie", "SingletonSocket")
-        if self.strict_profile_lock:
-            occupied = [
-                str(chrome_profile_dir / name)
-                for name in singleton_names
-                if (chrome_profile_dir / name).exists()
-            ]
-            if occupied:
-                raise PlatformAutomationError(
-                    "PROFILE_IN_USE: 账号浏览器 Profile 正在被其他流程占用"
-                )
-        else:
-            for lock_file in singleton_names:
-                lock_path = chrome_profile_dir / lock_file
-                try:
-                    if lock_path.exists():
-                        lock_path.unlink()
-                except Exception:
-                    pass
+        occupied = [
+            str(chrome_profile_dir / name)
+            for name in singleton_names
+            if (chrome_profile_dir / name).exists()
+        ]
+        if occupied:
+            raise PlatformAutomationError(
+                "PROFILE_IN_USE: 账号浏览器 Profile 正在被其他流程占用"
+            )
 
         # 严格模式必须先完成目录和占用检查，再启动 Playwright 驱动，避免
         # PROFILE_IN_USE 分支遗留无主进程。
@@ -213,14 +204,7 @@ class BasePlatform(ABC):
                     raise PlatformAutomationError(
                         f"PROFILE_IN_USE: 无法安全打开账号 Profile: {e}"
                     ) from e
-                # 旧流程维持原有兼容行为；账号会话域永远不走此分支。
-                for lock_file in singleton_names:
-                    lock_path = chrome_profile_dir / lock_file
-                    try:
-                        if lock_path.exists():
-                            lock_path.unlink()
-                    except Exception:
-                        pass
+                # 旧入口保留有限重试，但同样不删除 Chrome 占用凭据。
                 await asyncio.sleep(3)
         else:
             raise last_error

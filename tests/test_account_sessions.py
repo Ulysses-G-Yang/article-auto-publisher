@@ -40,6 +40,8 @@ from account_sessions.web import (
     create_account_session_blueprint,
 )
 from article_mvp.errors import PlatformBusyError
+from platforms.base import PlatformAutomationError
+from platforms.xiaoheihe import XiaoheihePlatform
 
 
 def run(coroutine):
@@ -209,6 +211,19 @@ def test_profile_lease_refuses_singleton_and_never_deletes_it(
     assert singleton.read_text(encoding="utf-8") == "occupied"
 
 
+def test_legacy_platform_entry_never_deletes_singleton(tmp_path: Path) -> None:
+    profile = tmp_path / "legacy-profile"
+    profile.mkdir()
+    singleton = profile / "SingletonLock"
+    singleton.write_text("active-or-unknown", encoding="utf-8")
+    platform = XiaoheihePlatform(profile_dir=profile)
+
+    with pytest.raises(PlatformAutomationError, match="PROFILE_IN_USE"):
+        run(platform.initialize())
+    assert singleton.read_text(encoding="utf-8") == "active-or-unknown"
+    assert platform.playwright is None
+
+
 def test_profile_lease_is_cross_process_keyed_by_profile(
     tmp_path: Path,
 ) -> None:
@@ -272,11 +287,19 @@ def test_draft_operation_is_account_bound_and_logs_are_isolated(
 
 
 def test_draft_executor_records_platform_logs_and_success(tmp_path: Path) -> None:
+    class FakeContext:
+        def __init__(self) -> None:
+            self.clear_calls = 0
+
+        async def clear_cookies(self) -> None:
+            self.clear_calls += 1
+
     class FakePlatform:
         platform_name = "xiaoheihe"
 
         def __init__(self) -> None:
             self.cleaned = False
+            self.context = FakeContext()
 
         async def initialize(self) -> None:
             return None
@@ -307,6 +330,8 @@ def test_draft_executor_records_platform_logs_and_success(tmp_path: Path) -> Non
     run(accounts.initialize())
     profile = make_profile(tmp_path, "xiaoheihe", "execute")
     account = run(insert_account(database, profile))
+    run(accounts.set_session_policy(account.account_id, False, LOCAL_WEB_CONTEXT))
+    account.persist_login = False
     delivery = DeliveryService(
         accounts,
         platform_factory=lambda _account: fake,
@@ -321,12 +346,14 @@ def test_draft_executor_records_platform_logs_and_success(tmp_path: Path) -> Non
     assert completed["status"] == "DRAFT_SAVED"
     assert completed["draft_url"].endswith("/drafts/1")
     assert fake.cleaned is True
+    assert fake.context.clear_calls == 1
     logs = run(accounts.list_activity(account.account_id, LOCAL_WEB_CONTEXT))
     assert {row["action"] for row in logs} >= {
         "DELIVERY_QUEUED",
         "DELIVERY_STARTED",
         "PLATFORM_LOG",
         "DRAFT_SAVED",
+        "SESSION_CLEARED_AFTER_OPERATION",
     }
     run(database.dispose())
 

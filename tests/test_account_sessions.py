@@ -28,6 +28,7 @@ from account_sessions.errors import (
     PublicPublishDisabledError,
 )
 from account_sessions.leases import AccountProfileLease
+from account_sessions.identity import _clean
 from account_sessions.models import AccountActivity, PlatformAccount
 from account_sessions.permissions import LOCAL_WEB_CONTEXT, AccessContext
 from account_sessions.web import (
@@ -84,6 +85,11 @@ def delivery_payload(account_id: str, *, mode: str = "DRAFT") -> dict:
         "mode": mode,
         "confirmation_token": None,
     }
+
+
+def test_legacy_javascript_escaped_nickname_is_decoded() -> None:
+    assert _clean("%u73A9%u5BB6102503316") == "玩家102503316"
+    assert _clean("%E6%B5%8B%E8%AF%95+account") == "测试 account"
 
 
 def test_database_schema_pragmas_and_idempotent_initialization(tmp_path: Path) -> None:

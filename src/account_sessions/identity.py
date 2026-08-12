@@ -1,5 +1,6 @@
 """从已打开的平台会话中提取最小账号身份，不返回 Cookie 值。"""
 
+import re
 from dataclasses import dataclass
 from urllib.parse import unquote_plus
 
@@ -13,7 +14,15 @@ class AccountIdentity:
 
 
 def _clean(value: object) -> str:
-    text = unquote_plus(str(value or "")).strip().strip('"\'')
+    text = str(value or "")
+    # 小黑盒历史 Cookie 仍可能使用 JavaScript escape 的 ``%u4E2D`` 形式；
+    # urllib 只认识 UTF-8 百分号编码，需先把 %uXXXX 转回 Unicode。
+    text = re.sub(
+        r"%u([0-9a-fA-F]{4})",
+        lambda match: chr(int(match.group(1), 16)),
+        text,
+    )
+    text = unquote_plus(text).strip().strip('"\'')
     return " ".join(text.split())[:255]
 
 

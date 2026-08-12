@@ -66,6 +66,18 @@ class AccountDatabase:
             connection.exec_driver_sql(
                 "ALTER TABLE delivery_operations ADD COLUMN content_reference VARCHAR(128)"
             )
+        if "request_key" not in columns:
+            connection.exec_driver_sql(
+                "ALTER TABLE delivery_operations ADD COLUMN request_key VARCHAR(128)"
+            )
+        if "persist_login_snapshot" not in columns:
+            connection.exec_driver_sql(
+                "ALTER TABLE delivery_operations ADD COLUMN persist_login_snapshot BOOLEAN"
+            )
+        connection.exec_driver_sql(
+            "CREATE UNIQUE INDEX IF NOT EXISTS ux_delivery_operations_request_key "
+            "ON delivery_operations(request_key) WHERE request_key IS NOT NULL"
+        )
 
     @asynccontextmanager
     async def session(self) -> AsyncIterator[AsyncSession]:

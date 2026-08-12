@@ -411,6 +411,7 @@ class FakeAccountState:
 class CapturingDelivery:
     def __init__(self) -> None:
         self.calls = []
+        self.operation_status = "QUEUED"
 
     async def request_delivery(self, request, _access, **kwargs):
         from account_sessions.errors import ConfirmationRequiredError
@@ -425,6 +426,17 @@ class CapturingDelivery:
         return {
             "operation_id": str(uuid.uuid4()),
             "status": "QUEUED",
+        }
+
+    async def get_operation(self, operation_id, _access):
+        return {
+            "operation_id": operation_id,
+            "status": self.operation_status,
+            "error_message": (
+                "服务中断时平台操作正在执行，请人工核对平台结果"
+                if self.operation_status == "RESULT_UNKNOWN"
+                else None
+            ),
         }
 
 
@@ -501,6 +513,7 @@ def test_plan_requires_batch_draft_and_per_publish_confirmation(tmp_path: Path) 
                 __import__(
                     "content_studio.contracts", fromlist=["ExecuteDeliveryPlanRequest"]
                 ).ExecuteDeliveryPlanRequest(),
+                LOCAL_WEB_CONTEXT,
             )
         )
 
@@ -510,6 +523,7 @@ def test_plan_requires_batch_draft_and_per_publish_confirmation(tmp_path: Path) 
         state.execute_plan(
             plan["plan_id"],
             ExecuteDeliveryPlanRequest(draft_batch_confirmed=True),
+            LOCAL_WEB_CONTEXT,
         )
     )
     draft_target = next(target for target in first["targets"] if target["mode"] == "DRAFT")
@@ -531,6 +545,7 @@ def test_plan_requires_batch_draft_and_per_publish_confirmation(tmp_path: Path) 
                 target_ids=[public_target["target_id"]],
                 confirmations={public_target["target_id"]: "per-target-token"},
             ),
+            LOCAL_WEB_CONTEXT,
         )
     )
     assert (
@@ -550,7 +565,12 @@ def test_plan_requires_batch_draft_and_per_publish_confirmation(tmp_path: Path) 
     )
     assert changed["revision"] > plan["draft_revision"]
     with pytest.raises(DeliveryPlanStaleError):
-        run(service.get_plan_execution_context(plan["plan_id"]))
+        run(
+            service.get_plan_execution_context(
+                plan["plan_id"],
+                LOCAL_WEB_CONTEXT,
+            )
+        )
 
     run(service.database.dispose())
     run(account_db.dispose())
@@ -660,11 +680,153 @@ def test_unexpected_target_failure_does_not_block_remaining_targets(tmp_path: Pa
         state.execute_plan(
             plan["plan_id"],
             ExecuteDeliveryPlanRequest(draft_batch_confirmed=True),
+            LOCAL_WEB_CONTEXT,
         )
     )
     assert [target["status"] for target in result["targets"]] == ["FAILED", "QUEUED"]
     assert result["status"] == "PARTIAL_FAIL"
     assert "secret-value" not in result["targets"][0]["error_message"]
     assert len(delivery.calls) == 2
+    run(service.database.dispose())
+    run(account_db.dispose())
+
+
+def test_docx_mixed_text_and_image_keeps_all_blocks(tmp_path: Path) -> None:
+    import io
+
+    from docx import Document
+    from docx.shared import Inches
+    from PIL import Image
+
+    image_buffer = io.BytesIO()
+    Image.new("RGB", (16, 16), "red").save(image_buffer, format="PNG")
+    image_path = tmp_path / "inline.png"
+    image_path.write_bytes(image_buffer.getvalue())
+    document = Document()
+    paragraph = document.add_paragraph()
+    paragraph.add_run("图片之前")
+    paragraph.add_run().add_picture(str(image_path), width=Inches(0.2))
+    paragraph.add_run("图片之后")
+    docx_buffer = io.BytesIO()
+    document.save(docx_buffer)
+
+    service = make_service(tmp_path)
+
+    async def scenario():
+        await service.initialize()
+        draft = await service.import_docx(docx_buffer.getvalue(), "mixed.docx")
+        await service.database.dispose()
+        return draft
+
+    draft = run(scenario())
+    assert [block["type"] for block in draft["blocks"]] == ["text", "image", "text"]
+    assert [block.get("text") for block in draft["blocks"] if block["type"] == "text"] == [
+        "图片之前",
+        "图片之后",
+    ]
+
+
+def test_missing_asset_returns_controlled_error(tmp_path: Path) -> None:
+    from content_studio.errors import ContentAssetError
+
+    store = AssetStore(tmp_path / "missing-assets")
+    with pytest.raises(ContentAssetError, match="图片文件不存在"):
+        store.resolve(str(tmp_path / "missing-assets" / "gone.png"))
+
+
+def test_plan_target_request_is_idempotent_and_running_becomes_unknown(
+    tmp_path: Path,
+) -> None:
+    from content_studio.contracts import ExecuteDeliveryPlanRequest
+    from content_studio.web import ContentStudioRuntimeState
+
+    account_db = AccountDatabase(sqlite_url(tmp_path / "idempotent-accounts.db"))
+    accounts = AccountSessionService(account_db, seed_legacy_profiles=False)
+    delivery = CapturingDelivery()
+    fake_state = FakeAccountState(accounts, delivery)
+    service = make_service(tmp_path, account_service=accounts)
+
+    async def scenario():
+        await accounts.initialize()
+        account = PlatformAccount(
+            account_id=str(uuid.uuid4()),
+            platform="xiaoheihe",
+            platform_user_id="idempotent-user",
+            display_name="幂等账号",
+            profile_path=str(tmp_path / "idempotent-profile"),
+            status="ACTIVE",
+            session_status="VALID",
+            persist_login=True,
+        )
+        async with account_db.session() as session:
+            session.add(account)
+        await service.initialize()
+        draft = await service.create_draft(
+            CreateDraftRequest(
+                title="幂等计划",
+                blocks=[{"type": "text", "text": "正文", "position": 0}],
+            )
+        )
+        targeted = await service.replace_targets(
+            draft["draft_id"],
+            ReplaceTargetsRequest(
+                revision=draft["revision"],
+                targets=[
+                    {
+                        "platform": "xiaoheihe",
+                        "account_id": account.account_id,
+                        "mode": "DRAFT",
+                    }
+                ],
+            ),
+            LOCAL_WEB_CONTEXT,
+        )
+        return await service.create_delivery_plan(
+            draft["draft_id"], targeted["revision"], LOCAL_WEB_CONTEXT
+        )
+
+    plan = run(scenario())
+    state = ContentStudioRuntimeState.__new__(ContentStudioRuntimeState)
+    state.account_state = fake_state
+    state.service = service
+    request = ExecuteDeliveryPlanRequest(draft_batch_confirmed=True)
+    first = run(state.execute_plan(plan["plan_id"], request, LOCAL_WEB_CONTEXT))
+    second = run(state.execute_plan(plan["plan_id"], request, LOCAL_WEB_CONTEXT))
+    assert len(delivery.calls) == 1
+    assert first["targets"][0]["operation_id"] == second["targets"][0]["operation_id"]
+
+    recoverable = run(
+        service.list_recoverable_plan_operations(
+            delivery,
+            LOCAL_WEB_CONTEXT,
+        )
+    )
+    assert recoverable == [
+        {
+            "plan_id": plan["plan_id"],
+            "target_id": first["targets"][0]["target_id"],
+            "operation_id": first["targets"][0]["operation_id"],
+        }
+    ]
+    run(
+        service.set_plan_target_result(
+            plan["plan_id"],
+            first["targets"][0]["target_id"],
+            status="RUNNING",
+            operation_id=first["targets"][0]["operation_id"],
+        )
+    )
+    delivery.calls.clear()
+    delivery.operation_status = "RESULT_UNKNOWN"
+    recoverable = run(
+        service.list_recoverable_plan_operations(
+            delivery,
+            LOCAL_WEB_CONTEXT,
+        )
+    )
+    updated = run(service.get_delivery_plan(plan["plan_id"], LOCAL_WEB_CONTEXT))
+    assert recoverable == []
+    assert updated["targets"][0]["status"] == "RESULT_UNKNOWN"
+    assert updated["targets"][0]["error_code"] == "DELIVERY_RESULT_UNKNOWN"
     run(service.database.dispose())
     run(account_db.dispose())

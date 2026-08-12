@@ -76,7 +76,10 @@ class AssetStore:
         )
 
     def resolve(self, storage_path: str) -> Path:
-        target = Path(storage_path).expanduser().resolve(strict=True)
+        try:
+            target = Path(storage_path).expanduser().resolve(strict=True)
+        except (FileNotFoundError, OSError) as exc:
+            raise ContentAssetError("图片文件不存在") from exc
         self._assert_within_root(target)
         if not target.is_file():
             raise ContentAssetError("图片文件不存在")

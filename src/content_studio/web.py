@@ -89,6 +89,21 @@ class ContentStudioRuntimeState:
             if not self._initialized:
                 self._runtime.run(self.service.initialize())
                 self._initialized = True
+                if self.account_state.auto_execute:
+                    for item in self._runtime.run(
+                        self.service.list_recoverable_plan_operations(
+                            self.account_state.delivery,
+                            LOCAL_WEB_CONTEXT,
+                        )
+                    ):
+                        self.account_state.submit(
+                            self._execute_operation_and_sync(
+                                item["plan_id"],
+                                item["target_id"],
+                                item["operation_id"],
+                                LOCAL_WEB_CONTEXT,
+                            )
+                        )
             return self._runtime
 
     def close(self) -> None:
@@ -110,8 +125,9 @@ class ContentStudioRuntimeState:
         self,
         plan_id: str,
         payload: ExecuteDeliveryPlanRequest,
+        access,
     ) -> dict:
-        context, targets = await self.service.get_plan_execution_context(plan_id)
+        context, targets = await self.service.get_plan_execution_context(plan_id, access)
         requested_ids = set(payload.target_ids or [target["target_id"] for target in targets])
         known_ids = {target["target_id"] for target in targets}
         unknown = requested_ids - known_ids
@@ -133,6 +149,12 @@ class ContentStudioRuntimeState:
                 "PUBLISHED",
             }:
                 continue
+            claim_id = await self.service.claim_plan_target(
+                plan_id,
+                target["target_id"],
+            )
+            if claim_id is None:
+                continue
             confirmation = payload.confirmations.get(target["target_id"])
             request_payload = DeliveryRequest(
                 article=ArticleInput(
@@ -147,10 +169,12 @@ class ContentStudioRuntimeState:
             try:
                 operation = await self.account_state.delivery.request_delivery(
                     request_payload,
-                    LOCAL_WEB_CONTEXT,
+                    access,
                     frozen_content_hash=context["content_hash"],
                     content_reference=context["version_id"],
                     confirmation_scope=target["target_id"],
+                    request_key=f"content-plan-target:{target['target_id']}",
+                    persist_login_snapshot=target["persist_login"],
                 )
             except ConfirmationRequiredError as exc:
                 await self.service.set_plan_target_result(
@@ -158,7 +182,7 @@ class ContentStudioRuntimeState:
                     target["target_id"],
                     status="CONFIRMATION_REQUIRED",
                     error_code=exc.error_code,
-                    error_message=str(exc),
+                    error_message=safe_error_message(exc),
                 )
                 target["status"] = "CONFIRMATION_REQUIRED"
                 target["confirmation_required"] = True
@@ -172,11 +196,11 @@ class ContentStudioRuntimeState:
                     target["target_id"],
                     status="BLOCKED",
                     error_code=getattr(exc, "error_code", "DELIVERY_BLOCKED"),
-                    error_message=str(exc),
+                    error_message=safe_error_message(exc),
                 )
                 target["status"] = "BLOCKED"
                 target["error_code"] = getattr(exc, "error_code", "DELIVERY_BLOCKED")
-                target["error_message"] = str(exc)
+                target["error_message"] = safe_error_message(exc)
                 continue
             except Exception as exc:
                 message = safe_error_message(exc)
@@ -192,24 +216,26 @@ class ContentStudioRuntimeState:
                 target["error_message"] = message
                 continue
 
+            operation_status = operation.get("status") or "QUEUED"
             await self.service.set_plan_target_result(
                 plan_id,
                 target["target_id"],
-                status="QUEUED",
+                status=operation_status,
                 operation_id=operation["operation_id"],
             )
-            target["status"] = "QUEUED"
+            target["status"] = operation_status
             target["operation_id"] = operation["operation_id"]
-            if self.account_state.auto_execute:
+            if self.account_state.auto_execute and operation_status == "QUEUED":
                 self.account_state.submit(
                     self._execute_operation_and_sync(
                         plan_id,
                         target["target_id"],
                         operation["operation_id"],
+                        access,
                     )
                 )
 
-        plan = await self.service.get_delivery_plan(plan_id)
+        plan = await self.service.get_delivery_plan(plan_id, access)
         response_targets = {target["target_id"]: target for target in plan["targets"]}
         for target in selected:
             response_targets[target["target_id"]].update(
@@ -227,11 +253,12 @@ class ContentStudioRuntimeState:
         plan_id: str,
         target_id: str,
         operation_id: str,
+        access,
     ) -> None:
         try:
             operation = await self.account_state.delivery.execute_operation(
                 operation_id,
-                LOCAL_WEB_CONTEXT,
+                access,
             )
             await self.service.set_plan_target_result(
                 plan_id,
@@ -240,13 +267,34 @@ class ContentStudioRuntimeState:
                 operation_id=operation_id,
             )
         except Exception as exc:
+            try:
+                operation = await self.account_state.delivery.get_operation(
+                    operation_id,
+                    access,
+                )
+            except Exception:
+                operation = None
+            if operation and operation.get("status") in {
+                "DRAFT_SAVED",
+                "PUBLISHED",
+                "RESULT_UNKNOWN",
+            }:
+                await self.service.set_plan_target_result(
+                    plan_id,
+                    target_id,
+                    status=operation["status"],
+                    operation_id=operation_id,
+                    error_code=operation.get("error_code"),
+                    error_message=operation.get("error_message"),
+                )
+                return
             await self.service.set_plan_target_result(
                 plan_id,
                 target_id,
                 status="FAILED",
                 operation_id=operation_id,
                 error_code=getattr(exc, "error_code", "DELIVERY_FAILED"),
-                error_message=str(exc)[:1000],
+                error_message=safe_error_message(exc),
             )
             return
 
@@ -353,12 +401,15 @@ def create_content_studio_blueprint(
 
     @blueprint.get("/api/delivery-plans/<plan_id>")
     def get_delivery_plan(plan_id: str):
-        return jsonify(state.run(state.service.get_delivery_plan(plan_id)))
+        return jsonify(state.run(state.service.get_delivery_plan(plan_id, LOCAL_WEB_CONTEXT)))
 
     @blueprint.post("/api/delivery-plans/<plan_id>/execute")
     def execute_delivery_plan(plan_id: str):
         payload = ExecuteDeliveryPlanRequest.model_validate(request.get_json(silent=True) or {})
-        result = state.run(state.execute_plan(plan_id, payload), timeout=120)
+        result = state.run(
+            state.execute_plan(plan_id, payload, LOCAL_WEB_CONTEXT),
+            timeout=120,
+        )
         has_confirmation = any(
             target.get("confirmation_required") and target.get("confirmation_token")
             for target in result["targets"]
@@ -399,5 +450,17 @@ def create_content_studio_blueprint(
                 "details": exc.errors(include_url=False, include_input=False),
             }
         ), 422
+
+    @blueprint.errorhandler(Exception)
+    def unexpected_error(exc: Exception):
+        """API 永远返回脱敏 JSON；详细堆栈只进入服务端日志。"""
+
+        LOGGER.exception("Content Studio 未处理异常")
+        return jsonify(
+            {
+                "error": "CONTENT_STUDIO_INTERNAL_ERROR",
+                "message": "内容工作台暂时不可用，请查看服务端日志",
+            }
+        ), 500
 
     return blueprint

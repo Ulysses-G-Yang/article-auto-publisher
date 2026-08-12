@@ -5,16 +5,22 @@
 """
 
 import asyncio
+import io
 import json
 import sqlite3
 import tempfile
 import uuid
+import zipfile
 from pathlib import Path
 from typing import Protocol
 
 from content_studio.assets import AssetStore, StoredAsset
 from content_studio.errors import ContentAssetError, DraftNotFoundError
 from content_studio.runtime_paths import default_work_root
+
+MAX_DOCX_BYTES = 50 * 1024 * 1024
+MAX_DOCX_ARCHIVE_ENTRIES = 10_000
+MAX_DOCX_UNCOMPRESSED_BYTES = 250 * 1024 * 1024
 
 
 class LegacySource(Protocol):
@@ -135,8 +141,19 @@ class DocxImportAdapter:
     ) -> tuple[str, list[dict], list[StoredAsset]]:
         if not data:
             raise ContentAssetError("DOCX 文件为空")
+        if len(data) > MAX_DOCX_BYTES:
+            raise ContentAssetError("DOCX 文件不能超过 50MB")
         if not filename.lower().endswith(".docx"):
             raise ContentAssetError("仅支持 .docx 文件")
+        try:
+            with zipfile.ZipFile(io.BytesIO(data)) as archive:
+                entries = archive.infolist()
+                if len(entries) > MAX_DOCX_ARCHIVE_ENTRIES:
+                    raise ContentAssetError("DOCX 内部文件数量超过安全限制")
+                if sum(item.file_size for item in entries) > MAX_DOCX_UNCOMPRESSED_BYTES:
+                    raise ContentAssetError("DOCX 解压后内容超过 250MB 安全限制")
+        except zipfile.BadZipFile as exc:
+            raise ContentAssetError("文件不是有效的 DOCX 文档") from exc
         with tempfile.TemporaryDirectory(prefix="docx-", dir=self.work_root) as temp_dir:
             temp_root = Path(temp_dir).resolve()
             upload = temp_root / "source.docx"

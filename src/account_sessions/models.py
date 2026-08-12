@@ -65,6 +65,7 @@ class DeliveryOperation(Base):
     )
 
     operation_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    request_key: Mapped[str | None] = mapped_column(String(128), unique=True, nullable=True)
     account_id: Mapped[str] = mapped_column(
         ForeignKey("platform_accounts.account_id"), nullable=False
     )
@@ -75,6 +76,7 @@ class DeliveryOperation(Base):
     title: Mapped[str] = mapped_column(String(255), nullable=False)
     body: Mapped[str] = mapped_column(Text, nullable=False)
     content_reference: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    persist_login_snapshot: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     content_version: Mapped[str] = mapped_column(String(64), nullable=False)
     account_display_name_snapshot: Mapped[str] = mapped_column(String(255), nullable=False)
     status: Mapped[str] = mapped_column(String(24), default="QUEUED", nullable=False)

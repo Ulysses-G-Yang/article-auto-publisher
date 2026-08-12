@@ -3,10 +3,10 @@
 import hashlib
 import json
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from sqlalchemy import delete, func, select, update
+from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import selectinload
@@ -87,6 +87,7 @@ class ContentStudioService:
 
     async def initialize(self) -> None:
         await self.database.initialize()
+        await self._release_interrupted_target_claims()
         await self.ensure_seed_draft()
 
     async def ensure_seed_draft(self) -> dict:
@@ -399,12 +400,17 @@ class ContentStudioService:
             await session.flush()
             return await self._plan_payload(session, plan)
 
-    async def get_delivery_plan(self, plan_id: str) -> dict:
+    async def get_delivery_plan(self, plan_id: str, access) -> dict:
         async with self.database.session() as session:
             plan = await self._load_plan(session, plan_id)
+            await self._assert_plan_access(session, plan, access, "logs.read")
             return await self._plan_payload(session, plan)
 
-    async def get_plan_execution_context(self, plan_id: str) -> tuple[dict, list[dict]]:
+    async def get_plan_execution_context(
+        self,
+        plan_id: str,
+        access,
+    ) -> tuple[dict, list[dict]]:
         async with self.database.session() as session:
             plan = await self._load_plan(session, plan_id)
             draft = await self._load_draft(session, plan.draft_id)
@@ -422,6 +428,12 @@ class ContentStudioService:
                     )
                 ).all()
             )
+            self._assert_plan_owner(plan, access)
+            for target in targets:
+                access.require(
+                    "draft.create" if target.mode == "DRAFT" else "publish.request",
+                    target.account_id,
+                )
             return {
                 "plan_id": plan.plan_id,
                 "draft_id": plan.draft_id,
@@ -431,6 +443,88 @@ class ContentStudioService:
                 "version_id": version.version_id,
                 "status": plan.status,
             }, [public_plan_target(target) for target in targets]
+
+    async def claim_plan_target(self, plan_id: str, target_id: str) -> str | None:
+        """短租约领取执行单创建权，阻止并发点击生成重复平台操作。"""
+
+        claim_id = str(uuid.uuid4())
+        now = _utc_now()
+        expires_at = now + timedelta(minutes=2)
+        retryable_statuses = {
+            "READY",
+            "CONFIRMATION_REQUIRED",
+            "BLOCKED",
+            "FAILED",
+            "CREATING",
+        }
+        async with self.database.session() as session:
+            result = await session.execute(
+                update(DeliveryPlanTarget)
+                .where(
+                    DeliveryPlanTarget.plan_id == plan_id,
+                    DeliveryPlanTarget.target_id == target_id,
+                    DeliveryPlanTarget.operation_id.is_(None),
+                    DeliveryPlanTarget.status.in_(retryable_statuses),
+                    or_(
+                        DeliveryPlanTarget.execution_claim_id.is_(None),
+                        DeliveryPlanTarget.execution_claim_expires_at.is_(None),
+                        DeliveryPlanTarget.execution_claim_expires_at <= now,
+                    ),
+                )
+                .values(
+                    status="CREATING",
+                    execution_claim_id=claim_id,
+                    execution_claim_expires_at=expires_at,
+                    error_code=None,
+                    error_message=None,
+                    updated_at=now,
+                )
+                .execution_options(synchronize_session=False)
+            )
+            return claim_id if result.rowcount == 1 else None
+
+    async def list_recoverable_plan_operations(
+        self,
+        account_delivery,
+        access,
+    ) -> list[dict]:
+        """返回已确认但尚未完成的执行单，供进程重启后安全续跑。"""
+
+        async with self.database.session() as session:
+            # RUNNING 可能已在平台产生副作用，绝不能自动重试；明确标记为
+            # 结果未知，等待人工在平台侧核对。
+            active = list(
+                (
+                    await session.scalars(
+                        select(DeliveryPlanTarget).where(
+                            DeliveryPlanTarget.operation_id.is_not(None),
+                            DeliveryPlanTarget.status.in_({"QUEUED", "RUNNING"}),
+                        )
+                    )
+                ).all()
+            )
+            recoverable = []
+            for row in active:
+                operation = await account_delivery.get_operation(
+                    row.operation_id,
+                    access,
+                )
+                if operation["status"] == "QUEUED":
+                    row.status = "QUEUED"
+                    recoverable.append(
+                        {
+                            "plan_id": row.plan_id,
+                            "target_id": row.target_id,
+                            "operation_id": row.operation_id,
+                        }
+                    )
+                    continue
+                if operation["status"] == "RESULT_UNKNOWN":
+                    row.status = "RESULT_UNKNOWN"
+                    row.error_code = "DELIVERY_RESULT_UNKNOWN"
+                    row.error_message = operation["error_message"]
+                    row.updated_at = _utc_now()
+            return recoverable
 
     async def build_platform_content(
         self,
@@ -531,6 +625,8 @@ class ContentStudioService:
             target.operation_id = operation_id
             target.error_code = error_code
             target.error_message = error_message
+            target.execution_claim_id = None
+            target.execution_claim_expires_at = None
             target.updated_at = _utc_now()
             await session.flush()
             statuses = list(
@@ -592,6 +688,44 @@ class ContentStudioService:
     async def _assert_revision(self, session, draft: ContentDraft, revision: int) -> None:
         if draft.revision != revision:
             raise DraftRevisionConflictError(await self._draft_payload(session, draft))
+
+    async def _assert_plan_access(
+        self, session, plan: DeliveryPlan, access, capability: str
+    ) -> None:
+        self._assert_plan_owner(plan, access)
+        targets = list(
+            (
+                await session.scalars(
+                    select(DeliveryPlanTarget).where(DeliveryPlanTarget.plan_id == plan.plan_id)
+                )
+            ).all()
+        )
+        for target in targets:
+            access.require(capability, target.account_id)
+
+    @staticmethod
+    def _assert_plan_owner(plan: DeliveryPlan, access) -> None:
+        if plan.actor_id != access.actor_id or plan.source != access.source:
+            access.require("__plan_owner__", "")
+
+    async def _release_interrupted_target_claims(self) -> None:
+        """新进程无法继承内存中的创建动作，启动时释放其短租约。"""
+
+        async with self.database.session() as session:
+            await session.execute(
+                update(DeliveryPlanTarget)
+                .where(
+                    DeliveryPlanTarget.status == "CREATING",
+                    DeliveryPlanTarget.operation_id.is_(None),
+                )
+                .values(
+                    status="READY",
+                    execution_claim_id=None,
+                    execution_claim_expires_at=None,
+                    updated_at=_utc_now(),
+                )
+                .execution_options(synchronize_session=False)
+            )
 
     async def _validate_asset_references(
         self,

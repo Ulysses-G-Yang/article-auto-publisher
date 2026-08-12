@@ -50,6 +50,26 @@ class ContentDatabase:
     async def initialize(self) -> None:
         async with self.engine.begin() as connection:
             await connection.run_sync(Base.metadata.create_all)
+            await connection.run_sync(self._upgrade_plan_target_schema)
+
+    @staticmethod
+    def _upgrade_plan_target_schema(connection) -> None:
+        """幂等补充目标级执行租约，支持已有 Content Studio 数据库。"""
+
+        columns = {
+            row[1]
+            for row in connection.exec_driver_sql(
+                "PRAGMA table_info(delivery_plan_targets)"
+            ).fetchall()
+        }
+        if "execution_claim_id" not in columns:
+            connection.exec_driver_sql(
+                "ALTER TABLE delivery_plan_targets ADD COLUMN execution_claim_id VARCHAR(36)"
+            )
+        if "execution_claim_expires_at" not in columns:
+            connection.exec_driver_sql(
+                "ALTER TABLE delivery_plan_targets ADD COLUMN execution_claim_expires_at DATETIME"
+            )
 
     @asynccontextmanager
     async def session(self) -> AsyncIterator[AsyncSession]:

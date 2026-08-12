@@ -1,10 +1,14 @@
 """自动化文章发布工具 - Flask 入口"""
-import sys
-import os
+
+# 运行期先注入项目 src 路径，后续项目包导入必须位于该引导之后。
+# ruff: noqa: E402
+
 import asyncio
-import threading
-import signal
+import os
 import shutil
+import signal
+import sys
+import threading
 
 # 确保模块路径
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -12,13 +16,13 @@ sys.path.insert(0, BASE_DIR)
 sys.path.insert(0, os.path.join(BASE_DIR, "src"))
 
 from flask import Flask
-
-from article_mvp.web import create_dashboard_blueprint
-from account_sessions import create_account_session_blueprint
-from content_studio import create_content_studio_blueprint
-from config import get_config
-from core.logging_setup import configure_logging
 from loguru import logger
+
+from account_sessions import create_account_session_blueprint
+from article_mvp.web import create_dashboard_blueprint
+from config import get_config
+from content_studio import create_content_studio_blueprint
+from core.logging_setup import configure_logging
 from web.routes import register_routes
 
 _QUEUE_START_LOCK = threading.Lock()
@@ -146,6 +150,9 @@ def create_app() -> Flask:
 
 def start_queue_worker():
     """在后台线程中启动队列 worker（只启动一次）"""
+    if not get_config()["app"].get("legacy_upload_queue_enabled", False):
+        logger.info("旧上传队列已关闭；跳过旧 worker，保留历史任务和日志不变")
+        return False
     global _QUEUE_STARTED
     with _QUEUE_START_LOCK:
         if _QUEUE_STARTED:
@@ -156,6 +163,7 @@ def start_queue_worker():
     # 在创建 worker 前完成启动迁移，确保历史 queued/retrying/processing 任务
     # 不会在新任务上传前后被误当成自动恢复对象。
     from models.database import Database
+
     paused = Database.get_instance().pause_unfinished_tasks()
     if paused:
         logger.info("启动时暂停 {} 个历史未完成任务", paused)
@@ -164,6 +172,7 @@ def start_queue_worker():
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         from core.queue_manager import get_queue_manager
+
         qm = get_queue_manager()
         loop.run_until_complete(qm.start())
         loop.run_forever()
@@ -172,6 +181,7 @@ def start_queue_worker():
         t = threading.Thread(target=_run, daemon=True, name="article-publisher-queue")
         t.start()
         logger.info("队列 worker 已启动；历史未完成任务不会自动恢复")
+        return True
     except Exception:
         with _QUEUE_START_LOCK:
             _QUEUE_STARTED = False
@@ -200,7 +210,9 @@ if __name__ == "__main__":
     # 启动队列 worker
     start_queue_worker()
 
-    logger.info("自动化文章发布工具启动中，访问地址: http://{}:{}", app_cfg["host"], app_cfg["port"])
+    logger.info(
+        "自动化文章发布工具启动中，访问地址: http://{}:{}", app_cfg["host"], app_cfg["port"]
+    )
 
     app.run(
         host=app_cfg["host"],

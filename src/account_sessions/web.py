@@ -83,6 +83,7 @@ class AccountSessionRuntimeState:
                 self._runtime = AccountRuntime()
             if not self._initialized:
                 self._runtime.run(self.accounts.initialize())
+                self._runtime.run(self.delivery.reconcile_interrupted_operations())
                 self._initialized = True
             return self._runtime
 

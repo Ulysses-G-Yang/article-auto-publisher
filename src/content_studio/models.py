@@ -180,6 +180,8 @@ class DeliveryPlanTarget(Base):
     operation_id: Mapped[str | None] = mapped_column(String(36))
     error_code: Mapped[str | None] = mapped_column(String(64))
     error_message: Mapped[str | None] = mapped_column(Text)
+    execution_claim_id: Mapped[str | None] = mapped_column(String(36))
+    execution_claim_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utc_now, nullable=False
     )

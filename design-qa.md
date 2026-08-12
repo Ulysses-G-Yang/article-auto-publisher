@@ -80,3 +80,59 @@
 - [x] Run automated and browser-rendered regression checks.
 
 final result: passed
+
+---
+
+# Design QA — CoreUI 创作与投递工作台返工
+
+## 对照与环境
+
+- 视觉基线：仓库内固定的 CoreUI Free Bootstrap Admin Template `v5.6.0`。
+- 官方本地构建截图：`docs/frontend/qa/coreui-official-v5.6.0-1280.png`。
+- ArticleOps 工作台截图：
+  - `docs/frontend/qa/content-studio-1440.png`
+  - `docs/frontend/qa/content-studio-1024.png`
+  - `docs/frontend/qa/content-studio-390.png`
+- 集成服务：隔离的测试数据目录、公开发布关闭、账号自动执行关闭；
+  验收未创建投递计划、未登录、未保存平台草稿、未公开发布。
+
+## 官方派生结果
+
+工作台沿用了官方基线的 256px 深色侧栏、白色 Header、浅灰画布、
+面包屑、卡片边框、表单、Badge、Modal 和响应式层级。业务扩展只增加
+图文块编辑、多目标投递与安全确认语义，没有复制旧页面的第二套外壳。
+ArticleOps 品牌色取代官方 Dashboard 的示例 KPI 色，但间距、字号和信息
+密度保持同一企业后台语境。
+
+## 尺寸与逐页结果
+
+在 1440、1024、390 三种实际 CSS viewport 宽度下逐页检查 `/`、
+`/upload`、`/accounts`、`/task/999999`、`/data-center/`：
+
+- 所有页面的 `documentElement.scrollWidth <= innerWidth`，无页面级横向溢出。
+- 1440/1024 下固定侧栏和主区边界正常，没有重复的 256px 左偏移。
+- 390 下侧栏默认完全移出屏幕，主内容占满可用宽度；内容、投递目标、
+  核对执行和安全信息均按顺序完整渲染。
+- 每条路由只有一个正确高亮导航项；修复后验收时间窗控制台错误为 0。
+
+## 交互与安全检查
+
+- 系统草稿真实从后端加载；前端没有硬编码种子正文。
+- 无投递目标时点击“检查并继续”，页面显示“至少添加一个投递目标”，
+  并将焦点移至第一个平台选项；不会创建计划。
+- 选择小黑盒后才请求账号；隔离环境无账号时显示“当前平台没有可用账号”，
+  不自动选择账号。
+- `CREATING`、`PARTIAL_FAIL`、`RESULT_UNKNOWN` 均有中文状态和语义色；
+  结果未知明确要求人工核对，页面不提供公开发布自动重试入口。
+
+## 修复历史
+
+1. 首轮 1280 浏览器检查发现官方 `.wrapper` 自带左内边距又叠加业务
+   `margin-left`，主区被双重推移并产生横向溢出。已统一为单一 256px 偏移。
+2. 同轮发现侧栏与导航容器同时初始化 `coreui.navigation`，控制台报重复实例。
+   已移除重复数据标记；新标签页和最终验收时间窗错误均为 0。
+3. 全新 checkout 发现仓库根 `build/` 规则误忽略上游构建脚本。已精确纳入
+   官方 `build/**` 与嵌套 `.gitignore`，全新 checkout 的 `npm ci` 和
+   `npm run build` exit 0，构建后 Git 工作树保持干净。
+
+final result: passed

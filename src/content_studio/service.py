@@ -501,6 +501,26 @@ class ContentStudioService:
             )
         return "\n\n".join(body_parts), platform_blocks, images
 
+    async def resolve_delivery_payload(
+        self,
+        content_hash: str,
+    ) -> tuple[list[dict], list[dict]]:
+        """按不可变版本引用解析图文，账号域不保存内容或本机路径副本。"""
+
+        async with self.database.session() as session:
+            version = await session.scalar(
+                select(ContentVersion).where(ContentVersion.content_hash == content_hash)
+            )
+            if version is None:
+                raise DraftValidationError("投递执行单引用的内容版本不存在")
+            draft_id = version.draft_id
+            blocks = version.blocks_json
+        _body, platform_blocks, images = await self.build_platform_content(
+            draft_id,
+            blocks,
+        )
+        return platform_blocks, images
+
     async def set_plan_target_result(
         self,
         plan_id: str,

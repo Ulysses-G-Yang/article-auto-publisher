@@ -14,7 +14,7 @@ from sqlalchemy import func, select
 
 from account_sessions.account_service import AccountSessionService
 from account_sessions.database import AccountDatabase
-from account_sessions.models import PlatformAccount
+from account_sessions.models import DeliveryOperation, PlatformAccount
 from account_sessions.permissions import LOCAL_WEB_CONTEXT
 from account_sessions.web import AccountSessionRuntimeState
 from content_studio.assets import AssetStore
@@ -499,6 +499,9 @@ def test_plan_requires_batch_draft_and_per_publish_confirmation(tmp_path: Path) 
     assert public_target["status"] == "CONFIRMATION_REQUIRED"
     assert public_target["confirmation_token"] == "per-target-token"
     assert delivery.calls[0][1]["frozen_content_hash"] == plan["content_version"]
+    assert delivery.calls[0][1]["content_reference"] == plan["content_version"]
+    assert "content_blocks" not in delivery.calls[0][1]
+    assert "images" not in delivery.calls[0][1]
 
     second = run(
         state.execute_plan(
@@ -531,6 +534,51 @@ def test_plan_requires_batch_draft_and_per_publish_confirmation(tmp_path: Path) 
 
     run(service.database.dispose())
     run(account_db.dispose())
+
+
+def test_account_operation_keeps_only_content_version_reference(tmp_path: Path) -> None:
+    account_db = AccountDatabase(sqlite_url(tmp_path / "reference-accounts.db"))
+    accounts = AccountSessionService(account_db, seed_legacy_profiles=False)
+
+    async def scenario():
+        await accounts.initialize()
+        account = PlatformAccount(
+            account_id=str(uuid.uuid4()),
+            platform="xiaoheihe",
+            platform_user_id="reference-user",
+            display_name="引用账号",
+            profile_path=str(tmp_path / "reference-profile"),
+            status="ACTIVE",
+            session_status="VALID",
+            persist_login=True,
+        )
+        async with account_db.session() as session:
+            session.add(account)
+        from account_sessions.contracts import DeliveryRequest
+        from account_sessions.delivery_service import DeliveryService
+
+        delivery = DeliveryService(accounts, public_publish_enabled=False)
+        operation = await delivery.request_delivery(
+            DeliveryRequest.model_validate(
+                {
+                    "article": {"title": "引用标题", "body": "内部摘要"},
+                    "platform": "xiaoheihe",
+                    "account_id": account.account_id,
+                    "mode": "DRAFT",
+                }
+            ),
+            LOCAL_WEB_CONTEXT,
+            frozen_content_hash="a" * 64,
+            content_reference="a" * 64,
+        )
+        async with account_db.session() as session:
+            stored = await session.get(DeliveryOperation, operation["operation_id"])
+            assert stored.content_reference == "a" * 64
+            assert not hasattr(stored, "content_blocks_json")
+            assert not hasattr(stored, "images_json")
+        await account_db.dispose()
+
+    run(scenario())
 
 
 def test_unexpected_target_failure_does_not_block_remaining_targets(tmp_path: Path) -> None:

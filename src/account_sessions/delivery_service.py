@@ -9,7 +9,7 @@ import hmac
 import os
 import secrets
 import uuid
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -57,10 +57,12 @@ class DeliveryService:
         *,
         platform_factory: Callable[[PlatformAccount], Any] | None = None,
         public_publish_enabled: bool | None = None,
+        content_resolver: Callable[[str], Awaitable[tuple[list[dict], list[dict]]]] | None = None,
     ) -> None:
         self.accounts = accounts
         self.database = accounts.database
         self.platform_factory = platform_factory or accounts.platform_factory
+        self.content_resolver = content_resolver
         self.public_publish_enabled = (
             _env_flag("ACCOUNT_SESSIONS_ALLOW_PUBLIC_PUBLISH")
             if public_publish_enabled is None
@@ -73,8 +75,8 @@ class DeliveryService:
         access: AccessContext,
         *,
         frozen_content_hash: str | None = None,
-        content_blocks: list[dict] | None = None,
-        images: list[dict] | None = None,
+        content_reference: str | None = None,
+        confirmation_scope: str | None = None,
     ) -> dict:
         capability = "draft.create" if request.mode == "DRAFT" else "publish.request"
         account = await self.accounts.require_account(
@@ -93,12 +95,14 @@ class DeliveryService:
                     account,
                     access,
                     frozen_content_hash=frozen_content_hash,
+                    confirmation_scope=confirmation_scope,
                 )
             await self._consume_confirmation(
                 request,
                 account,
                 access,
                 frozen_content_hash=frozen_content_hash,
+                confirmation_scope=confirmation_scope,
             )
             access.require("publish.execute", account.account_id)
             if not self.public_publish_enabled:
@@ -114,8 +118,7 @@ class DeliveryService:
             actor_id=access.actor_id,
             title=request.article.title,
             body=request.article.body,
-            content_blocks_json=content_blocks,
-            images_json=images,
+            content_reference=content_reference,
             content_version=(
                 frozen_content_hash or content_version(request.article.title, request.article.body)
             ),
@@ -155,14 +158,22 @@ class DeliveryService:
         platform = self.platform_factory(account)
         buffered_log = BufferedPlatformLog()
         try:
+            if operation.content_reference:
+                if self.content_resolver is None:
+                    raise AccountUnavailableError(
+                        "内容版本解析器不可用",
+                        error_code="CONTENT_VERSION_UNAVAILABLE",
+                    )
+                content_blocks, images = await self.content_resolver(operation.content_reference)
+            else:
+                content_blocks = [{"type": "text", "text": operation.body}]
+                images = []
             with self.accounts._lease(account, purpose=operation.mode):
                 await platform.initialize()
                 result = await platform.publish(
                     title=operation.title,
-                    content_blocks=(
-                        operation.content_blocks_json or [{"type": "text", "text": operation.body}]
-                    ),
-                    images=operation.images_json or [],
+                    content_blocks=content_blocks,
+                    images=images,
                     task_id=0,
                     db=buffered_log,
                     auto_login=False,
@@ -232,10 +243,15 @@ class DeliveryService:
         access: AccessContext,
         *,
         frozen_content_hash: str | None = None,
+        confirmation_scope: str | None = None,
     ) -> ConfirmationRequiredError:
         token = secrets.token_urlsafe(32)
         expires = datetime.now(timezone.utc) + timedelta(minutes=5)
-        fingerprint = _fingerprint(request, frozen_content_hash=frozen_content_hash)
+        fingerprint = _fingerprint(
+            request,
+            frozen_content_hash=frozen_content_hash,
+            confirmation_scope=confirmation_scope,
+        )
         async with self.database.session() as session:
             session.add(
                 PublishConfirmation(
@@ -272,6 +288,7 @@ class DeliveryService:
         access: AccessContext,
         *,
         frozen_content_hash: str | None = None,
+        confirmation_scope: str | None = None,
     ) -> None:
         token_hash = _token_hash(request.confirmation_token or "")
         now = datetime.now(timezone.utc)
@@ -289,7 +306,11 @@ class DeliveryService:
                 and confirmation.actor_id == access.actor_id
                 and hmac.compare_digest(
                     confirmation.fingerprint,
-                    _fingerprint(request, frozen_content_hash=frozen_content_hash),
+                    _fingerprint(
+                        request,
+                        frozen_content_hash=frozen_content_hash,
+                        confirmation_scope=confirmation_scope,
+                    ),
                 )
             )
             if not valid:
@@ -474,13 +495,14 @@ def _fingerprint(
     request: DeliveryRequest,
     *,
     frozen_content_hash: str | None = None,
+    confirmation_scope: str | None = None,
 ) -> str:
     return delivery_fingerprint(
         platform=request.platform,
         account_id=request.account_id,
         title=request.article.title,
         body=(
-            f"content-version:{frozen_content_hash}"
+            f"content-version:{frozen_content_hash};target:{confirmation_scope or '-'}"
             if frozen_content_hash
             else request.article.body
         ),

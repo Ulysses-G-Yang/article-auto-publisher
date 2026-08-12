@@ -54,7 +54,7 @@ class AccountDatabase:
 
     @staticmethod
     def _upgrade_delivery_operation_schema(connection) -> None:
-        """为既有账号数据库幂等补充内部图文快照列。"""
+        """为既有账号数据库幂等补充内容域版本引用。"""
 
         columns = {
             row[1]
@@ -62,13 +62,9 @@ class AccountDatabase:
                 "PRAGMA table_info(delivery_operations)"
             ).fetchall()
         }
-        if "content_blocks_json" not in columns:
+        if "content_reference" not in columns:
             connection.exec_driver_sql(
-                "ALTER TABLE delivery_operations ADD COLUMN content_blocks_json JSON"
-            )
-        if "images_json" not in columns:
-            connection.exec_driver_sql(
-                "ALTER TABLE delivery_operations ADD COLUMN images_json JSON"
+                "ALTER TABLE delivery_operations ADD COLUMN content_reference VARCHAR(128)"
             )
 
     @asynccontextmanager

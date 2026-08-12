@@ -3,7 +3,6 @@
 from datetime import datetime, timezone
 
 from sqlalchemy import (
-    JSON,
     Boolean,
     DateTime,
     ForeignKey,
@@ -75,8 +74,7 @@ class DeliveryOperation(Base):
     actor_id: Mapped[str] = mapped_column(String(128), nullable=False)
     title: Mapped[str] = mapped_column(String(255), nullable=False)
     body: Mapped[str] = mapped_column(Text, nullable=False)
-    content_blocks_json: Mapped[list[dict] | None] = mapped_column(JSON, nullable=True)
-    images_json: Mapped[list[dict] | None] = mapped_column(JSON, nullable=True)
+    content_reference: Mapped[str | None] = mapped_column(String(128), nullable=True)
     content_version: Mapped[str] = mapped_column(String(64), nullable=False)
     account_display_name_snapshot: Mapped[str] = mapped_column(String(255), nullable=False)
     status: Mapped[str] = mapped_column(String(24), default="QUEUED", nullable=False)

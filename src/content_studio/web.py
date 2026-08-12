@@ -58,6 +58,7 @@ class ContentStudioRuntimeState:
             docx_importer=DocxImportAdapter(self.asset_store, work_root=work_root),
             account_service=account_state.accounts,
         )
+        self.account_state.delivery.content_resolver = self.service.resolve_delivery_payload
         self._runtime = runtime
         self._owns_runtime = False
         self._initialized = False
@@ -124,10 +125,6 @@ class ContentStudioRuntimeState:
                 f"请确认将同一内容保存到 {len(draft_targets)} 个平台草稿"
             )
 
-        body, content_blocks, images = await self.service.build_platform_content(
-            context["draft_id"],
-            context["blocks"],
-        )
         for target in selected:
             if target["operation_id"] or target["status"] in {
                 "QUEUED",
@@ -138,7 +135,10 @@ class ContentStudioRuntimeState:
                 continue
             confirmation = payload.confirmations.get(target["target_id"])
             request_payload = DeliveryRequest(
-                article=ArticleInput(title=context["title"], body=body or "[仅图片内容]"),
+                article=ArticleInput(
+                    title=context["title"],
+                    body=f"[Content Studio version {context['content_hash']}]",
+                ),
                 platform=target["platform"],
                 account_id=target["account_id"],
                 mode=target["mode"],
@@ -149,8 +149,8 @@ class ContentStudioRuntimeState:
                     request_payload,
                     LOCAL_WEB_CONTEXT,
                     frozen_content_hash=context["content_hash"],
-                    content_blocks=content_blocks,
-                    images=images,
+                    content_reference=context["content_hash"],
+                    confirmation_scope=target["target_id"],
                 )
             except ConfirmationRequiredError as exc:
                 await self.service.set_plan_target_result(

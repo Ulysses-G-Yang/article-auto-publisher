@@ -57,7 +57,8 @@ class DeliveryService:
         *,
         platform_factory: Callable[[PlatformAccount], Any] | None = None,
         public_publish_enabled: bool | None = None,
-        content_resolver: Callable[[str], Awaitable[tuple[list[dict], list[dict]]]] | None = None,
+        content_resolver: Callable[[str], Awaitable[tuple[str, list[dict], list[dict]]]]
+        | None = None,
     ) -> None:
         self.accounts = accounts
         self.database = accounts.database
@@ -116,8 +117,12 @@ class DeliveryService:
             mode=request.mode,
             source=access.source,
             actor_id=access.actor_id,
-            title=request.article.title,
-            body=request.article.body,
+            title=(
+                "[Content Studio immutable version]" if content_reference else request.article.title
+            ),
+            body=(
+                "[Content Studio content reference]" if content_reference else request.article.body
+            ),
             content_reference=content_reference,
             content_version=(
                 frozen_content_hash or content_version(request.article.title, request.article.body)
@@ -164,14 +169,17 @@ class DeliveryService:
                         "内容版本解析器不可用",
                         error_code="CONTENT_VERSION_UNAVAILABLE",
                     )
-                content_blocks, images = await self.content_resolver(operation.content_reference)
+                resolved_title, content_blocks, images = await self.content_resolver(
+                    operation.content_reference
+                )
             else:
+                resolved_title = operation.title
                 content_blocks = [{"type": "text", "text": operation.body}]
                 images = []
             with self.accounts._lease(account, purpose=operation.mode):
                 await platform.initialize()
                 result = await platform.publish(
-                    title=operation.title,
+                    title=resolved_title,
                     content_blocks=content_blocks,
                     images=images,
                     task_id=0,

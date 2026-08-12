@@ -314,15 +314,6 @@ class ContentStudioService:
                 result_payload = await self._draft_payload(session, draft)
         except IntegrityError as exc:
             raise DraftTargetConflictError("草稿目标重复或已被并发修改") from exc
-        # “保持登录态”是账号域策略，不等于登录状态。内容目标成功落库后再按
-        # 用户显式值更新账号策略，避免目标事务失败却留下意外的账号设置。
-        for item, account in resolved:
-            if item.persist_login is not None and item.persist_login != account.persist_login:
-                await self.account_service.set_session_policy(
-                    item.account_id,
-                    item.persist_login,
-                    access,
-                )
         return result_payload
 
     async def create_delivery_plan(
@@ -505,7 +496,7 @@ class ContentStudioService:
     async def resolve_delivery_payload(
         self,
         version_id: str,
-    ) -> tuple[list[dict], list[dict]]:
+    ) -> tuple[str, list[dict], list[dict]]:
         """按不可变版本引用解析图文，账号域不保存内容或本机路径副本。"""
 
         async with self.database.session() as session:
@@ -513,12 +504,13 @@ class ContentStudioService:
             if version is None:
                 raise DraftValidationError("投递执行单引用的内容版本不存在")
             draft_id = version.draft_id
+            title = version.title
             blocks = version.blocks_json
         _body, platform_blocks, images = await self.build_platform_content(
             draft_id,
             blocks,
         )
-        return platform_blocks, images
+        return title, platform_blocks, images
 
     async def set_plan_target_result(
         self,

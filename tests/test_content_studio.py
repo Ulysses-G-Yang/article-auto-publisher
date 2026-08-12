@@ -575,6 +575,8 @@ def test_account_operation_keeps_only_content_version_reference(tmp_path: Path) 
         async with account_db.session() as session:
             stored = await session.get(DeliveryOperation, operation["operation_id"])
             assert stored.content_reference == "a" * 64
+            assert stored.title == "[Content Studio immutable version]"
+            assert stored.body == "[Content Studio content reference]"
             assert not hasattr(stored, "content_blocks_json")
             assert not hasattr(stored, "images_json")
         await account_db.dispose()

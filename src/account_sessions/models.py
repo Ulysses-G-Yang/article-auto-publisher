@@ -3,6 +3,7 @@
 from datetime import datetime, timezone
 
 from sqlalchemy import (
+    JSON,
     Boolean,
     DateTime,
     ForeignKey,
@@ -42,9 +43,7 @@ class PlatformAccount(Base):
     profile_path: Mapped[str] = mapped_column(String(2048), nullable=False)
     is_legacy_profile: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     status: Mapped[str] = mapped_column(String(16), default="ACTIVE", nullable=False)
-    session_status: Mapped[str] = mapped_column(
-        String(24), default="UNVERIFIED", nullable=False
-    )
+    session_status: Mapped[str] = mapped_column(String(24), default="UNVERIFIED", nullable=False)
     persist_login: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     last_verified_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
@@ -56,9 +55,7 @@ class PlatformAccount(Base):
         DateTime(timezone=True), default=utc_now, onupdate=utc_now, nullable=False
     )
 
-    operations: Mapped[list["DeliveryOperation"]] = relationship(
-        back_populates="account"
-    )
+    operations: Mapped[list["DeliveryOperation"]] = relationship(back_populates="account")
 
 
 class DeliveryOperation(Base):
@@ -78,19 +75,17 @@ class DeliveryOperation(Base):
     actor_id: Mapped[str] = mapped_column(String(128), nullable=False)
     title: Mapped[str] = mapped_column(String(255), nullable=False)
     body: Mapped[str] = mapped_column(Text, nullable=False)
+    content_blocks_json: Mapped[list[dict] | None] = mapped_column(JSON, nullable=True)
+    images_json: Mapped[list[dict] | None] = mapped_column(JSON, nullable=True)
     content_version: Mapped[str] = mapped_column(String(64), nullable=False)
-    account_display_name_snapshot: Mapped[str] = mapped_column(
-        String(255), nullable=False
-    )
+    account_display_name_snapshot: Mapped[str] = mapped_column(String(255), nullable=False)
     status: Mapped[str] = mapped_column(String(24), default="QUEUED", nullable=False)
     draft_url: Mapped[str | None] = mapped_column(String(2048), nullable=True)
     platform_article_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     platform_url: Mapped[str | None] = mapped_column(String(2048), nullable=True)
     error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
-    confirmation_used: Mapped[bool] = mapped_column(
-        Boolean, default=False, nullable=False
-    )
+    confirmation_used: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utc_now, nullable=False
     )

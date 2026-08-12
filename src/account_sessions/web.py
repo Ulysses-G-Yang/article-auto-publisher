@@ -6,8 +6,9 @@ from collections.abc import Coroutine
 from pathlib import Path
 from threading import Lock
 from typing import Any
+from urllib.parse import urlencode
 
-from flask import Blueprint, jsonify, render_template, request
+from flask import Blueprint, jsonify, redirect, request
 from pydantic import ValidationError
 
 from account_sessions.account_service import AccountSessionService
@@ -20,33 +21,14 @@ from account_sessions.permissions import (
     PermissionDeniedError,
 )
 from account_sessions.runtime import AccountRuntime
+from content_studio.service import SEED_BODY, SEED_TITLE
 
 LOGGER = logging.getLogger(__name__)
 
-DEFAULT_ARTICLE_TITLE = "凌晨三点，公司的智能马桶开始给我做绩效面谈"
-DEFAULT_ARTICLE_BODY = """凌晨三点十三分，我被公司的智能马桶叫醒了。
-
-不是比喻。它真的用老板的声音说：“检测到你今天坐了四十七分钟，但有效产出只有两次，转化率偏低。”
-
-我说那不是产出，那是生理活动。
-
-马桶沉默了两秒，屏幕上弹出一张红色折线图：“不要为过程找借口，要为结果找方法。”
-
-随后，它要求我填写《卫生间停留时长异常说明》，并让我从“能力不足”“主观懈怠”“缺乏主人翁意识”三个选项中选择原因。没有“昨晚吃了三份变态辣烤鱼”这个选项。
-
-隔壁蹲位的老王更惨。他刚放了一个屁，天花板上的摄像头就亮起绿灯，广播宣布：“恭喜员工王某完成本季度第一次主动发声。”
-
-老王很激动，申请把这次发声计入周报。
-
-早上八点，老板召集全员开会，宣布智能厕所改革取得阶段性成果：卫生纸消耗下降了百分之三十，员工平均如厕时间减少了十二分钟。
-
-至于为什么大家脸色发绿、走路夹着腿，老板认为这是团队执行力提升后的正常阵痛。
-
-会议最后，公司评选出了“年度最佳奋斗者”：一卷从入职至今从未被使用过的卫生纸。
-
-它的获奖感言只有一句：
-
-“只要不解决问题，就永远不会制造成本。”"""
+# 兼容旧 Python 调用方；页面入口已改为重定向，真实系统种子由 content_studio
+# 幂等创建，不再通过模板常量预填。
+DEFAULT_ARTICLE_BODY = SEED_BODY
+DEFAULT_ARTICLE_TITLE = SEED_TITLE
 
 
 class AccountSessionRuntimeState:
@@ -161,11 +143,10 @@ def create_account_session_blueprint(
 
     @blueprint.get("/delivery/new")
     def new_delivery():
-        return render_template(
-            "delivery.html",
-            default_article_title=DEFAULT_ARTICLE_TITLE,
-            default_article_body=DEFAULT_ARTICLE_BODY,
-        )
+        draft_id = (request.args.get("draft_id") or "").strip()
+        if draft_id:
+            return redirect(f"/upload?{urlencode({'draft_id': draft_id})}", code=302)
+        return redirect("/upload", code=302)
 
     @blueprint.get("/api/platforms")
     def list_platforms():
@@ -192,9 +173,7 @@ def create_account_session_blueprint(
 
     @blueprint.post("/api/platforms/<platform>/accounts/login")
     def create_account_login(platform: str):
-        account = state.run(
-            state.accounts.create_login_candidate(platform, LOCAL_WEB_CONTEXT)
-        )
+        account = state.run(state.accounts.create_login_candidate(platform, LOCAL_WEB_CONTEXT))
         state.submit(
             state.accounts.verify_account(
                 account["account_id"],
@@ -206,9 +185,7 @@ def create_account_session_blueprint(
 
     @blueprint.post("/api/accounts/<account_id>/verify")
     def verify_account(account_id: str):
-        account = state.run(
-            state.accounts.mark_verifying(account_id, LOCAL_WEB_CONTEXT)
-        )
+        account = state.run(state.accounts.mark_verifying(account_id, LOCAL_WEB_CONTEXT))
         state.submit(
             state.accounts.verify_account(
                 account_id,
@@ -240,17 +217,13 @@ def create_account_session_blueprint(
 
     @blueprint.get("/api/account-sessions/<account_id>/activity")
     def account_activity(account_id: str):
-        rows = state.run(
-            state.accounts.list_activity(account_id, LOCAL_WEB_CONTEXT)
-        )
+        rows = state.run(state.accounts.list_activity(account_id, LOCAL_WEB_CONTEXT))
         return jsonify({"account_id": account_id, "activities": rows})
 
     @blueprint.post("/api/delivery-operations")
     def create_delivery_operation():
         payload = DeliveryRequest.model_validate(request.get_json(silent=True) or {})
-        operation = state.run(
-            state.delivery.request_delivery(payload, LOCAL_WEB_CONTEXT)
-        )
+        operation = state.run(state.delivery.request_delivery(payload, LOCAL_WEB_CONTEXT))
         if state.auto_execute:
             state.submit(
                 state.delivery.execute_operation(
@@ -262,9 +235,7 @@ def create_account_session_blueprint(
 
     @blueprint.get("/api/delivery-operations/<operation_id>")
     def get_delivery_operation(operation_id: str):
-        operation = state.run(
-            state.delivery.get_operation(operation_id, LOCAL_WEB_CONTEXT)
-        )
+        operation = state.run(state.delivery.get_operation(operation_id, LOCAL_WEB_CONTEXT))
         return jsonify(operation)
 
     @blueprint.errorhandler(ConfirmationRequiredError)

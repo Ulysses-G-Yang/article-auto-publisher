@@ -143,6 +143,17 @@ def register_routes(app):
     @app.route("/api/upload", methods=["POST"])
     def api_upload():
         """批量上传 .docx 文件"""
+        if not cfg["app"].get("legacy_upload_queue_enabled", False):
+            return jsonify(
+                {
+                    "error": "LEGACY_UPLOAD_QUEUE_DISABLED",
+                    "message": (
+                        "旧的“上传即入队”入口已关闭。请使用创作与投递工作台的 "
+                        "/api/content-drafts/import-docx 导入为系统草稿。"
+                    ),
+                    "migration_url": "/upload",
+                }
+            ), 410
         files = request.files.getlist("files")
         platforms = request.form.getlist("platforms") or ["zol", "xiaoheihe"]
 

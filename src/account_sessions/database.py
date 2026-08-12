@@ -50,6 +50,26 @@ class AccountDatabase:
     async def initialize(self) -> None:
         async with self.engine.begin() as connection:
             await connection.run_sync(Base.metadata.create_all)
+            await connection.run_sync(self._upgrade_delivery_operation_schema)
+
+    @staticmethod
+    def _upgrade_delivery_operation_schema(connection) -> None:
+        """为既有账号数据库幂等补充内部图文快照列。"""
+
+        columns = {
+            row[1]
+            for row in connection.exec_driver_sql(
+                "PRAGMA table_info(delivery_operations)"
+            ).fetchall()
+        }
+        if "content_blocks_json" not in columns:
+            connection.exec_driver_sql(
+                "ALTER TABLE delivery_operations ADD COLUMN content_blocks_json JSON"
+            )
+        if "images_json" not in columns:
+            connection.exec_driver_sql(
+                "ALTER TABLE delivery_operations ADD COLUMN images_json JSON"
+            )
 
     @asynccontextmanager
     async def session(self) -> AsyncIterator[AsyncSession]:

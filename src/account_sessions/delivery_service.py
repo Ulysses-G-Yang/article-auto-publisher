@@ -71,6 +71,10 @@ class DeliveryService:
         self,
         request: DeliveryRequest,
         access: AccessContext,
+        *,
+        frozen_content_hash: str | None = None,
+        content_blocks: list[dict] | None = None,
+        images: list[dict] | None = None,
     ) -> dict:
         capability = "draft.create" if request.mode == "DRAFT" else "publish.request"
         account = await self.accounts.require_account(
@@ -84,13 +88,21 @@ class DeliveryService:
 
         if request.mode == "PUBLISH":
             if not request.confirmation_token:
-                raise await self._new_confirmation(request, account, access)
-            await self._consume_confirmation(request, account, access)
+                raise await self._new_confirmation(
+                    request,
+                    account,
+                    access,
+                    frozen_content_hash=frozen_content_hash,
+                )
+            await self._consume_confirmation(
+                request,
+                account,
+                access,
+                frozen_content_hash=frozen_content_hash,
+            )
             access.require("publish.execute", account.account_id)
             if not self.public_publish_enabled:
-                raise PublicPublishDisabledError(
-                    "公开发布总开关保持关闭；本阶段只允许保存草稿"
-                )
+                raise PublicPublishDisabledError("公开发布总开关保持关闭；本阶段只允许保存草稿")
 
         operation_id = str(uuid.uuid4())
         operation = DeliveryOperation(
@@ -102,9 +114,10 @@ class DeliveryService:
             actor_id=access.actor_id,
             title=request.article.title,
             body=request.article.body,
-            content_version=content_version(
-                request.article.title,
-                request.article.body,
+            content_blocks_json=content_blocks,
+            images_json=images,
+            content_version=(
+                frozen_content_hash or content_version(request.article.title, request.article.body)
             ),
             account_display_name_snapshot=account.display_name,
             status="QUEUED",
@@ -146,8 +159,10 @@ class DeliveryService:
                 await platform.initialize()
                 result = await platform.publish(
                     title=operation.title,
-                    content_blocks=[{"type": "text", "text": operation.body}],
-                    images=[],
+                    content_blocks=(
+                        operation.content_blocks_json or [{"type": "text", "text": operation.body}]
+                    ),
+                    images=operation.images_json or [],
                     task_id=0,
                     db=buffered_log,
                     auto_login=False,
@@ -215,10 +230,12 @@ class DeliveryService:
         request: DeliveryRequest,
         account: PlatformAccount,
         access: AccessContext,
+        *,
+        frozen_content_hash: str | None = None,
     ) -> ConfirmationRequiredError:
         token = secrets.token_urlsafe(32)
         expires = datetime.now(timezone.utc) + timedelta(minutes=5)
-        fingerprint = _fingerprint(request)
+        fingerprint = _fingerprint(request, frozen_content_hash=frozen_content_hash)
         async with self.database.session() as session:
             session.add(
                 PublishConfirmation(
@@ -253,6 +270,8 @@ class DeliveryService:
         request: DeliveryRequest,
         account: PlatformAccount,
         access: AccessContext,
+        *,
+        frozen_content_hash: str | None = None,
     ) -> None:
         token_hash = _token_hash(request.confirmation_token or "")
         now = datetime.now(timezone.utc)
@@ -268,7 +287,10 @@ class DeliveryService:
                 and expires_at > now
                 and confirmation.account_id == account.account_id
                 and confirmation.actor_id == access.actor_id
-                and hmac.compare_digest(confirmation.fingerprint, _fingerprint(request))
+                and hmac.compare_digest(
+                    confirmation.fingerprint,
+                    _fingerprint(request, frozen_content_hash=frozen_content_hash),
+                )
             )
             if not valid:
                 raise ConfirmationInvalidError("公开发布确认令牌已失效或与当前内容不匹配")
@@ -321,9 +343,7 @@ class DeliveryService:
             operation = await session.get(DeliveryOperation, operation_id)
             if operation is None:
                 raise AccountNotFoundError("投递执行单不存在")
-            operation.status = (
-                "DRAFT_SAVED" if operation.mode == "DRAFT" else "PUBLISHED"
-            )
+            operation.status = "DRAFT_SAVED" if operation.mode == "DRAFT" else "PUBLISHED"
             operation.draft_url = result.get("draft_url")
             operation.platform_url = result.get("post_url") or None
             operation.completed_at = datetime.now(timezone.utc)
@@ -387,9 +407,7 @@ class DeliveryService:
                     account,
                     access,
                     action=(
-                        "SESSION_CLEARED_AFTER_OPERATION"
-                        if success
-                        else "SESSION_CLEANUP_FAILED"
+                        "SESSION_CLEARED_AFTER_OPERATION" if success else "SESSION_CLEANUP_FAILED"
                     ),
                     level="INFO" if success else "WARN",
                     message=(
@@ -452,12 +470,20 @@ def _append_buffered_logs(
         )
 
 
-def _fingerprint(request: DeliveryRequest) -> str:
+def _fingerprint(
+    request: DeliveryRequest,
+    *,
+    frozen_content_hash: str | None = None,
+) -> str:
     return delivery_fingerprint(
         platform=request.platform,
         account_id=request.account_id,
         title=request.article.title,
-        body=request.article.body,
+        body=(
+            f"content-version:{frozen_content_hash}"
+            if frozen_content_hash
+            else request.article.body
+        ),
         mode=request.mode,
     )
 

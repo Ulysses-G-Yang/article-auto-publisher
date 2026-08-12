@@ -15,6 +15,7 @@ from flask import Flask
 
 from article_mvp.web import create_dashboard_blueprint
 from account_sessions import create_account_session_blueprint
+from content_studio import create_content_studio_blueprint
 from config import get_config
 from core.logging_setup import configure_logging
 from loguru import logger
@@ -126,7 +127,13 @@ def create_app() -> Flask:
         create_dashboard_blueprint(),
         url_prefix="/data-center",
     )
-    app.register_blueprint(create_account_session_blueprint())
+    account_blueprint = create_account_session_blueprint()
+    app.register_blueprint(account_blueprint)
+    app.register_blueprint(
+        create_content_studio_blueprint(
+            account_state=app.extensions["account_sessions"],
+        )
+    )
 
     # 保留原有 /api/cleanup 端点兼容性；安全模式不再删除不明占用锁。
     @app.route("/api/cleanup", methods=["POST"])

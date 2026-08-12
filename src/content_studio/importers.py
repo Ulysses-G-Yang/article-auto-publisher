@@ -151,38 +151,42 @@ class DocxImportAdapter:
             title = parser.get_title_from_article(parsed)
             stored_assets: list[StoredAsset] = []
             blocks: list[dict] = []
-            for position, source in enumerate(parsed.blocks):
-                block_id = str(uuid.uuid4())
-                if source.type in {"text", "heading"} and source.text:
+            try:
+                for position, source in enumerate(parsed.blocks):
+                    block_id = str(uuid.uuid4())
+                    if source.type in {"text", "heading"} and source.text:
+                        blocks.append(
+                            {
+                                "block_id": block_id,
+                                "type": "text",
+                                "text": source.text,
+                                "position": position,
+                            }
+                        )
+                        continue
+                    if source.type != "image" or not source.image_path:
+                        continue
+                    image_path = Path(source.image_path).resolve(strict=True)
+                    if not _is_within(image_path, temp_root):
+                        raise ContentAssetError("DOCX 解析器返回了工作目录之外的图片")
+                    stored = self.asset_store.save_image(
+                        image_path.read_bytes(),
+                        source.image_filename or image_path.name,
+                    )
+                    stored_assets.append(stored)
                     blocks.append(
                         {
                             "block_id": block_id,
-                            "type": "text",
-                            "text": source.text,
+                            "type": "image",
+                            "asset_id": stored.asset_id,
+                            "alt": source.image_filename or "文档图片",
                             "position": position,
                         }
                     )
-                    continue
-                if source.type != "image" or not source.image_path:
-                    continue
-                image_path = Path(source.image_path).resolve(strict=True)
-                if not _is_within(image_path, temp_root):
-                    raise ContentAssetError("DOCX 解析器返回了工作目录之外的图片")
-                stored = self.asset_store.save_image(
-                    image_path.read_bytes(),
-                    source.image_filename or image_path.name,
-                )
-                stored_assets.append(stored)
-                blocks.append(
-                    {
-                        "block_id": block_id,
-                        "type": "image",
-                        "asset_id": stored.asset_id,
-                        "alt": source.image_filename or "文档图片",
-                        "position": position,
-                    }
-                )
-            return title, _normalize_positions(blocks), stored_assets
+                return title, _normalize_positions(blocks), stored_assets
+            except Exception:
+                _remove_stored_assets(self.asset_store, stored_assets)
+                raise
 
 
 async def copy_legacy_article(
@@ -205,45 +209,53 @@ async def copy_legacy_article(
 
     blocks: list[dict] = []
     assets: list[StoredAsset] = []
-    for raw in source_blocks:
-        if not isinstance(raw, dict):
-            continue
-        block_type = raw.get("type")
-        position = len(blocks)
-        if block_type in {"text", "heading"} and str(raw.get("text") or "").strip():
+    try:
+        for raw in source_blocks:
+            if not isinstance(raw, dict):
+                continue
+            block_type = raw.get("type")
+            position = len(blocks)
+            if block_type in {"text", "heading"} and str(raw.get("text") or "").strip():
+                blocks.append(
+                    {
+                        "block_id": str(uuid.uuid4()),
+                        "type": "text",
+                        "text": str(raw["text"]),
+                        "position": position,
+                    }
+                )
+                continue
+            if block_type != "image":
+                continue
+            candidate = str(raw.get("image_path") or "")
+            row = (
+                image_by_path.get(str(Path(candidate).expanduser().resolve()))
+                if candidate
+                else None
+            )
+            if row is None:
+                raw_position = raw.get("position")
+                row = next(
+                    (item for item in image_rows if item.get("position_index") == raw_position),
+                    None,
+                )
+            if row is None:
+                raise ContentAssetError("旧文章图片块缺少对应的受控图片记录")
+            data = source.read_image(row["local_path"])
+            stored = asset_store.save_image(data, row.get("filename") or "legacy-image")
+            assets.append(stored)
             blocks.append(
                 {
                     "block_id": str(uuid.uuid4()),
-                    "type": "text",
-                    "text": str(raw["text"]),
+                    "type": "image",
+                    "asset_id": stored.asset_id,
+                    "alt": row.get("filename") or "文章图片",
                     "position": position,
                 }
             )
-            continue
-        if block_type != "image":
-            continue
-        candidate = str(raw.get("image_path") or "")
-        row = image_by_path.get(str(Path(candidate).expanduser().resolve())) if candidate else None
-        if row is None:
-            raw_position = raw.get("position")
-            row = next(
-                (item for item in image_rows if item.get("position_index") == raw_position),
-                None,
-            )
-        if row is None:
-            raise ContentAssetError("旧文章图片块缺少对应的受控图片记录")
-        data = source.read_image(row["local_path"])
-        stored = asset_store.save_image(data, row.get("filename") or "legacy-image")
-        assets.append(stored)
-        blocks.append(
-            {
-                "block_id": str(uuid.uuid4()),
-                "type": "image",
-                "asset_id": stored.asset_id,
-                "alt": row.get("filename") or "文章图片",
-                "position": position,
-            }
-        )
+    except Exception:
+        _remove_stored_assets(asset_store, assets)
+        raise
 
     if not blocks and str(article.get("content_text") or "").strip():
         blocks = [
@@ -281,3 +293,15 @@ def _is_within(target: Path, root: Path) -> bool:
         return True
     except ValueError:
         return False
+
+
+def _remove_stored_assets(
+    asset_store: AssetStore,
+    assets: list[StoredAsset],
+) -> None:
+    for asset in assets:
+        try:
+            asset_store.remove_if_owned(asset.storage_path)
+        except OSError:
+            # 清理异常不能覆盖真正的导入失败原因。
+            pass

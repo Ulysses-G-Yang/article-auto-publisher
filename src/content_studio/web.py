@@ -14,6 +14,7 @@ from account_sessions.contracts import ArticleInput, DeliveryRequest
 from account_sessions.errors import AccountSessionError, ConfirmationRequiredError
 from account_sessions.permissions import LOCAL_WEB_CONTEXT, PermissionDeniedError
 from account_sessions.runtime import AccountRuntime
+from account_sessions.security import safe_error_message
 from content_studio.assets import AssetStore
 from content_studio.contracts import (
     CreateDeliveryPlanRequest,
@@ -176,6 +177,19 @@ class ContentStudioRuntimeState:
                 target["status"] = "BLOCKED"
                 target["error_code"] = getattr(exc, "error_code", "DELIVERY_BLOCKED")
                 target["error_message"] = str(exc)
+                continue
+            except Exception as exc:
+                message = safe_error_message(exc)
+                await self.service.set_plan_target_result(
+                    plan_id,
+                    target["target_id"],
+                    status="FAILED",
+                    error_code=getattr(exc, "error_code", "DELIVERY_FAILED"),
+                    error_message=message,
+                )
+                target["status"] = "FAILED"
+                target["error_code"] = getattr(exc, "error_code", "DELIVERY_FAILED")
+                target["error_message"] = message
                 continue
 
             await self.service.set_plan_target_result(

@@ -409,6 +409,14 @@ class CapturingDelivery:
         }
 
 
+class PartiallyFailingDelivery(CapturingDelivery):
+    async def request_delivery(self, request, _access, **kwargs):
+        self.calls.append((request, kwargs))
+        if len(self.calls) == 1:
+            raise RuntimeError("token=secret-value platform request failed")
+        return {"operation_id": str(uuid.uuid4()), "status": "QUEUED"}
+
+
 def test_plan_requires_batch_draft_and_per_publish_confirmation(tmp_path: Path) -> None:
     from content_studio.web import ContentStudioRuntimeState
 
@@ -521,5 +529,72 @@ def test_plan_requires_batch_draft_and_per_publish_confirmation(tmp_path: Path) 
     with pytest.raises(DeliveryPlanStaleError):
         run(service.get_plan_execution_context(plan["plan_id"]))
 
+    run(service.database.dispose())
+    run(account_db.dispose())
+
+
+def test_unexpected_target_failure_does_not_block_remaining_targets(tmp_path: Path) -> None:
+    from content_studio.contracts import ExecuteDeliveryPlanRequest
+    from content_studio.web import ContentStudioRuntimeState
+
+    account_db = AccountDatabase(sqlite_url(tmp_path / "partial-accounts.db"))
+    accounts = AccountSessionService(account_db, seed_legacy_profiles=False)
+    delivery = PartiallyFailingDelivery()
+    fake_state = FakeAccountState(accounts, delivery)
+    service = make_service(tmp_path, account_service=accounts)
+
+    async def scenario():
+        await accounts.initialize()
+        targets = []
+        for index, platform in enumerate(("xiaoheihe", "zol")):
+            account = PlatformAccount(
+                account_id=str(uuid.uuid4()),
+                platform=platform,
+                platform_user_id=f"partial-{index}",
+                display_name=f"部分失败账号{index}",
+                profile_path=str(tmp_path / f"partial-profile-{index}"),
+                status="ACTIVE",
+                session_status="VALID",
+                persist_login=True,
+            )
+            async with account_db.session() as session:
+                session.add(account)
+            targets.append(
+                {
+                    "platform": platform,
+                    "account_id": account.account_id,
+                    "mode": "DRAFT",
+                }
+            )
+        await service.initialize()
+        draft = await service.create_draft(
+            CreateDraftRequest(
+                title="部分失败",
+                blocks=[{"type": "text", "text": "正文", "position": 0}],
+            )
+        )
+        targeted = await service.replace_targets(
+            draft["draft_id"],
+            ReplaceTargetsRequest(revision=draft["revision"], targets=targets),
+            LOCAL_WEB_CONTEXT,
+        )
+        return await service.create_delivery_plan(
+            draft["draft_id"], targeted["revision"], LOCAL_WEB_CONTEXT
+        )
+
+    plan = run(scenario())
+    state = ContentStudioRuntimeState.__new__(ContentStudioRuntimeState)
+    state.account_state = fake_state
+    state.service = service
+    result = run(
+        state.execute_plan(
+            plan["plan_id"],
+            ExecuteDeliveryPlanRequest(draft_batch_confirmed=True),
+        )
+    )
+    assert [target["status"] for target in result["targets"]] == ["FAILED", "QUEUED"]
+    assert result["status"] == "PARTIAL_FAIL"
+    assert "secret-value" not in result["targets"][0]["error_message"]
+    assert len(delivery.calls) == 2
     run(service.database.dispose())
     run(account_db.dispose())

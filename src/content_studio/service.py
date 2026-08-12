@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from sqlalchemy import delete, func, select, update
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import selectinload
 
@@ -90,11 +91,10 @@ class ContentStudioService:
 
     async def ensure_seed_draft(self) -> dict:
         async with self.database.session() as session:
-            draft = await session.scalar(
-                select(ContentDraft).where(ContentDraft.seed_key == SEED_KEY)
-            )
-            if draft is None:
-                draft = ContentDraft(
+            now = _utc_now()
+            await session.execute(
+                sqlite_insert(ContentDraft)
+                .values(
                     draft_id=str(uuid.uuid5(uuid.NAMESPACE_URL, SEED_KEY)),
                     seed_key=SEED_KEY,
                     source_type="SYSTEM_SEED",
@@ -110,9 +110,16 @@ class ContentStudioService:
                     ],
                     status="ACTIVE",
                     revision=1,
+                    created_at=now,
+                    updated_at=now,
                 )
-                session.add(draft)
-                await session.flush()
+                .on_conflict_do_nothing(index_elements=["seed_key"])
+            )
+            draft = await session.scalar(
+                select(ContentDraft).where(ContentDraft.seed_key == SEED_KEY)
+            )
+            if draft is None:
+                raise RuntimeError("系统种子草稿初始化失败")
             return await self._draft_payload(session, draft)
 
     async def list_drafts(self, *, limit: int, offset: int) -> dict:
@@ -351,6 +358,19 @@ class ContentStudioService:
                     raise DraftValidationError(f"账号 {target.account_display_name} 已失效")
 
             content_hash = _content_hash(draft.title, draft.blocks_json)
+            await session.execute(
+                sqlite_insert(ContentVersion)
+                .values(
+                    version_id=str(uuid.uuid4()),
+                    draft_id=draft_id,
+                    source_revision=draft.revision,
+                    content_hash=content_hash,
+                    title=draft.title,
+                    blocks_json=draft.blocks_json,
+                    created_at=_utc_now(),
+                )
+                .on_conflict_do_nothing(index_elements=["draft_id", "content_hash"])
+            )
             version = await session.scalar(
                 select(ContentVersion).where(
                     ContentVersion.draft_id == draft_id,
@@ -358,16 +378,7 @@ class ContentStudioService:
                 )
             )
             if version is None:
-                version = ContentVersion(
-                    version_id=str(uuid.uuid4()),
-                    draft_id=draft_id,
-                    source_revision=draft.revision,
-                    content_hash=content_hash,
-                    title=draft.title,
-                    blocks_json=draft.blocks_json,
-                )
-                session.add(version)
-                await session.flush()
+                raise RuntimeError("内容版本冻结失败")
 
             plan = DeliveryPlan(
                 plan_id=str(uuid.uuid4()),
@@ -776,12 +787,14 @@ def _content_hash(title: str, blocks: list[dict]) -> str:
 def _plan_status(statuses: list[str]) -> str:
     if not statuses or all(status == "READY" for status in statuses):
         return "READY"
-    terminal_success = {"QUEUED", "RUNNING", "DRAFT_SAVED", "PUBLISHED"}
-    failures = {"FAILED", "BLOCKED", "CONFIRMATION_REQUIRED"}
+    if any(status == "CONFIRMATION_REQUIRED" for status in statuses):
+        return "AWAITING_CONFIRMATION"
+    active_or_success = {"QUEUED", "RUNNING", "DRAFT_SAVED", "PUBLISHED"}
+    failures = {"FAILED", "BLOCKED"}
     if all(status in {"DRAFT_SAVED", "PUBLISHED"} for status in statuses):
         return "SUCCESS"
     if any(status in failures for status in statuses) and any(
-        status in terminal_success for status in statuses
+        status in active_or_success for status in statuses
     ):
         return "PARTIAL_FAIL"
     if all(status in failures for status in statuses):

@@ -14,9 +14,6 @@ from sqlalchemy import select
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 SRC_ROOT = PROJECT_ROOT / "src"
-FRONTEND_WORKTREE = Path(
-    r"D:\Backup\Documents\article-auto-publisher-worktrees\account-session-frontend"
-)
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
@@ -352,11 +349,7 @@ def test_publish_requires_single_use_confirmation_and_gate_stays_closed(
 
 
 def test_blueprint_matches_frontend_contract_and_injects_article(tmp_path: Path) -> None:
-    template_root = (
-        FRONTEND_WORKTREE / "web" / "templates"
-        if (FRONTEND_WORKTREE / "web" / "templates" / "delivery.html").is_file()
-        else PROJECT_ROOT / "web" / "templates"
-    )
+    template_root = PROJECT_ROOT / "web" / "templates"
     static_root = template_root.parent / "static"
     database_url = sqlite_database_url(tmp_path)
     database = AccountDatabase(database_url)

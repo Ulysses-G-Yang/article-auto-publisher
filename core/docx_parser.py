@@ -38,9 +38,9 @@ class ParsedArticle:
 
 
 class DocxParser:
-    def __init__(self):
+    def __init__(self, images_dir: str | None = None):
         cfg = get_config()
-        self.images_dir = cfg["paths"]["images"]
+        self.images_dir = images_dir or cfg["paths"]["images"]
         os.makedirs(self.images_dir, exist_ok=True)
 
     def parse(self, filepath: str) -> ParsedArticle:

@@ -19,7 +19,7 @@ DeliveryMode = Literal["DRAFT", "PUBLISH"]
 class StrictModel(BaseModel):
     """拒绝静默吞掉拼错或过期的请求字段。"""
 
-    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    model_config = ConfigDict(extra="forbid")
 
 
 class ContentBlockInput(StrictModel):
@@ -76,7 +76,7 @@ class CreateDeliveryPlanRequest(StrictModel):
 
 
 class ExecuteDeliveryPlanRequest(StrictModel):
-    target_ids: list[str] | None = Field(default=None, max_length=50)
+    target_ids: list[str] | None = Field(default=None, min_length=1, max_length=50)
     draft_batch_confirmed: bool = False
     confirmations: dict[str, str] = Field(default_factory=dict)
 

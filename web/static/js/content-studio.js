@@ -8,9 +8,10 @@
     const platformLabels = { xiaoheihe: '小黑盒', zol: '中关村在线' };
     const sourceLabels = { BLANK: '空白草稿', DOCX: 'DOCX 导入', LEGACY_ARTICLE: '历史文章副本', SYSTEM_SEED: '系统草稿' };
     const planStatusLabels = {
-        READY: '待执行', QUEUED: '已排队', RUNNING: '执行中', SUCCESS: '已完成',
+        READY: '待执行', CREATING: '正在创建执行单', QUEUED: '已排队', RUNNING: '执行中', SUCCESS: '已完成',
         PARTIAL_FAIL: '部分失败', FATAL: '执行失败', CONFIRMATION_REQUIRED: '待公开确认',
         DRAFT_SAVED: '平台草稿已保存', PUBLISHED: '已公开发布', BLOCKED: '已拦截', FAILED: '失败',
+        RESULT_UNKNOWN: '结果未知，需人工核对',
     };
     const state = {
         draft: null,
@@ -493,8 +494,27 @@
     function planBadge(status) {
         if (['SUCCESS', 'DRAFT_SAVED', 'PUBLISHED'].includes(status)) return 'text-bg-success';
         if (['BLOCKED', 'FAILED', 'FATAL'].includes(status)) return 'text-bg-danger';
-        if (['PARTIAL_FAIL', 'CONFIRMATION_REQUIRED'].includes(status)) return 'text-bg-warning';
+        if (['PARTIAL_FAIL', 'CONFIRMATION_REQUIRED', 'RESULT_UNKNOWN'].includes(status)) return 'text-bg-warning';
         return 'text-bg-info';
+    }
+
+    function planTargetDetail(target) {
+        if (target.status === 'RESULT_UNKNOWN') {
+            return '结果未知，请先到平台人工核对；系统不会自动重试。';
+        }
+        if (target.status === 'PARTIAL_FAIL') {
+            return target.error_message || '部分内容未完整处理，请核对图片和平台结果。';
+        }
+        if (target.status === 'CREATING') {
+            return '正在创建独立执行单，请稍候。';
+        }
+        return target.error_message || (target.operation_id
+            ? `执行单 ${target.operation_id}`
+            : target.mode === 'PUBLISH' ? '公开发布' : '平台草稿');
+    }
+
+    function hasInFlightTarget(plan) {
+        return plan.targets.some(target => ['CREATING', 'QUEUED', 'RUNNING'].includes(target.status));
     }
 
     function renderPlan() {
@@ -505,7 +525,7 @@
         byId('plan-status').textContent = planStatusLabels[state.plan.status] || state.plan.status;
         byId('plan-targets').replaceChildren(...state.plan.targets.map(target => {
             const row = document.createElement('article'); row.className = 'plan-target';
-            const copy = document.createElement('div'); copy.className = 'plan-target-copy'; const strong = document.createElement('strong'); strong.textContent = `${platformLabels[target.platform] || target.platform} · ${target.account_display_name || '平台账号'}`; const small = document.createElement('small'); small.textContent = target.error_message || (target.operation_id ? `执行单 ${target.operation_id}` : target.mode === 'PUBLISH' ? '公开发布' : '平台草稿'); copy.append(strong, small);
+            const copy = document.createElement('div'); copy.className = 'plan-target-copy'; const strong = document.createElement('strong'); strong.textContent = `${platformLabels[target.platform] || target.platform} · ${target.account_display_name || '平台账号'}`; const small = document.createElement('small'); small.textContent = planTargetDetail(target); copy.append(strong, small);
             const actions = document.createElement('div'); actions.className = 'plan-target-actions'; const badge = document.createElement('span'); badge.className = `badge ${planBadge(target.status)}`; badge.textContent = planStatusLabels[target.status] || target.status; actions.appendChild(badge);
             row.append(copy, actions); return row;
         }));
@@ -523,7 +543,7 @@
             const confirmations = result.targets.filter(target => target.confirmation_required && target.confirmation_token);
             if (confirmations.length) {
                 state.pendingPublishTargets = confirmations.slice(); showNextPublishConfirmation();
-            } else if (result.targets.some(target => ['QUEUED', 'RUNNING'].includes(target.status))) {
+            } else if (hasInFlightTarget(result)) {
                 schedulePlanPoll();
             }
         } catch (error) { setMessage(fromReview ? 'plan-review-error' : 'publish-confirm-error', error.message || '投递计划执行失败'); }
@@ -556,7 +576,7 @@
             state.pollCount += 1;
             try {
                 state.plan = await jsonResponse(await fetch(endpoint(root.dataset.planDetailUrlTemplate, 'plan_id', state.plan.plan_id), { headers: { Accept: 'application/json' } })); renderPlan();
-                if (state.plan.targets.some(target => ['QUEUED', 'RUNNING'].includes(target.status))) schedulePlanPoll();
+                if (hasInFlightTarget(state.plan)) schedulePlanPoll();
             } catch (error) { setMessage('execution-error', error.message || '无法刷新执行状态'); }
         }, 2500);
     }

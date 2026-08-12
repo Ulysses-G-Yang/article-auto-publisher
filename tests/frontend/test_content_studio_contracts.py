@@ -109,6 +109,20 @@ def test_multi_target_and_confirmation_contracts_are_separate() -> None:
     assert "/api/delivery-operations" not in template + script
 
 
+def test_delivery_statuses_are_explicit_and_never_auto_retry_publish() -> None:
+    script = read("web/static/js/content-studio.js")
+    docs = read("docs/frontend/CONTENT_STUDIO_UX.md")
+
+    assert "CREATING: '正在创建执行单'" in script
+    assert "PARTIAL_FAIL: '部分失败'" in script
+    assert "RESULT_UNKNOWN: '结果未知，需人工核对'" in script
+    assert "['PARTIAL_FAIL', 'CONFIRMATION_REQUIRED', 'RESULT_UNKNOWN']" in script
+    assert "['CREATING', 'QUEUED', 'RUNNING']" in script
+    assert "系统不会自动重试" in script
+    assert "retry-target" not in script
+    assert "不提供公开发布自动重试按钮" in docs
+
+
 def test_primary_action_reports_and_focuses_missing_fields() -> None:
     template = read("web/templates/upload.html")
     script = read("web/static/js/content-studio.js")
@@ -120,4 +134,3 @@ def test_primary_action_reports_and_focuses_missing_fields() -> None:
     assert "issues[0].focus" in script
     assert "填写文章标题" in script
     assert "至少添加一个投递目标" in script
-

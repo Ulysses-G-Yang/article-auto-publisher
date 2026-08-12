@@ -33,7 +33,7 @@ body { min-width: 320px; overflow-x: hidden; background: var(--app-canvas); font
 .sidebar-status strong { color: rgba(255,255,255,.8); font-size: .75rem; }
 .sidebar-status small { color: rgba(255,255,255,.42); font-size: .64rem; }
 .sidebar-backdrop { display: none; }
-.wrapper { margin-left: var(--app-sidebar-width); transition: margin-left .2s ease; }
+.wrapper { width: calc(100% - var(--app-sidebar-width)); margin-left: var(--app-sidebar-width); padding-left: 0 !important; transition: width .2s ease, margin-left .2s ease; }
 .header { min-height: var(--app-header-height); background: var(--cui-body-bg); z-index: 1020; }
 .header-main { display: flex; min-height: var(--app-header-height); align-items: center; }
 .header-toggler { display: grid; width: 38px; height: 38px; place-items: center; color: var(--app-muted); }
@@ -58,14 +58,14 @@ body { min-width: 320px; overflow-x: hidden; background: var(--app-canvas); font
 .status-dot.completed { background: #2eb85c; }
 .footer { min-height: 48px; color: var(--app-muted); font-size: .72rem; }
 body.sidebar-collapsed .sidebar { width: var(--app-sidebar-collapsed-width); }
-body.sidebar-collapsed .wrapper { margin-left: var(--app-sidebar-collapsed-width); }
+body.sidebar-collapsed .wrapper { width: calc(100% - var(--app-sidebar-collapsed-width)); margin-left: var(--app-sidebar-collapsed-width); }
 body.sidebar-collapsed .brand-copy, body.sidebar-collapsed .sidebar .nav-title, body.sidebar-collapsed .sidebar-status > span:last-child, body.sidebar-collapsed .sidebar .nav-link span { opacity: 0; pointer-events: none; }
 body.sidebar-collapsed .sidebar-header, body.sidebar-collapsed .sidebar-footer { justify-content: center; padding: 0; }
 body.sidebar-collapsed .sidebar .nav-link { justify-content: center; padding-inline: 0; }
 
 @media (max-width: 991.98px) {
     .sidebar, body.sidebar-collapsed .sidebar { width: var(--app-sidebar-width); transform: translateX(-100%); }
-    .wrapper, body.sidebar-collapsed .wrapper { margin-left: 0; }
+    .wrapper, body.sidebar-collapsed .wrapper { width: 100%; margin-left: 0; }
     body.sidebar-mobile-open .sidebar { transform: translateX(0); }
     body.sidebar-mobile-open .sidebar-backdrop { position: fixed; inset: 0; display: block; background: rgba(33,38,49,.58); z-index: 1035; }
     body.sidebar-collapsed .brand-copy, body.sidebar-collapsed .sidebar .nav-title, body.sidebar-collapsed .sidebar-status > span:last-child, body.sidebar-collapsed .sidebar .nav-link span { opacity: 1; pointer-events: auto; }

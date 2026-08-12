@@ -14,7 +14,7 @@
     <script src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js" defer></script>
 </head>
 <body>
-    <aside id="app-sidebar" class="sidebar sidebar-dark sidebar-fixed border-end" data-coreui="navigation" aria-label="主导航">
+    <aside id="app-sidebar" class="sidebar sidebar-dark sidebar-fixed border-end" aria-label="主导航">
         <div class="sidebar-header border-bottom">
             <a class="sidebar-brand" href="/" aria-label="ArticleOps 发布运营中心首页">
                 <span class="brand-mark" aria-hidden="true">A</span>
@@ -22,7 +22,7 @@
             </a>
             <button id="sidebar-close" class="btn sidebar-close d-lg-none" type="button" aria-label="关闭导航"><i class="cil-x" aria-hidden="true"></i></button>
         </div>
-        <div class="sidebar-nav" data-coreui="navigation" data-simplebar>
+        <div class="sidebar-nav" data-simplebar>
             <div class="nav-title">工作台</div>
             <a class="nav-link {% if request.path == '/' or request.path.startswith('/task/') %}active{% endif %}" href="/" {% if request.path == '/' or request.path.startswith('/task/') %}aria-current="page"{% endif %}>
                 <i class="nav-icon cil-speedometer" aria-hidden="true"></i><span>发布概览</span>

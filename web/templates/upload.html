@@ -1,8 +1,9 @@
 {% extends "base.html" %}
 {% block title %}上传文章 - 自动化文章发布工具{% endblock %}
+{% block header_title %}创建文章{% endblock %}
 {% block content %}
 <div x-data="uploader" class="container" style="max-width: 800px;">
-    <h2 class="mb-4"><i class="bi bi-cloud-upload me-2"></i>上传文章</h2>
+    <div class="page-heading"><div><h1>创建文章</h1><p>上传 Word 文档并选择目标平台，后续状态可在发布概览中追踪。</p></div></div>
 
     <div class="card mb-4">
         <div class="card-body">
@@ -19,7 +20,7 @@
                 <p class="mb-2">拖拽 Word 文档到此处，或点击选择</p>
                 <input type="file" id="fileInput" accept=".docx" multiple
                        @change="handleFiles($event)" class="d-none">
-                <button class="btn btn-primary" @click="$refs.fileInput.click()">
+                <button type="button" class="btn btn-primary" @click="$refs.fileInput.click()">
                     <i class="bi bi-folder2-open me-1"></i>选择文件
                 </button>
                 <input type="file" x-ref="fileInput" accept=".docx" multiple
@@ -38,7 +39,7 @@
                                     <span x-text="f.name"></span>
                                     <small class="text-muted ms-2" x-text="formatSize(f.size)"></small>
                                 </div>
-                                <button class="btn btn-sm btn-outline-danger" @click="removeFile(i)">
+                                <button type="button" class="btn btn-sm btn-outline-danger" @click="removeFile(i)" aria-label="移除所选文件">
                                     <i class="bi bi-x-lg"></i>
                                 </button>
                             </div>
@@ -69,7 +70,7 @@
 
     <!-- 上传按钮 -->
     <div class="d-flex gap-2 mb-4">
-        <button class="btn btn-primary btn-lg flex-grow-1" @click="startUpload"
+        <button type="button" class="btn btn-primary btn-lg flex-grow-1" @click="startUpload"
                 :disabled="uploading || files.length === 0 || (!platforms.zol && !platforms.xiaoheihe)">
             <template x-if="!uploading">
                 <span><i class="bi bi-rocket-takeoff me-1"></i>开始处理并发布</span>
@@ -81,7 +82,7 @@
                 </span>
             </template>
         </button>
-        <button class="btn btn-outline-secondary" @click="files = []; results = [];">
+        <button type="button" class="btn btn-outline-secondary" @click="files = []; results = [];">
             <i class="bi bi-trash me-1"></i>清空
         </button>
     </div>

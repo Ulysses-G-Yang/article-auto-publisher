@@ -4,7 +4,7 @@
 {% block extra_head %}<link rel="stylesheet" href="{{ url_for('static', filename='css/delivery.css') }}">{% endblock %}
 
 {% block content %}
-<div id="delivery-app" class="delivery-shell" data-accounts-url-template="/api/platforms/{platform}/accounts?usable=true" data-session-policy-url-template="/api/accounts/{account_id}/session-policy" data-delivery-url="/api/delivery-operations" data-activity-url-template="/api/accounts/{account_id}/activity">
+<div id="delivery-app" class="delivery-shell" data-accounts-url-template="/api/platforms/{platform}/accounts?usable=true" data-session-policy-url-template="/api/accounts/{account_id}/session-policy" data-delivery-url="/api/delivery-operations" data-activity-url-template="/api/account-sessions/{account_id}/activity">
     <nav aria-label="面包屑导航">
         <ol class="breadcrumb"><li class="breadcrumb-item"><a href="/">首页</a></li><li class="breadcrumb-item active" aria-current="page">内容投递</li></ol>
     </nav>

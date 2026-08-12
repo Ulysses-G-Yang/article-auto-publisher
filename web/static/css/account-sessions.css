@@ -1,0 +1,31 @@
+.multi-account-sessions { padding: 0; }
+.multi-account-header { display: flex; align-items: center; justify-content: space-between; gap: 1rem; }
+.multi-account-header h2 { margin: .15rem 0 0; font-size: 1.05rem; font-weight: 700; }
+.multi-account-header p { margin: .35rem 0 0; color: var(--app-muted); font-size: .75rem; }
+.section-eyebrow { color: var(--app-primary); font-size: .62rem; font-weight: 800; letter-spacing: .08em; }
+.session-platforms { display: flex; flex-wrap: wrap; gap: .55rem; }
+.session-placeholder { display: flex; min-height: 100px; align-items: center; justify-content: center; gap: .65rem; border: 1px dashed var(--app-card-border); border-radius: var(--app-radius); color: var(--app-muted); font-size: .8rem; }
+.session-account-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .8rem; }
+.session-account-card { display: grid; gap: .85rem; padding: 1rem; border: 1px solid var(--app-card-border); border-radius: var(--app-radius); background: var(--cui-body-bg); }
+.session-account-top { display: flex; min-width: 0; align-items: flex-start; justify-content: space-between; gap: .75rem; }
+.session-account-identity { display: flex; min-width: 0; flex-direction: column; }
+.session-account-identity strong, .session-account-identity span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.session-account-identity span { margin-top: .2rem; color: var(--app-muted); font-size: .72rem; }
+.session-account-badges { display: flex; flex: 0 0 auto; flex-wrap: wrap; justify-content: flex-end; gap: .3rem; }
+.session-account-meta { display: flex; align-items: center; justify-content: space-between; gap: .8rem; padding: .65rem 0; border-top: 1px solid var(--app-card-border); border-bottom: 1px solid var(--app-card-border); }
+.session-account-meta > span { color: var(--app-muted); font-size: .7rem; }
+.session-account-actions { display: flex; flex-wrap: wrap; gap: .45rem; }
+.session-add-row { display: flex; align-items: center; gap: .8rem; margin-top: 1rem; }
+.session-add-row span { color: var(--app-muted); font-size: .72rem; }
+.account-activity-drawer { --cui-offcanvas-width: min(480px, 100vw); }
+.account-activity-drawer .offcanvas-header { align-items: flex-start; }
+.account-activity-drawer .offcanvas-header p { margin-top: .25rem; color: var(--app-muted); font-size: .72rem; }
+.activity-list { display: grid; gap: .75rem; margin: 0; padding: 0; list-style: none; }
+.activity-item { display: grid; grid-template-columns: 10px minmax(0, 1fr); gap: .7rem; }
+.activity-dot { width: 10px; height: 10px; margin-top: .35rem; border-radius: 50%; background: var(--app-primary); box-shadow: 0 0 0 4px rgba(88,86,214,.1); }
+.activity-copy { padding-bottom: .75rem; border-bottom: 1px solid var(--app-card-border); }
+.activity-copy strong { display: block; font-size: .8rem; }
+.activity-copy p { margin: .3rem 0; color: var(--cui-body-color); font-size: .75rem; }
+.activity-copy time { color: var(--app-muted); font-size: .68rem; }
+@media (max-width: 767.98px) { .session-account-list { grid-template-columns: 1fr; } .multi-account-header, .session-add-row { align-items: flex-start; flex-direction: column; } }
+@media (max-width: 575.98px) { .session-account-actions .btn { flex: 1 1 auto; } .session-account-meta { align-items: flex-start; flex-direction: column; } }

@@ -1,6 +1,7 @@
 {% extends "base.html" %}
 {% block title %}账号管理 - 自动化文章发布工具{% endblock %}
 {% block header_title %}平台账号{% endblock %}
+{% block extra_head %}<link rel="stylesheet" href="{{ url_for('static', filename='css/account-sessions.css') }}">{% endblock %}
 {% block content %}
 <style>
     [x-cloak] { display: none !important; }
@@ -333,8 +334,48 @@
     </div>
 
     <!-- Toast：动态创建 Bootstrap Toast 实例，以支持不同提示时长 -->
-    <div id="account-toast-container" class="account-toast-container toast-container position-fixed top-0 end-0 p-3" aria-live="polite" aria-atomic="true"></div>
+<div id="account-toast-container" class="account-toast-container toast-container position-fixed top-0 end-0 p-3" aria-live="polite" aria-atomic="true"></div>
 </div>
+
+<section id="multi-account-sessions" class="container multi-account-sessions mt-4" style="max-width: 1100px;" data-accounts-url-template="/api/platforms/{platform}/accounts?usable=false" data-verify-url-template="/api/accounts/{account_id}/verify" data-login-url-template="/api/platforms/{platform}/accounts/login" data-policy-url-template="/api/accounts/{account_id}/session-policy" data-logout-url-template="/api/account-sessions/{account_id}/logout" data-activity-url-template="/api/account-sessions/{account_id}/activity" aria-labelledby="multi-account-heading">
+    <div class="card">
+        <div class="card-header multi-account-header">
+            <div><span class="section-eyebrow">ISOLATED ACCOUNT SESSIONS</span><h2 id="multi-account-heading">多账号会话</h2><p>每个账号使用独立浏览器 Profile，公开信息仅展示真实昵称和脱敏 ID。</p></div>
+            <button id="refresh-account-sessions" class="btn btn-outline-secondary btn-sm" type="button" disabled><i class="cil-reload me-1" aria-hidden="true"></i>刷新账号</button>
+        </div>
+        <div class="card-body">
+            <fieldset class="mb-3">
+                <legend class="form-label small fw-semibold">先选择平台</legend>
+                <div class="session-platforms" role="radiogroup" aria-label="多账号会话平台">
+                    <input class="btn-check" type="radio" name="session-platform" id="session-platform-xiaoheihe" value="xiaoheihe" autocomplete="off">
+                    <label class="btn btn-outline-primary" for="session-platform-xiaoheihe"><i class="bi bi-controller me-1" aria-hidden="true"></i>小黑盒</label>
+                    <input class="btn-check" type="radio" name="session-platform" id="session-platform-zol" value="zol" autocomplete="off">
+                    <label class="btn btn-outline-primary" for="session-platform-zol"><i class="bi bi-pc-display me-1" aria-hidden="true"></i>中关村在线</label>
+                </div>
+            </fieldset>
+            <div id="session-accounts-placeholder" class="session-placeholder"><i class="cil-arrow-top" aria-hidden="true"></i><span>选择平台后加载该平台账号</span></div>
+            <div id="session-accounts-loading" class="session-placeholder d-none" role="status"><span class="spinner-border spinner-border-sm" aria-hidden="true"></span><span>正在读取账号…</span></div>
+            <div id="session-accounts-error" class="alert alert-danger d-none" role="alert"></div>
+            <div id="session-accounts-empty" class="empty-state d-none"><i class="cil-user-unfollow" aria-hidden="true"></i><strong>该平台还没有账号</strong><span>添加账号会创建新的隔离浏览器 Profile。</span></div>
+            <div id="session-account-list" class="session-account-list d-none" aria-live="polite"></div>
+            <div id="session-login-status" class="alert alert-info d-none mt-3 mb-0" role="status"></div>
+            <div class="session-add-row">
+                <button id="add-platform-account" class="btn btn-primary" type="button" disabled><i class="cil-plus me-1" aria-hidden="true"></i>添加该平台账号</button>
+                <span>将创建新的隔离浏览器 Profile，并打开交互登录；不会复用其他账号的 Profile。</span>
+            </div>
+        </div>
+    </div>
+
+    <div class="offcanvas offcanvas-end account-activity-drawer" tabindex="-1" id="account-activity-drawer" aria-labelledby="account-activity-title">
+        <div class="offcanvas-header border-bottom"><div><span class="section-eyebrow">ACCOUNT ACTIVITY</span><h2 id="account-activity-title" class="offcanvas-title">账号活动日志</h2><p id="account-activity-account" class="mb-0"></p></div><button type="button" class="btn-close" data-bs-dismiss="offcanvas" aria-label="关闭活动日志"></button></div>
+        <div class="offcanvas-body">
+            <div id="account-activity-loading" class="session-placeholder d-none" role="status"><span class="spinner-border spinner-border-sm"></span><span>正在加载活动日志…</span></div>
+            <div id="account-activity-error" class="alert alert-danger d-none" role="alert"></div>
+            <div id="account-activity-empty" class="empty-state d-none"><i class="cil-history" aria-hidden="true"></i><strong>暂无活动记录</strong><span>该账号还没有可展示的安全事件。</span></div>
+            <ol id="account-activity-list" class="activity-list"></ol>
+        </div>
+    </div>
+</section>
 
 <script>
 document.addEventListener('alpine:init', () => {
@@ -724,3 +765,5 @@ document.addEventListener('alpine:init', () => {
 });
 </script>
 {% endblock %}
+
+{% block extra_scripts %}<script src="{{ url_for('static', filename='js/account-sessions.js') }}"></script>{% endblock %}

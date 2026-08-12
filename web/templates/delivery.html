@@ -1,0 +1,106 @@
+{% extends "base.html" %}
+{% block title %}内容投递 - ArticleOps{% endblock %}
+{% block header_title %}内容投递{% endblock %}
+{% block extra_head %}<link rel="stylesheet" href="{{ url_for('static', filename='css/delivery.css') }}">{% endblock %}
+
+{% block content %}
+<div id="delivery-app" class="delivery-shell" data-accounts-url-template="/api/platforms/{platform}/accounts?usable=true" data-session-policy-url-template="/api/accounts/{account_id}/session-policy" data-delivery-url="/api/delivery-operations" data-activity-url-template="/api/account-sessions/{account_id}/activity">
+    <nav aria-label="面包屑导航">
+        <ol class="breadcrumb"><li class="breadcrumb-item"><a href="/">首页</a></li><li class="breadcrumb-item active" aria-current="page">内容投递</li></ol>
+    </nav>
+    <div class="page-heading">
+        <div><h1>新建内容投递</h1><p>明确选择平台、账号和操作模式后，再将内容安全地保存或发布。</p></div>
+        <span class="badge text-bg-light border"><i class="cil-shield-alt me-1" aria-hidden="true"></i>账号信息已脱敏</span>
+    </div>
+
+    <div class="delivery-layout">
+        <div class="delivery-main">
+            <section class="card delivery-step" aria-labelledby="platform-heading">
+                <div class="card-body">
+                    <div class="step-heading"><span class="step-number">1</span><div><h2 id="platform-heading">选择投递平台</h2><p>选择平台后才会读取该平台的可用账号。</p></div></div>
+                    <fieldset class="platform-options">
+                        <legend class="visually-hidden">投递平台</legend>
+                        <input class="btn-check" type="radio" name="delivery-platform" id="platform-xiaoheihe" value="xiaoheihe" autocomplete="off">
+                        <label class="btn platform-option" for="platform-xiaoheihe"><i class="bi bi-controller" aria-hidden="true"></i><span><strong>小黑盒</strong><small>Xiaoheihe</small></span></label>
+                        <input class="btn-check" type="radio" name="delivery-platform" id="platform-zol" value="zol" autocomplete="off">
+                        <label class="btn platform-option" for="platform-zol"><i class="bi bi-pc-display" aria-hidden="true"></i><span><strong>中关村在线</strong><small>ZOL</small></span></label>
+                    </fieldset>
+                    <div id="platform-error" class="alert alert-danger d-none mt-3 mb-0" role="alert"></div>
+                </div>
+            </section>
+
+            <section class="card delivery-step" aria-labelledby="account-heading">
+                <div class="card-body">
+                    <div class="step-heading"><span class="step-number">2</span><div><h2 id="account-heading">选择投递账号</h2><p id="account-help">请先选择平台</p></div></div>
+                    <div id="account-loading" class="account-loading d-none" role="status"><span class="spinner-border spinner-border-sm" aria-hidden="true"></span>正在加载可用账号…</div>
+                    <div id="account-error" class="alert alert-danger d-none mb-3" role="alert"></div>
+                    <div id="account-empty" class="empty-state d-none"><i class="cil-user-unfollow" aria-hidden="true"></i><strong>没有可用账号</strong><span>请添加账号或完成登录验证后重试。</span></div>
+                    <fieldset id="account-selector" class="account-selector d-none">
+                        <legend class="visually-hidden">投递账号</legend>
+                        <div id="account-track" class="account-track" role="radiogroup" aria-describedby="account-help"></div>
+                    </fieldset>
+                    <div id="account-placeholder" class="account-placeholder"><i class="cil-arrow-top" aria-hidden="true"></i><span>选择平台后显示账号</span></div>
+                    <div id="session-policy-panel" class="session-policy-panel d-none">
+                        <div><strong>保持登录态</strong><small>仅控制会话持久化策略，不代表当前登录状态。</small></div>
+                        <div class="form-check form-switch m-0">
+                            <input id="persist-login" class="form-check-input" type="checkbox" role="switch" aria-describedby="session-policy-help">
+                            <label class="visually-hidden" for="persist-login">保持登录态</label>
+                        </div>
+                        <span id="session-policy-help" class="visually-hidden">切换后立即更新所选账号的会话持久化策略</span>
+                    </div>
+                    <div id="session-policy-error" class="alert alert-danger d-none mt-3 mb-0" role="alert"></div>
+                </div>
+            </section>
+
+            <section class="card delivery-step" aria-labelledby="content-heading">
+                <div class="card-body">
+                    <div class="step-heading"><span class="step-number">3</span><div><h2 id="content-heading">编辑内容与操作模式</h2><p>公开发布必须经过单独的高风险二次确认。</p></div></div>
+                    <div class="mb-3">
+                        <label class="form-label" for="article-title">标题</label>
+                        <input id="article-title" class="form-control" type="text" value="{{ default_article_title | default('凌晨三点，公司的智能马桶开始给我做绩效面谈', true) | e }}" maxlength="200" required>
+                    </div>
+                    <div class="mb-4">
+                        <label class="form-label" for="article-body">正文</label>
+                        <textarea id="article-body" class="form-control delivery-editor" rows="14" placeholder="当前会话未提供完整正文，请在投递前粘贴并核对正文。" required>{{ default_article_body | default('', true) | e }}</textarea>
+                        <div class="form-text">{% if default_article_body | default('', true) %}示例正文已预填，投递前仍可编辑并核对{% else %}正文保持可编辑；当前未预填未确认的内容。{% endif %}</div>
+                    </div>
+                    <fieldset>
+                        <legend class="form-label mb-2">操作模式</legend>
+                        <div class="mode-control" role="radiogroup" aria-label="投递操作模式">
+                            <input class="btn-check" type="radio" name="delivery-mode" id="mode-draft" value="DRAFT" autocomplete="off" checked>
+                            <label class="btn" for="mode-draft"><i class="cil-save" aria-hidden="true"></i><span><strong>保存到平台草稿箱</strong><small>推荐，可在平台内继续检查</small></span></label>
+                            <input class="btn-check" type="radio" name="delivery-mode" id="mode-publish" value="PUBLISH" autocomplete="off">
+                            <label class="btn" for="mode-publish"><i class="cil-warning" aria-hidden="true"></i><span><strong>公开发布</strong><small>高风险，需要二次确认</small></span></label>
+                        </div>
+                    </fieldset>
+                    <div id="delivery-error" class="alert alert-danger d-none mt-3 mb-0" role="alert"></div>
+                </div>
+            </section>
+        </div>
+
+        <aside class="delivery-summary" aria-labelledby="summary-heading">
+            <div class="card sticky-summary">
+                <div class="card-header"><h2 id="summary-heading">投递摘要</h2></div>
+                <div class="card-body">
+                    <dl class="summary-list"><div><dt>平台</dt><dd id="summary-platform">未选择</dd></div><div><dt>账号</dt><dd id="summary-account">未选择</dd></div><div><dt>模式</dt><dd id="summary-mode">保存到平台草稿箱</dd></div></dl>
+                    <button id="submit-delivery" class="btn btn-primary w-100" type="button" disabled>检查并继续</button>
+                    <p class="submit-note"><i class="cil-lock-locked" aria-hidden="true"></i>切换模式不会直接执行公开发布。</p>
+                </div>
+            </div>
+            <div id="operation-result" class="card operation-result d-none" aria-live="polite">
+                <div class="card-body"><span class="badge text-bg-info" id="operation-status">—</span><h2>执行单已创建</h2><dl><div><dt>执行单 ID</dt><dd id="operation-id">—</dd></div><div><dt>模式</dt><dd id="operation-mode">—</dd></div></dl><a id="account-activity-link" class="btn btn-outline-primary btn-sm" href="#">查看账号活动日志</a></div>
+            </div>
+        </aside>
+    </div>
+
+    <div class="modal fade" id="draft-confirmation" tabindex="-1" aria-labelledby="draft-confirmation-title" aria-hidden="true">
+        <div class="modal-dialog modal-dialog-centered"><div class="modal-content"><div class="modal-header"><h2 class="modal-title fs-5" id="draft-confirmation-title">确认保存到平台草稿箱</h2><button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="关闭"></button></div><div class="modal-body"><p>请核对本次投递摘要。该操作不会公开发布。</p><dl id="draft-confirmation-summary" class="confirmation-list"></dl></div><div class="modal-footer"><button type="button" class="btn btn-secondary" data-bs-dismiss="modal">返回检查</button><button id="confirm-draft" type="button" class="btn btn-primary">确认保存草稿</button></div></div></div>
+    </div>
+
+    <div class="modal fade" id="publish-confirmation" tabindex="-1" aria-labelledby="publish-confirmation-title" aria-hidden="true">
+        <div class="modal-dialog modal-dialog-centered"><div class="modal-content border-danger"><div class="modal-header bg-danger-subtle"><div><span class="badge text-bg-danger mb-2">高风险操作</span><h2 class="modal-title fs-5" id="publish-confirmation-title">确认公开发布</h2></div><button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="关闭"></button></div><div class="modal-body"><p><strong>确认后内容将公开发布，普通开关或模式切换不会触发此操作。</strong></p><dl id="publish-confirmation-summary" class="confirmation-list"></dl><p id="confirmation-expiry" class="text-body-secondary small mb-0"></p></div><div class="modal-footer"><button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消公开发布</button><button id="confirm-publish" type="button" class="btn btn-danger">我已核对，确认公开发布</button></div></div></div>
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_scripts %}<script src="{{ url_for('static', filename='js/delivery.js') }}"></script>{% endblock %}

@@ -17,8 +17,6 @@ from article_mvp.web import create_dashboard_blueprint
 from config import get_config
 from core.logging_setup import configure_logging
 from loguru import logger
-from models.database import Database
-from web.article_mvp_bridge import build_current_workflow_snapshot
 from web.routes import register_routes
 
 _QUEUE_START_LOCK = threading.Lock()
@@ -113,16 +111,9 @@ def create_app() -> Flask:
     # 注册路由
     register_routes(app)
 
-    # 新数据层保持独立包边界，但通过 Blueprint 接入现役 5000 端口。
-    # Provider 仅返回脱敏任务摘要，新包不会反向导入现役发布模块。
-    database_path = os.path.abspath(cfg["paths"]["database"]).replace("\\", "/")
-    dashboard_database_url = f"sqlite+aiosqlite:///{database_path}"
-    current_db = Database.get_instance()
+    # 只组合 HTTP 路由；article_mvp 自行管理独立数据库和运行目录。
     app.register_blueprint(
-        create_dashboard_blueprint(
-            database_url=dashboard_database_url,
-            current_workflow_provider=lambda: build_current_workflow_snapshot(current_db),
-        ),
+        create_dashboard_blueprint(),
         url_prefix="/data-center",
     )
 

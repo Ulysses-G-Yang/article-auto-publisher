@@ -1,7 +1,6 @@
 """可独立测试、也可挂载到现役 Flask 服务的只读数据看板。"""
 
 import atexit
-from collections.abc import Callable, Mapping
 from pathlib import Path
 from threading import Lock
 from typing import Any
@@ -11,23 +10,6 @@ from flask import Blueprint, Flask, current_app, jsonify, render_template
 from article_mvp.db.database import init_db
 from article_mvp.web.query import DashboardQueryService
 from article_mvp.web.runtime import AsyncRuntime
-
-CurrentWorkflowProvider = Callable[[], Mapping[str, Any]]
-
-
-def empty_current_workflow() -> dict[str, Any]:
-    """独立测试模式没有现役发布任务 Provider 时使用的安全空结构。"""
-
-    return {
-        "available": False,
-        "summary": {
-            "total_articles": 0,
-            "total_tasks": 0,
-            "xiaoheihe_tasks": 0,
-            "saved_drafts": 0,
-        },
-        "tasks": [],
-    }
 
 
 class DashboardRuntimeState:
@@ -75,9 +57,8 @@ def create_dashboard_blueprint(
     *,
     database_url: str | None = None,
     runtime: AsyncRuntime | None = None,
-    current_workflow_provider: CurrentWorkflowProvider | None = None,
 ) -> Blueprint:
-    """创建可挂载 Blueprint；新包通过 Provider 单向读取现役任务摘要。"""
+    """创建只读取 article_mvp 独立数据库的 Blueprint。"""
 
     package_root = Path(__file__).resolve().parent
     blueprint = Blueprint(
@@ -116,12 +97,6 @@ def create_dashboard_blueprint(
                 }
             ), 500
 
-        payload["current_workflow"] = empty_current_workflow()
-        if current_workflow_provider is not None:
-            try:
-                payload["current_workflow"] = dict(current_workflow_provider())
-            except Exception:
-                current_app.logger.exception("加载当前发布任务摘要失败")
         return jsonify(payload)
 
     return blueprint
@@ -131,7 +106,6 @@ def create_dashboard_app(
     *,
     database_url: str | None = None,
     runtime: AsyncRuntime | None = None,
-    current_workflow_provider: CurrentWorkflowProvider | None = None,
 ) -> Flask:
     """仅供单元测试使用；正式页面由现役 5000 端口挂载 Blueprint。"""
 
@@ -140,7 +114,6 @@ def create_dashboard_app(
         create_dashboard_blueprint(
             database_url=database_url,
             runtime=runtime,
-            current_workflow_provider=current_workflow_provider,
         )
     )
     return app

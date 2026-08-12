@@ -3,7 +3,6 @@
 import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from pathlib import Path
 from threading import Lock
 
 from sqlalchemy import event
@@ -17,6 +16,7 @@ from sqlalchemy.ext.asyncio import (
 )
 
 from article_mvp.db.models import Base
+from article_mvp.runtime_paths import database_path
 
 _engine: AsyncEngine | None = None
 _session_factory: async_sessionmaker[AsyncSession] | None = None
@@ -28,11 +28,9 @@ def default_database_url() -> str:
     configured = os.getenv("ARTICLE_MVP_DATABASE_URL")
     if configured:
         return configured.strip()
-    project_root = Path(__file__).resolve().parents[3]
-    data_dir = Path(os.getenv("ARTICLE_MVP_DATA_DIR", project_root / "data"))
-    database_path = (data_dir / "app.db").resolve()
-    database_path.parent.mkdir(parents=True, exist_ok=True)
-    return f"sqlite+aiosqlite:///{database_path.as_posix()}"
+    path = database_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return f"sqlite+aiosqlite:///{path.as_posix()}"
 
 
 def _install_sqlite_pragmas(engine: AsyncEngine) -> None:
@@ -87,6 +85,7 @@ async def init_db(database_url: str | None = None) -> None:
 
 _SQLITE_ADDITIVE_COLUMNS: dict[str, dict[str, str]] = {
     "platform_articles": {
+        "event_id": "VARCHAR(128)",
         "title": "VARCHAR(255)",
         "published_at": "DATETIME",
     },
@@ -124,6 +123,10 @@ def _upgrade_sqlite_schema(connection: Connection) -> None:
                 if column_name not in _sqlite_column_names(connection, table_name):
                     raise
             existing.add(column_name)
+    connection.exec_driver_sql(
+        "CREATE UNIQUE INDEX IF NOT EXISTS ux_platform_articles_event_id "
+        "ON platform_articles (event_id)"
+    )
 
 
 def _sqlite_column_names(connection: Connection, table_name: str) -> set[str]:

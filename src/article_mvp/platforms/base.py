@@ -4,9 +4,13 @@ from abc import ABC, abstractmethod
 from typing import Any
 
 import httpx
-from sqlalchemy.ext.asyncio import AsyncSession
 
-from article_mvp.contracts import CollectorAuth, MetricValues, PublishRequest
+from article_mvp.contracts import (
+    ArticlePublished,
+    CollectorAuth,
+    MetricValues,
+    PublishRequest,
+)
 from article_mvp.db.models import PlatformArticle
 
 
@@ -15,9 +19,8 @@ class BasePublisher(ABC):
     async def publish(
         self,
         request: PublishRequest,
-        session: AsyncSession,
-    ) -> PlatformArticle:
-        """发布内容并返回平台文章映射。"""
+    ) -> ArticlePublished:
+        """发布内容并返回标准事件；持久化由 Service 处理。"""
 
 
 class BaseCollector(ABC):

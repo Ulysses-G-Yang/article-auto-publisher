@@ -308,7 +308,6 @@ function renderCurrentTaskRows(tasks) {
 }
 
 function renderCurrentWorkflow(workflow) {
-  const summary = workflow?.summary || {};
   const state = byId("current-workflow-state");
   const available = Boolean(workflow?.available);
   state.textContent = available ? "同库只读" : "当前任务不可用";
@@ -317,7 +316,27 @@ function renderCurrentWorkflow(workflow) {
     : "badge text-bg-danger-subtle text-danger-emphasis";
 
   currentTasks = workflow?.tasks || [];
+  setText("current-tasks-empty-title", "暂无发布任务");
+  setText("current-tasks-empty-detail", "创建文章后，任务会显示在这里。");
   renderCurrentTaskRows(currentTasks);
+  if (dashboardPayload) {
+    populateArticlePicker();
+    renderMetricCards();
+  }
+}
+
+function renderLegacySummaryFailure() {
+  currentTasks = [];
+  const state = byId("current-workflow-state");
+  state.textContent = "旧发布摘要暂不可用";
+  state.className = "badge text-bg-danger-subtle text-danger-emphasis";
+  setText("current-tasks-empty-title", "旧发布摘要暂不可用");
+  setText("current-tasks-empty-detail", "新数据模块不受影响，可稍后单独刷新旧发布摘要。");
+  renderCurrentTaskRows(currentTasks);
+  if (dashboardPayload) {
+    populateArticlePicker();
+    renderMetricCards();
+  }
 }
 
 function renderContract(contract) {
@@ -336,41 +355,91 @@ function renderContract(contract) {
   }
 }
 
-async function refreshDashboard() {
+async function fetchJson(url) {
+  const response = await fetch(url, {
+    headers: { Accept: "application/json" },
+    cache: "no-store",
+  });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(payload.message || payload.error || `HTTP ${response.status}`);
+  }
+  return payload;
+}
+
+function renderDashboardPayload(payload) {
+  dashboardPayload = payload;
+  populateArticlePicker();
+  renderMetricCards();
+  setText("total-articles", payload.summary?.total_articles);
+  setText("mapped-articles", payload.summary?.mapped_articles);
+  setText("total-snapshots", payload.summary?.total_snapshots);
+  setText("latest-run", payload.summary?.latest_run_status, "暂无运行");
+  renderContract(payload.contract || {});
+  renderArticles(payload.articles || []);
+  renderRuns(payload.runs || []);
+}
+
+function renderDashboardFailure(error) {
   const alert = byId("alert");
+  dashboardPayload = null;
+  populateArticlePicker();
+  ["metric-basic", "metric-traffic", "metric-engagement", "metric-collection"].forEach((id) => {
+    replaceMetricRows(id, [metricRow("加载状态", "新指标暂不可用")]);
+  });
+  byId("metric-mode-status").textContent = "新看板数据加载失败，可稍后单独刷新";
+  setText("total-articles", "—");
+  setText("mapped-articles", "—");
+  setText("total-snapshots", "—");
+  setText("latest-run", "暂不可用");
+  renderContract({});
+  const gate = byId("collector-gate");
+  gate.textContent = "DATA UNAVAILABLE";
+  gate.className = "badge text-bg-danger-subtle text-danger-emphasis";
+  renderArticles([]);
+  renderRuns([]);
+  alert.textContent = `新看板加载失败：${error.message}`;
+  alert.classList.remove("d-none");
+}
+
+async function loadDashboardData() {
+  const alert = byId("alert");
+  alert.classList.add("d-none");
+  try {
+    const payload = await fetchJson(document.body.dataset.dashboardApi);
+    renderDashboardPayload(payload);
+  } catch (error) {
+    renderDashboardFailure(error);
+    throw error;
+  }
+}
+
+async function loadLegacySummary() {
+  try {
+    const payload = await fetchJson(document.body.dataset.legacySummaryApi);
+    renderCurrentWorkflow(payload);
+  } catch (error) {
+    renderLegacySummaryFailure();
+    throw error;
+  }
+}
+
+async function refreshDashboard() {
   const button = byId("refresh");
   button.disabled = true;
   button.classList.add("is-loading");
-  alert.classList.add("d-none");
-
   try {
-    const response = await fetch(document.body.dataset.dashboardApi, {
-      headers: { Accept: "application/json" },
-      cache: "no-store",
-    });
-    const payload = await response.json();
-    if (!response.ok) {
-      throw new Error(payload.message || payload.error || "加载失败");
-    }
-
-    renderCurrentWorkflow(payload.current_workflow);
-    dashboardPayload = payload;
-    populateArticlePicker();
-    renderMetricCards();
-    setText("total-articles", payload.summary.total_articles, "0");
-    setText("mapped-articles", payload.summary.mapped_articles, "0");
-    setText("total-snapshots", payload.summary.total_snapshots, "0");
-    setText("latest-run", payload.summary.latest_run_status, "暂无运行");
-    renderContract(payload.contract);
-    renderArticles(payload.articles || []);
-    renderRuns(payload.runs || []);
+    const results = await Promise.allSettled([
+      loadDashboardData(),
+      loadLegacySummary(),
+    ]);
+    const successful = results.filter((result) => result.status === "fulfilled").length;
     setText(
       "last-updated",
-      `更新于 ${new Date().toLocaleTimeString("zh-CN", { hour12: false })}`,
+      successful
+        ? `更新于 ${new Date().toLocaleTimeString("zh-CN", { hour12: false })} · ${successful}/2 数据源可用`
+        : "两个数据源均暂不可用",
     );
-  } catch (error) {
-    alert.textContent = `看板加载失败：${error.message}`;
-    alert.classList.remove("d-none");
   } finally {
     button.disabled = false;
     button.classList.remove("is-loading");

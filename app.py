@@ -14,6 +14,7 @@ sys.path.insert(0, os.path.join(BASE_DIR, "src"))
 from flask import Flask
 
 from article_mvp.web import create_dashboard_blueprint
+from account_sessions import create_account_session_blueprint
 from config import get_config
 from core.logging_setup import configure_logging
 from loguru import logger
@@ -76,23 +77,15 @@ def clear_platform_cookies(platform: str) -> bool:
 
 
 def kill_zombie_chrome():
-    """只清理 Chrome Profile 的锁文件，保留 Cookie 会话"""
-    profile_base = os.path.join(BASE_DIR, "data", "chrome_profiles")
-    cleaned = 0
+    """兼容旧调用，但不再擅自删除 Chrome 的 Singleton 占用凭据。
 
-    # 只清理 Singleton 锁文件，不触碰 Chrome 进程和 Profile 数据。
-    for platform in ["zol", "xiaoheihe"]:
-        profile_dir = os.path.join(profile_base, platform)
-        for lock_file in ["SingletonLock", "SingletonCookie", "SingletonSocket"]:
-            lock_path = os.path.join(profile_dir, lock_file)
-            try:
-                if os.path.exists(lock_path):
-                    os.remove(lock_path)
-                    cleaned += 1
-            except Exception as exc:
-                logger.warning("清理 Chrome Profile 锁文件失败: path={}, error={}", lock_path, exc)
+    Singleton 文件既可能是异常残留，也可能代表另一个仍在工作的 Chrome。
+    仅凭文件存在无法安全区分两者；账号会话域会在取得跨进程租约后返回
+    ``PROFILE_IN_USE``，由用户关闭占用进程后再重试。
+    """
 
-    return cleaned
+    logger.debug("安全模式不自动删除 Chrome Profile Singleton 文件")
+    return 0
 
 
 def create_app() -> Flask:
@@ -116,8 +109,9 @@ def create_app() -> Flask:
         create_dashboard_blueprint(),
         url_prefix="/data-center",
     )
+    app.register_blueprint(create_account_session_blueprint())
 
-    # 添加清理 Profile 锁文件的 API；保留原有 /api/cleanup 端点兼容性。
+    # 保留原有 /api/cleanup 端点兼容性；安全模式不再删除不明占用锁。
     @app.route("/api/cleanup", methods=["POST"])
     def api_cleanup():
         killed = kill_zombie_chrome()
@@ -161,10 +155,8 @@ def start_queue_worker():
 
 
 def on_shutdown(signum, frame):
-    """服务器关闭时清理 Chrome Profile 锁文件"""
-    logger.info("正在清理 Chrome Profile 锁文件...")
-    cleaned = kill_zombie_chrome()
-    logger.info("已清理 {} 个 Chrome Profile 锁文件", cleaned)
+    """服务器关闭时由浏览器上下文和操作系统释放各自租约。"""
+    logger.info("服务正在关闭；不会擅自删除 Chrome Profile 占用凭据")
     sys.exit(0)
 
 
@@ -174,11 +166,6 @@ if __name__ == "__main__":
     if app_cfg.get("environment") == "production":
         raise RuntimeError("生产环境请使用 run_flask_production.py，不要使用 Flask 开发服务器")
     configure_logging(cfg["paths"]["logs"])
-
-    # 启动前先清理上次残留的僵尸 Chrome
-    cleaned = kill_zombie_chrome()
-    if cleaned > 0:
-        logger.info("启动前清理了 {} 个 Chrome Profile 锁文件", cleaned)
 
     app = create_app()
 

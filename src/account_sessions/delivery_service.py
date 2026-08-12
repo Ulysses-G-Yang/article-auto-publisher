@@ -180,6 +180,25 @@ class DeliveryService:
             )
             raise
         finally:
+            if not account.persist_login and platform.context is not None:
+                try:
+                    await platform.context.clear_cookies()
+                    await self._record_session_cleanup(
+                        account,
+                        access,
+                        operation_id,
+                        success=True,
+                    )
+                except Exception as exc:
+                    await self._record_session_cleanup(
+                        account,
+                        access,
+                        operation_id,
+                        success=False,
+                        error=exc,
+                    )
+                finally:
+                    await self._mark_session_login_required(account.account_id)
             await platform.cleanup()
 
     async def get_operation(
@@ -352,6 +371,42 @@ class DeliveryService:
                     operation_id=operation_id,
                 )
             )
+
+    async def _record_session_cleanup(
+        self,
+        account: PlatformAccount,
+        access: AccessContext,
+        operation_id: str,
+        *,
+        success: bool,
+        error: Exception | None = None,
+    ) -> None:
+        async with self.database.session() as session:
+            session.add(
+                activity_for(
+                    account,
+                    access,
+                    action=(
+                        "SESSION_CLEARED_AFTER_OPERATION"
+                        if success
+                        else "SESSION_CLEANUP_FAILED"
+                    ),
+                    level="INFO" if success else "WARN",
+                    message=(
+                        "保持登录态已关闭，本次操作结束后已清除目标账号会话"
+                        if success
+                        else f"操作已结束，但目标账号会话清理失败: {error}"
+                    ),
+                    operation_id=operation_id,
+                )
+            )
+
+    async def _mark_session_login_required(self, account_id: str) -> None:
+        async with self.database.session() as session:
+            account = await session.get(PlatformAccount, account_id)
+            if account is not None:
+                account.session_status = "LOGIN_REQUIRED"
+                account.last_verified_at = None
 
 
 def operation_payload(

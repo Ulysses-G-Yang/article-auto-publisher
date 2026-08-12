@@ -18,7 +18,7 @@
 
 `PUBLISH` 首次提交不携带确认令牌。只有服务器返回 HTTP 428 和 `PUBLISH_CONFIRMATION_REQUIRED` 后，页面才保存一次性令牌并显示高风险确认框。用户明确点击“我已核对，确认公开发布”后，才用该令牌再次提交。平台、账号或模式变化都会清除旧令牌。
 
-成功响应必须与当前平台和账号一致，随后展示 `operation_id`、状态、模式和账号活动日志链接。
+成功响应必须与当前平台和账号一致，随后展示 `operation_id`、状态、模式和账号活动日志链接；日志 URL 为 `GET /api/account-sessions/{account_id}/activity`，避免与旧平台级账号路由冲突。
 
 ## 示例内容缺口
 

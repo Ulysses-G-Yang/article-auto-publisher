@@ -93,6 +93,7 @@ def test_publish_requires_428_token_and_explicit_second_confirmation() -> None:
 
 def test_delivery_payload_and_mismatch_failures_follow_contract() -> None:
     script = read("web/static/js/delivery.js")
+    template = read("web/templates/delivery.html")
 
     assert "article: { title:" in script
     assert "platform: state.platform" in script
@@ -104,6 +105,8 @@ def test_delivery_payload_and_mismatch_failures_follow_contract() -> None:
     assert "account-error" in script
     assert "session-policy-error" in script
     assert "delivery-error" in script
+    assert "/api/account-sessions/{account_id}/activity" in template
+    assert 'data-activity-url-template="/api/accounts/{account_id}/activity"' not in template
 
 
 def test_delivery_page_has_mobile_keyboard_and_aria_basics() -> None:

@@ -1,5 +1,6 @@
 {% extends "base.html" %}
 {% block title %}任务详情 - 自动化文章发布工具{% endblock %}
+{% block header_title %}任务详情{% endblock %}
 {% block content %}
 <div x-data="taskDetail" class="container" style="max-width: 900px;">
     <nav aria-label="breadcrumb" class="mb-3">
@@ -8,6 +9,10 @@
             <li class="breadcrumb-item active">任务 #{{ task.id if task else '' }}</li>
         </ol>
     </nav>
+
+    <div class="page-heading">
+        <div><h1>任务详情</h1><p>查看任务参数、文章预览与执行日志。</p></div>
+    </div>
 
     {% if task %}
     <!-- 任务概览 -->
@@ -58,7 +63,7 @@
                     <label class="text-muted small">草稿链接</label>
                     <p>
                         {% if task.draft_url %}
-                        <a href="{{ task.draft_url }}" target="_blank">查看草稿 <i class="bi bi-box-arrow-up-right"></i></a>
+                        <a href="{{ task.draft_url }}" target="_blank" rel="noopener noreferrer" aria-label="查看任务草稿（在新标签页打开）">查看草稿 <i class="bi bi-box-arrow-up-right"></i></a>
                         {% else %}-{% endif %}
                     </p>
                 </div>
@@ -154,7 +159,7 @@
     <div class="card">
         <div class="card-header d-flex justify-content-between align-items-center">
             <h5 class="mb-0">执行日志</h5>
-            <button class="btn btn-sm btn-outline-secondary" onclick="location.reload()">
+            <button type="button" class="btn btn-sm btn-outline-secondary" onclick="location.reload()">
                 <i class="bi bi-arrow-clockwise me-1"></i>刷新
             </button>
         </div>

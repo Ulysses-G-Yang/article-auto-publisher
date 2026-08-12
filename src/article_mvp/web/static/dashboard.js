@@ -3,18 +3,21 @@ const byId = (id) => document.getElementById(id);
 const LAYOUT_STORAGE_KEY = "article-mvp.dashboard-layout.v1";
 const THEME_STORAGE_KEY = "article-mvp.dashboard-theme.v1";
 const SIDEBAR_STORAGE_KEY = "article-mvp.sidebar-collapsed.v1";
+const METRIC_MODE_STORAGE_KEY = "article-mvp.metric-mode.v1";
 
 const DEFAULT_LAYOUT = [
-  { id: "summary", x: 0, y: 0, w: 12, h: 2 },
-  { id: "current-tasks", x: 0, y: 2, w: 8, h: 5 },
-  { id: "contract", x: 8, y: 2, w: 4, h: 5 },
-  { id: "articles", x: 0, y: 7, w: 8, h: 5 },
-  { id: "runs", x: 8, y: 7, w: 4, h: 5 },
+  { id: "summary", x: 0, y: 0, w: 12, h: 3 },
+  { id: "current-tasks", x: 0, y: 3, w: 8, h: 5 },
+  { id: "contract", x: 8, y: 3, w: 4, h: 5 },
+  { id: "articles", x: 0, y: 8, w: 8, h: 5 },
+  { id: "runs", x: 8, y: 8, w: 4, h: 5 },
 ];
 
 let dashboardGrid;
 let dashboardEditing = false;
 let currentTasks = [];
+let dashboardPayload = null;
+let metricMode = "overview";
 let savedLayoutState = null;
 
 function setText(id, value, fallback = "—") {
@@ -34,6 +37,176 @@ function platformLabel(platform) {
   if (platform === "xiaoheihe") return "小黑盒";
   if (platform === "zol") return "中关村在线";
   return platform || "—";
+}
+
+function displayMetric(value) {
+  return value === null || value === undefined ? "—" : Number(value).toLocaleString("zh-CN");
+}
+
+function metricRow(label, value, options = {}) {
+  const row = document.createElement("div");
+  row.className = options.primary ? "metric-row metric-row-primary" : "metric-row";
+  const name = document.createElement("span");
+  name.textContent = label;
+  const content = document.createElement(options.href ? "a" : "strong");
+  content.textContent = value ?? "—";
+  if (options.href) {
+    content.href = options.href;
+    content.target = "_blank";
+    content.rel = "noopener noreferrer";
+    content.setAttribute("aria-label", options.ariaLabel || `${label}（在新标签页打开）`);
+  }
+  row.append(name, content);
+  return row;
+}
+
+function replaceMetricRows(id, rows) {
+  const target = byId(id);
+  target.replaceChildren(...rows);
+}
+
+function sumAvailable(articles, field) {
+  const values = articles
+    .map((article) => article.latest_metric?.[field])
+    .filter((value) => value !== null && value !== undefined);
+  return values.length ? values.reduce((total, value) => total + Number(value), 0) : null;
+}
+
+function latestSnapshotTime(articles) {
+  const values = articles.map((article) => article.latest_metric?.snapshot_time).filter(Boolean);
+  return values.sort((left, right) => new Date(right) - new Date(left))[0] || null;
+}
+
+function freshnessLabel(snapshotTime) {
+  if (!snapshotTime) return "暂无数据";
+  const time = new Date(snapshotTime);
+  if (Number.isNaN(time.getTime())) return "时间未知";
+  const minutes = Math.max(0, Math.round((Date.now() - time.getTime()) / 60000));
+  if (minutes < 5) return "刚刚更新";
+  if (minutes < 60) return `${minutes} 分钟前`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 24) return `${hours} 小时前`;
+  return `${Math.round(hours / 24)} 天前`;
+}
+
+function articleTitle(article) {
+  if (article.title) return article.title;
+  const task = currentTasks.find((item) => Number(item.id) === Number(article.task_id));
+  return task?.article_title || task?.title_used || `文章 ${article.external_article_id || article.id}`;
+}
+
+function sortedArticles(articles) {
+  return [...articles].sort((left, right) => {
+    const leftTime = new Date(left.published_at || left.created_at || 0).getTime();
+    const rightTime = new Date(right.published_at || right.created_at || 0).getTime();
+    return rightTime - leftTime || Number(right.id || 0) - Number(left.id || 0);
+  });
+}
+
+function selectedArticle() {
+  const articles = sortedArticles(dashboardPayload?.articles || []);
+  const selectedId = byId("article-picker").value;
+  return articles.find((article) => String(article.id) === selectedId) || articles[0] || null;
+}
+
+function populateArticlePicker() {
+  const picker = byId("article-picker");
+  const previous = picker.value;
+  const articles = sortedArticles(dashboardPayload?.articles || []);
+  picker.replaceChildren();
+  for (const article of articles) {
+    const option = document.createElement("option");
+    option.value = String(article.id);
+    option.textContent = `${articleTitle(article)} · ${platformLabel(article.platform)}`;
+    picker.appendChild(option);
+  }
+  if (articles.some((article) => String(article.id) === previous)) picker.value = previous;
+  picker.disabled = articles.length === 0;
+}
+
+function renderOverviewMetrics() {
+  const payload = dashboardPayload || {};
+  const articles = payload.articles || [];
+  const summary = payload.summary || {};
+  const snapshotTime = latestSnapshotTime(articles);
+  const publishedTimes = articles.map((article) => article.published_at).filter(Boolean).sort().reverse();
+  replaceMetricRows("metric-basic", [
+    metricRow("文章总数", displayMetric(summary.total_articles), { primary: true }),
+    metricRow("已映射", displayMetric(summary.mapped_articles)),
+    metricRow("最新发布时间", publishedTimes[0] ? formatTime(publishedTimes[0]) : "—"),
+  ]);
+  replaceMetricRows("metric-traffic", [
+    metricRow("阅读 / 播放", displayMetric(sumAvailable(articles, "read_count")), { primary: true }),
+    metricRow("曝光", displayMetric(sumAvailable(articles, "exposure_count"))),
+  ]);
+  replaceMetricRows("metric-engagement", [
+    metricRow("点赞", displayMetric(sumAvailable(articles, "like_count")), { primary: true }),
+    metricRow("评论", displayMetric(sumAvailable(articles, "comment_count"))),
+    metricRow("收藏", displayMetric(sumAvailable(articles, "collect_count"))),
+  ]);
+  replaceMetricRows("metric-collection", [
+    metricRow("分享", displayMetric(sumAvailable(articles, "share_count")), { primary: true }),
+    metricRow("最近采集", snapshotTime ? formatTime(snapshotTime) : "尚未采集"),
+    metricRow("数据新鲜度", freshnessLabel(snapshotTime)),
+  ]);
+  byId("metric-mode-status").textContent = articles.length
+    ? (snapshotTime ? `基于 ${articles.length} 篇真实文章的最新快照` : "已有文章，尚未采集指标")
+    : "尚无平台文章映射";
+}
+
+function renderArticleMetrics() {
+  const article = selectedArticle();
+  if (!article) {
+    ["metric-basic", "metric-traffic", "metric-engagement", "metric-collection"].forEach((id) => {
+      replaceMetricRows(id, [metricRow("状态", "暂无文章")]);
+    });
+    byId("metric-mode-status").textContent = "尚无可选择的平台文章";
+    return;
+  }
+  const metric = article.latest_metric || {};
+  const snapshotTime = metric.snapshot_time;
+  replaceMetricRows("metric-basic", [
+    metricRow("正式标题", articleTitle(article), { primary: true }),
+    metricRow("文章 ID", article.external_article_id || "—"),
+    metricRow("发布时间", article.published_at ? formatTime(article.published_at) : "—"),
+    metricRow("平台", platformLabel(article.platform)),
+    metricRow("原始链接", article.platform_url ? "查看原文 ↗" : "链接缺失", {
+      href: article.platform_url || null,
+      ariaLabel: `${articleTitle(article)}原始链接（在新标签页打开）`,
+    }),
+  ]);
+  replaceMetricRows("metric-traffic", [
+    metricRow("阅读 / 播放", displayMetric(metric.read_count), { primary: true }),
+    metricRow("曝光", displayMetric(metric.exposure_count)),
+  ]);
+  replaceMetricRows("metric-engagement", [
+    metricRow("点赞", displayMetric(metric.like_count), { primary: true }),
+    metricRow("评论", displayMetric(metric.comment_count)),
+    metricRow("收藏", displayMetric(metric.collect_count)),
+  ]);
+  replaceMetricRows("metric-collection", [
+    metricRow("分享", displayMetric(metric.share_count), { primary: true }),
+    metricRow("最近采集", snapshotTime ? formatTime(snapshotTime) : "尚未采集"),
+    metricRow("数据新鲜度", freshnessLabel(snapshotTime)),
+  ]);
+  byId("metric-mode-status").textContent = snapshotTime ? "显示所选文章的真实最新快照" : "所选文章尚未采集指标";
+}
+
+function renderMetricCards() {
+  byId("article-picker-wrap").classList.toggle("d-none", metricMode !== "article");
+  document.querySelectorAll("[data-metric-mode]").forEach((button) => {
+    const active = button.dataset.metricMode === metricMode;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-pressed", String(active));
+  });
+  if (metricMode === "article") renderArticleMetrics();
+  else renderOverviewMetrics();
+}
+
+function setMetricMode(mode) {
+  metricMode = mode === "article" ? "article" : "overview";
+  localStorage.setItem(METRIC_MODE_STORAGE_KEY, metricMode);
+  renderMetricCards();
 }
 
 function statusNode(value) {
@@ -136,11 +309,6 @@ function renderCurrentTaskRows(tasks) {
 
 function renderCurrentWorkflow(workflow) {
   const summary = workflow?.summary || {};
-  setText("current-total-articles", summary.total_articles, "0");
-  setText("current-total-tasks", summary.total_tasks, "0");
-  setText("current-xhh-tasks", summary.xiaoheihe_tasks, "0");
-  setText("current-saved-drafts", summary.saved_drafts, "0");
-
   const state = byId("current-workflow-state");
   const available = Boolean(workflow?.available);
   state.textContent = available ? "同库只读" : "当前任务不可用";
@@ -186,6 +354,9 @@ async function refreshDashboard() {
     }
 
     renderCurrentWorkflow(payload.current_workflow);
+    dashboardPayload = payload;
+    populateArticlePicker();
+    renderMetricCards();
     setText("total-articles", payload.summary.total_articles, "0");
     setText("mapped-articles", payload.summary.mapped_articles, "0");
     setText("total-snapshots", payload.summary.total_snapshots, "0");
@@ -260,9 +431,9 @@ function updateResponsiveSummaryHeight() {
   const summary = moduleElement("summary");
   if (!summary || summary.hidden) return;
 
-  let height = 2;
-  if (window.innerWidth < 576) height = 6;
-  else if (window.innerWidth < 992) height = 4;
+  let height = 3;
+  if (window.innerWidth < 576) height = 8;
+  else if (window.innerWidth < 992) height = 5;
   else {
     height = savedLayoutState?.widgets.find((item) => item.id === "summary")?.h || 2;
   }
@@ -358,7 +529,8 @@ function initTheme() {
 
 function toggleSidebar() {
   if (window.innerWidth < 992) {
-    document.body.classList.toggle("sidebar-mobile-open");
+    const open = document.body.classList.toggle("sidebar-mobile-open");
+    byId("sidebar-toggle").setAttribute("aria-expanded", String(open));
     return;
   }
   const collapsed = document.body.classList.toggle("sidebar-collapsed");
@@ -373,12 +545,17 @@ function initSidebar() {
   byId("sidebar-toggle").addEventListener("click", toggleSidebar);
   byId("sidebar-close").addEventListener("click", () => {
     document.body.classList.remove("sidebar-mobile-open");
+    byId("sidebar-toggle").setAttribute("aria-expanded", "false");
   });
   byId("sidebar-backdrop").addEventListener("click", () => {
     document.body.classList.remove("sidebar-mobile-open");
+    byId("sidebar-toggle").setAttribute("aria-expanded", "false");
   });
   document.querySelectorAll(".sidebar a").forEach((link) => {
-    link.addEventListener("click", () => document.body.classList.remove("sidebar-mobile-open"));
+    link.addEventListener("click", () => {
+      document.body.classList.remove("sidebar-mobile-open");
+      byId("sidebar-toggle").setAttribute("aria-expanded", "false");
+    });
   });
   window.addEventListener("resize", updateResponsiveSummaryHeight);
 }
@@ -386,6 +563,10 @@ function initSidebar() {
 function bindInteractions() {
   byId("refresh").addEventListener("click", refreshDashboard);
   byId("task-search").addEventListener("input", () => renderCurrentTaskRows(currentTasks));
+  byId("article-picker").addEventListener("change", renderArticleMetrics);
+  document.querySelectorAll("[data-metric-mode]").forEach((button) => {
+    button.addEventListener("click", () => setMetricMode(button.dataset.metricMode));
+  });
   byId("edit-dashboard").addEventListener("click", () => setEditMode(!dashboardEditing));
   byId("save-layout").addEventListener("click", saveLayout);
   byId("reset-layout").addEventListener("click", restoreDefaultLayout);
@@ -404,6 +585,7 @@ function bindInteractions() {
 }
 
 function initializeDashboard() {
+  metricMode = localStorage.getItem(METRIC_MODE_STORAGE_KEY) === "article" ? "article" : "overview";
   initTheme();
   initGrid();
   initSidebar();

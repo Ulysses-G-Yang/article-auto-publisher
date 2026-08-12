@@ -45,7 +45,7 @@
   <div class="wrapper d-flex flex-column min-vh-100">
     <header class="header header-sticky p-0 border-bottom">
       <div class="container-fluid px-4 header-main">
-        <button id="sidebar-toggle" class="header-toggler btn" type="button" aria-label="切换导航">
+        <button id="sidebar-toggle" class="header-toggler btn" type="button" aria-label="切换导航" aria-controls="app-sidebar" aria-expanded="false">
           <i class="cil-menu" aria-hidden="true"></i>
         </button>
 
@@ -102,34 +102,42 @@
         <section id="alert" class="alert alert-danger d-none" role="alert"></section>
 
         <div id="dashboard-grid" class="grid-stack" aria-label="可配置数据看板">
-          <section id="module-summary" class="grid-stack-item" gs-id="summary" gs-x="0" gs-y="0" gs-w="12" gs-h="2" gs-min-h="2" data-module="summary">
+          <section id="module-summary" class="grid-stack-item" gs-id="summary" gs-x="0" gs-y="0" gs-w="12" gs-h="3" gs-min-h="3" data-module="summary">
             <div class="grid-stack-item-content dashboard-module summary-module">
+              <div class="summary-toolbar">
+                <div class="metric-mode-switch" role="group" aria-label="指标卡显示模式">
+                  <button class="metric-mode-button active" type="button" data-metric-mode="overview" aria-pressed="true">运营总览</button>
+                  <button class="metric-mode-button" type="button" data-metric-mode="article" aria-pressed="false">单篇文章</button>
+                </div>
+                <div id="article-picker-wrap" class="article-picker d-none">
+                  <label for="article-picker">选择文章</label>
+                  <select id="article-picker" class="form-select form-select-sm" aria-describedby="article-picker-help"></select>
+                  <span id="article-picker-help" class="visually-hidden">默认选择最新发布文章</span>
+                </div>
+                <p id="metric-mode-status" class="summary-status" aria-live="polite">正在加载真实数据…</p>
+              </div>
               <div class="summary-grid">
                 <article class="metric-card metric-primary">
-                  <div class="metric-card-top"><span>现有文章</span><i class="cil-notes" aria-hidden="true"></i></div>
-                  <strong id="current-total-articles">—</strong>
-                  <small>当前发布工作流</small>
+                  <div class="metric-card-top"><span>基础信息</span><i class="cil-notes" aria-hidden="true"></i></div>
+                  <div id="metric-basic" class="metric-card-content"></div>
                 </article>
                 <article class="metric-card metric-info">
-                  <div class="metric-card-top"><span>全部任务</span><i class="cil-list" aria-hidden="true"></i></div>
-                  <strong id="current-total-tasks">—</strong>
-                  <small>跨平台任务总量</small>
+                  <div class="metric-card-top"><span>流量表现</span><i class="cil-chart" aria-hidden="true"></i></div>
+                  <div id="metric-traffic" class="metric-card-content"></div>
                 </article>
                 <article class="metric-card metric-warning">
-                  <div class="metric-card-top"><span>小黑盒任务</span><i class="cil-chart" aria-hidden="true"></i></div>
-                  <strong id="current-xhh-tasks">—</strong>
-                  <small>阶段一目标平台</small>
+                  <div class="metric-card-top"><span>互动表现</span><i class="cil-thumb-up" aria-hidden="true"></i></div>
+                  <div id="metric-engagement" class="metric-card-content"></div>
                 </article>
                 <article class="metric-card metric-danger">
-                  <div class="metric-card-top"><span>草稿已保存</span><i class="cil-save" aria-hidden="true"></i></div>
-                  <strong id="current-saved-drafts">—</strong>
-                  <small>可继续发布</small>
+                  <div class="metric-card-top"><span>传播与采集</span><i class="cil-share" aria-hidden="true"></i></div>
+                  <div id="metric-collection" class="metric-card-content"></div>
                 </article>
               </div>
             </div>
           </section>
 
-          <section id="module-current-tasks" class="grid-stack-item" gs-id="current-tasks" gs-x="0" gs-y="2" gs-w="8" gs-h="5" gs-min-w="5" gs-min-h="4" data-module="current-tasks">
+          <section id="module-current-tasks" class="grid-stack-item" gs-id="current-tasks" gs-x="0" gs-y="3" gs-w="8" gs-h="5" gs-min-w="5" gs-min-h="4" data-module="current-tasks">
             <div class="grid-stack-item-content dashboard-module card">
               <header class="module-header widget-drag-handle">
                 <div><span class="module-eyebrow">CURRENT WORKFLOW</span><h2>当前发布任务</h2></div>
@@ -145,7 +153,7 @@
             </div>
           </section>
 
-          <section id="module-contract" class="grid-stack-item" gs-id="contract" gs-x="8" gs-y="2" gs-w="4" gs-h="5" gs-min-w="3" gs-min-h="4" data-module="contract">
+          <section id="module-contract" class="grid-stack-item" gs-id="contract" gs-x="8" gs-y="3" gs-w="4" gs-h="5" gs-min-w="3" gs-min-h="4" data-module="contract">
             <div class="grid-stack-item-content dashboard-module card">
               <header class="module-header widget-drag-handle">
                 <div><span class="module-eyebrow">INTERFACE CONTRACT</span><h2>接口证据状态</h2></div>
@@ -165,7 +173,7 @@
             </div>
           </section>
 
-          <section id="module-articles" class="grid-stack-item" gs-id="articles" gs-x="0" gs-y="7" gs-w="8" gs-h="5" gs-min-w="5" gs-min-h="4" data-module="articles">
+          <section id="module-articles" class="grid-stack-item" gs-id="articles" gs-x="0" gs-y="8" gs-w="8" gs-h="5" gs-min-w="5" gs-min-h="4" data-module="articles">
             <div class="grid-stack-item-content dashboard-module card">
               <header class="module-header widget-drag-handle">
                 <div><span class="module-eyebrow">CONTENT MAP</span><h2>平台文章与最新指标</h2></div>
@@ -181,7 +189,7 @@
             </div>
           </section>
 
-          <section id="module-runs" class="grid-stack-item" gs-id="runs" gs-x="8" gs-y="7" gs-w="4" gs-h="5" gs-min-w="3" gs-min-h="4" data-module="runs">
+          <section id="module-runs" class="grid-stack-item" gs-id="runs" gs-x="8" gs-y="8" gs-w="4" gs-h="5" gs-min-w="3" gs-min-h="4" data-module="runs">
             <div class="grid-stack-item-content dashboard-module card">
               <header class="module-header widget-drag-handle">
                 <div><span class="module-eyebrow">COLLECTION RUNS</span><h2>最近采集运行</h2></div>

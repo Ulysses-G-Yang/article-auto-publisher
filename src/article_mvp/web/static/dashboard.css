@@ -392,6 +392,68 @@ body.dashboard-editing .widget-drag-handle:active {
   box-shadow: none;
 }
 
+.summary-toolbar {
+  display: flex;
+  min-height: 44px;
+  align-items: center;
+  gap: 1rem;
+  margin-bottom: .75rem;
+}
+
+.metric-mode-switch {
+  display: inline-flex;
+  padding: .2rem;
+  border: 1px solid var(--app-card-border);
+  border-radius: .45rem;
+  background: var(--cui-body-bg);
+  box-shadow: var(--app-shadow);
+}
+
+.metric-mode-button {
+  min-height: 34px;
+  padding: .35rem .85rem;
+  border: 0;
+  border-radius: .3rem;
+  background: transparent;
+  color: var(--app-muted);
+  font-size: .8rem;
+  font-weight: 650;
+}
+
+.metric-mode-button:hover,
+.metric-mode-button:focus-visible {
+  color: var(--app-primary);
+}
+
+.metric-mode-button.active {
+  background: var(--app-primary);
+  color: #fff;
+}
+
+.article-picker {
+  display: flex;
+  align-items: center;
+  gap: .55rem;
+}
+
+.article-picker label {
+  margin: 0;
+  color: var(--app-muted);
+  font-size: .76rem;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.article-picker .form-select {
+  width: min(360px, 38vw);
+}
+
+.summary-status {
+  margin: 0 0 0 auto;
+  color: var(--app-muted);
+  font-size: .75rem;
+}
+
 .summary-grid {
   display: grid;
   height: 100%;
@@ -404,7 +466,7 @@ body.dashboard-editing .widget-drag-handle:active {
   display: flex;
   min-width: 0;
   flex-direction: column;
-  justify-content: center;
+  justify-content: flex-start;
   padding: 1rem 1.1rem;
   overflow: hidden;
   border-radius: var(--app-radius);
@@ -431,16 +493,53 @@ body.dashboard-editing .widget-drag-handle:active {
   font-size: 1.25rem;
 }
 
-.metric-card strong {
-  margin-top: .45rem;
-  font-size: 1.75rem;
-  line-height: 1;
+.metric-card-content {
+  display: grid;
+  gap: .32rem;
+  margin-top: .55rem;
 }
 
-.metric-card small {
-  margin-top: .45rem;
+.metric-row {
+  display: flex;
+  min-width: 0;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: .65rem;
+  font-size: .72rem;
+}
+
+.metric-row span {
+  flex: 0 0 auto;
   color: rgba(255, 255, 255, .68);
-  font-size: .68rem;
+}
+
+.metric-row strong,
+.metric-row a {
+  min-width: 0;
+  overflow: hidden;
+  color: #fff;
+  font-size: .82rem;
+  font-weight: 700;
+  text-align: right;
+  text-decoration: none;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.metric-row a:hover,
+.metric-row a:focus-visible {
+  text-decoration: underline;
+}
+
+.metric-row-primary {
+  margin-bottom: .18rem;
+  align-items: center;
+}
+
+.metric-row-primary strong,
+.metric-row-primary a {
+  font-size: 1.25rem;
+  line-height: 1.15;
 }
 
 .module-header {
@@ -867,6 +966,10 @@ body.sidebar-collapsed .sidebar .nav-title {
   .page-heading-meta { justify-content: flex-start; }
   .edit-toolbar { align-items: flex-start; flex-direction: column; }
   .grid-stack { margin: 0; }
+  .summary-toolbar { align-items: stretch; flex-direction: column; gap: .55rem; }
+  .article-picker { width: 100%; }
+  .article-picker .form-select { width: 100%; }
+  .summary-status { margin-left: 0; }
 }
 
 @media (max-width: 575.98px) {

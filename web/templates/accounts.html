@@ -1,5 +1,6 @@
 {% extends "base.html" %}
 {% block title %}账号管理 - 自动化文章发布工具{% endblock %}
+{% block header_title %}平台账号{% endblock %}
 {% block content %}
 <style>
     [x-cloak] { display: none !important; }
@@ -142,15 +143,15 @@
     }
 </style>
 
-<div x-data="accounts" x-init="init()" class="container" style="max-width: 700px;">
-    <div class="d-flex align-items-center justify-content-between mb-2">
-        <h2 class="mb-0"><i class="bi bi-person-badge me-2"></i>平台账号管理</h2>
+<div x-data="accounts" x-init="init()" class="container" style="max-width: 900px;">
+    <div class="page-heading">
+        <div><h1>平台账号</h1><p>管理平台登录状态；凭据不会在页面中展示。</p></div>
         <span class="text-muted small" aria-live="polite">
             <i class="bi bi-arrow-repeat me-1"></i>自动检测
         </span>
     </div>
 
-    <p class="text-muted mb-4">
+    <p class="text-muted mb-4 visually-hidden">
         首次使用需要在各平台登录。登录 Cookie 会自动保存，后续无需重复登录。
     </p>
 

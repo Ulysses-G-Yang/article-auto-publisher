@@ -1,0 +1,79 @@
+from pathlib import Path
+
+
+ROOT = Path(__file__).resolve().parents[2]
+
+
+def read(relative_path: str) -> str:
+    return (ROOT / relative_path).read_text(encoding="utf-8")
+
+
+def test_dashboard_has_accessible_switchable_metric_cards() -> None:
+    template = read("src/article_mvp/web/templates/dashboard.html")
+    script = read("src/article_mvp/web/static/dashboard.js")
+
+    assert 'role="group" aria-label="指标卡显示模式"' in template
+    assert 'data-metric-mode="overview"' in template
+    assert 'data-metric-mode="article"' in template
+    assert 'id="article-picker"' in template
+    assert 'aria-live="polite"' in template
+    assert 'aria-controls="app-sidebar" aria-expanded="false"' in template
+    assert "METRIC_MODE_STORAGE_KEY" in script
+    assert "populateArticlePicker()" in script
+    assert "renderOverviewMetrics()" in script
+    assert "renderArticleMetrics()" in script
+    assert 'setAttribute("aria-expanded"' in script
+
+
+def test_nullable_metrics_do_not_fall_back_to_zero() -> None:
+    script = read("src/article_mvp/web/static/dashboard.js")
+
+    assert 'value === null || value === undefined ? "—"' in script
+    assert 'snapshotTime ? formatTime(snapshotTime) : "尚未采集"' in script
+    assert 'article.published_at ? formatTime(article.published_at) : "—"' in script
+    assert "created_at 仅" not in script
+    assert 'displayMetric(metric.exposure_count)' in script
+    assert 'displayMetric(metric.share_count)' in script
+
+
+def test_original_article_link_is_safe_and_accessible() -> None:
+    script = read("src/article_mvp/web/static/dashboard.js")
+
+    assert 'content.target = "_blank"' in script
+    assert 'content.rel = "noopener noreferrer"' in script
+    assert 'content.setAttribute("aria-label"' in script
+    assert "原始链接（在新标签页打开）" in script
+
+
+def test_legacy_api_contracts_are_preserved() -> None:
+    index = read("web/templates/index.html")
+    upload = read("web/templates/upload.html")
+    accounts = read("web/templates/accounts.html")
+    task = read("web/templates/task_detail.html")
+
+    assert "fetch('/api/tasks')" in index
+    assert "fetch('/api/status')" in index
+    assert "fetch('/api/upload', { method: 'POST', body: formData })" in upload
+    assert "formData.append('files', f)" in upload
+    assert "formData.append('platforms', p)" in upload
+    assert "fetch('/api/accounts')" in accounts
+    assert "/api/accounts/${platform}/logout" in accounts
+    assert "/api/accounts/${platform}/clear-cookies" in accounts
+    assert "fetch('/api/accounts/' + platform + '/login', { method: 'POST' })" in accounts
+    assert "fetch('/api/cleanup', { method: 'POST' })" in accounts
+    assert "/api/tasks/{{ task.id if task else 0 }}/resume" in task
+    assert "JSON.stringify({community: this.community, topic: this.topic})" in task
+
+
+def test_shared_shell_has_navigation_and_mobile_controls() -> None:
+    base = read("web/templates/base.html")
+    script = read("web/static/js/app.js")
+
+    for path in ('href="/"', 'href="/upload"', 'href="/accounts"', 'href="/data-center/"'):
+        assert path in base
+    assert "request.path.startswith('/task/')" in base
+    assert 'id="sidebar-toggle"' in base
+    assert 'id="sidebar-close"' in base
+    assert 'id="sidebar-backdrop"' in base
+    assert "sidebar-mobile-open" in script
+    assert "event.key === 'Escape'" in script

@@ -410,10 +410,9 @@ def test_blueprint_matches_frontend_contract_and_injects_article(tmp_path: Path)
     )
     client = app.test_client()
 
-    page = client.get("/delivery/new")
-    assert page.status_code == 200
-    assert DEFAULT_ARTICLE_TITLE in page.get_data(as_text=True)
-    assert "只要不解决问题，就永远不会制造成本" in page.get_data(as_text=True)
+    page = client.get("/delivery/new", follow_redirects=False)
+    assert page.status_code == 302
+    assert page.headers["Location"] == "/upload"
 
     accounts_response = client.get(
         "/api/platforms/xiaoheihe/accounts?usable=true"

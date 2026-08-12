@@ -410,6 +410,9 @@ def test_blueprint_matches_frontend_contract_and_injects_article(tmp_path: Path)
     )
     assert activity.status_code == 200
     assert activity.get_json()["account_id"] == account.account_id
+    assert [event["action"] for event in activity.get_json()["activities"]] == [
+        "DELIVERY_QUEUED"
+    ]
 
     publish_payload = delivery_payload(account.account_id, mode="PUBLISH")
     confirmation = client.post("/api/delivery-operations", json=publish_payload)

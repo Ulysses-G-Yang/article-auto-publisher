@@ -45,6 +45,8 @@ ZOL 不桥接 Cookie；但 Chromium 本身仍可能更新缓存或时间戳。
 
 账号列表只返回 `account_id`、真实显示名、脱敏平台 ID、会话状态、复用策略和
 验证时间，不返回 Profile 路径、Cookie、Token 或原始平台 ID。
+活动日志响应使用顶层 `activities` 数组，条目只包含账号快照、来源、动作、
+级别、脱敏消息和时间。
 
 ## 发布安全门
 

@@ -243,7 +243,7 @@ def create_account_session_blueprint(
         rows = state.run(
             state.accounts.list_activity(account_id, LOCAL_WEB_CONTEXT)
         )
-        return jsonify({"account_id": account_id, "activity": rows})
+        return jsonify({"account_id": account_id, "activities": rows})
 
     @blueprint.post("/api/delivery-operations")
     def create_delivery_operation():

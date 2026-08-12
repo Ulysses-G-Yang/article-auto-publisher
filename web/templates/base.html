@@ -4,10 +4,11 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta name="color-scheme" content="light dark">
+    <meta name="theme-color" content="#212631">
     <title>{% block title %}ArticleOps 发布运营中心{% endblock %}</title>
-    <link rel="stylesheet" href="/data-center/assets/vendor/coreui/coreui.min.css">
-    <link rel="stylesheet" href="/data-center/assets/vendor/coreui-icons/css/free.min.css">
-    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.css">
+    <link rel="stylesheet" href="{{ url_for('static', filename='vendor/coreui-template/css/style.min.css') }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='vendor/coreui-template/simplebar/simplebar.css') }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='vendor/coreui-icons/css/free.min.css') }}">
     <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
     {% block extra_head %}{% endblock %}
     <script src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js" defer></script>
@@ -16,33 +17,29 @@
     <aside id="app-sidebar" class="sidebar sidebar-dark sidebar-fixed border-end" aria-label="主导航">
         <div class="sidebar-header border-bottom">
             <a class="sidebar-brand" href="/" aria-label="ArticleOps 发布运营中心首页">
-                <span class="brand-mark" aria-hidden="true">AP</span>
-                <span class="brand-copy"><strong>ArticleOps</strong><small>发布运营中心</small></span>
+                <span class="brand-mark" aria-hidden="true">A</span>
+                <span class="brand-copy"><strong>ArticleOps</strong><small>CONTENT OPERATIONS</small></span>
             </a>
-            <button id="sidebar-close" class="btn sidebar-close d-lg-none" type="button" aria-label="关闭导航">
-                <i class="cil-x" aria-hidden="true"></i>
-            </button>
+            <button id="sidebar-close" class="btn sidebar-close d-lg-none" type="button" aria-label="关闭导航"><i class="cil-x" aria-hidden="true"></i></button>
         </div>
-        <nav class="sidebar-nav" aria-label="业务导航">
+        <div class="sidebar-nav" data-simplebar>
             <div class="nav-title">工作台</div>
             <a class="nav-link {% if request.path == '/' or request.path.startswith('/task/') %}active{% endif %}" href="/" {% if request.path == '/' or request.path.startswith('/task/') %}aria-current="page"{% endif %}>
                 <i class="nav-icon cil-speedometer" aria-hidden="true"></i><span>发布概览</span>
             </a>
-            <a class="nav-link {% if request.path == '/upload' %}active{% endif %}" href="/upload" {% if request.path == '/upload' %}aria-current="page"{% endif %}>
-                <i class="nav-icon cil-cloud-upload" aria-hidden="true"></i><span>创建文章</span>
+            <a class="nav-link {% if request.path == '/upload' or request.path.startswith('/delivery/') %}active{% endif %}" href="/upload" {% if request.path == '/upload' or request.path.startswith('/delivery/') %}aria-current="page"{% endif %}>
+                <i class="nav-icon cil-pencil" aria-hidden="true"></i><span>创作与投递</span>
             </a>
-            <a class="nav-link {% if request.path.startswith('/delivery/') %}active{% endif %}" href="/delivery/new" {% if request.path.startswith('/delivery/') %}aria-current="page"{% endif %}>
-                <i class="nav-icon cil-send" aria-hidden="true"></i><span>内容投递</span>
-            </a>
+            <div class="nav-title">运营管理</div>
             <a class="nav-link {% if request.path == '/accounts' %}active{% endif %}" href="/accounts" {% if request.path == '/accounts' %}aria-current="page"{% endif %}>
                 <i class="nav-icon cil-user" aria-hidden="true"></i><span>平台账号</span>
             </a>
             <a class="nav-link {% if request.path.startswith('/data-center') %}active{% endif %}" href="/data-center/" {% if request.path.startswith('/data-center') %}aria-current="page"{% endif %}>
                 <i class="nav-icon cil-chart" aria-hidden="true"></i><span>数据中心</span>
             </a>
-        </nav>
+        </div>
         <div class="sidebar-footer border-top">
-            <div class="sidebar-status"><span class="status-dot completed"></span><span><strong>本机服务</strong><small>5000 端口 · 同一工作流</small></span></div>
+            <div class="sidebar-status"><span class="status-dot completed" aria-hidden="true"></span><span><strong>本机服务</strong><small>同一业务入口</small></span></div>
         </div>
     </aside>
     <div id="sidebar-backdrop" class="sidebar-backdrop" aria-hidden="true"></div>
@@ -50,29 +47,21 @@
     <div class="wrapper d-flex flex-column min-vh-100">
         <header class="header header-sticky p-0 border-bottom">
             <div class="container-fluid px-3 px-lg-4 header-main">
-                <button id="sidebar-toggle" class="header-toggler btn" type="button" aria-label="切换导航" aria-controls="app-sidebar" aria-expanded="false">
-                    <i class="cil-menu" aria-hidden="true"></i>
-                </button>
-                <div class="header-context ms-2 ms-lg-3">
-                    <strong>{% block header_title %}发布工作台{% endblock %}</strong>
-                    <small class="d-none d-sm-block">自动化文章发布与数据采集</small>
-                </div>
+                <button id="sidebar-toggle" class="header-toggler btn" type="button" aria-label="切换导航" aria-controls="app-sidebar" aria-expanded="false"><i class="cil-menu" aria-hidden="true"></i></button>
+                <div class="header-context ms-2 ms-lg-3"><strong>{% block header_title %}发布工作台{% endblock %}</strong><small class="d-none d-sm-block">自动化文章发布与数据采集</small></div>
                 <div class="header-actions ms-auto">
-                    <a class="btn btn-primary btn-sm d-inline-flex align-items-center gap-2" href="/upload">
-                        <i class="cil-plus" aria-hidden="true"></i><span class="d-none d-sm-inline">创建文章</span>
-                    </a>
+                    <a class="btn btn-primary btn-sm d-inline-flex align-items-center gap-2" href="/upload"><i class="cil-plus" aria-hidden="true"></i><span class="d-none d-sm-inline">创作与投递</span></a>
                 </div>
             </div>
         </header>
-
         <main class="body flex-grow-1 app-main">
-            <div class="container-fluid px-3 px-lg-4 py-4">
-                {% block content %}{% endblock %}
-            </div>
+            <div class="container-fluid px-3 px-lg-4 py-4">{% block content %}{% endblock %}</div>
         </main>
+        <footer class="footer px-3 px-lg-4"><span>ArticleOps</span><span class="ms-auto">CoreUI Free Bootstrap Admin Template v5.6.0</span></footer>
     </div>
 
-    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="{{ url_for('static', filename='vendor/coreui-template/js/coreui.bundle.min.js') }}"></script>
+    <script src="{{ url_for('static', filename='vendor/coreui-template/simplebar/simplebar.min.js') }}"></script>
     <script src="{{ url_for('static', filename='js/app.js') }}"></script>
     {% block extra_scripts %}{% endblock %}
 </body>

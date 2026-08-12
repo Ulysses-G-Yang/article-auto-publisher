@@ -6,6 +6,7 @@
   <meta name="color-scheme" content="light dark">
   <title>发布与采集数据中心</title>
   <link rel="stylesheet" href="{{ url_for('article_mvp_dashboard.static', filename='vendor/coreui/coreui.min.css') }}">
+  <link rel="stylesheet" href="{{ url_for('article_mvp_dashboard.static', filename='vendor/simplebar/simplebar.css') }}">
   <link rel="stylesheet" href="{{ url_for('article_mvp_dashboard.static', filename='vendor/coreui-icons/css/free.min.css') }}">
   <link rel="stylesheet" href="{{ url_for('article_mvp_dashboard.static', filename='vendor/gridstack/gridstack.min.css') }}">
   <link rel="stylesheet" href="{{ url_for('article_mvp_dashboard.static', filename='dashboard.css') }}">
@@ -14,22 +15,22 @@
   <aside id="app-sidebar" class="sidebar sidebar-dark sidebar-fixed border-end" aria-label="主导航">
     <div class="sidebar-header border-bottom">
       <a class="sidebar-brand" href="/" aria-label="文章自动发布首页">
-        <span class="brand-mark" aria-hidden="true">AP</span>
-        <span class="brand-copy"><strong>ArticleOps</strong><small>发布运营中心</small></span>
+        <span class="brand-mark" aria-hidden="true">A</span>
+        <span class="brand-copy"><strong>ArticleOps</strong><small>CONTENT OPERATIONS</small></span>
       </a>
       <button id="sidebar-close" class="btn sidebar-close d-lg-none" type="button" aria-label="关闭导航">
         <i class="cil-x" aria-hidden="true"></i>
       </button>
     </div>
 
-    <nav class="sidebar-nav" aria-label="业务导航">
+    <nav class="sidebar-nav" data-simplebar aria-label="业务导航">
       <div class="nav-title">工作台</div>
       <a class="nav-link" href="/"><i class="nav-icon cil-speedometer" aria-hidden="true"></i>发布概览</a>
-      <a class="nav-link" href="/upload"><i class="nav-icon cil-cloud-upload" aria-hidden="true"></i>创建文章</a>
+      <a class="nav-link" href="/upload"><i class="nav-icon cil-pencil" aria-hidden="true"></i>创作与投递</a>
       <a class="nav-link" href="/accounts"><i class="nav-icon cil-user" aria-hidden="true"></i>平台账号</a>
       <a class="nav-link active" href="/data-center/" aria-current="page"><i class="nav-icon cil-chart" aria-hidden="true"></i>数据中心</a>
 
-      <div class="nav-title">小黑盒单链路</div>
+      <div class="nav-title">数据模块</div>
       <a class="nav-link" href="#module-current-tasks"><i class="nav-icon cil-list" aria-hidden="true"></i>发布任务</a>
       <a class="nav-link" href="#module-contract"><i class="nav-icon cil-check-circle" aria-hidden="true"></i>接口契约</a>
       <a class="nav-link" href="#module-articles"><i class="nav-icon cil-notes" aria-hidden="true"></i>文章映射</a>
@@ -148,7 +149,7 @@
                   <thead><tr><th>任务</th><th>文章</th><th>平台</th><th>状态</th><th>发布标题</th><th>创建时间</th></tr></thead>
                   <tbody id="current-tasks-body"></tbody>
                 </table>
-                <div id="current-tasks-empty" class="empty-state d-none"><i class="cil-list"></i><strong id="current-tasks-empty-title">暂无发布任务</strong><span id="current-tasks-empty-detail">创建文章后，任务会显示在这里。</span></div>
+                <div id="current-tasks-empty" class="empty-state d-none"><i class="cil-list"></i><strong id="current-tasks-empty-title">暂无发布任务</strong><span id="current-tasks-empty-detail">从“创作与投递”执行后，任务会显示在这里。</span></div>
               </div>
             </div>
           </section>
@@ -233,6 +234,7 @@
   </div>
 
   <script src="{{ url_for('article_mvp_dashboard.static', filename='vendor/coreui/coreui.bundle.min.js') }}" defer></script>
+  <script src="{{ url_for('article_mvp_dashboard.static', filename='vendor/simplebar/simplebar.min.js') }}" defer></script>
   <script src="{{ url_for('article_mvp_dashboard.static', filename='vendor/gridstack/gridstack-all.js') }}" defer></script>
   <script src="{{ url_for('article_mvp_dashboard.static', filename='dashboard.js') }}" defer></script>
 </body>

@@ -1,0 +1,9 @@
+.sidebar.sidebar-dark.sidebar-fixed.border-end#sidebar
+  .sidebar-header.border-bottom
+    .sidebar-brand.me-auto
+      +inlineSvg(src='assets/brand/coreui-full.svg' width='88' height='32' alt='CoreUI Logo Full').sidebar-brand-full
+      +inlineSvg(src='assets/brand/coreui-signet.svg' width='88' height='32' alt='CoreUI Logo Signet').sidebar-brand-narrow
+    button.btn-close.d-lg-none(type='button' data-coreui-theme="dark" aria-label='Close' onclick='coreui.Sidebar.getInstance(document.querySelector("#sidebar")).toggle()')
+  include sidebar-nav
+  .sidebar-footer.border-top.d-none.d-md-flex
+    button.sidebar-toggler(type="button" data-coreui-toggle="unfoldable")

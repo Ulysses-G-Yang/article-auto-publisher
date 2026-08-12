@@ -1,0 +1,526 @@
+# Architecture Documentation
+
+## Project Purpose
+
+CoreUI Free Bootstrap Admin Template is a professional admin dashboard template built on Bootstrap 5 and CoreUI components. It provides a ready-to-use foundation for building admin panels, dashboards, and web applications with a clean, modern interface.
+
+**Key Characteristics:**
+- Server-side templating approach (Pug → HTML)
+- Bootstrap 5 + CoreUI component library
+- Vanilla JavaScript (no framework dependencies)
+- Multi-page application (MPA) architecture
+- Static file generation with build-time compilation
+
+## High-Level Architecture
+
+```
+┌─────────────────────────────────────────────────────┐
+│                   Source Files                      │
+│  ┌──────────┐  ┌──────────┐  ┌──────────┐           │
+│  │   Pug    │  │   Sass   │  │    JS    │           │
+│  │Templates │  │  Styles  │  │ Modules  │           │
+│  └────┬─────┘  └────┬─────┘  └────┬─────┘           │
+│       │             │             │                 │
+└───────┼─────────────┼─────────────┼─────────────────┘
+        │             │             │
+        ▼             ▼             ▼
+┌─────────────────────────────────────────────────────┐
+│                  Build Pipeline                     │
+│  ┌──────────┐  ┌──────────┐  ┌──────────┐           │
+│  │   Pug    │  │PostCSS + │  │ syncdir  │           │
+│  │Compiler  │  │  Sass    │  │(copy JS) │           │
+│  └────┬─────┘  └────┬─────┘  └────┬─────┘           │
+│       │             │             │                 │
+└───────┼─────────────┼─────────────┼─────────────────┘
+        │             │             │
+        ▼             ▼             ▼
+┌─────────────────────────────────────────────────────┐
+│                 Distribution Files                  │
+│  ┌──────────┐  ┌──────────┐  ┌──────────┐           │
+│  │   HTML   │  │   CSS    │  │    JS    │           │
+│  │  Files   │  │ (minified)│  │(bundled) │          │
+│  └──────────┘  └──────────┘  └──────────┘           │
+│         (served via browser-sync or web server)     │
+└─────────────────────────────────────────────────────┘
+```
+
+## Technology Stack
+
+### Frontend
+- **HTML Generation**: Pug 3.0.3 (template engine)
+- **CSS Framework**: Bootstrap 5.3.x
+- **Component Library**: CoreUI 5.x (@coreui/coreui)
+- **Icons**: CoreUI Icons (@coreui/icons)
+- **JavaScript**: Vanilla ES6+ (no framework)
+- **Charts**: Chart.js 4.x
+- **Scrollbars**: SimpleBar 6.x
+
+### Build Tools
+- **Package Manager**: npm
+- **CSS Processing**: Sass 1.102.x → PostCSS → Autoprefixer
+- **JS**: plain ES2015+, copied as-is via `sync-directory` (no transpilation - the declared browser targets already support the syntax used, see [Browser Support](#browser-support))
+- **Task Runner**: npm scripts with npm-run-all
+- **File Watching**: Nodemon
+- **Live Server**: Browser-sync 3.0.4
+
+### Code Quality
+- **Linting**: ESLint 9.x (flat config) with XO + Unicorn
+- **Style Linting**: Stylelint 16.x with Bootstrap config
+- **Formatting**: Prettier 3.9.x
+- **Editor Config**: .editorconfig for consistency
+
+## Directory Structure
+
+```
+coreui-free-bootstrap-admin-template/
+│
+├── src/                          # Source files (edit these)
+│   ├── pug/                      # Pug templates (HTML source)
+│   │   ├── _layout/              # Base layout templates
+│   │   │   ├── default.pug       # Main layout with sidebar/header
+│   │   │   └── pages.pug         # Standalone pages layout (auth, errors)
+│   │   ├── _partials/            # Reusable components
+│   │   │   ├── banner.pug        # Top announcement banner
+│   │   │   ├── head.pug          # HTML <head> section
+│   │   │   ├── header.pug        # Top navigation bar
+│   │   │   ├── sidebar.pug       # Left sidebar wrapper
+│   │   │   ├── sidebar-nav.pug   # Sidebar navigation items (data-driven)
+│   │   │   ├── footer.pug        # Page footer
+│   │   │   ├── scripts.pug       # Common script includes
+│   │   │   └── docs-icons.pug    # Icon documentation helpers
+│   │   ├── _mixins/              # Pug helper mixins
+│   │   │   ├── breadcrumb.pug    # Breadcrumb generator
+│   │   │   ├── callout.pug       # Alert/callout boxes
+│   │   │   ├── callout-custom.pug # Custom callout variant
+│   │   │   ├── docs-components.pug # Docs component helpers
+│   │   │   ├── example.pug       # Code example displays
+│   │   │   └── inline-svg.pug    # Inline SVG helper
+│   │   └── views/                # Page templates
+│   │       ├── index.pug         # Main dashboard page
+│   │       ├── blank.pug         # Blank page template
+│   │       ├── charts.pug        # Charts page
+│   │       ├── widgets.pug       # Widgets page
+│   │       ├── authentication/   # Auth pages (login, register, etc.)
+│   │       ├── components/       # UI components (buttons, modals, etc.)
+│   │       ├── error-pages/      # Error pages (404, 500)
+│   │       ├── forms/            # Form components
+│   │       └── icons/            # Icon libraries
+│   │
+│   ├── scss/                     # Sass stylesheets
+│   │   ├── style.scss            # Main stylesheet entry
+│   │   ├── style-rtl.scss        # RTL (right-to-left) styles
+│   │   └── examples.scss         # Demo/example page styles
+│   │
+│   ├── js/                       # JavaScript modules
+│   │   ├── main.js               # Main entry point
+│   │   ├── charts.js             # Chart.js configurations
+│   │   ├── color-modes.js        # Dark/light theme switcher
+│   │   ├── config.js             # App configuration / shared settings
+│   │   ├── tooltips.js           # Tooltip initialization
+│   │   ├── popovers.js           # Popover initialization
+│   │   ├── toasts.js             # Toast notification initialization
+│   │   └── widgets.js            # Widgets page charts
+│   │
+│   ├── assets/                   # Static assets
+│   │   ├── brand/                # Logo files
+│   │   ├── favicon/              # Favicon files
+│   │   └── img/                  # Images
+│   │
+│   └── views/                    # Compiled HTML (auto-generated)
+│       └── *.html                # Do NOT edit these manually
+│
+├── dist/                         # Production build output
+│   ├── css/                      # Minified CSS
+│   ├── js/                       # Synced JS (copied as-is, no transform)
+│   ├── assets/                   # Copied assets
+│   ├── vendors/                  # Third-party libraries
+│   └── *.html                    # Production HTML files
+│
+├── build/                        # Build scripts
+│   ├── pug.mjs                   # Pug compilation script
+│   ├── postcss.config.mjs        # PostCSS configuration
+│   ├── vendors.mjs               # Vendor file bundling
+│   └── format-html.mjs           # HTML formatting/prettifying
+│
+├── node_modules/                 # npm dependencies (ignored)
+│
+└── Configuration files
+    ├── package.json              # Dependencies and scripts
+    ├── .editorconfig             # Editor settings
+    ├── eslint.config.mjs         # ESLint flat config
+    ├── .prettierrc.json          # Prettier formatting
+    ├── .stylelintrc              # Stylelint rules
+    ├── .browserslistrc           # Target browsers
+    └── .cursorrules              # AI context (Cursor IDE)
+```
+
+## Build Pipeline Details
+
+### Development Mode (`npm start`)
+
+1. **Clean**: Remove old compiled files
+2. **Compile Pug**: `src/pug/**/*.pug` → `src/views/*.html`
+3. **Compile Sass**: `src/scss/*.scss` → `dist/css/*.css` (expanded, autoprefixed)
+4. **Sync JS**: `src/js/*.js` → `dist/js/*.js` (copied as-is via `sync-directory`, no transform)
+5. **Copy Assets**: `src/assets/**/*` → `dist/assets/`
+6. **Build Vendors**: Bundle third-party libraries
+7. **Watch Files**: Monitor changes and recompile
+8. **Browser-sync**: Live reload server on http://localhost:3000
+
+### Production Build (`npm run build`)
+
+1. **All development steps**
+2. **Minify CSS**: Compress stylesheets with clean-css-cli
+3. **JS**: No separate minify step - shipped as synced source
+4. **Optimize Assets**: Copy optimized files
+5. **Generate zip**: Create distribution package
+
+### File Watching
+
+```
+npm run watch          # Watch all file types
+npm run watch-pug      # Watch Pug templates only
+npm run watch-css      # Watch Sass files only
+npm run watch-js       # Watch JavaScript files only
+```
+
+Each watch task uses **nodemon** to monitor file changes and trigger appropriate compilation.
+
+## Data Flow
+
+### Page Rendering Flow
+
+```
+1. Browser Request
+   └─> /index.html
+
+2. Server Response
+   └─> Serve dist/index.html (static file)
+
+3. HTML Loads Resources
+   ├─> dist/css/style.css (Bootstrap + CoreUI + custom styles)
+   ├─> dist/js/main.js (app initialization)
+   └─> dist/vendors/*.js (Chart.js, SimpleBar, etc.)
+
+4. JavaScript Execution
+   ├─> Initialize CoreUI components
+   ├─> Set up event listeners
+   ├─> Configure charts (if on dashboard)
+   └─> Enable tooltips/popovers
+
+5. User Interaction
+   └─> JavaScript handles UI updates (no page reload)
+```
+
+### Theme Switching Flow
+
+```
+1. User clicks theme toggle button
+   └─> color-modes.js listens for click
+
+2. ColorModeStorageManager updates preference
+   ├─> Save to localStorage
+   └─> Update [data-coreui-theme] attribute
+
+3. CSS custom properties respond
+   └─> Variables change (--cui-primary-bg, --cui-text-color, etc.)
+
+4. ColorSchemeChange event fires
+   └─> Charts re-render with new theme colors
+```
+
+### Chart Rendering Flow
+
+```
+1. charts.js module loads
+   └─> import Chart from 'chart.js/auto'
+
+2. DOM ready
+   └─> Find chart canvas elements
+
+3. Fetch data (or use inline data)
+   └─> Random data generator for demo
+
+4. Create Chart.js instance
+   ├─> Configure chart type (line, bar, pie, etc.)
+   ├─> Apply theme colors from CSS variables
+   └─> Set responsive options
+
+5. Theme changes
+   └─> Re-initialize charts with new colors
+```
+
+## Component Organization
+
+### Pug Template Hierarchy
+
+```
+default.pug (main layout — dashboard/component pages)
+├─> sidebar.pug (side navigation)
+│   └─> sidebar-nav.pug (data-driven nav items)
+├─> header.pug (top navigation bar)
+│   └─> block breadcrumb
+├─> block canonical / block styles
+├─> block view
+│   └─> index.pug / components/*.pug / etc. (page content)
+└─> footer.pug (page footer)
+    └─> scripts.pug (common script includes)
+        └─> block scripts / block js
+
+pages.pug (standalone layout — auth & error pages)
+├─> block styles
+└─> block view
+    └─> authentication/*.pug / error-pages/*.pug
+```
+
+**Block System:**
+- `block view`: Main page content area (both layouts)
+- `block canonical`: `<link rel="canonical">` override (`default.pug` only)
+- `block breadcrumb`: Breadcrumb trail, declared inside `header.pug` (`default.pug` only)
+- `block scripts` / `block js`: Page-specific script includes, declared inside `scripts.pug`
+- Each view extends a layout and overrides only the blocks it needs
+
+### CSS Architecture
+
+```
+style.scss
+├─> Import Bootstrap 5
+├─> Import CoreUI components
+├─> Import custom variables
+└─> Import custom component styles
+
+Theme System:
+[data-coreui-theme="light"]  # Light mode (default)
+[data-coreui-theme="dark"]   # Dark mode
+[data-coreui-theme="auto"]   # System preference
+```
+
+**CSS Custom Properties:**
+- `--cui-primary`, `--cui-secondary`, etc. (colors)
+- `--cui-bg`, `--cui-text-color` (backgrounds/text)
+- `--cui-border-color`, `--cui-shadow` (UI elements)
+
+### JavaScript Module Pattern
+
+Each JS file in `src/js/` is an ES6 module:
+
+```javascript
+// Import dependencies
+import { Something } from '@coreui/coreui'
+
+// Define functionality
+const doSomething = () => { /* ... */ }
+
+// Initialize on DOM ready
+document.addEventListener('DOMContentLoaded', () => {
+  doSomething()
+})
+
+// Export if needed (most files use side effects only)
+```
+
+## Key Dependencies
+
+### Runtime Dependencies
+
+| Package | Purpose | Used In |
+|---------|---------|---------|
+| `@coreui/coreui` | UI component library | All pages |
+| `@coreui/icons` | Icon library | Icon pages |
+| `chart.js` | Charts and graphs | Dashboard |
+| `simplebar` | Custom scrollbars | Sidebar |
+| `@coreui/utils` | Utility functions | Theme switching |
+
+### Build Dependencies
+
+| Package | Purpose |
+|---------|---------|
+| `sass` | CSS preprocessing |
+| `sync-directory` | Copy `src/js`, `src/assets`, `src/views` into `dist/` |
+| `pug` | HTML templating |
+| `postcss` | CSS post-processing |
+| `autoprefixer` | Vendor prefix automation |
+| `browser-sync` | Development server |
+| `eslint` | JavaScript linting |
+| `stylelint` | CSS linting |
+
+## Browser Support
+
+Defined in `.browserslistrc`:
+
+```
+>= 0.5%
+last 2 major versions
+not dead
+Chrome >= 60
+Firefox >= 60
+Firefox ESR
+iOS >= 12
+Safari >= 12
+not Explorer <= 11
+```
+
+Modern browsers with native ES2015+ support - this is also why `src/js` ships untranspiled (see [Build Tools](#build-tools)).
+
+## Deployment
+
+### Static Hosting (Recommended)
+
+1. Run `npm run build`
+2. Deploy `dist/` folder to:
+   - Netlify
+   - Vercel
+   - GitHub Pages
+   - AWS S3 + CloudFront
+   - Any static file server
+
+### Traditional Web Server
+
+1. Run `npm run build`
+2. Copy `dist/` contents to web root
+3. Configure server to serve `index.html` as default
+4. Set proper MIME types for CSS/JS files
+
+### Docker (Optional)
+
+```dockerfile
+FROM nginx:alpine
+COPY dist/ /usr/share/nginx/html/
+EXPOSE 80
+```
+
+## Performance Considerations
+
+### CSS Optimization
+- Sass compilation removes unused styles
+- PostCSS autoprefixer adds only necessary prefixes
+- Minification in production build
+- CSS is render-blocking (loaded in `<head>`)
+
+### JavaScript Optimization
+- No transpilation or minification step - files are copied as-is (see [Build Tools](#build-tools))
+- Files loaded as separate scripts (no bundler)
+- Deferred script loading where possible
+
+### Asset Optimization
+- SVG icons (scalable, small file size)
+- Favicon in multiple formats for compatibility
+- Images in `src/assets/` should be optimized before adding
+
+## Security Considerations
+
+### Content Security Policy (CSP)
+Template includes inline scripts and styles. For strict CSP:
+1. Extract inline scripts to external files
+2. Use nonces or hashes for required inline scripts
+3. Update CSP headers accordingly
+
+### XSS Prevention
+- Pug automatically escapes HTML by default
+- Use `!= html` only for trusted content
+- Sanitize user input on server-side (if adding backend)
+
+### Dependency Management
+- Regularly update npm dependencies
+- Run `npm audit` to check for vulnerabilities
+- Pin major versions in `package.json`
+
+## Extensibility
+
+### Adding New Pages
+
+1. Create `src/pug/views/my-page.pug`
+2. Extend layout: `extends ../_layout/default.pug`
+3. Override the `view` block (see [Block System](#pug-template-hierarchy)):
+   ```pug
+   block view
+     .container-lg.px-4
+       h1 My Page Title
+       p Page content here
+   ```
+4. Add an entry to `src/pug/_partials/sidebar-nav.pug` so the page is reachable from the sidebar
+5. Run `npm run pug` (or `npm start`) to compile
+6. Access at `/my-page.html`
+
+### Adding New Components
+
+1. Check CoreUI docs: https://coreui.io/bootstrap/docs/
+2. Copy component markup to Pug file
+3. Convert HTML to Pug syntax (use html2pug.com if needed)
+4. Import required JavaScript:
+   ```javascript
+   import { Modal } from '@coreui/coreui'
+   ```
+5. Initialize component in page-specific JS
+
+### Adding New Styles
+
+1. Edit `src/scss/style.scss` or create new partial
+2. Use Sass modules syntax to import CoreUI:
+   ```scss
+   @use "@coreui/coreui/scss/coreui" as * with (
+     $enable-deprecation-messages: false
+   );
+   ```
+   For CoreUI Pro projects:
+   ```scss
+   @use "@coreui/coreui-pro/scss/coreui" as * with (
+     $enable-deprecation-messages: false
+   );
+   ```
+3. Use CSS custom properties for theme compatibility
+4. Run `npm run css` to compile
+
+### Integrating Backend APIs
+
+This template is frontend-only. To add backend:
+
+1. **Fetch API** for AJAX requests:
+   ```javascript
+   fetch('/api/endpoint')
+     .then(response => response.json())
+     .then(data => updateUI(data))
+   ```
+
+2. **Authentication**: Implement token-based auth
+   - Store JWT in localStorage/sessionStorage
+   - Add Authorization header to requests
+   - Redirect to login on 401 responses
+
+3. **State Management**: For complex apps, consider:
+   - Vanilla JS with custom events
+   - Lightweight state library (Zustand, Nano Stores)
+   - Full framework migration (React, Vue, etc.)
+
+## Common Issues and Solutions
+
+### Pug Compilation Errors
+- **Error**: "Cannot find module"
+  - **Fix**: Check Pug include/extend paths (relative to file)
+
+### Sass Compilation Errors
+- **Error**: "Undefined variable"
+  - **Fix**: Import Bootstrap/CoreUI variables before using
+
+### JavaScript Errors
+- **Error**: "X is not defined"
+  - **Fix**: Add `/* global X */` comment or import module
+
+### Live Reload Not Working
+- **Error**: Browser-sync not updating
+  - **Fix**: Check if `watch` scripts are running, restart `npm start`
+
+### Build Fails
+- **Error**: npm scripts fail
+  - **Fix**: Delete `node_modules/` and `dist/`, run `npm install`, then `npm run build`
+
+## Resources
+
+- **CoreUI Bootstrap Docs**: https://coreui.io/bootstrap/docs/
+- **Pug Documentation**: https://pugjs.org/
+- **Chart.js Documentation**: https://www.chartjs.org/
+- **Sass Documentation**: https://sass-lang.com/documentation/
+
+## Changelog
+
+See [releases](https://github.com/coreui/coreui-free-bootstrap-admin-template/releases) for version history and updates.

@@ -52,7 +52,7 @@
         <div class="card-header d-flex justify-content-between align-items-center">
             <h5 class="mb-0">任务列表</h5>
             <button class="btn btn-sm btn-outline-secondary" @click="fetchData">
-                <i class="bi bi-arrow-clockwise me-1"></i>刷新
+                <i class="cil-reload me-1"></i>刷新
             </button>
         </div>
         <div class="table-responsive">
@@ -73,7 +73,7 @@
                     <template x-if="tasks.length === 0">
                         <tr>
                             <td colspan="8" class="empty-state">
-                                <i class="bi bi-inbox fs-3 d-block mb-2"></i>
+                                <i class="cil-inbox fs-3 d-block mb-2"></i>
                                 暂无任务，去 <a href="/upload">上传文章</a>
                             </td>
                         </tr>
@@ -103,7 +103,7 @@
                             </td>
                             <td>
                                 <a :href="'/task/' + task.id" class="btn btn-sm btn-outline-primary">
-                                    <i class="bi bi-eye"></i>
+                                    <i class="cil-magnifying-glass"></i>
                                 </a>
                             </td>
                         </tr>

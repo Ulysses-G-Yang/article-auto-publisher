@@ -536,6 +536,49 @@ class RegressionTests(DatabaseTestCase):
             self.assertTrue(xh_cookie.exists())
             self.assertFalse(app_module.clear_platform_cookies("unsupported"))
 
+    def test_clear_platform_cookies_refuses_active_profile(self):
+        import app as app_module
+        from core.platform_guard import release, try_acquire
+
+        old_base_dir = app_module.BASE_DIR
+        with tempfile.TemporaryDirectory() as temp_dir:
+            cookie_path = (
+                Path(temp_dir)
+                / "data"
+                / "chrome_profiles"
+                / "xiaoheihe"
+                / "Default"
+                / "Network"
+                / "Cookies"
+            )
+            cookie_path.parent.mkdir(parents=True)
+            cookie_path.write_bytes(b"active cookie database")
+            app_module.BASE_DIR = temp_dir
+            self.assertTrue(try_acquire("xiaoheihe"))
+            try:
+                self.assertFalse(app_module.clear_platform_cookies("xiaoheihe"))
+            finally:
+                release("xiaoheihe")
+                app_module.BASE_DIR = old_base_dir
+            self.assertTrue(cookie_path.exists())
+
+    def test_clear_platform_cookies_refuses_singleton_marker(self):
+        import app as app_module
+
+        old_base_dir = app_module.BASE_DIR
+        with tempfile.TemporaryDirectory() as temp_dir:
+            profile = Path(temp_dir) / "data" / "chrome_profiles" / "zol"
+            cookie_path = profile / "Default" / "Network" / "Cookies"
+            cookie_path.parent.mkdir(parents=True)
+            cookie_path.write_bytes(b"active cookie database")
+            (profile / "SingletonLock").write_text("occupied", encoding="utf-8")
+            app_module.BASE_DIR = temp_dir
+            try:
+                self.assertFalse(app_module.clear_platform_cookies("zol"))
+            finally:
+                app_module.BASE_DIR = old_base_dir
+            self.assertTrue(cookie_path.exists())
+
     def test_logout_endpoint_resets_selected_account(self):
         import app as app_module
         from app import create_app

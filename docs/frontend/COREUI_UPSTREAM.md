@@ -10,6 +10,15 @@ ArticleOps 的管理后台以 CoreUI Free Bootstrap Admin Template `v5.6.0`
 - 完整源码：`frontend/coreui-free-bootstrap-admin-template/`
 - 生产编译产物：`web/static/vendor/coreui-template/`
 - 许可证：`frontend/coreui-free-bootstrap-admin-template/LICENSE`
+- 上游忽略规则：`frontend/coreui-free-bootstrap-admin-template/.gitignore`
+
+## 已知上游依赖风险
+
+在固定的 `v5.6.0` 基线执行 `npm ci` 后，`npm audit` 报告 19 项
+开发工具链依赖漏洞：5 项 moderate、13 项 high、1 项 critical。
+这些问题来自上游构建依赖，不进入 Flask 生产运行时；本次为保证二开
+基线可复现而原样记录，未擅自升级或改写锁文件。后续应在独立升级任务中
+对照新版 CoreUI 构建结果、视觉回归和许可证后再处理。
 
 ## 生产运行
 
@@ -21,6 +30,11 @@ Set-Location frontend/coreui-free-bootstrap-admin-template
 npm ci
 npm run build
 ```
+
+上游的 `build/**` 构建脚本与 `.gitignore` 必须一同保留。仓库根目录原有
+`build/` 忽略规则也会匹配嵌套目录，因此首次纳入时使用强制暂存；文件
+进入 Git 后可在全新 checkout 直接构建。嵌套 `.gitignore` 会继续排除
+构建产生的 `node_modules/` 与 `dist/`，保证构建后工作树保持干净。
 
 ## ArticleOps 修改范围
 

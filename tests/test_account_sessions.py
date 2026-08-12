@@ -405,6 +405,11 @@ def test_blueprint_matches_frontend_contract_and_injects_article(tmp_path: Path)
     assert operation.status_code == 202
     assert operation.get_json()["account"]["account_id"] == account.account_id
     assert operation.get_json()["status"] == "QUEUED"
+    activity = client.get(
+        f"/api/account-sessions/{account.account_id}/activity"
+    )
+    assert activity.status_code == 200
+    assert activity.get_json()["account_id"] == account.account_id
 
     publish_payload = delivery_payload(account.account_id, mode="PUBLISH")
     confirmation = client.post("/api/delivery-operations", json=publish_payload)

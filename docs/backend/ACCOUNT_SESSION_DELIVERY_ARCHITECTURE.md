@@ -39,7 +39,7 @@ ZOL 不桥接 Cookie；但 Chromium 本身仍可能更新缓存或时间戳。
 - `POST /api/accounts/{account_id}/verify`
 - `POST /api/accounts/{account_id}/session-policy`
 - `POST /api/account-sessions/{account_id}/logout`
-- `GET /api/accounts/{account_id}/activity`
+- `GET /api/account-sessions/{account_id}/activity`
 - `POST /api/delivery-operations`
 - `GET /api/delivery-operations/{operation_id}`
 

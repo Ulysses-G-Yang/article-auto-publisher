@@ -238,7 +238,7 @@ def create_account_session_blueprint(
         )
         return jsonify(account)
 
-    @blueprint.get("/api/accounts/<account_id>/activity")
+    @blueprint.get("/api/account-sessions/<account_id>/activity")
     def account_activity(account_id: str):
         rows = state.run(
             state.accounts.list_activity(account_id, LOCAL_WEB_CONTEXT)

@@ -50,7 +50,12 @@ class BasePlatform(ABC):
 
     platform_name: str = ""
 
-    def __init__(self):
+    def __init__(
+        self,
+        *,
+        profile_dir: str | os.PathLike[str] | None = None,
+        strict_profile_lock: bool = False,
+    ):
         self.cfg = get_config()
         self.platform_cfg = self.cfg["platforms"].get(self.platform_name, {})
         self.simulator = HumanSimulator()
@@ -58,6 +63,8 @@ class BasePlatform(ABC):
         self.browser: Optional[Browser] = None
         self.context: Optional[BrowserContext] = None
         self.page: Optional[Page] = None
+        self.profile_dir = Path(profile_dir).resolve() if profile_dir else None
+        self.strict_profile_lock = strict_profile_lock
 
     @staticmethod
     def _exception_means_browser_closed(exc: Exception) -> bool:
@@ -139,31 +146,53 @@ class BasePlatform(ABC):
         if "NODE_OPTIONS" in os.environ:
             del os.environ["NODE_OPTIONS"]
 
-        self.playwright = await async_playwright().start()
-
         # 每个平台独立的 Chrome 用户数据目录，Cookie 自动持久化
-        chrome_profile_dir = os.path.join(
-            self.cfg["paths"].get("data", os.path.join(os.path.dirname(__file__), "..", "data")),
-            "chrome_profiles",
-            self.platform_name,
-        )
-        os.makedirs(chrome_profile_dir, exist_ok=True)
+        chrome_profile_dir = self.profile_dir or Path(
+            self.cfg["paths"].get(
+                "data",
+                os.path.join(os.path.dirname(__file__), "..", "data"),
+            )
+        ) / "chrome_profiles" / self.platform_name
+        chrome_profile_dir = chrome_profile_dir.resolve()
+        if self.strict_profile_lock and not chrome_profile_dir.is_dir():
+            raise PlatformAutomationError(
+                "PROFILE_NOT_FOUND: 账号浏览器 Profile 不存在"
+            )
+        chrome_profile_dir.mkdir(parents=True, exist_ok=True)
 
-        # 清理 Chrome 残留的 SingletonLock（上次异常退出时遗留）
-        for lock_file in ["SingletonLock", "SingletonCookie", "SingletonSocket"]:
-            lock_path = os.path.join(chrome_profile_dir, lock_file)
-            try:
-                if os.path.exists(lock_path):
-                    os.remove(lock_path)
-            except Exception:
-                pass
+        # Singleton 既可能是异常残留，也可能是活动 Chrome 的占用凭据。
+        # 账号会话严格模式绝不删除；旧流程暂时保留原兼容路径。
+        singleton_names = ("SingletonLock", "SingletonCookie", "SingletonSocket")
+        if self.strict_profile_lock:
+            occupied = [
+                str(chrome_profile_dir / name)
+                for name in singleton_names
+                if (chrome_profile_dir / name).exists()
+            ]
+            if occupied:
+                raise PlatformAutomationError(
+                    "PROFILE_IN_USE: 账号浏览器 Profile 正在被其他流程占用"
+                )
+        else:
+            for lock_file in singleton_names:
+                lock_path = chrome_profile_dir / lock_file
+                try:
+                    if lock_path.exists():
+                        lock_path.unlink()
+                except Exception:
+                    pass
+
+        # 严格模式必须先完成目录和占用检查，再启动 Playwright 驱动，避免
+        # PROFILE_IN_USE 分支遗留无主进程。
+        self.playwright = await async_playwright().start()
 
         # 使用系统 Chrome 浏览器，带重试机制
         last_error = None
-        for attempt in range(3):
+        max_attempts = 1 if self.strict_profile_lock else 3
+        for attempt in range(max_attempts):
             try:
                 self.context = await self.playwright.chromium.launch_persistent_context(
-                    user_data_dir=chrome_profile_dir,
+                    user_data_dir=str(chrome_profile_dir),
                     channel="chrome",
                     headless=False,
                     viewport={"width": 1366, "height": 900},
@@ -180,12 +209,16 @@ class BasePlatform(ABC):
                 break
             except Exception as e:
                 last_error = e
-                # 清理 lock 重试
-                for lock_file in ["SingletonLock", "SingletonCookie", "SingletonSocket"]:
-                    lock_path = os.path.join(chrome_profile_dir, lock_file)
+                if self.strict_profile_lock:
+                    raise PlatformAutomationError(
+                        f"PROFILE_IN_USE: 无法安全打开账号 Profile: {e}"
+                    ) from e
+                # 旧流程维持原有兼容行为；账号会话域永远不走此分支。
+                for lock_file in singleton_names:
+                    lock_path = chrome_profile_dir / lock_file
                     try:
-                        if os.path.exists(lock_path):
-                            os.remove(lock_path)
+                        if lock_path.exists():
+                            lock_path.unlink()
                     except Exception:
                         pass
                 await asyncio.sleep(3)
@@ -274,7 +307,8 @@ class BasePlatform(ABC):
                       community: str = "", selection_query: str = "",
                       selection_override: dict = None,
                       task_id: int = 0, db: Database = None,
-                      auto_login: bool = True) -> dict:
+                      auto_login: bool = True,
+                      delivery_mode: str | None = None) -> dict:
         """执行完整发布流水线
 
         auto_login=False 时（用于后台队列 worker）：若未登录直接优雅失败，
@@ -402,7 +436,12 @@ class BasePlatform(ABC):
             # 本轮回归默认只保存草稿，避免验证时误公开发布；未来需要公开发布时
             # 可显式打开 app.publish_after_draft 配置。
             post_url = ""
-            if self.cfg.get("app", {}).get("publish_after_draft", False):
+            should_publish = (
+                delivery_mode == "PUBLISH"
+                if delivery_mode is not None
+                else self.cfg.get("app", {}).get("publish_after_draft", False)
+            )
+            if should_publish:
                 db.add_task_log(task_id, "INFO", "提交发布...")
                 post_url = await self.publish_now(title)
                 await self.simulator.random_delay(1, 2)

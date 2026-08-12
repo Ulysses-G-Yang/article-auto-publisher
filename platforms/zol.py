@@ -30,8 +30,8 @@ class ZOLPlatform(BasePlatform):
     TOPIC_BUTTON = "button:has-text('选择话题')"
     TOPIC_MODAL = ".ant-modal-wrap:visible"
 
-    def __init__(self):
-        super().__init__()
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
         self.last_login_error = ""
 
     @staticmethod
@@ -214,7 +214,7 @@ class ZOLPlatform(BasePlatform):
                 ) from exc
             return {"ok": False, "error": str(exc)}
 
-    async def check_login(self) -> bool:
+    async def check_login(self, *, allow_cookie_bridge: bool = True) -> bool:
         """检查是否能进入真实 ZOL 创作者中心编辑器。
 
         个人中心 Cookie 存在并不等于博客编辑器可用；过期或域不完整的
@@ -227,7 +227,7 @@ class ZOLPlatform(BasePlatform):
             editor_url = self.platform_cfg.get(
                 "editor_url", "https://post.zol.com.cn/v2/create/article"
             )
-            if self._host(editor_url) == self.CREATOR_HOST:
+            if allow_cookie_bridge and self._host(editor_url) == self.CREATOR_HOST:
                 await self._bridge_creator_cookies()
             await self.page.goto(
                 editor_url,

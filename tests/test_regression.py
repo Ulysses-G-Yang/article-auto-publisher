@@ -475,7 +475,7 @@ class RegressionTests(DatabaseTestCase):
         self.db._init_tables()
         self.assertEqual(self.db.get_task(task_id)["error_code"], "BROWSER_CONTEXT_CLOSED")
 
-    def test_cleanup_only_removes_profile_lock_files(self):
+    def test_cleanup_never_removes_ambiguous_profile_lock_files(self):
         import app as app_module
 
         old_base_dir = app_module.BASE_DIR
@@ -501,8 +501,8 @@ class RegressionTests(DatabaseTestCase):
             finally:
                 app_module.BASE_DIR = old_base_dir
 
-            self.assertEqual(cleaned, 6)
-            self.assertTrue(all(not path.exists() for path in lock_paths))
+            self.assertEqual(cleaned, 0)
+            self.assertTrue(all(path.exists() for path in lock_paths))
             self.assertTrue(cookie_path.exists())
             kill_mock.assert_not_called()
 

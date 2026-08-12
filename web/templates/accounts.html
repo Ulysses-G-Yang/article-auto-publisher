@@ -148,7 +148,7 @@
     <div class="page-heading">
         <div><h1>平台账号</h1><p>管理平台登录状态；凭据不会在页面中展示。</p></div>
         <span class="text-muted small" aria-live="polite">
-            <i class="bi bi-arrow-repeat me-1"></i>自动检测
+            <i class="cil-reload me-1"></i>自动检测
         </span>
     </div>
 
@@ -162,7 +162,7 @@
             <div class="account-card-content d-flex justify-content-between align-items-center gap-3">
                 <div class="account-platform">
                     <div class="platform-icon platform-icon-zol" aria-hidden="true">
-                        <i class="bi bi-pc-display"></i>
+                        <i class="cil-screen-desktop"></i>
                     </div>
                     <div class="account-meta">
                         <h5 class="mb-1">中关村在线 <span class="badge bg-info-subtle text-info-emphasis ms-1">ZOL</span></h5>
@@ -170,21 +170,21 @@
 
                         <div class="account-status-row">
                             <span x-show="zolStatus === 'logged_in'" x-transition class="badge bg-success">
-                                <i class="bi bi-check-circle me-1"></i>已登录
+                                <i class="cil-check-circle me-1"></i>已登录
                             </span>
                             <span x-show="zolStatus === 'logged_out'" x-transition class="badge bg-secondary">
-                                <i class="bi bi-circle me-1"></i>未登录
+                                <i class="cil-circle me-1"></i>未登录
                             </span>
                             <span x-show="zolStatus === 'logging_in'" x-transition class="badge bg-warning text-dark status-pulse">
                                 <span class="spinner-grow spinner-grow-sm me-1" aria-hidden="true"></span>登录中...
                             </span>
                             <span x-show="zolStatus === 'login_failed'" x-transition class="badge bg-danger">
-                                <i class="bi bi-exclamation-circle me-1"></i>登录失败
+                                <i class="cil-warning me-1"></i>登录失败
                             </span>
                         </div>
 
                         <small x-show="zolLastLogin" x-transition class="account-last-login">
-                            <i class="bi bi-clock me-1"></i>上次登录时间：<span x-text="formatLoginTime(zolLastLogin)"></span>
+                            <i class="cil-clock me-1"></i>上次登录时间：<span x-text="formatLoginTime(zolLastLogin)"></span>
                         </small>
                         <button
                             x-show="zolStatus === 'login_failed'"
@@ -194,7 +194,7 @@
                             @click="toggleError('zol')"
                             :aria-expanded="errorExpanded.zol"
                         >
-                            <i class="bi bi-info-circle me-1"></i><span x-text="errorExpanded.zol ? '收起失败原因' : '查看失败原因'"></span>
+                            <i class="cil-info me-1"></i><span x-text="errorExpanded.zol ? '收起失败原因' : '查看失败原因'"></span>
                         </button>
                         <div x-show="zolStatus === 'login_failed' && errorExpanded.zol" x-transition class="account-error-detail" x-text="zolError"></div>
                     </div>
@@ -212,7 +212,7 @@
                             <span><span class="spinner-border spinner-border-sm me-1" aria-hidden="true"></span>等待扫码...</span>
                         </template>
                         <template x-if="!isWaiting('zol')">
-                            <span><i class="bi bi-box-arrow-in-right me-1"></i><span x-text="loginButtonText('zol')"></span></span>
+                            <span><i class="cil-input me-1"></i><span x-text="loginButtonText('zol')"></span></span>
                         </template>
                     </button>
                     <button
@@ -224,7 +224,7 @@
                         @click="logout('zol')"
                     >
                         <template x-if="!isLoggingOut('zol')">
-                            <span><i class="bi bi-box-arrow-left me-1"></i>退出登录</span>
+                            <span><i class="cil-account-logout me-1"></i>退出登录</span>
                         </template>
                         <template x-if="isLoggingOut('zol')">
                             <span><span class="spinner-border spinner-border-sm me-1"></span>清除中...</span>
@@ -241,7 +241,7 @@
             <div class="account-card-content d-flex justify-content-between align-items-center gap-3">
                 <div class="account-platform">
                     <div class="platform-icon platform-icon-xh" aria-hidden="true">
-                        <i class="bi bi-controller"></i>
+                        <i class="cil-gamepad"></i>
                     </div>
                     <div class="account-meta">
                         <h5 class="mb-1">小黑盒 <span class="badge bg-purple">Xiaoheihe</span></h5>
@@ -249,21 +249,21 @@
 
                         <div class="account-status-row">
                             <span x-show="xhStatus === 'logged_in'" x-transition class="badge bg-success">
-                                <i class="bi bi-check-circle me-1"></i>已登录
+                                <i class="cil-check-circle me-1"></i>已登录
                             </span>
                             <span x-show="xhStatus === 'logged_out'" x-transition class="badge bg-secondary">
-                                <i class="bi bi-circle me-1"></i>未登录
+                                <i class="cil-circle me-1"></i>未登录
                             </span>
                             <span x-show="xhStatus === 'logging_in'" x-transition class="badge bg-warning text-dark status-pulse">
                                 <span class="spinner-grow spinner-grow-sm me-1" aria-hidden="true"></span>登录中...
                             </span>
                             <span x-show="xhStatus === 'login_failed'" x-transition class="badge bg-danger">
-                                <i class="bi bi-exclamation-circle me-1"></i>登录失败
+                                <i class="cil-warning me-1"></i>登录失败
                             </span>
                         </div>
 
                         <small x-show="xhLastLogin" x-transition class="account-last-login">
-                            <i class="bi bi-clock me-1"></i>上次登录时间：<span x-text="formatLoginTime(xhLastLogin)"></span>
+                            <i class="cil-clock me-1"></i>上次登录时间：<span x-text="formatLoginTime(xhLastLogin)"></span>
                         </small>
                         <button
                             x-show="xhStatus === 'login_failed'"
@@ -273,7 +273,7 @@
                             @click="toggleError('xiaoheihe')"
                             :aria-expanded="errorExpanded.xiaoheihe"
                         >
-                            <i class="bi bi-info-circle me-1"></i><span x-text="errorExpanded.xiaoheihe ? '收起失败原因' : '查看失败原因'"></span>
+                            <i class="cil-info me-1"></i><span x-text="errorExpanded.xiaoheihe ? '收起失败原因' : '查看失败原因'"></span>
                         </button>
                         <div x-show="xhStatus === 'login_failed' && errorExpanded.xiaoheihe" x-transition class="account-error-detail" x-text="xhError"></div>
                     </div>
@@ -291,7 +291,7 @@
                             <span><span class="spinner-border spinner-border-sm me-1" aria-hidden="true"></span>等待扫码...</span>
                         </template>
                         <template x-if="!isWaiting('xiaoheihe')">
-                            <span><i class="bi bi-box-arrow-in-right me-1"></i><span x-text="loginButtonText('xiaoheihe')"></span></span>
+                            <span><i class="cil-input me-1"></i><span x-text="loginButtonText('xiaoheihe')"></span></span>
                         </template>
                     </button>
                     <button
@@ -303,7 +303,7 @@
                         @click="logout('xiaoheihe')"
                     >
                         <template x-if="!isLoggingOut('xiaoheihe')">
-                            <span><i class="bi bi-box-arrow-left me-1"></i>退出登录</span>
+                            <span><i class="cil-account-logout me-1"></i>退出登录</span>
                         </template>
                         <template x-if="isLoggingOut('xiaoheihe')">
                             <span><span class="spinner-border spinner-border-sm me-1"></span>清除中...</span>
@@ -319,7 +319,7 @@
         <div class="modal-dialog modal-dialog-centered">
             <div class="modal-content">
                 <div class="modal-header">
-                    <h5 class="modal-title" id="reloginModalLabel"><i class="bi bi-arrow-repeat me-2"></i>确认重新登录</h5>
+                    <h5 class="modal-title" id="reloginModalLabel"><i class="cil-reload me-2"></i>确认重新登录</h5>
                     <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="关闭" @click="cancelRelogin()"></button>
                 </div>
                 <div class="modal-body">
@@ -348,9 +348,9 @@
                 <legend class="form-label small fw-semibold">先选择平台</legend>
                 <div class="session-platforms" role="radiogroup" aria-label="多账号会话平台">
                     <input class="btn-check" type="radio" name="session-platform" id="session-platform-xiaoheihe" value="xiaoheihe" autocomplete="off">
-                    <label class="btn btn-outline-primary" for="session-platform-xiaoheihe"><i class="bi bi-controller me-1" aria-hidden="true"></i>小黑盒</label>
+                    <label class="btn btn-outline-primary" for="session-platform-xiaoheihe"><i class="cil-gamepad me-1" aria-hidden="true"></i>小黑盒</label>
                     <input class="btn-check" type="radio" name="session-platform" id="session-platform-zol" value="zol" autocomplete="off">
-                    <label class="btn btn-outline-primary" for="session-platform-zol"><i class="bi bi-pc-display me-1" aria-hidden="true"></i>中关村在线</label>
+                    <label class="btn btn-outline-primary" for="session-platform-zol"><i class="cil-screen-desktop me-1" aria-hidden="true"></i>中关村在线</label>
                 </div>
             </fieldset>
             <div id="session-accounts-placeholder" class="session-placeholder"><i class="cil-arrow-top" aria-hidden="true"></i><span>选择平台后加载该平台账号</span></div>

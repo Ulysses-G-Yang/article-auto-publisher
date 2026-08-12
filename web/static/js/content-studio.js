@@ -149,10 +149,12 @@
         setSaveState('saving', '正在同步');
         const baseRevision = state.draft.revision;
         try {
+            const requestTitle = state.draft.title;
+            const requestBlocks = publicBlocks();
             const response = await fetch(endpoint(root.dataset.draftUrlTemplate, 'draft_id', state.draft.draft_id), {
                 method: 'PATCH',
                 headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
-                body: JSON.stringify({ revision: baseRevision, title: state.draft.title, blocks: publicBlocks() }),
+                body: JSON.stringify({ revision: baseRevision, title: requestTitle, blocks: requestBlocks }),
             });
             const payload = await response.json().catch(() => ({}));
             if (response.status === 409 && payload.error === 'DRAFT_REVISION_CONFLICT') {
@@ -167,11 +169,17 @@
             state.draft.revision = payload.revision;
             state.draft.updated_at = payload.updated_at;
             state.draft.source_type = payload.source_type;
-            state.dirty = false;
-            await localDraftPut(false);
+            const changedDuringRequest = state.draft.title !== requestTitle
+                || JSON.stringify(publicBlocks()) !== JSON.stringify(requestBlocks);
+            state.dirty = changedDuringRequest;
+            await localDraftPut(changedDuringRequest);
             updateDraftMeta();
-            setSaveState('synced', '已同步');
-            return true;
+            setSaveState(changedDuringRequest ? 'local' : 'synced', changedDuringRequest ? '本地已保存' : '已同步');
+            if (changedDuringRequest) {
+                clearTimeout(state.saveTimer);
+                state.saveTimer = setTimeout(() => saveDraftNow(), 1000);
+            }
+            return !changedDuringRequest;
         } catch (error) {
             setSaveState('error', '同步失败');
             setMessage('content-error', `${error.message}；本地恢复副本已保留。`);

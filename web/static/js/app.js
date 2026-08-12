@@ -2,6 +2,7 @@ const SIDEBAR_STORAGE_KEY = 'articleops.sidebar-collapsed.v1';
 // CoreUI's Bootstrap-compatible components are the sole runtime implementation.
 // Keep the historical `bootstrap.*` calls working while legacy pages migrate.
 const bootstrap = window.coreui;
+window.bootstrap = window.coreui;
 
 const api = {
     async get(url) {

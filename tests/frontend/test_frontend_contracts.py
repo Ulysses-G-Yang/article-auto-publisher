@@ -61,17 +61,13 @@ def test_original_article_link_is_safe_and_accessible() -> None:
     assert "原始链接（在新标签页打开）" in script
 
 
-def test_legacy_api_contracts_are_preserved() -> None:
+def test_read_only_legacy_pages_keep_their_compatible_contracts() -> None:
     index = read("web/templates/index.html")
-    upload = read("web/templates/upload.html")
     accounts = read("web/templates/accounts.html")
     task = read("web/templates/task_detail.html")
 
     assert "fetch('/api/tasks')" in index
     assert "fetch('/api/status')" in index
-    assert "fetch('/api/upload', { method: 'POST', body: formData })" in upload
-    assert "formData.append('files', f)" in upload
-    assert "formData.append('platforms', p)" in upload
     assert "fetch('/api/accounts')" in accounts
     assert "/api/accounts/${platform}/logout" in accounts
     assert "/api/accounts/${platform}/clear-cookies" in accounts
@@ -81,6 +77,15 @@ def test_legacy_api_contracts_are_preserved() -> None:
     assert "JSON.stringify({community: this.community, topic: this.topic})" in task
 
 
+def test_legacy_upload_queue_is_not_used_by_new_page() -> None:
+    upload = read("web/templates/upload.html")
+    script = read("web/static/js/content-studio.js")
+
+    assert "/api/upload" not in upload + script
+    assert "/api/content-drafts/import-docx" in upload
+    assert "formData.append('platforms'" not in upload
+
+
 def test_shared_shell_has_navigation_and_mobile_controls() -> None:
     base = read("web/templates/base.html")
     script = read("web/static/js/app.js")
@@ -88,6 +93,7 @@ def test_shared_shell_has_navigation_and_mobile_controls() -> None:
     for path in ('href="/"', 'href="/upload"', 'href="/accounts"', 'href="/data-center/"'):
         assert path in base
     assert "request.path.startswith('/task/')" in base
+    assert 'href="/delivery/new"' not in base
     assert 'id="sidebar-toggle"' in base
     assert 'id="sidebar-close"' in base
     assert 'id="sidebar-backdrop"' in base

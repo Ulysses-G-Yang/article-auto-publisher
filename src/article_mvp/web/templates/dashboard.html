@@ -5,8 +5,8 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light dark">
   <title>发布与采集数据中心</title>
-  <link rel="stylesheet" href="/static/vendor/coreui-template/css/style.min.css">
-  <link rel="stylesheet" href="/static/vendor/coreui-template/simplebar/simplebar.css">
+  <link rel="stylesheet" href="{{ url_for('article_mvp_dashboard.static', filename='vendor/coreui/coreui.min.css') }}">
+  <link rel="stylesheet" href="{{ url_for('article_mvp_dashboard.static', filename='vendor/simplebar/simplebar.css') }}">
   <link rel="stylesheet" href="{{ url_for('article_mvp_dashboard.static', filename='vendor/coreui-icons/css/free.min.css') }}">
   <link rel="stylesheet" href="{{ url_for('article_mvp_dashboard.static', filename='vendor/gridstack/gridstack.min.css') }}">
   <link rel="stylesheet" href="{{ url_for('article_mvp_dashboard.static', filename='dashboard.css') }}">
@@ -233,8 +233,8 @@
     </div>
   </div>
 
-  <script src="/static/vendor/coreui-template/js/coreui.bundle.min.js" defer></script>
-  <script src="/static/vendor/coreui-template/simplebar/simplebar.min.js" defer></script>
+  <script src="{{ url_for('article_mvp_dashboard.static', filename='vendor/coreui/coreui.bundle.min.js') }}" defer></script>
+  <script src="{{ url_for('article_mvp_dashboard.static', filename='vendor/simplebar/simplebar.min.js') }}" defer></script>
   <script src="{{ url_for('article_mvp_dashboard.static', filename='vendor/gridstack/gridstack-all.js') }}" defer></script>
   <script src="{{ url_for('article_mvp_dashboard.static', filename='dashboard.js') }}" defer></script>
 </body>

@@ -121,7 +121,8 @@ def test_delivery_page_has_mobile_keyboard_and_aria_basics() -> None:
     assert "overflow-x: auto" in styles
     assert "@media (max-width: 575.98px)" in styles
     assert "request.path.startswith('/delivery/')" in base
-    assert 'href="/delivery/new"' in base
+    assert 'href="/delivery/new"' not in base
+    assert "创作与投递" in base
 
 
 def test_example_content_uses_safe_server_injected_jinja_defaults() -> None:

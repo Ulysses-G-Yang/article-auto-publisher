@@ -57,12 +57,12 @@
                     <div class="step-heading"><span class="step-number">3</span><div><h2 id="content-heading">编辑内容与操作模式</h2><p>公开发布必须经过单独的高风险二次确认。</p></div></div>
                     <div class="mb-3">
                         <label class="form-label" for="article-title">标题</label>
-                        <input id="article-title" class="form-control" type="text" value="凌晨三点，公司的智能马桶开始给我做绩效面谈" maxlength="200" required>
+                        <input id="article-title" class="form-control" type="text" value="{{ default_article_title | default('凌晨三点，公司的智能马桶开始给我做绩效面谈', true) | e }}" maxlength="200" required>
                     </div>
                     <div class="mb-4">
                         <label class="form-label" for="article-body">正文</label>
-                        <textarea id="article-body" class="form-control delivery-editor" rows="14" placeholder="当前会话未提供完整正文，请在投递前粘贴并核对正文。" required></textarea>
-                        <div class="form-text">正文保持可编辑；当前未预填未确认的内容。</div>
+                        <textarea id="article-body" class="form-control delivery-editor" rows="14" placeholder="当前会话未提供完整正文，请在投递前粘贴并核对正文。" required>{{ default_article_body | default('', true) | e }}</textarea>
+                        <div class="form-text">{% if default_article_body | default('', true) %}示例正文已预填，投递前仍可编辑并核对{% else %}正文保持可编辑；当前未预填未确认的内容。{% endif %}</div>
                     </div>
                     <fieldset>
                         <legend class="form-label mb-2">操作模式</legend>

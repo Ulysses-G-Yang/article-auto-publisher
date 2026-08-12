@@ -121,11 +121,14 @@ def test_delivery_page_has_mobile_keyboard_and_aria_basics() -> None:
     assert 'href="/delivery/new"' in base
 
 
-def test_frozen_example_content_does_not_invent_missing_body() -> None:
+def test_example_content_uses_safe_server_injected_jinja_defaults() -> None:
     template = read("web/templates/delivery.html")
 
-    assert "凌晨三点，公司的智能马桶开始给我做绩效面谈" in template
+    assert "default_article_title" in template
+    assert "default('凌晨三点，公司的智能马桶开始给我做绩效面谈', true) | e" in template
+    assert "{{ default_article_body | default('', true) | e }}" in template
+    assert "{% if default_article_body | default('', true) %}" in template
+    assert "示例正文已预填，投递前仍可编辑并核对" in template
     assert "当前会话未提供完整正文" in template
     assert '<textarea id="article-body"' in template
-    assert 'required></textarea>' in template
-
+    assert "不自行编造" not in template

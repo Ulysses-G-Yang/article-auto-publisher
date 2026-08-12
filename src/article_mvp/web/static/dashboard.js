@@ -432,8 +432,8 @@ function updateResponsiveSummaryHeight() {
   if (!summary || summary.hidden) return;
 
   let height = 3;
-  if (window.innerWidth < 576) height = 10;
-  else if (window.innerWidth < 992) height = 6;
+  if (window.innerWidth < 576) height = 8;
+  else if (window.innerWidth < 992) height = 5;
   else {
     height = savedLayoutState?.widgets.find((item) => item.id === "summary")?.h || 2;
   }
@@ -529,7 +529,8 @@ function initTheme() {
 
 function toggleSidebar() {
   if (window.innerWidth < 992) {
-    document.body.classList.toggle("sidebar-mobile-open");
+    const open = document.body.classList.toggle("sidebar-mobile-open");
+    byId("sidebar-toggle").setAttribute("aria-expanded", String(open));
     return;
   }
   const collapsed = document.body.classList.toggle("sidebar-collapsed");
@@ -544,12 +545,17 @@ function initSidebar() {
   byId("sidebar-toggle").addEventListener("click", toggleSidebar);
   byId("sidebar-close").addEventListener("click", () => {
     document.body.classList.remove("sidebar-mobile-open");
+    byId("sidebar-toggle").setAttribute("aria-expanded", "false");
   });
   byId("sidebar-backdrop").addEventListener("click", () => {
     document.body.classList.remove("sidebar-mobile-open");
+    byId("sidebar-toggle").setAttribute("aria-expanded", "false");
   });
   document.querySelectorAll(".sidebar a").forEach((link) => {
-    link.addEventListener("click", () => document.body.classList.remove("sidebar-mobile-open"));
+    link.addEventListener("click", () => {
+      document.body.classList.remove("sidebar-mobile-open");
+      byId("sidebar-toggle").setAttribute("aria-expanded", "false");
+    });
   });
   window.addEventListener("resize", updateResponsiveSummaryHeight);
 }

@@ -1,6 +1,7 @@
-"""小黑盒独立发布器：公开发布、响应捕获和映射必须原子编排。"""
+"""小黑盒独立发布器：捕获公开发布响应并生成标准事件。"""
 
 import os
+import uuid
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timezone
 from pathlib import Path
@@ -14,21 +15,17 @@ from playwright.async_api import (
 from playwright.async_api import (
     TimeoutError as PlaywrightTimeoutError,
 )
-from sqlalchemy import select
-from sqlalchemy.exc import IntegrityError
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from article_mvp.config import PlatformConfig, load_platform_config
-from article_mvp.contracts import PublishRequest
-from article_mvp.db.models import PlatformArticle, PlatformArticleStatus
+from article_mvp.contracts import ArticlePublished, PublishRequest
 from article_mvp.errors import (
     ConfigurationError,
     LoginRequiredError,
-    PublishMappingConflictError,
     PublishResultUnknownError,
 )
 from article_mvp.platforms.base import BasePublisher
 from article_mvp.platforms.locks import PlatformFileLock
+from article_mvp.runtime_paths import runtime_data_dir
 from article_mvp.security import extract_json_path, redact_sensitive, sanitize_url
 
 PUBLIC_CONFIRMATION = "I_UNDERSTAND_PUBLICATION_IS_PUBLIC"
@@ -48,8 +45,7 @@ class XiaoheihePublisher(BasePublisher):
     ) -> None:
         self.config = config or load_platform_config()
         self.page = page
-        project_root = Path(__file__).resolve().parents[4]
-        data_dir = Path(os.getenv("ARTICLE_MVP_DATA_DIR", project_root / "data"))
+        data_dir = runtime_data_dir()
         self.profile_dir = Path(profile_dir or data_dir / "profiles" / self.platform)
         self.lock_path = data_dir / "locks" / f"{self.platform}.lock"
         self.headless = headless
@@ -67,14 +63,12 @@ class XiaoheihePublisher(BasePublisher):
     async def publish(
         self,
         request: PublishRequest,
-        session: AsyncSession,
-    ) -> PlatformArticle:
+    ) -> ArticlePublished:
         self._assert_publication_allowed()
         if self.page is not None:
             await self._prepare_editor(self.page, request)
             return await self.publish_and_capture(
                 self.page,
-                session,
                 task_id=request.task_id,
                 title=request.title,
             )
@@ -97,7 +91,6 @@ class XiaoheihePublisher(BasePublisher):
                 await self._prepare_editor(page, request)
                 return await self.publish_and_capture(
                     page,
-                    session,
                     task_id=request.task_id,
                     title=request.title,
                 )
@@ -180,13 +173,12 @@ class XiaoheihePublisher(BasePublisher):
     async def publish_and_capture(
         self,
         page: Page,
-        session: AsyncSession,
         *,
         task_id: int,
         title: str | None = None,
         trigger: Callable[[Page], Awaitable[None]] | None = None,
-    ) -> PlatformArticle:
-        """捕获发布响应并写入映射；调用方持有事务并负责 commit。"""
+    ) -> ArticlePublished:
+        """捕获发布响应并生成事件；平台插件不连接数据库。"""
 
         endpoint = self.config.publish.submit_endpoint
 
@@ -252,16 +244,24 @@ class XiaoheihePublisher(BasePublisher):
             self._first_path(payload, self.config.publish.published_at_paths)
         )
 
-        return await self._persist_mapping(
-            session,
+        event_key = f"{self.platform}:{task_id}:{external_article_id}"
+        return ArticlePublished(
+            event_id=str(uuid.uuid5(uuid.NAMESPACE_URL, event_key)),
             task_id=task_id,
+            platform=self.platform,
             external_article_id=external_article_id,
             title=title,
             platform_url=platform_url,
             published_at=published_at,
-            payload=payload,
-            response_url=response.url,
-            response_status=response.status,
+            evidence={
+                "publish_response": redact_sensitive(payload),
+                "capture": {
+                    "response_url": sanitize_url(response.url),
+                    "response_status": response.status,
+                    "evidence_level": (self.config.publish.submit_endpoint.evidence.level.value),
+                    "evidence_source": (self.config.publish.submit_endpoint.evidence.source),
+                },
+            },
         )
 
     @staticmethod
@@ -306,72 +306,3 @@ class XiaoheihePublisher(BasePublisher):
             # 平台未声明时区时无法安全判断是 UTC 还是北京时间，宁可保留为空。
             return None
         return parsed.astimezone(timezone.utc)
-
-    async def _persist_mapping(
-        self,
-        session: AsyncSession,
-        *,
-        task_id: int,
-        external_article_id: str,
-        title: str | None,
-        platform_url: str | None,
-        published_at: datetime | None,
-        payload: dict[str, Any],
-        response_url: str,
-        response_status: int,
-    ) -> PlatformArticle:
-        task_mapping = await session.scalar(
-            select(PlatformArticle).where(
-                PlatformArticle.task_id == task_id,
-                PlatformArticle.platform == self.platform,
-            )
-        )
-        if task_mapping is not None:
-            if task_mapping.external_article_id == external_article_id:
-                return task_mapping
-            raise PublishMappingConflictError(
-                "同一任务已映射到不同的小黑盒文章 ID，禁止覆盖"
-            )
-
-        external_mapping = await session.scalar(
-            select(PlatformArticle).where(
-                PlatformArticle.platform == self.platform,
-                PlatformArticle.external_article_id == external_article_id,
-            )
-        )
-        if external_mapping is not None:
-            if external_mapping.task_id == task_id:
-                return external_mapping
-            raise PublishMappingConflictError(
-                "该小黑盒文章 ID 已属于另一发布任务，禁止重复关联"
-            )
-
-        mapping = PlatformArticle(
-            task_id=task_id,
-            platform=self.platform,
-            external_article_id=external_article_id,
-            title=title,
-            platform_url=platform_url,
-            published_at=published_at,
-            status=PlatformArticleStatus.MAPPED,
-            extra_data={
-                "publish_response": redact_sensitive(payload),
-                "capture": {
-                    "response_url": sanitize_url(response_url),
-                    "response_status": response_status,
-                    "evidence_level": self.config.publish.submit_endpoint.evidence.level.value,
-                    "evidence_source": self.config.publish.submit_endpoint.evidence.source,
-                },
-            },
-        )
-        session.add(mapping)
-        try:
-            await session.flush()
-        except IntegrityError as exc:
-            raise PublishMappingConflictError("写入平台文章映射时发生唯一性冲突") from exc
-        except Exception as exc:
-            raise PublishResultUnknownError(
-                f"平台已返回 post_id，但映射写入失败: {exc}",
-                error_code="PUBLISH_MAPPING_PERSISTENCE_FAILED",
-            ) from exc
-        return mapping

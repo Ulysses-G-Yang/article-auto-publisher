@@ -1,6 +1,6 @@
 """跨层传递的最小、稳定数据契约。"""
 
-from datetime import datetime
+from datetime import datetime, timezone
 from decimal import Decimal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -24,6 +24,30 @@ class PublishRequest(BaseModel):
         if any(not value.strip() for value in values):
             raise ValueError("image_paths 不能包含空路径")
         return values
+
+
+class ArticlePublished(BaseModel):
+    """平台确认公开发布后产生的稳定事件，不携带 ORM 或登录态对象。"""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    event_id: str = Field(min_length=1, max_length=128)
+    event_type: str = Field(default="article_published", pattern="^article_published$")
+    task_id: int = Field(gt=0)
+    platform: str = Field(pattern=r"^[a-z0-9_]+$")
+    external_article_id: str = Field(min_length=1, max_length=128)
+    title: str | None = Field(default=None, max_length=255)
+    platform_url: str | None = Field(default=None, max_length=1024)
+    published_at: datetime | None = None
+    occurred_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    evidence: dict = Field(default_factory=dict)
+
+    @field_validator("published_at", "occurred_at")
+    @classmethod
+    def require_aware_datetime(cls, value: datetime | None) -> datetime | None:
+        if value is not None and value.tzinfo is None:
+            raise ValueError("事件时间必须包含时区")
+        return value
 
 
 class CollectorAuth(BaseModel):

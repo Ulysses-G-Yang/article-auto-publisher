@@ -46,8 +46,12 @@ from article_mvp.errors import (
 )
 from article_mvp.platforms.xiaoheihe.collector import XiaoheiheCollector
 from article_mvp.platforms.xiaoheihe.publisher import XiaoheihePublisher
+from article_mvp.runtime_paths import database_path as default_database_path
+from article_mvp.runtime_paths import runtime_data_dir
 from article_mvp.security import extract_json_path, redact_sensitive
 from article_mvp.services.collect_service import CollectService
+from article_mvp.services.published_event_service import PublishedEventService
+from article_mvp.tools.migrate_legacy_tables import migrate
 from article_mvp.tools.probe_xhh import sanitized_url
 from article_mvp.web import create_dashboard_app
 from article_mvp.web.runtime import AsyncRuntime
@@ -162,6 +166,7 @@ async def test_init_db_sets_pragmas_and_indexes(tmp_path):
     assert {"platform_articles", "metric_snapshots", "collection_runs"} <= tables
     assert "ux_platform_articles_platform_external_id" in indexes
     assert "ux_platform_articles_task_platform" in indexes
+    assert "ux_platform_articles_event_id" in indexes
     assert foreign_key_rows[0]["referred_table"] == "platform_articles"
     await dispose_db()
 
@@ -184,15 +189,17 @@ async def test_publish_capture_maps_nested_post_id_and_redacts(tmp_path):
     page = FakePage(response)
     publisher = XiaoheihePublisher(page=page)
 
-    async with session_scope(url) as session:
-        mapping = await publisher.publish_and_capture(
-            page,
-            session,
-            task_id=21,
-            title="正式发布标题",
-            trigger=no_op_trigger,
-        )
-        assert mapping.id is not None
+    event = await publisher.publish_and_capture(
+        page,
+        task_id=21,
+        title="正式发布标题",
+        trigger=no_op_trigger,
+    )
+    assert event.external_article_id == "7788"
+    assert event.evidence["publish_response"]["data"]["token"] == "[REDACTED]"
+
+    mapping = await PublishedEventService(url).handle(event)
+    assert mapping.id is not None
 
     async with session_scope(url) as session:
         saved = await session.scalar(select(PlatformArticle))
@@ -202,6 +209,7 @@ async def test_publish_capture_maps_nested_post_id_and_redacts(tmp_path):
             2026, 8, 12, 1, 42, tzinfo=timezone.utc
         )
         assert saved.status is PlatformArticleStatus.MAPPED
+        assert saved.event_id == event.event_id
         assert saved.extra_data["publish_response"]["data"]["token"] == "[REDACTED]"
         assert page.predicate(response)
     await dispose_db()
@@ -272,7 +280,7 @@ async def test_init_db_upgrades_existing_sqlite_without_losing_data(tmp_path):
                 )
             ).all()
         }
-    assert {"title", "published_at"} <= platform_columns
+    assert {"event_id", "title", "published_at"} <= platform_columns
     assert {"exposure_count", "share_count"} <= metric_columns
 
     async with session_scope(url) as session:
@@ -292,20 +300,30 @@ async def test_publish_capture_is_idempotent_and_detects_conflict(tmp_path):
     page = FakePage(FakeResponse({"post_id": "same-id"}))
     publisher = XiaoheihePublisher(page=page)
 
-    async with session_scope(url) as session:
-        first = await publisher.publish_and_capture(
-            page, session, task_id=1, trigger=no_op_trigger
-        )
-        second = await publisher.publish_and_capture(
-            page, session, task_id=1, trigger=no_op_trigger
-        )
-        assert first is second
+    first_event = await publisher.publish_and_capture(
+        page, task_id=1, trigger=no_op_trigger
+    )
+    second_event = await publisher.publish_and_capture(
+        page, task_id=1, trigger=no_op_trigger
+    )
+    assert first_event.event_id == second_event.event_id
 
-    async with session_scope(url) as session:
-        with pytest.raises(PublishMappingConflictError):
-            await publisher.publish_and_capture(
-                page, session, task_id=2, trigger=no_op_trigger
-            )
+    service = PublishedEventService(url)
+    first = await service.handle(first_event)
+    second = await service.handle(second_event)
+    assert first.id == second.id
+
+    conflict = first_event.model_copy(
+        update={"event_id": "another-event", "task_id": 2}
+    )
+    with pytest.raises(PublishMappingConflictError):
+        await service.handle(conflict)
+
+    reused_event_id = first_event.model_copy(
+        update={"task_id": 3, "external_article_id": "other-post"}
+    )
+    with pytest.raises(PublishMappingConflictError):
+        await service.handle(reused_event_id)
     await dispose_db()
 
 
@@ -329,18 +347,13 @@ async def test_publish_capture_errors_are_result_unknown(
     timeout_error,
     error_code,
 ):
-    url = database_url(tmp_path)
-    await dispose_db()
-    await init_db(url)
     page = FakePage(response, timeout_error=timeout_error)
     publisher = XiaoheihePublisher(page=page)
-    async with session_scope(url) as session:
-        with pytest.raises(PublishResultUnknownError) as captured:
-            await publisher.publish_and_capture(
-                page, session, task_id=10, trigger=no_op_trigger
-            )
-        assert captured.value.error_code == error_code
-    await dispose_db()
+    with pytest.raises(PublishResultUnknownError) as captured:
+        await publisher.publish_and_capture(
+            page, task_id=10, trigger=no_op_trigger
+        )
+    assert captured.value.error_code == error_code
 
 
 @pytest.mark.asyncio
@@ -573,35 +586,127 @@ def test_new_package_has_no_legacy_runtime_imports():
             )
 
 
+def test_default_runtime_paths_are_isolated_from_legacy_data(monkeypatch):
+    monkeypatch.delenv("ARTICLE_MVP_DATA_DIR", raising=False)
+    data_dir = runtime_data_dir()
+    assert data_dir.name == "article_mvp"
+    assert data_dir.parent.name == "data"
+    assert default_database_path() == data_dir / "article_mvp.db"
+    assert default_database_path().name != "app.db"
+
+    publisher = XiaoheihePublisher()
+    assert publisher.profile_dir == data_dir / "profiles" / "xiaoheihe"
+    assert publisher.lock_path == data_dir / "locks" / "xiaoheihe.lock"
+
+
+@pytest.mark.asyncio
+async def test_legacy_table_migration_is_idempotent_and_keeps_source(tmp_path):
+    source = tmp_path / "legacy.db"
+    destination = tmp_path / "article_mvp.db"
+    source_url = f"sqlite+aiosqlite:///{source.as_posix()}"
+    destination_url = f"sqlite+aiosqlite:///{destination.as_posix()}"
+
+    await dispose_db()
+    await init_db(source_url)
+    async with session_scope(source_url) as session:
+        article = PlatformArticle(
+            task_id=101,
+            platform="xiaoheihe",
+            external_article_id="migrated-post",
+            title="迁移文章",
+            status=PlatformArticleStatus.MAPPED,
+        )
+        session.add(article)
+        await session.flush()
+        session.add(
+            MetricSnapshot(
+                article_id=article.id,
+                read_count=88,
+                snapshot_time=datetime(2026, 8, 12, 4, 0, tzinfo=timezone.utc),
+            )
+        )
+        session.add(
+            CollectionRun(
+                platform="xiaoheihe",
+                status=CollectionRunStatus.SUCCESS,
+                articles_processed=1,
+            )
+        )
+    await dispose_db()
+
+    await init_db(destination_url)
+    await dispose_db()
+    first = migrate(source, destination)
+    second = migrate(source, destination)
+
+    assert first == {
+        "platform_articles": 1,
+        "metric_snapshots": 1,
+        "collection_runs": 1,
+    }
+    assert second == {
+        "platform_articles": 0,
+        "metric_snapshots": 0,
+        "collection_runs": 0,
+    }
+
+    source_connection = sqlite3.connect(source)
+    destination_connection = sqlite3.connect(destination)
+    try:
+        assert source_connection.execute(
+            "SELECT COUNT(*) FROM platform_articles"
+        ).fetchone()[0] == 1
+        assert destination_connection.execute(
+            "SELECT title FROM platform_articles"
+        ).fetchone()[0] == "迁移文章"
+        assert destination_connection.execute(
+            "SELECT read_count FROM metric_snapshots"
+        ).fetchone()[0] == 88
+    finally:
+        source_connection.close()
+        destination_connection.close()
+
+
+@pytest.mark.asyncio
+async def test_legacy_table_migration_rejects_different_existing_row(tmp_path):
+    source = tmp_path / "legacy.db"
+    destination = tmp_path / "article_mvp.db"
+    for path, title in ((source, "源文章"), (destination, "目标文章")):
+        url = f"sqlite+aiosqlite:///{path.as_posix()}"
+        await dispose_db()
+        await init_db(url)
+        async with session_scope(url) as session:
+            session.add(
+                PlatformArticle(
+                    id=1,
+                    task_id=1,
+                    platform="xiaoheihe",
+                    external_article_id="same-id",
+                    title=title,
+                    status=PlatformArticleStatus.MAPPED,
+                )
+            )
+        await dispose_db()
+
+    with pytest.raises(RuntimeError, match="内容不同"):
+        migrate(source, destination)
+
+    source_connection = sqlite3.connect(source)
+    try:
+        assert source_connection.execute(
+            "SELECT title FROM platform_articles WHERE id=1"
+        ).fetchone()[0] == "源文章"
+    finally:
+        source_connection.close()
+
+
 def test_dashboard_shows_safe_summary_without_raw_payloads(tmp_path):
     url = database_url(tmp_path)
     runtime = AsyncRuntime()
 
-    def current_workflow_provider():
-        return {
-            "available": True,
-            "summary": {
-                "total_articles": 19,
-                "total_tasks": 24,
-                "xiaoheihe_tasks": 10,
-                "saved_drafts": 17,
-            },
-            "tasks": [
-                {
-                    "id": 7,
-                    "platform": "xiaoheihe",
-                    "status": "completed",
-                    "article_title": "现役任务",
-                    "title_used": "安全标题",
-                    "created_at": "2026-08-11T09:00:00",
-                }
-            ],
-        }
-
     app = create_dashboard_app(
         database_url=url,
         runtime=runtime,
-        current_workflow_provider=current_workflow_provider,
     )
 
     async def seed_dashboard() -> None:
@@ -669,8 +774,7 @@ def test_dashboard_shows_safe_summary_without_raw_payloads(tmp_path):
         assert payload["articles"][0]["latest_metric"]["share_count"] == 5
         assert payload["articles"][0]["latest_metric"]["revenue"] == "1.2500"
         assert payload["contract"]["collector_enabled"] is False
-        assert payload["current_workflow"]["summary"]["total_tasks"] == 24
-        assert payload["current_workflow"]["tasks"][0]["article_title"] == "现役任务"
+        assert "current_workflow" not in payload
         serialized = api_response.get_data(as_text=True)
         assert "must-not-be-visible" not in serialized
         assert "raw_data" not in serialized

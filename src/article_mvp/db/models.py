@@ -70,6 +70,7 @@ class PlatformArticle(Base):
             "platform",
             unique=True,
         ),
+        Index("ux_platform_articles_event_id", "event_id", unique=True),
         Index("ix_platform_articles_platform_status", "platform", "status"),
     )
 
@@ -77,6 +78,7 @@ class PlatformArticle(Base):
     task_id: Mapped[int] = mapped_column(Integer, nullable=False)
     platform: Mapped[str] = mapped_column(String(32), nullable=False)
     external_article_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    event_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
     title: Mapped[str | None] = mapped_column(String(255), nullable=True)
     platform_url: Mapped[str | None] = mapped_column(String(1024), nullable=True)
     published_at: Mapped[datetime | None] = mapped_column(

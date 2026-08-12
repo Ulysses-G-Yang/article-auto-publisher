@@ -16,6 +16,7 @@ from article_mvp.db.database import dispose_db
 from article_mvp.platforms.locks import PlatformFileLock
 from article_mvp.platforms.xiaoheihe.collector import XiaoheiheCollector
 from article_mvp.platforms.xiaoheihe.schemas import ProbeRecord
+from article_mvp.runtime_paths import runtime_data_dir
 from article_mvp.security import payload_shape, sanitize_url
 from article_mvp.services.collect_service import CollectService
 
@@ -96,8 +97,7 @@ def parse_args() -> argparse.Namespace:
 async def _main() -> None:
     args = parse_args()
     config = load_platform_config()
-    project_root = Path(__file__).resolve().parents[4]
-    data_dir = Path(os.getenv("ARTICLE_MVP_DATA_DIR", project_root / "data"))
+    data_dir = runtime_data_dir()
     profile_dir = data_dir / "profiles" / "xiaoheihe"
     output_dir = data_dir / "probes"
     output_dir.mkdir(parents=True, exist_ok=True)

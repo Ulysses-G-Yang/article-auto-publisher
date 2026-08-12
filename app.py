@@ -45,6 +45,21 @@ def clear_platform_cookies(platform: str) -> bool:
     if not os.path.isdir(profile_base):
         return False
 
+    # 旧账号按钮也必须与登录、发布和新账号域共享同一租约，不能在另一个
+    # 流程正使用 Profile 时删除 Cookie 数据库。
+    from core.platform_guard import release as release_platform
+    from core.platform_guard import try_acquire as try_acquire_platform
+
+    if not try_acquire_platform(platform):
+        logger.warning("平台账号正在使用，拒绝清理 Cookie: platform={}", platform)
+        return False
+
+    singleton_names = ("SingletonLock", "SingletonCookie", "SingletonSocket")
+    if any(os.path.exists(os.path.join(profile_base, name)) for name in singleton_names):
+        logger.warning("Chrome 正在占用 Profile，拒绝清理 Cookie: platform={}", platform)
+        release_platform(platform)
+        return False
+
     cookie_paths = [
         os.path.join(profile_base, "Default", "Network", "Cookies"),
         os.path.join(profile_base, "Default", "Network", "Cookies-wal"),
@@ -56,24 +71,26 @@ def clear_platform_cookies(platform: str) -> bool:
         os.path.join(profile_base, "Default", "Login Data"),
     ]
 
-    cleared = False
-    for path in cookie_paths:
-        try:
-            target = os.path.realpath(path)
-            if os.path.commonpath([profile_base, target]) != profile_base:
-                logger.error("拒绝清理越界的 Cookie 路径: platform={}, path={}", platform, path)
-                continue
-            if os.path.isfile(path):
-                os.remove(path)
-                cleared = True
-            elif os.path.isdir(path):
-                shutil.rmtree(path)
-                cleared = True
-        except Exception as exc:
-            # Chrome 正在占用文件时可能清理失败；记录原因但继续尝试其他文件。
-            logger.warning("清理 {} Cookie 文件失败: path={}, error={}", platform, path, exc)
-
-    return cleared
+    try:
+        cleared = False
+        for path in cookie_paths:
+            try:
+                target = os.path.realpath(path)
+                if os.path.commonpath([profile_base, target]) != profile_base:
+                    logger.error("拒绝清理越界的 Cookie 路径: platform={}, path={}", platform, path)
+                    continue
+                if os.path.isfile(path):
+                    os.remove(path)
+                    cleared = True
+                elif os.path.isdir(path):
+                    shutil.rmtree(path)
+                    cleared = True
+            except Exception as exc:
+                # Chrome 正在占用文件时可能清理失败；记录原因但继续尝试其他文件。
+                logger.warning("清理 {} Cookie 文件失败: path={}, error={}", platform, path, exc)
+        return cleared
+    finally:
+        release_platform(platform)
 
 
 def kill_zombie_chrome():

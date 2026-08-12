@@ -111,10 +111,26 @@ PATCH 和 PUT 成功后 `revision` 增加一。修订号不匹配返回：
 `PUBLISH_CONFIRMATION_REQUIRED`、`confirmation_token` 与 `expires_at`；目标、
 账号、模式或冻结内容变化后令牌失效。一个目标失败不会阻止其他目标创建执行单。
 
+### 执行状态与中断恢复
+
+- `CREATING`：服务端正在为目标原子创建或关联账号执行单。
+- `QUEUED`：执行单已经持久化但尚未开始；服务重启后可以安全重新调度。
+- `RUNNING`：平台操作已经开始。
+- `DRAFT_SAVED` / `PUBLISHED`：平台结果已经确认。
+- `PARTIAL_FAIL` / `FAILED` / `BLOCKED`：该目标未完整成功，不影响其他目标。
+- `RESULT_UNKNOWN`：进程在平台操作期间中断，平台可能已经产生副作用；必须人工核对，
+  系统禁止自动重试。
+
+目标先通过数据库租约进行原子领取，再以稳定 `request_key` 幂等创建账号执行单。
+相同请求重复到达会返回原执行单；请求内容、账号、模式、操作者或冻结内容不一致时
+返回冲突，不会借用另一请求的结果。启动恢复只重新调度 `QUEUED`；遗留的
+`RUNNING` 会转换为 `RESULT_UNKNOWN`。
+
 ## 兼容边界
 
 - `/delivery/new` 使用 302/308 重定向到 `/upload`，仅原样保留 `draft_id`。
 - `/api/upload` 默认返回 `410 LEGACY_UPLOAD_QUEUE_DISABLED`，环境变量
   `LEGACY_UPLOAD_QUEUE_ENABLED=true` 才恢复旧的“上传即入队”。
+- 开关关闭时旧队列 worker 不启动，也不会暂停历史任务或追加历史任务日志。
 - `/api/delivery-operations` 暂留兼容；新工作台只依赖计划接口。
 - 自动化测试不执行真实平台草稿或公开发布。

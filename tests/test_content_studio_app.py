@@ -25,6 +25,9 @@ def test_create_app_mounts_studio_without_touching_legacy_queue(
     flask_app = app_module.create_app()
     client = flask_app.test_client()
 
+    # 新工作台默认不能隐式启动旧 worker；否则启动迁移会改写历史任务与日志。
+    assert app_module.start_queue_worker() is False
+
     assert client.get("/upload").status_code == 200
     redirect = client.get("/delivery/new?draft_id=abc", follow_redirects=False)
     assert redirect.status_code == 302

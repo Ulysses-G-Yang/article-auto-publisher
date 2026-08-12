@@ -1,216 +1,120 @@
 {% extends "base.html" %}
-{% block title %}上传文章 - 自动化文章发布工具{% endblock %}
-{% block header_title %}创建文章{% endblock %}
+{% block title %}创作与投递 - ArticleOps{% endblock %}
+{% block header_title %}创作与投递{% endblock %}
+{% block extra_head %}<link rel="stylesheet" href="{{ url_for('static', filename='css/content-studio.css') }}">{% endblock %}
+
 {% block content %}
-<div x-data="uploader" class="container" style="max-width: 800px;">
-    <div class="page-heading"><div><h1>创建文章</h1><p>上传 Word 文档并选择目标平台，后续状态可在发布概览中追踪。</p></div></div>
+<div id="content-studio"
+     class="studio-shell"
+     data-drafts-url="/api/content-drafts"
+     data-draft-url-template="/api/content-drafts/{draft_id}"
+     data-docx-url="/api/content-drafts/import-docx"
+     data-legacy-url="/api/content-sources/legacy-articles"
+     data-from-legacy-url-template="/api/content-drafts/from-legacy/{article_id}"
+     data-assets-url-template="/api/content-drafts/{draft_id}/assets"
+     data-targets-url-template="/api/content-drafts/{draft_id}/targets"
+     data-plan-url-template="/api/content-drafts/{draft_id}/delivery-plans"
+     data-plan-detail-url-template="/api/delivery-plans/{plan_id}"
+     data-plan-execute-url-template="/api/delivery-plans/{plan_id}/execute"
+     data-accounts-url-template="/api/platforms/{platform}/accounts?usable=true"
+     data-session-policy-url-template="/api/accounts/{account_id}/session-policy">
+    <nav aria-label="面包屑导航"><ol class="breadcrumb"><li class="breadcrumb-item"><a href="/">首页</a></li><li class="breadcrumb-item active" aria-current="page">创作与投递</li></ol></nav>
 
-    <div class="card mb-4">
-        <div class="card-body">
-            <h5 class="card-title">选择 Word 文档</h5>
-            <p class="text-muted small">支持 .docx 格式，可同时选择多个文件</p>
+    <div class="page-heading studio-heading">
+        <div><h1>创作与投递</h1><p>从内容草稿到多账号投递，全程使用同一份可恢复内容。</p></div>
+        <div id="save-indicator" class="save-indicator is-loading" role="status" aria-live="polite">
+            <span class="save-indicator-dot" aria-hidden="true"></span><span id="save-indicator-text">正在读取草稿</span>
+        </div>
+    </div>
 
-            <!-- 拖拽上传区域 -->
-            <div class="upload-zone border rounded-3 p-5 text-center mb-3"
-                 :class="{ 'border-primary bg-light': dragging }"
-                 @dragover.prevent="dragging = true"
-                 @dragleave.prevent="dragging = false"
-                 @drop.prevent="handleDrop($event)">
-                <i class="bi bi-file-earmark-word fs-1 text-muted mb-3 d-block"></i>
-                <p class="mb-2">拖拽 Word 文档到此处，或点击选择</p>
-                <input type="file" id="fileInput" accept=".docx" multiple
-                       @change="handleFiles($event)" class="d-none">
-                <button type="button" class="btn btn-primary" @click="$refs.fileInput.click()">
-                    <i class="bi bi-folder2-open me-1"></i>选择文件
-                </button>
-                <input type="file" x-ref="fileInput" accept=".docx" multiple
-                       @change="handleFiles($event)" class="d-none">
-            </div>
+    <ol class="studio-progress" aria-label="创作与投递流程">
+        <li class="active"><span>1</span><div><strong>内容</strong><small>草稿与图文块</small></div></li>
+        <li><span>2</span><div><strong>投递目标</strong><small>平台与账号</small></div></li>
+        <li><span>3</span><div><strong>核对执行</strong><small>冻结版本后执行</small></div></li>
+    </ol>
 
-            <!-- 已选文件列表 -->
-            <template x-if="files.length > 0">
-                <div class="mt-3">
-                    <h6>已选文件 (<span x-text="files.length"></span>)</h6>
-                    <div class="list-group">
-                        <template x-for="(f, i) in files" :key="i">
-                            <div class="list-group-item d-flex justify-content-between align-items-center">
-                                <div>
-                                    <i class="bi bi-file-earmark-word text-primary me-2"></i>
-                                    <span x-text="f.name"></span>
-                                    <small class="text-muted ms-2" x-text="formatSize(f.size)"></small>
-                                </div>
-                                <button type="button" class="btn btn-sm btn-outline-danger" @click="removeFile(i)" aria-label="移除所选文件">
-                                    <i class="bi bi-x-lg"></i>
-                                </button>
-                            </div>
-                        </template>
+    <div id="studio-loading" class="card studio-loading" role="status"><div class="card-body"><span class="spinner-border spinner-border-sm" aria-hidden="true"></span><span>正在打开最近草稿…</span></div></div>
+    <div id="studio-fatal" class="alert alert-danger d-none" role="alert"></div>
+
+    <div id="studio-workspace" class="studio-layout d-none">
+        <div class="studio-main">
+            <section class="card studio-card" aria-labelledby="content-heading">
+                <header class="card-header studio-card-header">
+                    <div><span class="section-kicker">CONTENT</span><h2 id="content-heading">编辑内容</h2></div>
+                    <div class="d-flex flex-wrap gap-2">
+                        <button id="open-source-library" class="btn btn-outline-secondary btn-sm" type="button" data-coreui-toggle="modal" data-coreui-target="#source-library-modal"><i class="cil-folder-open me-1" aria-hidden="true"></i>更换内容源</button>
+                        <button id="add-text-block" class="btn btn-outline-primary btn-sm" type="button"><i class="cil-paragraph me-1" aria-hidden="true"></i>文字块</button>
+                        <label class="btn btn-outline-primary btn-sm mb-0" for="asset-upload"><i class="cil-image-plus me-1" aria-hidden="true"></i>图片</label>
+                        <input id="asset-upload" class="visually-hidden" type="file" accept="image/png,image/jpeg,image/gif,image/webp" multiple>
                     </div>
+                </header>
+                <div class="card-body">
+                    <div class="draft-meta-row">
+                        <span id="draft-source-badge" class="badge text-bg-light border">草稿</span>
+                        <span id="draft-revision" class="text-body-secondary small">修订 -</span>
+                        <span id="draft-updated-at" class="text-body-secondary small"></span>
+                    </div>
+                    <div class="mb-4">
+                        <label class="form-label fw-semibold" for="draft-title">文章标题 <span class="text-danger" aria-hidden="true">*</span></label>
+                        <input id="draft-title" class="form-control form-control-lg" type="text" maxlength="200" autocomplete="off" placeholder="输入一个清晰的文章标题">
+                        <div id="draft-title-error" class="invalid-feedback"></div>
+                    </div>
+                    <div class="blocks-heading"><div><strong>正文图文块</strong><small>拖动或使用上下按钮调整顺序</small></div><span id="block-count" class="badge text-bg-light border">0 个块</span></div>
+                    <div id="content-blocks" class="content-blocks" aria-live="polite"></div>
+                    <div id="blocks-empty" class="studio-empty d-none"><i class="cil-notes" aria-hidden="true"></i><strong>正文还是空的</strong><span>添加文字或图片，也可从 DOCX/历史文章导入。</span><button class="btn btn-sm btn-primary" type="button" data-action="empty-add-text">添加第一个文字块</button></div>
+                    <div id="content-error" class="alert alert-danger d-none mt-3 mb-0" role="alert"></div>
                 </div>
-            </template>
-        </div>
-    </div>
+            </section>
 
-    <!-- 平台选择 -->
-    <div class="card mb-4">
-        <div class="card-body">
-            <h5 class="card-title">目标平台</h5>
-            <p class="text-muted small">选择要发布到的平台</p>
-            <div class="d-flex gap-3">
-                <label class="d-flex align-items-center">
-                    <input type="checkbox" x-model="platforms.zol" class="form-check-input me-2" checked>
-                    <span class="badge bg-info fs-6">中关村在线 (ZOL)</span>
-                </label>
-                <label class="d-flex align-items-center">
-                    <input type="checkbox" x-model="platforms.xiaoheihe" class="form-check-input me-2" checked>
-                    <span class="badge bg-purple fs-6">小黑盒</span>
-                </label>
-            </div>
-        </div>
-    </div>
-
-    <!-- 上传按钮 -->
-    <div class="d-flex gap-2 mb-4">
-        <button type="button" class="btn btn-primary btn-lg flex-grow-1" @click="startUpload"
-                :disabled="uploading || files.length === 0 || (!platforms.zol && !platforms.xiaoheihe)">
-            <template x-if="!uploading">
-                <span><i class="bi bi-rocket-takeoff me-1"></i>开始处理并发布</span>
-            </template>
-            <template x-if="uploading">
-                <span>
-                    <span class="spinner-border spinner-border-sm me-2"></span>
-                    处理中...
-                </span>
-            </template>
-        </button>
-        <button type="button" class="btn btn-outline-secondary" @click="files = []; results = [];">
-            <i class="bi bi-trash me-1"></i>清空
-        </button>
-    </div>
-
-    <!-- 处理进度 -->
-    <div class="progress mb-3" x-show="uploading">
-        <div class="progress-bar progress-bar-striped progress-bar-animated"
-             :style="'width: ' + progress + '%'" x-text="progress + '%'"></div>
-    </div>
-
-    <!-- 处理结果 -->
-    <template x-if="results.length > 0">
-        <div class="card">
-            <div class="card-header">
-                <h5 class="mb-0">处理结果</h5>
-            </div>
-            <div class="list-group list-group-flush">
-                <template x-for="r in results" :key="r.filename">
-                    <div class="list-group-item">
-                        <div class="d-flex justify-content-between align-items-start">
-                            <div>
-                                <h6 class="mb-1">
-                                    <template x-if="r.status === 'ok'">
-                                        <i class="bi bi-check-circle-fill text-success me-1"></i>
-                                    </template>
-                                    <template x-if="r.status === 'error'">
-                                        <i class="bi bi-x-circle-fill text-danger me-1"></i>
-                                    </template>
-                                    <span x-text="r.filename"></span>
-                                </h6>
-                                <template x-if="r.status === 'ok'">
-                                    <div class="small text-muted">
-                                        <span class="me-2">标题: <span x-text="r.title"></span></span>
-                                        <span class="me-2">字数: <span x-text="r.char_count"></span></span>
-                                        <span class="me-2">图片: <span x-text="r.image_count"></span></span>
-                                        <div class="mt-1">
-                                            <span class="badge bg-secondary me-1">ZOL: <span x-text="r.topic_zol || '未匹配'"></span></span>
-                                            <span class="badge bg-secondary">小黑盒: <span x-text="r.topic_xiaoheihe || '未匹配'"></span></span>
-                                        </div>
-                                        <div class="mt-1">
-                                            关键词:
-                                            <template x-for="kw in r.keywords" :key="kw">
-                                                <span class="badge bg-light text-dark me-1" x-text="kw"></span>
-                                            </template>
-                                        </div>
-                                        <div class="mt-1" x-show="r.tasks">
-                                            任务:
-                                            <template x-for="t in r.tasks" :key="t.task_id">
-                                                <a :href="'/task/' + t.task_id" class="badge bg-primary text-decoration-none me-1"
-                                                   x-text="platformLabel(t.platform) + ' #' + t.task_id"></a>
-                                            </template>
-                                        </div>
-                                    </div>
-                                </template>
-                                <template x-if="r.status === 'error'">
-                                    <p class="text-danger small mb-0" x-text="r.error"></p>
-                                </template>
-                            </div>
-                        </div>
+            <section class="card studio-card" aria-labelledby="targets-heading">
+                <header class="card-header studio-card-header"><div><span class="section-kicker">DESTINATIONS</span><h2 id="targets-heading">投递目标</h2></div><span id="target-count" class="badge text-bg-primary">0 个目标</span></header>
+                <div class="card-body">
+                    <p class="section-intro">先选平台，再选择该平台返回的真实账号昵称。系统不会自动选择账号。</p>
+                    <div class="target-builder">
+                        <fieldset class="target-builder-field platform-field"><legend>平台</legend><div class="platform-segment" role="radiogroup" aria-label="目标平台">
+                            <input class="btn-check" type="radio" name="target-platform" id="target-platform-xiaoheihe" value="xiaoheihe" autocomplete="off"><label class="btn" for="target-platform-xiaoheihe"><i class="cil-gamepad" aria-hidden="true"></i><span>小黑盒</span></label>
+                            <input class="btn-check" type="radio" name="target-platform" id="target-platform-zol" value="zol" autocomplete="off"><label class="btn" for="target-platform-zol"><i class="cil-screen-desktop" aria-hidden="true"></i><span>中关村在线</span></label>
+                        </div></fieldset>
+                        <div class="target-builder-field account-field"><label for="target-account">账号</label><select id="target-account" class="form-select" disabled><option value="">请先选择平台</option></select><small id="target-account-help">仅有 VALID 登录态可用</small></div>
+                        <fieldset class="target-builder-field mode-field"><legend>投递模式</legend><div class="mode-segment" role="radiogroup" aria-label="投递模式"><input class="btn-check" type="radio" name="target-mode" id="target-mode-draft" value="DRAFT" checked><label class="btn" for="target-mode-draft">平台草稿</label><input class="btn-check" type="radio" name="target-mode" id="target-mode-publish" value="PUBLISH"><label class="btn" for="target-mode-publish">公开发布</label></div></fieldset>
+                        <div class="target-builder-field policy-field"><span class="field-label">会话策略</span><div class="session-switch"><div><strong>保持登录态</strong><small>不代表当前已登录</small></div><div class="form-check form-switch m-0"><input id="target-persist-login" class="form-check-input" type="checkbox" role="switch" disabled aria-label="保持所选账号登录态"></div></div></div>
+                        <button id="add-target" class="btn btn-primary target-add" type="button"><i class="cil-plus me-1" aria-hidden="true"></i>添加目标</button>
                     </div>
-                </template>
-            </div>
+                    <div id="target-builder-error" class="alert alert-danger d-none mt-3" role="alert"></div>
+                    <div id="targets-list" class="targets-list"></div>
+                    <div id="targets-empty" class="studio-empty compact"><i class="cil-paper-plane" aria-hidden="true"></i><strong>尚未添加投递目标</strong><span>同一份内容可添加多个“平台 + 账号 + 模式”目标。</span></div>
+                </div>
+            </section>
+
+            <section id="execution-section" class="card studio-card" aria-labelledby="execution-heading">
+                <header class="card-header studio-card-header"><div><span class="section-kicker">EXECUTION</span><h2 id="execution-heading">核对与执行</h2></div><span class="badge text-bg-light border"><i class="cil-lock-locked me-1" aria-hidden="true"></i>执行前冻结版本</span></header>
+                <div class="card-body">
+                    <div id="validation-summary" class="alert alert-warning d-none" role="alert" tabindex="-1"><strong>还需完成以下条件：</strong><ul id="validation-list" class="mb-0 mt-2"></ul></div>
+                    <div class="execute-bar"><div><strong>准备生成投递计划</strong><p>内容将固化为不可变版本；后续编辑不会静默改动已生成的计划。</p></div><button id="create-plan" class="btn btn-primary btn-lg" type="button"><i class="cil-clipboard me-2" aria-hidden="true"></i>检查并继续</button></div>
+                    <div id="execution-error" class="alert alert-danger d-none mt-3 mb-0" role="alert"></div>
+                    <div id="plan-result" class="plan-result d-none mt-4" aria-live="polite"><div class="plan-result-head"><div><span class="section-kicker">DELIVERY PLAN</span><h3 id="plan-id">投递计划</h3></div><span id="plan-status" class="badge text-bg-info">READY</span></div><div id="plan-targets" class="plan-targets"></div></div>
+                </div>
+            </section>
         </div>
-    </template>
+
+        <aside class="studio-side" aria-label="草稿与安全信息">
+            <section class="card side-card"><div class="card-body"><span class="section-kicker">CURRENT DRAFT</span><h2 id="side-draft-title">未命名草稿</h2><dl class="draft-facts"><div><dt>来源</dt><dd id="side-draft-source">—</dd></div><div><dt>图文块</dt><dd id="side-block-count">0</dd></div><div><dt>投递目标</dt><dd id="side-target-count">0</dd></div><div><dt>修订</dt><dd id="side-revision">—</dd></div></dl><button class="btn btn-outline-secondary w-100" type="button" data-coreui-toggle="modal" data-coreui-target="#source-library-modal">打开内容库</button></div></section>
+            <section class="card side-card safety-card"><div class="card-body"><div class="safety-icon"><i class="cil-shield-alt" aria-hidden="true"></i></div><h2>发布安全门</h2><ul><li>平台草稿目标使用一次批量摘要确认</li><li>公开发布目标逐条二次确认</li><li>内容、账号或模式变化会使令牌失效</li><li>“保持登录态”只是会话持久化策略</li></ul></div></section>
+        </aside>
+    </div>
+
+    <div class="modal fade" id="source-library-modal" tabindex="-1" aria-labelledby="source-library-title" aria-hidden="true"><div class="modal-dialog modal-xl modal-dialog-scrollable"><div class="modal-content"><div class="modal-header"><div><span class="section-kicker">CONTENT LIBRARY</span><h2 id="source-library-title" class="modal-title">选择内容源</h2></div><button class="btn-close" type="button" data-coreui-dismiss="modal" aria-label="关闭"></button></div><div class="modal-body">
+        <div class="source-actions"><button id="new-blank-draft" class="source-action" type="button"><i class="cil-file" aria-hidden="true"></i><span><strong>新建空白文章</strong><small>从标题和第一个文字块开始</small></span></button><label class="source-action" for="docx-import"><i class="cil-cloud-upload" aria-hidden="true"></i><span><strong>导入 DOCX</strong><small>转换为统一图文块，不会立即发布</small></span></label><input id="docx-import" class="visually-hidden" type="file" accept=".docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document"></div>
+        <ul class="nav nav-underline source-tabs" role="tablist"><li class="nav-item"><button class="nav-link active" type="button" data-coreui-toggle="tab" data-coreui-target="#draft-library-pane" role="tab">系统草稿</button></li><li class="nav-item"><button id="legacy-tab" class="nav-link" type="button" data-coreui-toggle="tab" data-coreui-target="#legacy-library-pane" role="tab">历史文章（只读）</button></li></ul>
+        <div class="tab-content"><div id="draft-library-pane" class="tab-pane fade show active" role="tabpanel"><div id="draft-library-list" class="library-list"></div><div id="draft-library-empty" class="studio-empty d-none"><strong>暂无系统草稿</strong></div></div><div id="legacy-library-pane" class="tab-pane fade" role="tabpanel"><div class="alert alert-info">历史文章保持只读；点击“继续编辑”会复制为新草稿，不修改原文章、旧任务和日志。</div><div id="legacy-library-loading" class="studio-loading-inline d-none"><span class="spinner-border spinner-border-sm"></span>正在读取历史文章…</div><div id="legacy-library-list" class="library-list"></div><div id="legacy-library-error" class="alert alert-danger d-none"></div></div></div>
+    </div></div></div></div>
+
+    <div class="modal fade" id="conflict-modal" tabindex="-1" data-coreui-backdrop="static" aria-labelledby="conflict-title" aria-hidden="true"><div class="modal-dialog"><div class="modal-content"><div class="modal-header"><h2 id="conflict-title" class="modal-title fs-5">草稿发生修订冲突</h2></div><div class="modal-body"><p>另一个页面已保存了更新版本。为避免静默覆盖，请选择如何处理当前本地内容。</p><dl class="conflict-facts"><div><dt>当前本地修订</dt><dd id="conflict-local-revision">—</dd></div><div><dt>服务端修订</dt><dd id="conflict-server-revision">—</dd></div></dl></div><div class="modal-footer"><button id="conflict-use-server" class="btn btn-outline-secondary" type="button">采用服务端版本</button><button id="conflict-save-copy" class="btn btn-primary" type="button">将本地内容另存为副本</button></div></div></div></div>
+
+    <div class="modal fade" id="plan-review-modal" tabindex="-1" aria-labelledby="plan-review-title" aria-hidden="true"><div class="modal-dialog modal-lg modal-dialog-scrollable"><div class="modal-content"><div class="modal-header"><div><span class="section-kicker">FROZEN VERSION</span><h2 id="plan-review-title" class="modal-title">核对投递计划</h2></div><button class="btn-close" type="button" data-coreui-dismiss="modal" aria-label="关闭"></button></div><div class="modal-body"><div id="plan-review-summary" class="plan-review-summary"></div><div id="draft-confirmation-row" class="form-check confirmation-check d-none"><input id="draft-batch-confirmed" class="form-check-input" type="checkbox"><label class="form-check-label" for="draft-batch-confirmed">我已核对摘要，确认将这份内容保存到上述平台草稿目标</label></div><div id="plan-review-error" class="alert alert-danger d-none mt-3 mb-0"></div></div><div class="modal-footer"><button class="btn btn-outline-secondary" type="button" data-coreui-dismiss="modal">返回修改</button><button id="execute-plan" class="btn btn-primary" type="button">确认并创建执行单</button></div></div></div></div>
+
+    <div class="modal fade" id="publish-confirm-modal" tabindex="-1" aria-labelledby="publish-confirm-title" aria-hidden="true"><div class="modal-dialog"><div class="modal-content border-danger"><div class="modal-header"><div><span class="badge text-bg-danger mb-2">高风险操作</span><h2 id="publish-confirm-title" class="modal-title fs-5">逐条确认公开发布</h2></div><button class="btn-close" type="button" data-coreui-dismiss="modal" aria-label="关闭"></button></div><div class="modal-body"><p>该目标会将内容公开发布到平台，不是保存草稿。</p><div id="publish-target-summary" class="publish-target-summary"></div><p id="publish-token-expiry" class="small text-body-secondary mb-0"></p><div id="publish-confirm-error" class="alert alert-danger d-none mt-3"></div></div><div class="modal-footer"><button class="btn btn-outline-secondary" type="button" data-coreui-dismiss="modal">取消</button><button id="confirm-publish-target" class="btn btn-danger" type="button">我已核对，确认公开发布</button></div></div></div></div>
 </div>
-
-<script>
-document.addEventListener('alpine:init', () => {
-    Alpine.data('uploader', () => ({
-        files: [],
-        platforms: { zol: true, xiaoheihe: true },
-        uploading: false,
-        progress: 0,
-        results: [],
-        dragging: false,
-
-        handleFiles(event) {
-            const newFiles = Array.from(event.target.files);
-            this.files = [...this.files, ...newFiles];
-            event.target.value = '';
-        },
-
-        handleDrop(event) {
-            this.dragging = false;
-            const newFiles = Array.from(event.dataTransfer.files).filter(f => f.name.endsWith('.docx'));
-            this.files = [...this.files, ...newFiles];
-        },
-
-        removeFile(index) {
-            this.files.splice(index, 1);
-        },
-
-        formatSize(bytes) {
-            return bytes > 1024 * 1024
-                ? (bytes / (1024 * 1024)).toFixed(1) + ' MB'
-                : (bytes / 1024).toFixed(1) + ' KB';
-        },
-
-        platformLabel(p) {
-            return { zol: '中关村在线', xiaoheihe: '小黑盒' }[p] || p;
-        },
-
-        async startUpload() {
-            if (this.files.length === 0) return;
-            this.uploading = true;
-            this.progress = 0;
-            this.results = [];
-
-            const formData = new FormData();
-            this.files.forEach(f => formData.append('files', f));
-
-            const selectedPlatforms = [];
-            if (this.platforms.zol) selectedPlatforms.push('zol');
-            if (this.platforms.xiaoheihe) selectedPlatforms.push('xiaoheihe');
-            selectedPlatforms.forEach(p => formData.append('platforms', p));
-
-            try {
-                const res = await fetch('/api/upload', { method: 'POST', body: formData });
-                const data = await res.json();
-                this.progress = 100;
-                this.results = data.results || [];
-            } catch (e) {
-                alert('上传失败: ' + e.message);
-            } finally {
-                this.uploading = false;
-            }
-        },
-    }));
-});
-</script>
 {% endblock %}
+
+{% block extra_scripts %}<script src="{{ url_for('static', filename='js/content-studio.js') }}"></script>{% endblock %}

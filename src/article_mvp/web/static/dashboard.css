@@ -78,8 +78,7 @@ input {
   flex: 0 0 36px;
   place-items: center;
   border-radius: 9px;
-  background: linear-gradient(135deg, #857dec, #5856d6);
-  box-shadow: 0 4px 14px rgba(88, 86, 214, .42);
+  background: var(--app-primary);
   font-size: .78rem;
   font-weight: 800;
   letter-spacing: .04em;

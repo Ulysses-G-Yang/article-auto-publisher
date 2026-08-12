@@ -437,6 +437,7 @@ class ContentStudioService:
                 "title": version.title,
                 "blocks": version.blocks_json,
                 "content_hash": version.content_hash,
+                "version_id": version.version_id,
                 "status": plan.status,
             }, [public_plan_target(target) for target in targets]
 
@@ -503,14 +504,12 @@ class ContentStudioService:
 
     async def resolve_delivery_payload(
         self,
-        content_hash: str,
+        version_id: str,
     ) -> tuple[list[dict], list[dict]]:
         """按不可变版本引用解析图文，账号域不保存内容或本机路径副本。"""
 
         async with self.database.session() as session:
-            version = await session.scalar(
-                select(ContentVersion).where(ContentVersion.content_hash == content_hash)
-            )
+            version = await session.get(ContentVersion, version_id)
             if version is None:
                 raise DraftValidationError("投递执行单引用的内容版本不存在")
             draft_id = version.draft_id

@@ -499,7 +499,8 @@ def test_plan_requires_batch_draft_and_per_publish_confirmation(tmp_path: Path) 
     assert public_target["status"] == "CONFIRMATION_REQUIRED"
     assert public_target["confirmation_token"] == "per-target-token"
     assert delivery.calls[0][1]["frozen_content_hash"] == plan["content_version"]
-    assert delivery.calls[0][1]["content_reference"] == plan["content_version"]
+    assert delivery.calls[0][1]["content_reference"]
+    assert delivery.calls[0][1]["content_reference"] != plan["content_version"]
     assert "content_blocks" not in delivery.calls[0][1]
     assert "images" not in delivery.calls[0][1]
 

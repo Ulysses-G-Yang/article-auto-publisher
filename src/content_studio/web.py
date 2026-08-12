@@ -149,7 +149,7 @@ class ContentStudioRuntimeState:
                     request_payload,
                     LOCAL_WEB_CONTEXT,
                     frozen_content_hash=context["content_hash"],
-                    content_reference=context["content_hash"],
+                    content_reference=context["version_id"],
                     confirmation_scope=target["target_id"],
                 )
             except ConfirmationRequiredError as exc:
@@ -363,6 +363,9 @@ def create_content_studio_blueprint(
             target.get("confirmation_required") and target.get("confirmation_token")
             for target in result["targets"]
         )
+        if has_confirmation:
+            result["error"] = "PUBLISH_CONFIRMATION_REQUIRED"
+            result["message"] = "一个或多个公开发布目标需要逐条确认"
         return jsonify(result), 428 if has_confirmation else 202
 
     @blueprint.errorhandler(DraftRevisionConflictError)

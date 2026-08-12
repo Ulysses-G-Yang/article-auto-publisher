@@ -9,6 +9,7 @@
     <link rel="stylesheet" href="/data-center/assets/vendor/coreui-icons/css/free.min.css">
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.css">
     <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+    {% block extra_head %}{% endblock %}
     <script src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js" defer></script>
 </head>
 <body>
@@ -29,6 +30,9 @@
             </a>
             <a class="nav-link {% if request.path == '/upload' %}active{% endif %}" href="/upload" {% if request.path == '/upload' %}aria-current="page"{% endif %}>
                 <i class="nav-icon cil-cloud-upload" aria-hidden="true"></i><span>创建文章</span>
+            </a>
+            <a class="nav-link {% if request.path.startswith('/delivery/') %}active{% endif %}" href="/delivery/new" {% if request.path.startswith('/delivery/') %}aria-current="page"{% endif %}>
+                <i class="nav-icon cil-send" aria-hidden="true"></i><span>内容投递</span>
             </a>
             <a class="nav-link {% if request.path == '/accounts' %}active{% endif %}" href="/accounts" {% if request.path == '/accounts' %}aria-current="page"{% endif %}>
                 <i class="nav-icon cil-user" aria-hidden="true"></i><span>平台账号</span>
@@ -70,5 +74,6 @@
 
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
     <script src="{{ url_for('static', filename='js/app.js') }}"></script>
+    {% block extra_scripts %}{% endblock %}
 </body>
 </html>

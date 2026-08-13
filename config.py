@@ -35,11 +35,9 @@ DEFAULT_CONFIG = {
     "platforms": {
         "zol": {
             "name": "中关村在线",
-            # ZOL 当前投稿/创作者中心入口；扫码在页面的“APP扫码登录”标签中生成。
             "login_url": "https://post.zol.com.cn/v2/login",
             "editor_url": "https://post.zol.com.cn/v2/create/article",
             "draft_url": "https://post.zol.com.cn/v2/manage/works/draft",
-            # 创作者中心当前页面提示标题长度为 5~35 个字。
             "title_max_length": 35,
             "tag_max_count": 5,
         },
@@ -52,8 +50,50 @@ DEFAULT_CONFIG = {
             "community_max_count": 2,
             "tag_max_count": 5,
         },
+        "zhihu": {
+            "name": "知乎",
+            "login_url": "https://www.zhihu.com/signin",
+            "editor_url": "https://www.zhihu.com/write",
+            "title_max_length": 40,
+        },
+        "weibo": {
+            "name": "微博",
+            "login_url": "https://weibo.com/login.php",
+            "editor_url": "https://weibo.com/p/aj/v6/mblog/add",
+            "title_max_length": 0, # 微博没有标题
+        },
+        "smzdm": {
+            "name": "什么值得买",
+            "login_url": "https://zhiyou.smzdm.com/user/login",
+            "editor_url": "https://post.smzdm.com/publish/",
+            "title_max_length": 30,
+        },
+        "toutiao": {
+            "name": "今日头条",
+            "login_url": "https://mp.toutiao.com/auth/login/",
+            "editor_url": "https://mp.toutiao.com/profile_v4/graphic/publish",
+            "title_max_length": 30,
+        },
+        "baijiahao": {
+            "name": "百家号",
+            "login_url": "https://baijiahao.baidu.com/",
+            "editor_url": "https://baijiahao.baidu.com/builder/rc/edit",
+            "title_max_length": 40,
+        },
+        "xiaohongshu": {
+            "name": "小红书",
+            "login_url": "https://creator.xiaohongshu.com/login",
+            "editor_url": "https://creator.xiaohongshu.com/publish/publish",
+            "title_max_length": 20,
+        },
+        "douyin": {
+            "name": "抖音",
+            "login_url": "https://creator.douyin.com/",
+            "editor_url": "https://creator.douyin.com/content/publish",
+            "title_max_length": 30,
+        }
     },
-    "human_simulation": {
+
         "delay": {"min": 0.5, "max": 3.0},
         "long_delay_probability": 0.1,
         "long_delay": {"min": 5.0, "max": 15.0},

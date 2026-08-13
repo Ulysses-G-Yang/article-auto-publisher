@@ -52,10 +52,76 @@
 .target-builder-field legend, .target-builder-field > label, .field-label { display: block; float: none; width: auto; margin-bottom: .35rem; color: var(--cui-secondary-color); font-size: .7rem; font-weight: 700; }
 .target-builder-field small { display: block; margin-top: .3rem; color: var(--cui-secondary-color); font-size: .66rem; }
 .platform-segment, .mode-segment { display: grid; grid-template-columns: repeat(2, 1fr); }
-.platform-segment .btn, .mode-segment .btn { display: flex; min-height: 40px; align-items: center; justify-content: center; gap: .4rem; border-radius: 0; border-color: var(--cui-border-color); font-size: .75rem; }
-.platform-segment label:first-of-type, .mode-segment label:first-of-type { border-radius: .38rem 0 0 .38rem; }
-.platform-segment label:last-of-type, .mode-segment label:last-of-type { border-radius: 0 .38rem .38rem 0; }
-.session-switch { display: flex; min-height: 40px; align-items: center; justify-content: space-between; gap: .7rem; padding: .35rem .65rem; border: 1px solid var(--cui-border-color); border-radius: .38rem; }
+/* 首席架构师重构：10 平台工业级矩阵样式 */
+.platform-matrix-container {
+    padding: 1.5rem;
+    background: var(--cui-tertiary-bg);
+    border-radius: 0.75rem;
+    border: 1px solid var(--cui-border-color);
+}
+
+.platform-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+    gap: 1rem;
+}
+
+.platform-card {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 1rem;
+    background: var(--cui-body-bg);
+    border: 2px solid transparent;
+    border-radius: 0.5rem;
+    cursor: pointer;
+    transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+    opacity: 0.6;
+    filter: grayscale(1);
+}
+
+.platform-card:hover {
+    opacity: 1;
+    filter: grayscale(0);
+    transform: translateY(-2px);
+    box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+}
+
+.platform-card.active {
+    opacity: 1;
+    filter: grayscale(0);
+    border-color: var(--app-primary);
+    background: rgba(var(--cui-primary-rgb), 0.05);
+}
+
+.platform-card.disabled {
+    cursor: not-allowed;
+    background: transparent;
+    border: 1px dashed var(--cui-border-color);
+}
+
+.platform-icon {
+    font-size: 1.75rem;
+    margin-bottom: 0.5rem;
+    color: var(--cui-secondary-color);
+}
+
+.platform-card.active .platform-icon {
+    color: var(--app-primary);
+}
+
+.platform-name {
+    font-size: 0.75rem;
+    font-weight: 700;
+    color: var(--cui-body-color);
+}
+
+.mode-segment-v2 .btn {
+    border-radius: 0.5rem;
+    font-weight: 600;
+}
+
 .session-switch > div:first-child { display: flex; min-width: 0; flex-direction: column; }
 .session-switch strong { font-size: .72rem; }
 .session-switch small { margin: 0; overflow: hidden; font-size: .61rem; text-overflow: ellipsis; white-space: nowrap; }

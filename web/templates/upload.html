@@ -67,20 +67,79 @@
             </section>
 
             <section class="card studio-card" aria-labelledby="targets-heading">
-                <header class="card-header studio-card-header"><div><span class="section-kicker">DESTINATIONS</span><h2 id="targets-heading">投递目标</h2></div><span id="target-count" class="badge text-bg-primary">0 个目标</span></header>
+                <header class="card-header studio-card-header"><div><span class="section-kicker">DESTINATIONS</span><h2 id="targets-heading">发布矩阵</h2></div><span id="target-count" class="badge text-bg-primary">10 平台就绪</span></header>
                 <div class="card-body">
-                    <p class="section-intro">先选平台，再选择该平台返回的真实账号昵称。系统不会自动选择账号。</p>
-                    <div class="target-builder">
-                        <fieldset class="target-builder-field platform-field"><legend>平台</legend><div class="platform-segment" role="radiogroup" aria-label="目标平台">
-                            <input class="btn-check" type="radio" name="target-platform" id="target-platform-xiaoheihe" value="xiaoheihe" autocomplete="off"><label class="btn" for="target-platform-xiaoheihe"><i class="cil-gamepad" aria-hidden="true"></i><span>小黑盒</span></label>
-                            <input class="btn-check" type="radio" name="target-platform" id="target-platform-zol" value="zol" autocomplete="off"><label class="btn" for="target-platform-zol"><i class="cil-screen-desktop" aria-hidden="true"></i><span>中关村在线</span></label>
-                        </div></fieldset>
-                        <div class="target-builder-field account-field"><label for="target-account">账号</label><select id="target-account" class="form-select" disabled><option value="">请先选择平台</option></select><small id="target-account-help">仅有 VALID 登录态可用</small></div>
-                        <fieldset class="target-builder-field mode-field"><legend>投递模式</legend><div class="mode-segment" role="radiogroup" aria-label="投递模式"><input class="btn-check" type="radio" name="target-mode" id="target-mode-draft" value="DRAFT" checked><label class="btn" for="target-mode-draft">平台草稿</label><input class="btn-check" type="radio" name="target-mode" id="target-mode-publish" value="PUBLISH"><label class="btn" for="target-mode-publish">公开发布</label></div></fieldset>
-                        <div class="target-builder-field policy-field"><span class="field-label">会话策略</span><div class="session-switch"><div><strong>保持登录态</strong><small>不代表当前已登录</small></div><div class="form-check form-switch m-0"><input id="target-persist-login" class="form-check-input" type="checkbox" role="switch" disabled aria-label="保持所选账号登录态"></div></div></div>
-                        <button id="add-target" class="btn btn-primary target-add" type="button"><i class="cil-plus me-1" aria-hidden="true"></i>添加目标</button>
+                    <p class="section-intro">选择目标平台进行一键分发。系统将自动隔离账号会话并确保内容强一致性。</p>
+                    
+                    <!-- 首席架构师重构：10 平台工业级矩阵 -->
+                    <div class="platform-matrix-container mb-4">
+                        <div class="platform-grid" id="platform-selector-grid">
+                            <!-- 动态注入点：知乎, 微博, 小黑盒, ZOL, 小红书... -->
+                            <div class="platform-card active" data-platform="xiaoheihe">
+                                <div class="platform-icon"><i class="cil-gamepad"></i></div>
+                                <div class="platform-name">小黑盒</div>
+                            </div>
+                            <div class="platform-card" data-platform="zol">
+                                <div class="platform-icon"><i class="cil-screen-desktop"></i></div>
+                                <div class="platform-name">中关村在线</div>
+                            </div>
+                            <div class="platform-card" data-platform="zhihu">
+                                <div class="platform-icon"><i class="cil-speech"></i></div>
+                                <div class="platform-name">知乎</div>
+                            </div>
+                            <div class="platform-card" data-platform="weibo">
+                                <div class="platform-icon"><i class="cil-share-all"></i></div>
+                                <div class="platform-name">微博</div>
+                            </div>
+                            <div class="platform-card" data-platform="smzdm">
+                                <div class="platform-icon"><i class="cil-cart"></i></div>
+                                <div class="platform-name">什么值得买</div>
+                            </div>
+                            <div class="platform-card" data-platform="toutiao">
+                                <div class="platform-icon"><i class="cil-newspaper"></i></div>
+                                <div class="platform-name">今日头条</div>
+                            </div>
+                            <div class="platform-card" data-platform="baijiahao">
+                                <div class="platform-icon"><i class="cil-library"></i></div>
+                                <div class="platform-name">百家号</div>
+                            </div>
+                            <div class="platform-card" data-platform="xiaohongshu">
+                                <div class="platform-icon"><i class="cil-camera"></i></div>
+                                <div class="platform-name">小红书</div>
+                            </div>
+                            <div class="platform-card" data-platform="douyin">
+                                <div class="platform-icon"><i class="cil-video"></i></div>
+                                <div class="platform-name">抖音</div>
+                            </div>
+                            <div class="platform-card disabled">
+                                <div class="platform-icon"><i class="cil-plus"></i></div>
+                                <div class="platform-name">更多平台</div>
+                            </div>
+                        </div>
                     </div>
-                    <div id="target-builder-error" class="alert alert-danger d-none mt-3" role="alert"></div>
+
+                    <div class="target-builder-v2 border-top pt-4">
+                        <div class="row g-3">
+                            <div class="col-md-6">
+                                <label for="target-account" class="form-label fw-bold">选择发布账号</label>
+                                <select id="target-account" class="form-select form-select-lg">
+                                    <option value="">点击上方矩阵激活平台账号...</option>
+                                </select>
+                            </div>
+                            <div class="col-md-3">
+                                <label class="form-label fw-bold">模式</label>
+                                <div class="mode-segment-v2">
+                                    <input type="radio" class="btn-check" name="target-mode" id="m-draft" value="DRAFT" checked>
+                                    <label class="btn btn-outline-secondary w-100" for="m-draft">保存草稿</label>
+                                </div>
+                            </div>
+                            <div class="col-md-3">
+                                <label class="form-label fw-bold">&nbsp;</label>
+                                <button id="add-target" class="btn btn-primary btn-lg w-100">加入队列</button>
+                            </div>
+                        </div>
+                    </div>
+
                     <div id="targets-list" class="targets-list"></div>
                     <div id="targets-empty" class="studio-empty compact"><i class="cil-paper-plane" aria-hidden="true"></i><strong>尚未添加投递目标</strong><span>同一份内容可添加多个“平台 + 账号 + 模式”目标。</span></div>
                 </div>

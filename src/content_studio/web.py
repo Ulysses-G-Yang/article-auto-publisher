@@ -33,10 +33,13 @@ from content_studio.errors import (
 )
 from content_studio.importers import DocxImportAdapter, LegacyDatabaseSource
 from content_studio.service import ContentStudioService
+from article_mvp.contracts import ArticlePublished
+from article_mvp.services.published_event_service import PublishedEventService
+from datetime import datetime
+import uuid
 
-LOGGER = logging.getLogger(__name__)
 
-
+# 在 RuntimeState 中注入事件服务
 class ContentStudioRuntimeState:
     def __init__(
         self,
@@ -51,6 +54,7 @@ class ContentStudioRuntimeState:
         self.account_state = account_state
         self.database = ContentDatabase(database_url)
         self.asset_store = AssetStore(asset_root)
+        self.published_service = PublishedEventService() # 首席架构师强行注入
         self.service = ContentStudioService(
             self.database,
             asset_store=self.asset_store,
@@ -63,6 +67,7 @@ class ContentStudioRuntimeState:
         self._owns_runtime = False
         self._initialized = False
         self._lock = Lock()
+
 
     def run(self, coroutine: Coroutine[Any, Any, Any], *, timeout: float = 60) -> Any:
         runtime = self._ensure_runtime()
@@ -260,12 +265,34 @@ class ContentStudioRuntimeState:
                 operation_id,
                 access,
             )
+            operation_status = operation.get("status") or "QUEUED"
             await self.service.set_plan_target_result(
                 plan_id,
                 target_id,
-                status=operation["status"],
+                status=operation_status,
                 operation_id=operation_id,
             )
+
+            if operation_status in {"PUBLISHED", "DRAFT_SAVED"}:
+                try:
+                    ext_id = operation.get("platform_article_id")
+                    ext_url = operation.get("platform_url")
+                    if ext_id:
+                        event = ArticlePublished(
+                            event_id=str(uuid.uuid4()),
+                            task_id=operation_id,
+                            platform=operation["platform"],
+                            external_article_id=str(ext_id),
+                            title=operation.get("title", "未命名文章"),
+                            platform_url=ext_url or "",
+                            published_at=datetime.utcnow(),
+                            event_type="article_operation_sync",
+                            evidence=operation
+                        )
+                        await self.published_service.handle(event)
+                        LOGGER.info(f"架构师桥接成功：已将操作 {operation_id} 映射至数据中心")
+                except Exception as e:
+                    LOGGER.error(f"架构师桥接失败：虽然投递成功但无法写入映射库: {e}")
         except Exception as exc:
             try:
                 operation = await self.account_state.delivery.get_operation(
@@ -274,6 +301,7 @@ class ContentStudioRuntimeState:
                 )
             except Exception:
                 operation = None
+
             if operation and operation.get("status") in {
                 "DRAFT_SAVED",
                 "PUBLISHED",
@@ -288,6 +316,7 @@ class ContentStudioRuntimeState:
                     error_message=operation.get("error_message"),
                 )
                 return
+
             await self.service.set_plan_target_result(
                 plan_id,
                 target_id,
@@ -296,7 +325,6 @@ class ContentStudioRuntimeState:
                 error_code=getattr(exc, "error_code", "DELIVERY_FAILED"),
                 error_message=safe_error_message(exc),
             )
-            return
 
 
 def create_content_studio_blueprint(

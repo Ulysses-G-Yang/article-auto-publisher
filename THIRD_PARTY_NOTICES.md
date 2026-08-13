@@ -5,7 +5,7 @@
 - Upstream repository: `git@github.com:coreui/coreui-free-bootstrap-admin-template.git`
 - Upstream release: `v5.6.0`
 - Vendored commit: `da2c89f5e71a762fb46a3583f42d5f740d965b1d`
-- Framework runtime: `@coreui/coreui` `5.9.0` (pinned by the upstream lockfile)
+- Framework runtime: `@coreui/coreui` `5.9.0` (exactly pinned in the vendored build manifest and lockfile)
 - License: MIT, copyright 2026 creativeLabs Łukasz Holeczek
 
 The unmodified upstream source, build configuration, lockfile, and license are

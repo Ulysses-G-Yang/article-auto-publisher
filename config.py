@@ -52,7 +52,9 @@ DEFAULT_CONFIG = {
         },
         "zhihu": {
             "name": "知乎",
+            "home_url": "https://www.zhihu.com/",
             "login_url": "https://www.zhihu.com/signin",
+            "identity_api_path": "/api/v4/me",
             "editor_url": "https://www.zhihu.com/write",
             "title_max_length": 40,
         },
@@ -200,7 +202,7 @@ def load_config(config_path: str = None) -> dict:
 
     config_path = config_path or os.getenv("APP_CONFIG_FILE")
     if config_path and os.path.exists(config_path):
-        with open(config_path, "r", encoding="utf-8") as f:
+        with open(config_path, encoding="utf-8") as f:
             user_config = yaml.safe_load(f)
             if user_config:
                 _deep_merge(cfg, user_config)

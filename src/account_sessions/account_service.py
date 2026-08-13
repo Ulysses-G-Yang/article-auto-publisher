@@ -19,10 +19,11 @@ from account_sessions.identity import extract_identity
 from account_sessions.leases import AccountProfileLease
 from account_sessions.models import AccountActivity, PlatformAccount
 from account_sessions.permissions import AccessContext
+from account_sessions.platform_catalog import ACCOUNT_ENABLED_PLATFORMS
 from account_sessions.runtime_paths import legacy_profile_path, managed_profile_path
 from account_sessions.security import mask_platform_user_id, safe_error_message
 
-SUPPORTED_PLATFORMS = ("xiaoheihe", "zol")
+SUPPORTED_PLATFORMS = ACCOUNT_ENABLED_PLATFORMS
 
 
 class AccountSessionService:
@@ -105,6 +106,45 @@ class AccountSessionService:
                 continue
             visible.append(public_account(account))
         return visible
+
+    async def get_account_summary(self, access: AccessContext) -> dict:
+        """返回跨平台账号状态摘要，不暴露 Profile、Cookie 或原始平台 ID。"""
+
+        async with self.database.session() as session:
+            statement = (
+                select(PlatformAccount)
+                .where(PlatformAccount.status == "ACTIVE")
+                .order_by(
+                    PlatformAccount.platform,
+                    PlatformAccount.display_name,
+                    PlatformAccount.account_id,
+                )
+            )
+            accounts = list((await session.scalars(statement)).all())
+
+        visible: list[dict] = []
+        for account in accounts:
+            try:
+                access.require("session.read", account.account_id)
+            except Exception:
+                continue
+            visible.append(
+                {
+                    "platform": account.platform,
+                    **public_account(account),
+                }
+            )
+
+        valid_accounts = sum(account["session_status"] == "VALID" for account in visible)
+        return {
+            "summary": {
+                "total_accounts": len(visible),
+                "valid_accounts": valid_accounts,
+                "attention_required_accounts": len(visible) - valid_accounts,
+                "platforms_with_accounts": len({account["platform"] for account in visible}),
+            },
+            "accounts": visible,
+        }
 
     async def get_account(self, account_id: str) -> PlatformAccount:
         async with self.database.session() as session:
@@ -381,9 +421,15 @@ def _platform_instance(account: PlatformAccount):
         from platforms.xiaoheihe import XiaoheihePlatform
 
         return XiaoheihePlatform(**kwargs)
-    from platforms.zol import ZOLPlatform
+    if account.platform == "zol":
+        from platforms.zol import ZOLPlatform
 
-    return ZOLPlatform(**kwargs)
+        return ZOLPlatform(**kwargs)
+    if account.platform == "zhihu":
+        from platforms.zhihu import ZhihuPlatform
+
+        return ZhihuPlatform(**kwargs)
+    raise AccountPlatformMismatchError("不支持的平台")
 
 
 async def _check_login(platform, *, read_only: bool) -> bool:

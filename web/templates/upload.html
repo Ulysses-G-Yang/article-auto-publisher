@@ -1,7 +1,10 @@
 {% extends "base.html" %}
 {% block title %}创作与投递 - ArticleOps{% endblock %}
 {% block header_title %}创作与投递{% endblock %}
-{% block extra_head %}<link rel="stylesheet" href="{{ url_for('static', filename='css/content-studio.css') }}">{% endblock %}
+{% block extra_head %}
+<link rel="stylesheet" href="{{ url_for('static', filename='css/content-studio.css') }}">
+<link rel="stylesheet" href="{{ url_for('static', filename='css/content-studio-matrix.css') }}">
+{% endblock %}
 
 {% block content %}
 <div id="content-studio"
@@ -118,3 +121,6 @@
 {% endblock %}
 
 {% block extra_scripts %}<script src="{{ url_for('static', filename='js/content-studio.js') }}"></script>{% endblock %}
+
+
+

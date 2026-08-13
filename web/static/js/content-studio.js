@@ -5,7 +5,7 @@
     if (!root) return;
 
     const byId = id => document.getElementById(id);
-    const platformLabels = { xiaoheihe: '小黑盒', zol: '中关村在线' };
+    let platformCatalog = [];
     const sourceLabels = { BLANK: '空白草稿', DOCX: 'DOCX 导入', LEGACY_ARTICLE: '历史文章副本', SYSTEM_SEED: '系统草稿' };
     const planStatusLabels = {
         READY: '待执行', CREATING: '正在创建执行单', QUEUED: '已排队', RUNNING: '执行中', SUCCESS: '已完成',
@@ -675,3 +675,8 @@
 
     init();
 })();
+
+
+
+
+

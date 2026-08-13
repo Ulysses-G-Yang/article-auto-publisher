@@ -1,0 +1,158 @@
+/* 10-Platform Matrix Grid */
+.platform-matrix-container {
+    padding: 1.5rem;
+    background: var(--cui-tertiary-bg);
+    border-radius: 0.75rem;
+    border: 1px solid var(--cui-border-color);
+}
+
+.platform-grid {
+    display: flex;
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    overflow-y: hidden;
+    gap: 1rem;
+    padding-bottom: 0.5rem; /* For scrollbar */
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: thin;
+}
+
+.platform-grid::-webkit-scrollbar {
+    height: 6px;
+}
+.platform-grid::-webkit-scrollbar-track {
+    background: rgba(0,0,0,0.05);
+    border-radius: 4px;
+}
+.platform-grid::-webkit-scrollbar-thumb {
+    background: var(--cui-border-color);
+    border-radius: 4px;
+}
+
+.platform-card {
+    display: flex;
+    flex: 0 0 auto;
+    width: 120px;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 1rem;
+    background: var(--cui-body-bg);
+    border: 2px solid transparent;
+    border-radius: 0.5rem;
+    cursor: pointer;
+    transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+    position: relative;
+}
+
+.platform-card:not(.disabled):not(.status-coming-soon):hover {
+    transform: translateY(-2px);
+    box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+    border-color: rgba(var(--cui-primary-rgb), 0.3);
+}
+
+.platform-card.active {
+    border-color: var(--app-primary);
+    background: rgba(var(--cui-primary-rgb), 0.05);
+}
+
+.platform-card.status-coming-soon {
+    cursor: not-allowed;
+    opacity: 0.5;
+    filter: grayscale(1);
+    border: 1px dashed var(--cui-border-color);
+    background: transparent;
+}
+
+.platform-card.status-coming-soon::after {
+    content: 'COMING SOON';
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%) rotate(-15deg);
+    font-size: 0.6rem;
+    font-weight: 800;
+    color: var(--cui-secondary-color);
+    background: var(--cui-body-bg);
+    padding: 2px 6px;
+    border: 1px solid var(--cui-border-color);
+    border-radius: 4px;
+    white-space: nowrap;
+    opacity: 0.8;
+}
+
+.platform-icon {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 48px;
+    height: 48px;
+    margin-bottom: 0.5rem;
+}
+
+.platform-icon img {
+    max-width: 100%;
+    max-height: 100%;
+    object-fit: contain;
+    /* Optical sizing compensation */
+    filter: drop-shadow(0 2px 4px rgba(0,0,0,0.05));
+}
+
+.platform-name {
+    font-size: 0.75rem;
+    font-weight: 700;
+    color: var(--cui-body-color);
+    text-align: center;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    width: 100%;
+}
+
+.platform-action-overlay {
+    position: absolute;
+    inset: 0;
+    background: rgba(255,255,255, 0.9);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    opacity: 0;
+    transition: opacity 0.2s ease;
+    border-radius: 0.4rem;
+    pointer-events: none;
+    text-align: center;
+    padding: 0.5rem;
+}
+
+.platform-card.auth-only.active .platform-action-overlay {
+    opacity: 1;
+    pointer-events: auto;
+}
+
+.mode-segment-v2 {
+    display: flex;
+    gap: 0.5rem;
+}
+
+.mode-segment-v2 .btn {
+    border-radius: 0.5rem;
+    font-weight: 600;
+}
+
+@media (max-width: 575.98px) {
+    .platform-matrix-container {
+        padding: 1rem;
+    }
+    .platform-card {
+        width: 100px;
+        padding: 0.75rem;
+    }
+    .platform-icon {
+        width: 36px;
+        height: 36px;
+    }
+    .platform-name {
+        font-size: 0.7rem;
+    }
+}

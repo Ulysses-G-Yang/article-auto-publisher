@@ -5,7 +5,7 @@ from pathlib import Path
 from loguru import logger
 
 from platforms.base import BasePlatform, BrowserLifecycleError, SelectorError
-from human.simulator import HumanSimulator
+from platforms.content_validation import ensure_valid_content, safe_media_error
 
 
 class XiaoheihePlatform(BasePlatform):
@@ -335,16 +335,14 @@ class XiaoheihePlatform(BasePlatform):
             "el => el.dispatchEvent(new InputEvent('input', {bubbles: true, inputType: 'insertText'}))"
         )
 
-        expected_parts = [
-            (block.get("text") or "").strip()
-            for block in content_blocks
-            if block.get("type") in ("text", "heading") and (block.get("text") or "").strip()
-        ]
         actual_text = await editor.inner_text()
-        missing = [part[:30] for part in expected_parts if part not in actual_text]
-        if missing:
-            raise SelectorError(f"小黑盒正文输入后验证失败，缺少文本片段: {missing}")
-        logger.info("小黑盒正文文字输入并验证成功: {} 个文本段落", len(expected_parts))
+        expected_count = ensure_valid_content(
+            content_blocks,
+            actual_text,
+            platform="小黑盒",
+            phase="输入后",
+        )
+        logger.info("小黑盒正文文字输入并验证成功: {} 个文本段落", expected_count)
 
         expected_images = sum(
             1 for block in content_blocks if block.get("type") == "image"
@@ -372,7 +370,10 @@ class XiaoheihePlatform(BasePlatform):
                     else:
                         failed_images.append({
                             "filename": Path(str(img_path)).name,
-                            "error": upload_result.get("error", "图片上传失败"),
+                            "error": safe_media_error(
+                                upload_result.get("error"),
+                                fallback="图片上传失败",
+                            ),
                         })
                     await self.simulator.random_delay(0.2, 0.5)
                 else:
@@ -384,10 +385,13 @@ class XiaoheihePlatform(BasePlatform):
         # 图片操作可能触发编辑器重渲染，重新定位正文并做最终校验。
         editor = self.page.locator(self.BODY_FIELD).first
         actual_text = await editor.inner_text()
-        missing = [part[:30] for part in expected_parts if part not in actual_text]
-        if missing:
-            raise SelectorError(f"小黑盒图片处理后正文验证失败，缺少文本片段: {missing}")
-        logger.info("小黑盒正文输入并最终验证成功: {} 个文本段落", len(expected_parts))
+        ensure_valid_content(
+            content_blocks,
+            actual_text,
+            platform="小黑盒",
+            phase="图片处理后",
+        )
+        logger.info("小黑盒正文输入并最终验证成功: {} 个文本段落", expected_count)
 
         if expected_images == 0:
             media_status = "not_required"
@@ -448,7 +452,10 @@ class XiaoheihePlatform(BasePlatform):
                 await chooser.set_files(image_path)
                 return True
             except Exception as exc:
-                logger.debug("小黑盒原生文件选择器未捕获，检查已挂载文件控件: {}", exc)
+                logger.debug(
+                    "小黑盒原生文件选择器未捕获，检查已挂载文件控件: error_type={}",
+                    type(exc).__name__,
+                )
         else:
             await self._click_with_fallback(trigger, timeout=5000)
 
@@ -459,7 +466,7 @@ class XiaoheihePlatform(BasePlatform):
             await file_input.set_input_files(image_path)
             return True
         except Exception as exc:
-            logger.debug("小黑盒设置文件控件失败: {}", exc)
+            logger.debug("小黑盒设置文件控件失败: error_type={}", type(exc).__name__)
             return False
 
     async def _upload_image(self, image_path: str):
@@ -528,8 +535,15 @@ class XiaoheihePlatform(BasePlatform):
         except Exception as e:
             if self._exception_means_browser_closed(e):
                 raise BrowserLifecycleError("BROWSER_CONTEXT_CLOSED: 小黑盒图片上传时页面已关闭") from e
-            logger.warning("小黑盒图片上传失败: filename={}, error={}", image_name, e)
-            return {"success": False, "error": str(e)}
+            logger.warning(
+                "小黑盒图片上传失败: filename={}, error_type={}",
+                image_name,
+                type(e).__name__,
+            )
+            return {
+                "success": False,
+                "error": safe_media_error(e, fallback="图片上传失败"),
+            }
 
     async def _editor_image_count(self) -> int:
         """读取编辑器正文区域中的图片数量，不把头像/预览图计入。"""

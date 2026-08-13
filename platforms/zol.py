@@ -14,7 +14,7 @@ from platforms.base import (
     PlatformAccessError,
     SelectorError,
 )
-from human.simulator import HumanSimulator
+from platforms.content_validation import ensure_valid_content, safe_media_error
 
 
 class ZOLPlatform(BasePlatform):
@@ -514,9 +514,9 @@ class ZOLPlatform(BasePlatform):
 
         raise SelectorError("ZOL_TITLE_SELECTOR_ERROR: ZOL 标题输入框未找到或输入后校验失败")
 
-    async def fill_content(self, content_blocks: list, images: list):
-        """填写正文、插入图片，并验证文字和图片数量。"""
-        self._require_page_alive("ZOL 填写正文")
+    async def _resolve_content_editor(self):
+        """定位编辑器，并显式返回 iframe/textarea/contenteditable 读取策略。"""
+        self._require_page_alive("ZOL 定位正文编辑器")
         iframe_selectors = [
             ".tox-edit-area iframe",
             "iframe.tox-edit-area__iframe",
@@ -526,52 +526,87 @@ class ZOLPlatform(BasePlatform):
             "#content_ifr",
             "iframe[id*='content']",
         ]
-        editor_frame = None
-        editor = None
-
         for selector in iframe_selectors:
             locator = self.page.locator(selector).first
             try:
-                if await locator.count() == 0:
+                if await locator.count() == 0 or not await locator.is_visible():
                     continue
                 handle = await locator.element_handle()
                 if handle:
                     editor_frame = await handle.content_frame()
                     if editor_frame:
                         editor = editor_frame.locator("body").first
-                        break
+                        if await editor.count() > 0 and await editor.is_visible():
+                            return editor, "iframe"
             except Exception as exc:
-                logger.debug("ZOL iframe 探测失败: selector={}, error={}", selector, exc)
+                if self._exception_means_browser_closed(exc):
+                    raise BrowserLifecycleError(
+                        "BROWSER_CONTEXT_CLOSED: ZOL 定位 iframe 正文编辑器时页面已关闭"
+                    ) from exc
+                logger.debug(
+                    "ZOL iframe 探测失败: selector={}, error_type={}",
+                    selector,
+                    type(exc).__name__,
+                )
 
-        if editor is None:
-            editor_selectors = [
-                ".mce-content-body",
-                "#tinymce",
-                "textarea[name='content']",
-                "#content",
-                "div.ke-edit",
-                "div.ke-content",
-                ".editor-content",
-                "[contenteditable='true']",
-            ]
-            for selector in editor_selectors:
-                locator = self.page.locator(selector).first
-                try:
-                    if await locator.count() > 0 and await locator.is_visible():
-                        editor = locator
-                        break
-                except Exception as exc:
-                    logger.debug("ZOL 正文候选选择器失败: selector={}, error={}", selector, exc)
+        editor_selectors = [
+            ".mce-content-body",
+            "#tinymce",
+            "textarea[name='content']",
+            "#content",
+            "div.ke-edit",
+            "div.ke-content",
+            ".editor-content",
+            "[contenteditable='true']",
+        ]
+        for selector in editor_selectors:
+            locator = self.page.locator(selector).first
+            try:
+                if await locator.count() == 0 or not await locator.is_visible():
+                    continue
+                tag_name = await locator.evaluate("el => el.tagName.toLowerCase()")
+                return locator, "textarea" if tag_name == "textarea" else "contenteditable"
+            except Exception as exc:
+                if self._exception_means_browser_closed(exc):
+                    raise BrowserLifecycleError(
+                        "BROWSER_CONTEXT_CLOSED: ZOL 定位正文编辑器时页面已关闭"
+                    ) from exc
+                logger.debug(
+                    "ZOL 正文候选选择器失败: selector={}, error_type={}",
+                    selector,
+                    type(exc).__name__,
+                )
 
-        if editor is None:
-            raise SelectorError(f"ZOL_CONTENT_SELECTOR_ERROR: 正文编辑器未找到，当前 URL: {self.page.url}")
+        raise SelectorError(
+            f"ZOL_CONTENT_SELECTOR_ERROR: 正文编辑器未找到，当前 URL: {self.page.url}"
+        )
+
+    async def _read_content_editor_text(self, editor, editor_kind: str) -> str:
+        """按明确策略读取编辑器范围内正文，不读取页面或 HTML。"""
+        try:
+            if editor_kind == "textarea":
+                return await editor.input_value()
+            if editor_kind in {"iframe", "contenteditable"}:
+                return await editor.inner_text()
+        except Exception as exc:
+            if self._exception_means_browser_closed(exc):
+                raise BrowserLifecycleError(
+                    "BROWSER_CONTEXT_CLOSED: ZOL 读取正文编辑器时页面已关闭"
+                ) from exc
+            raise SelectorError(
+                f"ZOL_CONTENT_READ_ERROR: {editor_kind} 正文读取失败"
+            ) from exc
+        raise SelectorError(f"ZOL_CONTENT_READ_ERROR: 未知编辑器策略 {editor_kind!r}")
+
+    async def fill_content(self, content_blocks: list, images: list):
+        """填写正文、插入图片，并验证文字和图片数量。"""
+        editor, editor_kind = await self._resolve_content_editor()
 
         text_parts = [
             block.get("text", "").strip()
             for block in content_blocks
             if block.get("type") in ("text", "heading") and block.get("text", "").strip()
         ]
-        tag_name = await editor.evaluate("el => el.tagName.toLowerCase()")
         expected_value = "\n\n".join(text_parts)
         expected_images = sum(
             1 for block in content_blocks if block.get("type") == "image"
@@ -580,9 +615,8 @@ class ZOLPlatform(BasePlatform):
         failed_images = []
         has_images = expected_images > 0
 
-        # 没有图片时直接 fill；有图片时按 DOCX 块顺序写入，确保图片出现在
-        # 对应段落之间。当前真实 ZOL 页面是 TinyMCE iframe，但保留 textarea/
-        # contenteditable 兼容路径，方便页面改版和离线测试。
+        # 没有图片时保留原 fill 快速路径；有图片时仍按原始块顺序输入，
+        # 规范化只用于读回比较，不得改变冻结内容的写入文本或排版。
         if not has_images:
             await editor.fill(expected_value)
         else:
@@ -601,10 +635,11 @@ class ZOLPlatform(BasePlatform):
                         await self.page.keyboard.press("Enter")
                     elif previous_kind == "image":
                         await self.page.keyboard.press("Enter")
-                    for index, line in enumerate(block_text.splitlines() or [block_text]):
+                    block_lines = block_text.splitlines() or [block_text]
+                    for index, line in enumerate(block_lines):
                         if line:
                             await self.page.keyboard.insert_text(line)
-                        if index < len(block_text.splitlines()) - 1:
+                        if index < len(block_lines) - 1:
                             await self.page.keyboard.press("Enter")
                     previous_kind = "text"
                 elif btype == "image":
@@ -625,8 +660,14 @@ class ZOLPlatform(BasePlatform):
                         else:
                             failed_images.append({
                                 "filename": Path(str(image_file)).name,
-                                "error": upload_result.get("error", "ZOL 图片上传失败"),
-                                "error_code": upload_result.get("error_code"),
+                                "error": safe_media_error(
+                                    upload_result.get("error"),
+                                    fallback="ZOL 图片上传失败",
+                                ),
+                                "error_code": (
+                                    upload_result.get("error_code")
+                                    or "ZOL_IMAGE_UPLOAD_FAILED"
+                                ),
                             })
                     else:
                         failed_images.append({
@@ -640,13 +681,15 @@ class ZOLPlatform(BasePlatform):
                 "el => el.dispatchEvent(new InputEvent('input', {bubbles: true, inputType: 'insertText'}))"
             )
 
-        if tag_name == "textarea":
-            actual_text = await editor.input_value()
-        else:
-            actual_text = await editor.inner_text()
-        missing = [part[:30] for part in text_parts if part not in actual_text]
-        if missing:
-            raise SelectorError(f"ZOL_CONTENT_VALIDATION_ERROR: 正文输入后验证失败，缺少文本片段: {missing}")
+        # 图片弹窗可能替换 iframe/body 节点，必须重新解析编辑器再读取。
+        editor, editor_kind = await self._resolve_content_editor()
+        actual_text = await self._read_content_editor_text(editor, editor_kind)
+        expected_count = ensure_valid_content(
+            content_blocks,
+            actual_text,
+            platform="ZOL",
+            phase="输入及图片处理后",
+        )
         if expected_images == 0:
             media_status = "not_required"
             media_error = None
@@ -666,7 +709,7 @@ class ZOLPlatform(BasePlatform):
 
         logger.info(
             "ZOL 正文验证成功: text_parts={}, images={}/{}, media_status={}",
-            len(text_parts),
+            expected_count,
             uploaded_images,
             expected_images,
             media_status,
@@ -680,7 +723,6 @@ class ZOLPlatform(BasePlatform):
             "media_error": media_error,
             "media_error_code": media_error_code,
         }
-
     async def _editor_image_count(self) -> int:
         """只统计 ZOL 正文编辑器 iframe 内的图片。"""
         self._require_page_alive("ZOL 统计编辑器图片")
@@ -790,11 +832,15 @@ class ZOLPlatform(BasePlatform):
         except Exception as exc:
             if self._exception_means_browser_closed(exc):
                 raise BrowserLifecycleError("BROWSER_CONTEXT_CLOSED: ZOL 图片上传时页面已关闭") from exc
-            logger.warning("ZOL 图片上传失败: filename={}, error={}", image_name, exc)
+            logger.warning(
+                "ZOL 图片上传失败: filename={}, error_type={}",
+                image_name,
+                type(exc).__name__,
+            )
             return {
                 "success": False,
                 "error_code": "ZOL_IMAGE_UPLOAD_FAILED",
-                "error": str(exc),
+                "error": safe_media_error(exc, fallback="ZOL 图片上传失败"),
             }
         finally:
             # 所有失败分支都必须关闭弹窗，否则后续图片和正文键盘输入会被遮罩截获。

@@ -1,5 +1,4 @@
 import asyncio
-import copy
 import shutil
 import tempfile
 import unittest
@@ -10,6 +9,7 @@ from config import get_config
 from models.database import Database
 from core.queue_manager import classify_task_error, normalize_selection_query
 from platforms.base import BasePlatform, BrowserLifecycleError, PlatformAccessError
+from platforms.content_validation import ContentValidationError
 from platforms.zol import ZOLPlatform
 from platforms.xiaoheihe import XiaoheihePlatform
 
@@ -862,6 +862,103 @@ class RegressionTests(DatabaseTestCase):
         ], []))
         self.assertIn("iframe正文", platform.page.frame_body.text)
 
+    def test_xiaoheihe_multiline_validation_accepts_editor_entities(self):
+        platform = XiaoheihePlatform()
+        platform.page = FakeXiaoPage()
+        platform.simulator.random_delay = AsyncMock()
+        original_inner_text = platform.page.body.inner_text
+
+        async def entity_transformed_text():
+            value = await original_inner_text()
+            return value.replace("A&B", "A&amp;B").replace("第二 段", "第二&nbsp;段\u200b")
+
+        platform.page.body.inner_text = entity_transformed_text
+        result = asyncio.run(platform.fill_content([
+            {"type": "text", "text": "第一段\nA&B\n第二 段"},
+        ], []))
+        self.assertTrue(result["text_ok"])
+        self.assertEqual(result["media_status"], "not_required")
+
+    def test_xiaoheihe_revalidates_body_after_image_rerender(self):
+        platform = XiaoheihePlatform()
+        platform.page = FakeXiaoPage()
+        platform.simulator.random_delay = AsyncMock()
+
+        async def remove_body_after_upload(_path):
+            platform.page.body.text = "第一段"
+            platform.page.body.value = "第一段"
+            return {"success": True, "filename": "image.png"}
+
+        platform._upload_image = AsyncMock(side_effect=remove_body_after_upload)
+        with self.assertRaises(ContentValidationError) as context:
+            asyncio.run(platform.fill_content([
+                {"type": "text", "text": "第一段\n第二段"},
+                {"type": "image", "position": 1, "local_path": "D:/test/image.png"},
+            ], []))
+        self.assertEqual(context.exception.error_code, "CONTENT_VALIDATION_ERROR")
+
+    def test_zol_three_editor_read_strategies_are_explicit(self):
+        for kind, expected_kind in (
+            ("textarea", "textarea"),
+            ("contenteditable", "contenteditable"),
+            ("iframe", "iframe"),
+        ):
+            with self.subTest(kind=kind):
+                platform = ZOLPlatform()
+                platform.page = FakePage(kind)
+                editor, actual_kind = asyncio.run(platform._resolve_content_editor())
+                self.assertEqual(actual_kind, expected_kind)
+                if kind == "textarea":
+                    editor.value = "textarea正文"
+                    editor.input_value = AsyncMock(return_value=editor.value)
+                    editor.inner_text = AsyncMock(side_effect=AssertionError("textarea 不得读 inner_text"))
+                else:
+                    editor.text = f"{kind}正文"
+                    editor.inner_text = AsyncMock(return_value=editor.text)
+                    editor.input_value = AsyncMock(side_effect=AssertionError("富文本不得读 input_value"))
+                actual = asyncio.run(platform._read_content_editor_text(editor, actual_kind))
+                self.assertIn(kind, actual)
+                if kind == "textarea":
+                    editor.input_value.assert_awaited_once()
+                    editor.inner_text.assert_not_awaited()
+                else:
+                    editor.inner_text.assert_awaited_once()
+                    editor.input_value.assert_not_awaited()
+    def test_zol_hidden_iframe_falls_back_to_visible_direct_editor(self):
+        platform = ZOLPlatform()
+        page = FakePage("textarea")
+        hidden_iframe = FakeLocator(page=page, tag="iframe", visible=False)
+        original_locator = page.locator
+
+        def locator(selector):
+            if selector.startswith("iframe") or "iframe" in selector:
+                return hidden_iframe
+            return original_locator(selector)
+
+        page.locator = locator
+        platform.page = page
+        editor, editor_kind = asyncio.run(platform._resolve_content_editor())
+        self.assertIs(editor, page.target)
+        self.assertEqual(editor_kind, "textarea")
+    def test_zol_revalidates_replaced_iframe_after_image_upload(self):
+        platform = ZOLPlatform()
+        page = FakePage("iframe")
+        platform.page = page
+        platform.simulator.random_delay = AsyncMock()
+
+        async def replace_iframe_after_upload(_path):
+            replacement_body = FakeLocator(page=page, tag="body", text="第一段")
+            page.frame_body = replacement_body
+            page.frame = FakeFrame(page, replacement_body)
+            page.iframe_handle.content_frame = AsyncMock(return_value=page.frame)
+            return {"success": True, "filename": "image.png"}
+
+        platform._upload_image = AsyncMock(side_effect=replace_iframe_after_upload)
+        with self.assertRaises(ContentValidationError):
+            asyncio.run(platform.fill_content([
+                {"type": "text", "text": "第一段\n第二段"},
+                {"type": "image", "position": 1},
+            ], [{"position_index": 1, "local_path": "D:/test/image.png"}]))
     def test_xiaoheihe_separates_community_and_topic(self):
         platform = XiaoheihePlatform()
         platform.select_community = AsyncMock(return_value={"success": True, "value": "自动社区"})
@@ -980,6 +1077,40 @@ class RegressionTests(DatabaseTestCase):
         self.assertEqual(len(result["failed_images"]), 1)
 
 
+    def test_xiaoheihe_media_errors_do_not_leak_physical_paths(self):
+        platform = XiaoheihePlatform()
+        platform.page = FakeXiaoPage()
+        platform.simulator.random_delay = AsyncMock()
+        platform._upload_image = AsyncMock(return_value={
+            "success": False,
+            "error": r"set_input_files D:\secret\private\image.png token=abcdef123456789012345678901234",
+        })
+        result = asyncio.run(platform.fill_content([
+            {"type": "text", "text": "正文段"},
+            {"type": "image", "position": 1, "local_path": "D:/test/image.png"},
+        ], []))
+        serialized = repr(result["failed_images"])
+        self.assertNotIn(r"D:\secret", serialized)
+        self.assertNotIn("abcdef123456", serialized)
+        self.assertEqual(result["failed_images"][0]["filename"], "image.png")
+
+    def test_zol_media_errors_do_not_leak_physical_paths(self):
+        platform = ZOLPlatform()
+        platform.page = FakePage("iframe")
+        platform.simulator.random_delay = AsyncMock()
+        platform._upload_image = AsyncMock(return_value={
+            "success": False,
+            "error_code": "ZOL_IMAGE_UPLOAD_FAILED",
+            "error": r"set_input_files D:\secret\private\image.png cookie=abcdef123456789012345678901234",
+        })
+        result = asyncio.run(platform.fill_content([
+            {"type": "text", "text": "正文段"},
+            {"type": "image", "position": 1},
+        ], [{"position_index": 1, "local_path": "D:/test/image.png"}]))
+        serialized = repr(result["failed_images"])
+        self.assertNotIn(r"D:\secret", serialized)
+        self.assertNotIn("abcdef123456", serialized)
+        self.assertEqual(result["failed_images"][0]["filename"], "image.png")
     def test_zol_topic_match_rejects_ambiguous_candidates(self):
         self.assertEqual(
             ZOLPlatform._pick_topic_candidate(["显示器分屏", "显示器推荐"], "显示器"),

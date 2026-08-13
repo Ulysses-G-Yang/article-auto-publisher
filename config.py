@@ -93,7 +93,7 @@ DEFAULT_CONFIG = {
             "title_max_length": 30,
         }
     },
-
+    "human_simulation": {
         "delay": {"min": 0.5, "max": 3.0},
         "long_delay_probability": 0.1,
         "long_delay": {"min": 5.0, "max": 15.0},

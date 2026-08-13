@@ -107,6 +107,45 @@ class AccountSessionService:
             visible.append(public_account(account))
         return visible
 
+    async def get_account_summary(self, access: AccessContext) -> dict:
+        """返回跨平台账号状态摘要，不暴露 Profile、Cookie 或原始平台 ID。"""
+
+        async with self.database.session() as session:
+            statement = (
+                select(PlatformAccount)
+                .where(PlatformAccount.status == "ACTIVE")
+                .order_by(
+                    PlatformAccount.platform,
+                    PlatformAccount.display_name,
+                    PlatformAccount.account_id,
+                )
+            )
+            accounts = list((await session.scalars(statement)).all())
+
+        visible: list[dict] = []
+        for account in accounts:
+            try:
+                access.require("session.read", account.account_id)
+            except Exception:
+                continue
+            visible.append(
+                {
+                    "platform": account.platform,
+                    **public_account(account),
+                }
+            )
+
+        valid_accounts = sum(account["session_status"] == "VALID" for account in visible)
+        return {
+            "summary": {
+                "total_accounts": len(visible),
+                "valid_accounts": valid_accounts,
+                "attention_required_accounts": len(visible) - valid_accounts,
+                "platforms_with_accounts": len({account["platform"] for account in visible}),
+            },
+            "accounts": visible,
+        }
+
     async def get_account(self, account_id: str) -> PlatformAccount:
         async with self.database.session() as session:
             account = await session.get(PlatformAccount, account_id)

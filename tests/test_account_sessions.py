@@ -410,6 +410,31 @@ def test_blueprint_matches_frontend_contract_and_injects_article(tmp_path: Path)
     assert accounts_payload["accounts"][0]["display_name"] == "网页账号"
     assert "profile_path" not in accounts_payload["accounts"][0]
 
+    summary_response = client.get("/api/account-sessions/summary")
+    assert summary_response.status_code == 200
+    summary_payload = summary_response.get_json()
+    assert summary_payload["summary"] == {
+        "total_accounts": 1,
+        "valid_accounts": 1,
+        "attention_required_accounts": 0,
+        "platforms_with_accounts": 1,
+    }
+    assert summary_payload["accounts"] == [
+        {
+            "account_id": account.account_id,
+            "platform": "xiaoheihe",
+            "display_name": "网页账号",
+            "masked_platform_user_id": "****1234",
+            "status": "ACTIVE",
+            "session_status": "VALID",
+            "persist_login": True,
+            "last_verified_at": None,
+        }
+    ]
+    account_keys = set(summary_payload["accounts"][0])
+    assert "profile_path" not in account_keys
+    assert "platform_user_id" not in account_keys
+
     operation = client.post(
         "/api/delivery-operations",
         json=delivery_payload(account.account_id),

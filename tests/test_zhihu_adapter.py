@@ -18,6 +18,7 @@ from account_sessions.account_service import AccountSessionService
 from account_sessions.database import AccountDatabase
 from account_sessions.identity import extract_identity
 from account_sessions.permissions import LOCAL_WEB_CONTEXT
+from platforms.base import BrowserLifecycleError, LoginRequiredError
 from platforms.zhihu import PlatformNotImplementedError, ZhihuPlatform
 
 
@@ -143,6 +144,27 @@ def test_interactive_login_polls_until_identity_api_confirms_session(monkeypatch
     assert platform.last_login_error == ""
 
 
+def test_interactive_login_timeout_is_bounded_and_explicit() -> None:
+    platform = make_platform([invalid_identity(), invalid_identity()])
+    platform.LOGIN_POLL_INTERVAL_SECONDS = 0
+    platform.LOGIN_POLL_ATTEMPTS = 2
+
+    with pytest.raises(LoginRequiredError, match="知乎登录超时"):
+        run(platform.login())
+
+    assert platform.page.goto_calls == ["https://www.zhihu.com/signin"]
+    assert len(platform.page.identity_paths) == 2
+    assert platform.last_login_error.startswith("LOGIN_REQUIRED:")
+
+
+def test_closed_browser_is_not_downgraded_to_login_required() -> None:
+    platform = make_platform([])
+    platform.page.is_closed = lambda: True
+
+    with pytest.raises(BrowserLifecycleError, match="页面已关闭"):
+        run(platform.check_login())
+
+
 def test_account_service_creates_and_verifies_isolated_zhihu_profile(
     tmp_path: Path,
     monkeypatch,
@@ -219,6 +241,62 @@ def test_account_service_creates_and_verifies_isolated_zhihu_profile(
     profile_dir = data_root / "profiles" / "zhihu" / candidate["account_id"]
     assert profile_dir.is_dir()
     run(database.dispose())
+
+
+def test_account_service_cleans_up_after_zhihu_login_timeout(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    data_root = tmp_path / "account-sessions"
+    monkeypatch.setenv("ACCOUNT_SESSION_DATA_DIR", str(data_root))
+    database = AccountDatabase(f"sqlite+aiosqlite:///{(tmp_path / 'accounts.db').as_posix()}")
+
+    class TimeoutPlatform:
+        platform_name = "zhihu"
+
+        def __init__(self) -> None:
+            self.cleaned = False
+
+        async def initialize(self) -> None:
+            return None
+
+        async def check_login(self) -> bool:
+            return False
+
+        async def login(self) -> None:
+            raise LoginRequiredError("LOGIN_REQUIRED: 知乎登录超时")
+
+        async def cleanup(self) -> None:
+            self.cleaned = True
+
+    platform = TimeoutPlatform()
+    service = AccountSessionService(
+        database,
+        seed_legacy_profiles=False,
+        platform_factory=lambda _account: platform,
+        allowed_profile_roots=(data_root / "profiles",),
+    )
+    run(service.initialize())
+    candidate = run(service.create_login_candidate("zhihu", LOCAL_WEB_CONTEXT))
+
+    with pytest.raises(LoginRequiredError, match="知乎登录超时"):
+        run(
+            service.verify_account(
+                candidate["account_id"],
+                LOCAL_WEB_CONTEXT,
+                allow_interactive_login=True,
+            )
+        )
+
+    stored = run(service.get_account(candidate["account_id"]))
+    assert platform.cleaned is True
+    assert stored.session_status == "LOGIN_REQUIRED"
+    assert [
+        item["action"]
+        for item in run(service.list_activity(candidate["account_id"], LOCAL_WEB_CONTEXT))
+    ] == ["SESSION_VERIFY_FAILED"]
+    run(database.dispose())
+
 
 @pytest.mark.parametrize(
     ("method_name", "args"),

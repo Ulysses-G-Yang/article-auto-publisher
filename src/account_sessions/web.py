@@ -160,6 +160,12 @@ def create_account_session_blueprint(
         )
         return jsonify({"platform": platform, "accounts": accounts})
 
+    @blueprint.get("/api/account-sessions/summary")
+    def account_session_summary():
+        """供数据中心独立读取账号状态；不耦合文章与采集数据库。"""
+
+        return jsonify(state.run(state.accounts.get_account_summary(LOCAL_WEB_CONTEXT)))
+
     @blueprint.post("/api/platforms/<platform>/accounts/login")
     def create_account_login(platform: str):
         account = state.run(state.accounts.create_login_candidate(platform, LOCAL_WEB_CONTEXT))

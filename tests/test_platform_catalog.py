@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 from flask import Flask
+from pydantic import ValidationError
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 SRC_ROOT = PROJECT_ROOT / "src"
@@ -24,6 +25,7 @@ from account_sessions.platform_catalog import (
     PLATFORM_CATALOG,
 )
 from account_sessions.web import create_account_session_blueprint
+from content_studio.contracts import DraftTargetInput
 
 
 EXPECTED_IDS = [
@@ -106,3 +108,42 @@ def test_unknown_platform_cannot_fall_back_to_zol() -> None:
 
     with pytest.raises(AccountPlatformMismatchError, match="不支持的平台"):
         _platform_instance(account)
+
+
+def test_zhihu_is_account_only_and_cannot_enter_delivery_contracts(
+    tmp_path: Path,
+) -> None:
+    app = Flask(__name__)
+    database_path = tmp_path / "account-sessions.db"
+    blueprint = create_account_session_blueprint(
+        database_url=f"sqlite+aiosqlite:///{database_path.as_posix()}",
+        seed_legacy_profiles=False,
+        auto_execute=False,
+    )
+    app.register_blueprint(blueprint)
+    client = app.test_client()
+    account_id = str(uuid.uuid4())
+
+    response = client.post(
+        "/api/delivery-operations",
+        json={
+            "article": {"title": "只验证契约", "body": "不会发送到平台"},
+            "platform": "zhihu",
+            "account_id": account_id,
+            "mode": "DRAFT",
+            "confirmation_token": None,
+        },
+    )
+
+    assert response.status_code == 422
+    assert response.get_json()["error"] == "REQUEST_VALIDATION_FAILED"
+    with pytest.raises(ValidationError):
+        DraftTargetInput.model_validate(
+            {
+                "platform": "zhihu",
+                "account_id": account_id,
+                "mode": "DRAFT",
+            }
+        )
+
+    app.extensions["account_sessions"].close()

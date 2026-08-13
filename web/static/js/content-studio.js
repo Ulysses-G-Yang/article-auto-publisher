@@ -5,7 +5,6 @@
     if (!root) return;
 
     const byId = id => document.getElementById(id);
-    const platformLabels = { xiaoheihe: '小黑盒', zol: '中关村在线' };
     const sourceLabels = { BLANK: '空白草稿', DOCX: 'DOCX 导入', LEGACY_ARTICLE: '历史文章副本', SYSTEM_SEED: '系统草稿' };
     const planStatusLabels = {
         READY: '待执行', CREATING: '正在创建执行单', QUEUED: '已排队', RUNNING: '执行中', SUCCESS: '已完成',
@@ -14,8 +13,9 @@
         RESULT_UNKNOWN: '结果未知，需人工核对',
     };
     const state = {
+        platforms: [], // 架构师：动态平台列表
         draft: null,
-        drafts: [],
+
         accounts: [],
         selectedPlatform: null,
         selectedAccountId: null,
@@ -72,16 +72,34 @@
         byId('save-indicator-text').textContent = text;
     }
 
-    function openLocalDb() {
+    function openLocalDb(timeoutMs = 1500) {
         if (!window.indexedDB) return Promise.resolve(null);
         return new Promise(resolve => {
-            const request = indexedDB.open('articleops-content-studio', 1);
+            let settled = false;
+            const finish = database => {
+                if (settled) {
+                    database?.close?.();
+                    return;
+                }
+                settled = true;
+                clearTimeout(timer);
+                resolve(database || null);
+            };
+            const timer = setTimeout(() => finish(null), timeoutMs);
+            let request;
+            try {
+                request = indexedDB.open('articleops-content-studio', 1);
+            } catch (_) {
+                finish(null);
+                return;
+            }
             request.onupgradeneeded = () => {
                 const database = request.result;
                 if (!database.objectStoreNames.contains('drafts')) database.createObjectStore('drafts', { keyPath: 'draft_id' });
             };
-            request.onsuccess = () => resolve(request.result);
-            request.onerror = () => resolve(null);
+            request.onsuccess = () => finish(request.result);
+            request.onerror = () => finish(null);
+            request.onblocked = () => finish(null);
         });
     }
 
@@ -235,14 +253,23 @@
     function updateDraftMeta() {
         if (!state.draft) return;
         const source = sourceLabels[state.draft.source_type] || state.draft.source_type || '草稿';
-        byId('draft-source-badge').textContent = source;
-        byId('draft-revision').textContent = `修订 ${state.draft.revision}`;
-        byId('draft-updated-at').textContent = state.draft.updated_at ? `更新于 ${formatDate(state.draft.updated_at)}` : '';
-        byId('side-draft-title').textContent = state.draft.title || '未命名草稿';
-        byId('side-draft-source').textContent = source;
-        byId('side-block-count').textContent = String(state.draft.blocks.length);
-        byId('side-target-count').textContent = String(state.draft.targets.length);
-        byId('side-revision').textContent = String(state.draft.revision);
+        const indicatorText = byId('save-indicator-text');
+        if (indicatorText) {
+             const sourceBadge = byId('draft-source-badge');
+             if (sourceBadge) sourceBadge.textContent = source;
+             const revElem = byId('draft-revision');
+             if (revElem) revElem.textContent = `修订 ${state.draft.revision}`;
+             const updatedElem = byId('draft-updated-at');
+             if (updatedElem) updatedElem.textContent = state.draft.updated_at ? `更新于 ${formatDate(state.draft.updated_at)}` : '';
+        }
+        const sideTitle = byId('side-draft-title');
+        if (sideTitle) {
+            sideTitle.textContent = state.draft.title || '未命名草稿';
+            byId('side-draft-source').textContent = source;
+            byId('side-block-count').textContent = String(state.draft.blocks.length);
+            byId('side-target-count').textContent = String(state.draft.targets.length);
+            byId('side-revision').textContent = String(state.draft.revision);
+        }
     }
 
     function formatDate(value) {
@@ -356,8 +383,76 @@
         }
     }
 
+    async function fetchPlatforms() {
+        const loading = byId('platform-grid-loading');
+        const grid = byId('platform-selector-grid');
+        try {
+            const response = await fetch(root.dataset.platformsUrl);
+            const data = await jsonResponse(response);
+            state.platforms = Array.isArray(data) ? data : (data.platforms || []);
+            renderPlatformGrid();
+            if (loading) loading.classList.add('d-none');
+            if (grid) grid.classList.remove('d-none');
+        } catch (error) {
+            setMessage('target-builder-error', '平台目录加载失败: ' + error.message);
+        }
+    }
+
+    function renderPlatformGrid() {
+        const grid = byId('platform-selector-grid');
+        if (!grid) return;
+        grid.replaceChildren(...state.platforms.map(platform => {
+            const card = document.createElement('div');
+            card.className = `platform-card ${state.selectedPlatform === platform.id ? 'active' : ''} ${platform.status === 'COMING_SOON' ? 'disabled' : ''}`;
+            card.dataset.platform = platform.id;
+            
+            const icon = document.createElement('div');
+            icon.className = 'platform-icon';
+            const img = document.createElement('img');
+            img.src = platform.logo_url;
+            img.alt = platform.display_name;
+            img.style.width = '32px'; img.style.height = '32px';
+            img.onerror = () => { icon.innerHTML = '<i class="cil-applications"></i>'; };
+            icon.appendChild(img);
+
+            const name = document.createElement('div');
+            name.className = 'platform-name';
+            name.textContent = platform.display_name;
+
+            if (platform.status === 'COMING_SOON') {
+                card.title = '即将接入';
+            }
+
+            card.addEventListener('click', () => {
+                if (platform.status === 'COMING_SOON') return;
+                
+                // 知乎特殊处理：仅引导账号管理
+                if (platform.id === 'zhihu' && !platform.delivery_enabled) {
+                    if (confirm('知乎目前仅支持账号验证，是否前往账号页进行扫码？')) {
+                        window.location.href = '/accounts?platform=zhihu';
+                    }
+                    return;
+                }
+
+                state.selectedPlatform = platform.id;
+                document.querySelectorAll('.platform-card').forEach(c => c.classList.remove('active'));
+                card.classList.add('active');
+                loadAccounts(platform.id);
+            });
+
+            card.append(icon, name);
+            return card;
+        }));
+    }
+
+    function platformLabel(id) {
+        const p = state.platforms.find(p => p.id === id);
+        return p ? p.display_name : id;
+    }
+
     async function loadAccounts(platform) {
         const sequence = ++state.accountRequestSequence;
+
         state.accountRequestController?.abort();
         state.accountRequestController = new AbortController();
         state.accounts = []; state.selectedAccountId = null;
@@ -425,8 +520,8 @@
 
     async function addTarget() {
         const account = selectedAccount();
-        const mode = document.querySelector('input[name="target-mode"]:checked')?.value || 'DRAFT';
-        if (!state.selectedPlatform) { setMessage('target-builder-error', '请先选择平台。'); byId('target-platform-xiaoheihe').focus(); return; }
+        const mode = byId('target-mode')?.value || 'DRAFT';
+        if (!state.selectedPlatform) { setMessage('target-builder-error', '请先选择平台。'); byId('platform-selector-grid').focus(); return; }
         if (!account) { setMessage('target-builder-error', '请选择一个状态有效的账号。'); byId('target-account').focus(); return; }
         if (state.draft.targets.some(target => target.account_id === account.account_id)) { setMessage('target-builder-error', '同一草稿不能重复添加同一账号。'); return; }
         setMessage('target-builder-error', '');
@@ -437,7 +532,7 @@
         const container = byId('targets-list');
         container.replaceChildren(...state.draft.targets.map(target => {
             const row = document.createElement('article'); row.className = 'target-row';
-            const platform = document.createElement('div'); const platformStrong = document.createElement('strong'); platformStrong.textContent = platformLabels[target.platform] || target.platform; const platformSmall = document.createElement('small'); platformSmall.textContent = '平台'; platform.append(platformStrong, platformSmall);
+            const platform = document.createElement('div'); const platformStrong = document.createElement('strong'); platformStrong.textContent = platformLabel(target.platform); const platformSmall = document.createElement('small'); platformSmall.textContent = '平台'; platform.append(platformStrong, platformSmall);
             const account = document.createElement('div'); const accountStrong = document.createElement('strong'); accountStrong.textContent = target.account_display_name || '平台账号'; const accountSmall = document.createElement('small'); accountSmall.textContent = target.account_id ? `账号 ${target.account_id.slice(0, 8)}…` : '账号'; account.append(accountStrong, accountSmall);
             const mode = document.createElement('div'); const modeBadge = document.createElement('span'); modeBadge.className = `badge ${target.mode === 'PUBLISH' ? 'text-bg-danger' : 'text-bg-info'}`; modeBadge.textContent = target.mode === 'PUBLISH' ? '公开发布' : '平台草稿'; mode.appendChild(modeBadge);
             const policy = document.createElement('div'); const policyStrong = document.createElement('strong'); policyStrong.textContent = target.persist_login ? '保持登录态' : '不持久会话'; const policySmall = document.createElement('small'); policySmall.textContent = '会话策略'; policy.append(policyStrong, policySmall);
@@ -453,7 +548,7 @@
         const issues = [];
         if (!state.draft.title.trim()) issues.push({ message: '填写文章标题', focus: 'draft-title' });
         if (publicBlocks().length === 0) issues.push({ message: '至少添加一个非空文字块或图片块', focus: 'add-text-block' });
-        if (state.draft.targets.length === 0) issues.push({ message: '至少添加一个投递目标', focus: 'target-platform-xiaoheihe' });
+        if (state.draft.targets.length === 0) issues.push({ message: '至少添加一个投递目标', focus: 'platform-selector-grid' });
         return issues;
     }
 
@@ -481,7 +576,7 @@
         const summary = byId('plan-review-summary');
         summary.replaceChildren(...state.plan.targets.map(target => {
             const card = document.createElement('article'); card.className = 'plan-review-card';
-            const strong = document.createElement('strong'); strong.textContent = `${platformLabels[target.platform] || target.platform} · ${target.account_display_name || '平台账号'}`;
+            const strong = document.createElement('strong'); strong.textContent = `${platformLabel(target.platform)} · ${target.account_display_name || '平台账号'}`;
             const detail = document.createElement('div'); detail.className = 'small text-body-secondary'; detail.textContent = target.mode === 'PUBLISH' ? '公开发布（还需逐条二次确认）' : '保存到平台草稿箱';
             card.append(strong, detail); return card;
         }));
@@ -660,10 +755,65 @@
         window.addEventListener('beforeunload', () => { if (state.dirty) localDraftPut(true); });
     }
 
-    async function init() {
-        bindEvents(); state.localDb = await openLocalDb();
+    
+    async function loadPlatforms() {
         try {
-            const drafts = await refreshDrafts();
+            const url = root.dataset.platformsUrl;
+            const payload = await jsonResponse(await fetch(url, { headers: { Accept: 'application/json' } }));
+            const segment = byId('platform-segment');
+            if (segment && payload.platforms) {
+                segment.replaceChildren();
+                payload.platforms.forEach(p => {
+                    platformLabels[p.id] = p.display_name;
+                    
+                    const input = document.createElement('input');
+                    input.className = 'btn-check';
+                    input.type = 'radio';
+                    input.name = 'target-platform';
+                    input.id = 'target-platform-' + p.id;
+                    input.value = p.id;
+                    input.autocomplete = 'off';
+                    if (!p.delivery_enabled && !p.account_enabled) {
+                        input.disabled = true;
+                    }
+                    
+                    const label = document.createElement('label');
+                    label.className = 'btn';
+                    label.htmlFor = input.id;
+                    const img = document.createElement('img');
+                    img.src = p.logo_url;
+                    img.className = 'platform-icon';
+                    img.alt = p.display_name;
+                    img.style.width = '1em';
+                    img.style.height = '1em';
+                    img.style.marginRight = '4px';
+                    const span = document.createElement('span');
+                    span.textContent = p.display_name;
+                    
+                    label.append(img, span);
+                    segment.append(input, label);
+                    
+                    input.addEventListener('change', event => { 
+                        if (p.account_enabled && !p.delivery_enabled) {
+                            window.location.href = '/accounts?platform=' + p.id;
+                            return;
+                        }
+                        state.selectedPlatform = event.target.value; 
+                        state.selectedAccountId = null; 
+                        loadAccounts(state.selectedPlatform); 
+                    });
+                });
+            }
+        } catch (error) {
+            console.error('Failed to load platforms', error);
+        }
+    }
+
+    async function init() {
+        state.localDb = await openLocalDb();
+        await fetchPlatforms(); // 架构师：初始化平台矩阵
+        const params = new URLSearchParams(window.location.search);
+
             const requestedId = new URLSearchParams(window.location.search).get('draft_id');
             let draft = requestedId ? await jsonResponse(await fetch(endpoint(root.dataset.draftUrlTemplate, 'draft_id', requestedId), { headers: { Accept: 'application/json' } })) : drafts[0];
             if (!draft) draft = await jsonResponse(await fetch(root.dataset.draftsUrl, { method: 'POST', headers: { 'Content-Type': 'application/json', Accept: 'application/json' }, body: JSON.stringify({ title: '', blocks: [] }) }));

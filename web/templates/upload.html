@@ -13,6 +13,7 @@
      data-from-legacy-url-template="/api/content-drafts/from-legacy/{article_id}"
      data-assets-url-template="/api/content-drafts/{draft_id}/assets"
      data-targets-url-template="/api/content-drafts/{draft_id}/targets"
+     data-platforms-url="/api/platforms"
      data-plan-url-template="/api/content-drafts/{draft_id}/delivery-plans"
      data-plan-detail-url-template="/api/delivery-plans/{plan_id}"
      data-plan-execute-url-template="/api/delivery-plans/{plan_id}/execute"
@@ -71,10 +72,7 @@
                 <div class="card-body">
                     <p class="section-intro">先选平台，再选择该平台返回的真实账号昵称。系统不会自动选择账号。</p>
                     <div class="target-builder">
-                        <fieldset class="target-builder-field platform-field"><legend>平台</legend><div class="platform-segment" role="radiogroup" aria-label="目标平台">
-                            <input class="btn-check" type="radio" name="target-platform" id="target-platform-xiaoheihe" value="xiaoheihe" autocomplete="off"><label class="btn" for="target-platform-xiaoheihe"><i class="cil-gamepad" aria-hidden="true"></i><span>小黑盒</span></label>
-                            <input class="btn-check" type="radio" name="target-platform" id="target-platform-zol" value="zol" autocomplete="off"><label class="btn" for="target-platform-zol"><i class="cil-screen-desktop" aria-hidden="true"></i><span>中关村在线</span></label>
-                        </div></fieldset>
+                        <fieldset class="target-builder-field platform-field"><legend>平台</legend><div class="platform-segment" id="platform-segment" role="radiogroup" aria-label="目标平台"></div></fieldset>
                         <div class="target-builder-field account-field"><label for="target-account">账号</label><select id="target-account" class="form-select" disabled><option value="">请先选择平台</option></select><small id="target-account-help">仅有 VALID 登录态可用</small></div>
                         <fieldset class="target-builder-field mode-field"><legend>投递模式</legend><div class="mode-segment" role="radiogroup" aria-label="投递模式"><input class="btn-check" type="radio" name="target-mode" id="target-mode-draft" value="DRAFT" checked><label class="btn" for="target-mode-draft">平台草稿</label><input class="btn-check" type="radio" name="target-mode" id="target-mode-publish" value="PUBLISH"><label class="btn" for="target-mode-publish">公开发布</label></div></fieldset>
                         <div class="target-builder-field policy-field"><span class="field-label">会话策略</span><div class="session-switch"><div><strong>保持登录态</strong><small>不代表当前已登录</small></div><div class="form-check form-switch m-0"><input id="target-persist-login" class="form-check-input" type="checkbox" role="switch" disabled aria-label="保持所选账号登录态"></div></div></div>

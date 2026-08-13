@@ -20,6 +20,7 @@ from account_sessions.permissions import (
     LOCAL_WEB_CONTEXT,
     PermissionDeniedError,
 )
+from account_sessions.platform_catalog import public_platform_catalog
 from account_sessions.runtime import AccountRuntime
 
 LOGGER = logging.getLogger(__name__)
@@ -145,14 +146,7 @@ def create_account_session_blueprint(
 
     @blueprint.get("/api/platforms")
     def list_platforms():
-        return jsonify(
-            {
-                "platforms": [
-                    {"id": "xiaoheihe", "display_name": "小黑盒"},
-                    {"id": "zol", "display_name": "中关村在线"},
-                ]
-            }
-        )
+        return jsonify({"platforms": public_platform_catalog()})
 
     @blueprint.get("/api/platforms/<platform>/accounts")
     def list_accounts(platform: str):

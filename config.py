@@ -52,8 +52,14 @@ DEFAULT_CONFIG = {
             "community_max_count": 2,
             "tag_max_count": 5,
         },
-    },
+        "zhihu": {
+            "name": "知乎",
+            "home_url": "https://www.zhihu.com/",
+            "login_url": "https://www.zhihu.com/signin",
+            "identity_api_path": "/api/v4/me",
+        },
     "human_simulation": {
+    },
         "delay": {"min": 0.5, "max": 3.0},
         "long_delay_probability": 0.1,
         "long_delay": {"min": 5.0, "max": 15.0},
@@ -160,7 +166,7 @@ def load_config(config_path: str = None) -> dict:
 
     config_path = config_path or os.getenv("APP_CONFIG_FILE")
     if config_path and os.path.exists(config_path):
-        with open(config_path, "r", encoding="utf-8") as f:
+        with open(config_path, encoding="utf-8") as f:
             user_config = yaml.safe_load(f)
             if user_config:
                 _deep_merge(cfg, user_config)

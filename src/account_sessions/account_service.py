@@ -19,10 +19,11 @@ from account_sessions.identity import extract_identity
 from account_sessions.leases import AccountProfileLease
 from account_sessions.models import AccountActivity, PlatformAccount
 from account_sessions.permissions import AccessContext
+from account_sessions.platform_catalog import ACCOUNT_ENABLED_PLATFORMS
 from account_sessions.runtime_paths import legacy_profile_path, managed_profile_path
 from account_sessions.security import mask_platform_user_id, safe_error_message
 
-SUPPORTED_PLATFORMS = ("xiaoheihe", "zol")
+SUPPORTED_PLATFORMS = ACCOUNT_ENABLED_PLATFORMS
 
 
 class AccountSessionService:
@@ -381,9 +382,15 @@ def _platform_instance(account: PlatformAccount):
         from platforms.xiaoheihe import XiaoheihePlatform
 
         return XiaoheihePlatform(**kwargs)
-    from platforms.zol import ZOLPlatform
+    if account.platform == "zol":
+        from platforms.zol import ZOLPlatform
 
-    return ZOLPlatform(**kwargs)
+        return ZOLPlatform(**kwargs)
+    if account.platform == "zhihu":
+        from platforms.zhihu import ZhihuPlatform
+
+        return ZhihuPlatform(**kwargs)
+    raise AccountPlatformMismatchError("不支持的平台")
 
 
 async def _check_login(platform, *, read_only: bool) -> bool:

@@ -72,7 +72,14 @@
                 <div class="card-body">
                     <p class="section-intro">先选平台，再选择该平台返回的真实账号昵称。系统不会自动选择账号。</p>
                     <div class="target-builder">
-                        <fieldset class="target-builder-field platform-field"><legend>平台</legend><div class="platform-segment" id="platform-segment" role="radiogroup" aria-label="目标平台"></div></fieldset>
+                        <fieldset class="target-builder-field platform-field">
+                            <legend>平台</legend>
+                            <div class="platform-matrix-container">
+                                <div id="platform-grid-loading" class="platform-grid-loading" role="status"><span class="spinner-border spinner-border-sm" aria-hidden="true"></span><span>正在读取平台目录…</span></div>
+                                <div id="platform-selector-grid" class="platform-grid d-none" role="group" aria-label="目标平台" tabindex="-1"></div>
+                            </div>
+                            <small>彩色平台可使用；“即将接入”平台仅展示，不会请求账号或创建投递目标。</small>
+                        </fieldset>
                         <div class="target-builder-field account-field"><label for="target-account">账号</label><select id="target-account" class="form-select" disabled><option value="">请先选择平台</option></select><small id="target-account-help">仅有 VALID 登录态可用</small></div>
                         <fieldset class="target-builder-field mode-field"><legend>投递模式</legend><div class="mode-segment" role="radiogroup" aria-label="投递模式"><input class="btn-check" type="radio" name="target-mode" id="target-mode-draft" value="DRAFT" checked><label class="btn" for="target-mode-draft">平台草稿</label><input class="btn-check" type="radio" name="target-mode" id="target-mode-publish" value="PUBLISH"><label class="btn" for="target-mode-publish">公开发布</label></div></fieldset>
                         <div class="target-builder-field policy-field"><span class="field-label">会话策略</span><div class="session-switch"><div><strong>保持登录态</strong><small>不代表当前已登录</small></div><div class="form-check form-switch m-0"><input id="target-persist-login" class="form-check-input" type="checkbox" role="switch" disabled aria-label="保持所选账号登录态"></div></div></div>
@@ -115,5 +122,5 @@
 </div>
 {% endblock %}
 
-{% block extra_scripts %}<script src="{{ url_for('static', filename='js/content-studio.js') }}"></script>{% endblock %}
+{% block extra_scripts %}<script src="{{ url_for('static', filename='js/content-studio.js', v='20260813-studio-recovery') }}"></script>{% endblock %}
 

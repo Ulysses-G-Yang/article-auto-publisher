@@ -47,81 +47,97 @@
 .studio-empty strong { color: var(--cui-body-color); }
 .studio-empty.compact { min-height: 125px; }
 .section-intro { color: var(--cui-secondary-color); font-size: .82rem; }
-.target-builder { display: grid; grid-template-columns: minmax(210px,.8fr) minmax(220px,1.1fr) minmax(200px,.9fr) minmax(180px,.8fr) auto; align-items: end; gap: .75rem; }
+.target-builder { display: grid; grid-template-columns: minmax(240px,1.2fr) minmax(200px,.9fr) minmax(180px,.8fr) auto; align-items: end; gap: .75rem; }
 .target-builder-field { min-width: 0; margin: 0; }
 .target-builder-field legend, .target-builder-field > label, .field-label { display: block; float: none; width: auto; margin-bottom: .35rem; color: var(--cui-secondary-color); font-size: .7rem; font-weight: 700; }
 .target-builder-field small { display: block; margin-top: .3rem; color: var(--cui-secondary-color); font-size: .66rem; }
-.platform-segment, .mode-segment { display: grid; grid-template-columns: repeat(2, 1fr); }
-/* 首席架构师重构：10 平台工业级矩阵样式 */
+.platform-field { grid-column: 1 / -1; }
+.mode-segment { display: grid; grid-template-columns: repeat(2, 1fr); }
 .platform-matrix-container {
-    padding: 1.5rem;
+    position: relative;
+    width: 100%;
+    min-width: 0;
+    padding: .75rem;
+    overflow: hidden;
     background: var(--cui-tertiary-bg);
-    border-radius: 0.75rem;
     border: 1px solid var(--cui-border-color);
+    border-radius: .75rem;
 }
-
+.platform-grid-loading {
+    display: flex;
+    min-height: 88px;
+    align-items: center;
+    justify-content: center;
+    gap: .6rem;
+    color: var(--cui-secondary-color);
+    font-size: .78rem;
+}
 .platform-grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
-    gap: 1rem;
+    display: flex;
+    width: 100%;
+    min-width: 0;
+    gap: .65rem;
+    overflow-x: auto;
+    overflow-y: hidden;
+    padding: .15rem .1rem .45rem;
+    scroll-snap-type: x proximity;
+    scrollbar-width: thin;
 }
-
 .platform-card {
     display: flex;
+    flex: 0 0 96px;
+    min-height: 88px;
     flex-direction: column;
     align-items: center;
     justify-content: center;
-    padding: 1rem;
+    gap: .35rem;
+    padding: .65rem .45rem;
     background: var(--cui-body-bg);
-    border: 2px solid transparent;
-    border-radius: 0.5rem;
+    border: 1px solid var(--cui-border-color);
+    border-radius: .6rem;
     cursor: pointer;
-    transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
-    opacity: 0.6;
-    filter: grayscale(1);
+    scroll-snap-align: start;
+    transition: border-color .16s ease, box-shadow .16s ease, transform .16s ease;
 }
-
-.platform-card:hover {
-    opacity: 1;
-    filter: grayscale(0);
+.platform-card:not(:disabled):hover {
+    border-color: rgba(var(--cui-primary-rgb), .55);
     transform: translateY(-2px);
-    box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+    box-shadow: 0 .3rem .8rem rgba(31, 41, 55, .1);
 }
-
-.platform-card.active {
-    opacity: 1;
-    filter: grayscale(0);
+.platform-card:focus-visible { outline: 3px solid rgba(var(--cui-primary-rgb), .25); outline-offset: 2px; }
+.platform-card.is-active {
     border-color: var(--app-primary);
-    background: rgba(var(--cui-primary-rgb), 0.05);
+    background: rgba(var(--cui-primary-rgb), .08);
+    box-shadow: 0 0 0 2px rgba(var(--cui-primary-rgb), .12);
 }
-
-.platform-card.disabled {
+.platform-card:disabled {
     cursor: not-allowed;
-    background: transparent;
-    border: 1px dashed var(--cui-border-color);
+    opacity: .5;
+    filter: grayscale(1);
+    background: var(--cui-secondary-bg);
 }
-
 .platform-icon {
-    font-size: 1.75rem;
-    margin-bottom: 0.5rem;
-    color: var(--cui-secondary-color);
+    display: grid;
+    width: 34px;
+    height: 34px;
+    place-items: center;
+    overflow: hidden;
+    border-radius: .45rem;
+    background: var(--cui-body-bg);
 }
-
-.platform-card.active .platform-icon {
-    color: var(--app-primary);
-}
-
+.platform-icon img { display: block; width: 28px; height: 28px; object-fit: contain; }
+.platform-icon-fallback { font-size: .78rem; font-weight: 800; color: var(--cui-primary); }
 .platform-name {
-    font-size: 0.75rem;
-    font-weight: 700;
+    max-width: 100%;
+    overflow: hidden;
     color: var(--cui-body-color);
+    font-size: .72rem;
+    font-weight: 700;
+    line-height: 1.2;
+    text-overflow: ellipsis;
+    white-space: nowrap;
 }
-
-.mode-segment-v2 .btn {
-    border-radius: 0.5rem;
-    font-weight: 600;
-}
-
+.platform-status { color: var(--cui-secondary-color); font-size: .58rem; line-height: 1; }
 .session-switch > div:first-child { display: flex; min-width: 0; flex-direction: column; }
 .session-switch strong { font-size: .72rem; }
 .session-switch small { margin: 0; overflow: hidden; font-size: .61rem; text-overflow: ellipsis; white-space: nowrap; }

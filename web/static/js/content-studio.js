@@ -13,7 +13,8 @@
         RESULT_UNKNOWN: '结果未知，需人工核对',
     };
     const state = {
-        platforms: [], // 架构师：动态平台列表
+        platforms: [],
+        drafts: [],
         draft: null,
 
         accounts: [],
@@ -383,18 +384,34 @@
         }
     }
 
+    function resetAccountPicker(message = '请先选择平台') {
+        state.accountRequestController?.abort();
+        state.accountRequestController = null;
+        state.accounts = [];
+        state.selectedAccountId = null;
+        const select = byId('target-account');
+        select.disabled = true;
+        select.replaceChildren(new Option(message, ''));
+        const policy = byId('target-persist-login');
+        policy.disabled = true;
+        policy.checked = false;
+    }
+
     async function fetchPlatforms() {
         const loading = byId('platform-grid-loading');
         const grid = byId('platform-selector-grid');
         try {
-            const response = await fetch(root.dataset.platformsUrl);
+            const response = await fetch(root.dataset.platformsUrl, { headers: { Accept: 'application/json' } });
             const data = await jsonResponse(response);
-            state.platforms = Array.isArray(data) ? data : (data.platforms || []);
+            state.platforms = (Array.isArray(data) ? data : (data.platforms || []))
+                .filter(platform => platform && typeof platform.id === 'string')
+                .sort((left, right) => Number(left.sort_order || 0) - Number(right.sort_order || 0));
             renderPlatformGrid();
-            if (loading) loading.classList.add('d-none');
-            if (grid) grid.classList.remove('d-none');
         } catch (error) {
-            setMessage('target-builder-error', '平台目录加载失败: ' + error.message);
+            setMessage('target-builder-error', `平台目录加载失败：${error.message || '未知错误'}`);
+        } finally {
+            loading?.classList.add('d-none');
+            grid?.classList.remove('d-none');
         }
     }
 
@@ -402,54 +419,65 @@
         const grid = byId('platform-selector-grid');
         if (!grid) return;
         grid.replaceChildren(...state.platforms.map(platform => {
-            const card = document.createElement('div');
-            card.className = `platform-card ${state.selectedPlatform === platform.id ? 'active' : ''} ${platform.status === 'COMING_SOON' ? 'disabled' : ''}`;
-            card.dataset.platform = platform.id;
-            
-            const icon = document.createElement('div');
+            const selectable = Boolean(platform.account_enabled || platform.delivery_enabled);
+            const card = document.createElement('button');
+            card.type = 'button';
+            card.className = `platform-card${state.selectedPlatform === platform.id ? ' is-active' : ''}`;
+            card.dataset.platformId = platform.id;
+            card.disabled = !selectable;
+            card.setAttribute('aria-pressed', state.selectedPlatform === platform.id ? 'true' : 'false');
+            card.setAttribute('aria-label', `${platform.display_name}${selectable ? '' : '，即将接入'}`);
+
+            const icon = document.createElement('span');
             icon.className = 'platform-icon';
             const img = document.createElement('img');
-            img.src = platform.logo_url;
-            img.alt = platform.display_name;
-            img.style.width = '32px'; img.style.height = '32px';
-            img.onerror = () => { icon.innerHTML = '<i class="cil-applications"></i>'; };
+            img.src = platform.logo_url || '';
+            img.alt = '';
+            img.setAttribute('aria-hidden', 'true');
+            img.addEventListener('error', () => {
+                img.remove();
+                const fallback = document.createElement('span');
+                fallback.className = 'platform-icon-fallback';
+                fallback.textContent = (platform.display_name || platform.id).slice(0, 2);
+                icon.appendChild(fallback);
+            }, { once: true });
             icon.appendChild(img);
 
-            const name = document.createElement('div');
+            const name = document.createElement('span');
             name.className = 'platform-name';
-            name.textContent = platform.display_name;
+            name.textContent = platform.display_name || platform.id;
+            const status = document.createElement('span');
+            status.className = 'platform-status';
+            status.textContent = platform.delivery_enabled ? '可投递' : (platform.account_enabled ? '账号管理' : '即将接入');
 
-            if (platform.status === 'COMING_SOON') {
-                card.title = '即将接入';
-            }
-
-            card.addEventListener('click', () => {
-                if (platform.status === 'COMING_SOON') return;
-                
-                // 知乎特殊处理：仅引导账号管理
-                if (platform.id === 'zhihu' && !platform.delivery_enabled) {
-                    if (confirm('知乎目前仅支持账号验证，是否前往账号页进行扫码？')) {
-                        window.location.href = '/accounts?platform=zhihu';
-                    }
+            card.addEventListener('click', async () => {
+                if (!selectable) return;
+                state.selectedPlatform = platform.id;
+                resetAccountPicker(platform.delivery_enabled ? '正在读取账号…' : '该平台暂不支持投递');
+                renderPlatformGrid();
+                setMessage('target-builder-error', '');
+                if (!platform.delivery_enabled) {
+                    const alert = byId('target-builder-error');
+                    setMessage('target-builder-error', `${platform.display_name}目前仅支持账号管理。`);
+                    const link = document.createElement('a');
+                    link.className = 'alert-link ms-1';
+                    link.href = `/accounts?platform=${encodeURIComponent(platform.id)}`;
+                    link.textContent = '前往平台账号页';
+                    alert.appendChild(link);
                     return;
                 }
-
-                state.selectedPlatform = platform.id;
-                document.querySelectorAll('.platform-card').forEach(c => c.classList.remove('active'));
-                card.classList.add('active');
-                loadAccounts(platform.id);
+                await loadAccounts(platform.id);
             });
 
-            card.append(icon, name);
+            card.append(icon, name, status);
             return card;
         }));
     }
 
     function platformLabel(id) {
-        const p = state.platforms.find(p => p.id === id);
-        return p ? p.display_name : id;
+        const platform = state.platforms.find(item => item.id === id);
+        return platform ? platform.display_name : id;
     }
-
     async function loadAccounts(platform) {
         const sequence = ++state.accountRequestSequence;
 
@@ -457,7 +485,7 @@
         state.accountRequestController = new AbortController();
         state.accounts = []; state.selectedAccountId = null;
         const select = byId('target-account');
-        select.disabled = true; select.replaceChildren(new Option(`正在读取${platformLabels[platform]}账号…`, ''));
+        select.disabled = true; select.replaceChildren(new Option(`正在读取${platformLabel(platform)}账号…`, ''));
         byId('target-persist-login').disabled = true;
         setMessage('target-builder-error', '');
         try {
@@ -520,7 +548,7 @@
 
     async function addTarget() {
         const account = selectedAccount();
-        const mode = byId('target-mode')?.value || 'DRAFT';
+        const mode = document.querySelector('input[name="target-mode"]:checked')?.value || 'DRAFT';
         if (!state.selectedPlatform) { setMessage('target-builder-error', '请先选择平台。'); byId('platform-selector-grid').focus(); return; }
         if (!account) { setMessage('target-builder-error', '请选择一个状态有效的账号。'); byId('target-account').focus(); return; }
         if (state.draft.targets.some(target => target.account_id === account.account_id)) { setMessage('target-builder-error', '同一草稿不能重复添加同一账号。'); return; }
@@ -620,7 +648,7 @@
         byId('plan-status').textContent = planStatusLabels[state.plan.status] || state.plan.status;
         byId('plan-targets').replaceChildren(...state.plan.targets.map(target => {
             const row = document.createElement('article'); row.className = 'plan-target';
-            const copy = document.createElement('div'); copy.className = 'plan-target-copy'; const strong = document.createElement('strong'); strong.textContent = `${platformLabels[target.platform] || target.platform} · ${target.account_display_name || '平台账号'}`; const small = document.createElement('small'); small.textContent = planTargetDetail(target); copy.append(strong, small);
+            const copy = document.createElement('div'); copy.className = 'plan-target-copy'; const strong = document.createElement('strong'); strong.textContent = `${platformLabel(target.platform)} · ${target.account_display_name || '平台账号'}`; const small = document.createElement('small'); small.textContent = planTargetDetail(target); copy.append(strong, small);
             const actions = document.createElement('div'); actions.className = 'plan-target-actions'; const badge = document.createElement('span'); badge.className = `badge ${planBadge(target.status)}`; badge.textContent = planStatusLabels[target.status] || target.status; actions.appendChild(badge);
             row.append(copy, actions); return row;
         }));
@@ -650,7 +678,7 @@
         if (!state.activePublishTarget) { schedulePlanPoll(); return; }
         const target = state.activePublishTarget;
         const summary = byId('publish-target-summary'); summary.replaceChildren();
-        const strong = document.createElement('strong'); strong.textContent = `${platformLabels[target.platform] || target.platform} · ${target.account_display_name || '平台账号'}`;
+        const strong = document.createElement('strong'); strong.textContent = `${platformLabel(target.platform)} · ${target.account_display_name || '平台账号'}`;
         const detail = document.createElement('div'); detail.className = 'small mt-1'; detail.textContent = `标题：${state.draft.title}`;
         summary.append(strong, detail); byId('publish-token-expiry').textContent = target.expires_at ? `一次性确认令牌有效至 ${formatDate(target.expires_at)}` : '该确认令牌只能使用一次。';
         setMessage('publish-confirm-error', ''); coreModal('publish-confirm-modal').show();
@@ -740,7 +768,6 @@
         byId('content-blocks').addEventListener('input', event => { const block = state.draft.blocks.find(item => item.block_id === event.target.dataset.blockId); if (!block) return; if (event.target.dataset.action === 'text-input') block.text = event.target.value; if (event.target.dataset.action === 'image-alt') block.alt = event.target.value; markDirty(); });
         byId('content-blocks').addEventListener('click', event => { const button = event.target.closest('button[data-action]'); if (!button) return; if (button.dataset.action === 'move-up') moveBlock(button.dataset.blockId, -1); if (button.dataset.action === 'move-down') moveBlock(button.dataset.blockId, 1); if (button.dataset.action === 'delete-block') { state.draft.blocks = state.draft.blocks.filter(block => block.block_id !== button.dataset.blockId); renderBlocks(); markDirty(); } });
         byId('asset-upload').addEventListener('change', event => { uploadAssets(Array.from(event.target.files || [])); event.target.value = ''; });
-        document.querySelectorAll('input[name="target-platform"]').forEach(input => input.addEventListener('change', event => { state.selectedPlatform = event.target.value; state.selectedAccountId = null; loadAccounts(state.selectedPlatform); }));
         byId('target-account').addEventListener('change', event => { state.selectedAccountId = event.target.value || null; const account = selectedAccount(); const control = byId('target-persist-login'); control.disabled = !account; control.checked = Boolean(account?.persist_login); });
         byId('target-persist-login').addEventListener('change', event => updateSessionPolicy(event.target.checked));
         byId('add-target').addEventListener('click', addTarget);
@@ -756,72 +783,34 @@
     }
 
     
-    async function loadPlatforms() {
-        try {
-            const url = root.dataset.platformsUrl;
-            const payload = await jsonResponse(await fetch(url, { headers: { Accept: 'application/json' } }));
-            const segment = byId('platform-segment');
-            if (segment && payload.platforms) {
-                segment.replaceChildren();
-                payload.platforms.forEach(p => {
-                    platformLabels[p.id] = p.display_name;
-                    
-                    const input = document.createElement('input');
-                    input.className = 'btn-check';
-                    input.type = 'radio';
-                    input.name = 'target-platform';
-                    input.id = 'target-platform-' + p.id;
-                    input.value = p.id;
-                    input.autocomplete = 'off';
-                    if (!p.delivery_enabled && !p.account_enabled) {
-                        input.disabled = true;
-                    }
-                    
-                    const label = document.createElement('label');
-                    label.className = 'btn';
-                    label.htmlFor = input.id;
-                    const img = document.createElement('img');
-                    img.src = p.logo_url;
-                    img.className = 'platform-icon';
-                    img.alt = p.display_name;
-                    img.style.width = '1em';
-                    img.style.height = '1em';
-                    img.style.marginRight = '4px';
-                    const span = document.createElement('span');
-                    span.textContent = p.display_name;
-                    
-                    label.append(img, span);
-                    segment.append(input, label);
-                    
-                    input.addEventListener('change', event => { 
-                        if (p.account_enabled && !p.delivery_enabled) {
-                            window.location.href = '/accounts?platform=' + p.id;
-                            return;
-                        }
-                        state.selectedPlatform = event.target.value; 
-                        state.selectedAccountId = null; 
-                        loadAccounts(state.selectedPlatform); 
-                    });
-                });
-            }
-        } catch (error) {
-            console.error('Failed to load platforms', error);
-        }
-    }
-
     async function init() {
-        state.localDb = await openLocalDb();
-        await fetchPlatforms(); // 架构师：初始化平台矩阵
-        const params = new URLSearchParams(window.location.search);
+        try {
+            bindEvents();
+            state.localDb = await openLocalDb();
+            await fetchPlatforms();
+            const drafts = await refreshDrafts();
+            const params = new URLSearchParams(window.location.search);
+            const requestedId = params.get('draft_id');
+            let draft = requestedId
+                ? await jsonResponse(await fetch(endpoint(root.dataset.draftUrlTemplate, 'draft_id', requestedId), { headers: { Accept: 'application/json' } }))
+                : drafts[0];
 
-            const requestedId = new URLSearchParams(window.location.search).get('draft_id');
-            let draft = requestedId ? await jsonResponse(await fetch(endpoint(root.dataset.draftUrlTemplate, 'draft_id', requestedId), { headers: { Accept: 'application/json' } })) : drafts[0];
-            if (!draft) draft = await jsonResponse(await fetch(root.dataset.draftsUrl, { method: 'POST', headers: { 'Content-Type': 'application/json', Accept: 'application/json' }, body: JSON.stringify({ title: '', blocks: [] }) }));
+            if (!draft) {
+                draft = await jsonResponse(await fetch(root.dataset.draftsUrl, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+                    body: JSON.stringify({ title: '', blocks: [] }),
+                }));
+                await refreshDrafts();
+            }
+
             await openDraft(draft);
         } catch (error) {
-            byId('studio-loading').classList.add('d-none'); setMessage('studio-fatal', `${error.message || '创作工作台加载失败'}。请确认 Content Studio 后端已启用。`); setSaveState('error', '加载失败');
+            byId('studio-loading').classList.add('d-none');
+            setMessage('studio-fatal', `加载工作台失败：${error.message || '未知错误'}`);
         }
     }
+
 
     init();
 })();

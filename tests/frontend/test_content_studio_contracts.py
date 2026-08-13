@@ -110,6 +110,32 @@ def test_accounts_load_after_platform_without_auto_selection() -> None:
     assert "不代表当前已登录" in template
 
 
+def test_platform_matrix_is_dynamic_and_does_not_keep_legacy_radios() -> None:
+    template = read("web/templates/upload.html")
+    script = read("web/static/js/content-studio.js")
+    stylesheet = read("web/static/css/content-studio.css")
+
+    assert 'data-platforms-url="/api/platforms"' in template
+    assert 'id="platform-selector-grid"' in template
+    assert 'id="platform-grid-loading"' in template
+    assert "fetch(root.dataset.platformsUrl" in script
+    assert "card.dataset.platformId = platform.id" in script
+    assert "function loadPlatforms()" not in script
+    assert "platformLabels" not in script
+    assert 'input[name="target-platform"]' not in script
+    assert "overflow-x: auto" in stylesheet
+    assert ".platform-card:disabled" in stylesheet
+
+
+def test_studio_initialization_refreshes_drafts_and_always_terminates() -> None:
+    script = read("web/static/js/content-studio.js")
+
+    assert "function openLocalDb(timeoutMs = 1500)" in script
+    assert "request.onblocked = () => finish(null)" in script
+    assert "const timer = setTimeout(() => finish(null), timeoutMs)" in script
+    assert "const drafts = await refreshDrafts()" in script
+    assert script.rstrip().endswith("init();\n})();")
+
 def test_multi_target_and_confirmation_contracts_are_separate() -> None:
     template = read("web/templates/upload.html")
     script = read("web/static/js/content-studio.js")

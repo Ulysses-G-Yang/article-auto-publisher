@@ -82,6 +82,17 @@ async def test_studio_key_controls_stay_inside_mobile_and_tablet_viewports() -> 
                 )
                 await page.locator("#studio-workspace:not(.d-none)").wait_for()
 
+                platform_cards = page.locator("#platform-selector-grid .platform-card")
+                assert await platform_cards.count() == 10
+                assert await page.locator(
+                    '.platform-card[data-platform-id="xiaoheihe"]:not(:disabled)'
+                ).count() == 1
+                assert await page.locator(
+                    '.platform-card[data-platform-id="zhihu"]:not(:disabled)'
+                ).count() == 1
+                assert await page.locator(
+                    "#platform-selector-grid .platform-card:disabled"
+                ).count() == 7
                 rows = await page.evaluate(
                     """selectors => Object.entries(selectors).flatMap(([name, selector]) =>
                         [...document.querySelectorAll(selector)].map((element, index) => {
@@ -168,7 +179,7 @@ async def test_account_target_selection_persists_without_creating_plan() -> None
             assert await account_select.is_disabled()
 
             await page.locator(
-                'label[for="target-platform-xiaoheihe"]'
+                '.platform-card[data-platform-id="xiaoheihe"]'
             ).click()
             await account_select.locator("option").nth(2).wait_for(state="attached")
             assert await account_select.input_value() == ""

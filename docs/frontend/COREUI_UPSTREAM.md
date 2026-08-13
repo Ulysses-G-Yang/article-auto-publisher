@@ -3,7 +3,8 @@
 ## 固定基线
 
 ArticleOps 的管理后台以 CoreUI Free Bootstrap Admin Template `v5.6.0`
-为结构基线，它的 `package-lock.json` 将 `@coreui/coreui` 解析为 `5.9.0`。
+为结构基线。为满足生产基线的精确锁定要求，`package.json` 与
+`package-lock.json` 均将 `@coreui/coreui` 固定为 `5.9.0`。
 
 - 上游 SSH：`git@github.com:coreui/coreui-free-bootstrap-admin-template.git`
 - 上游 commit：`da2c89f5e71a762fb46a3583f42d5f740d965b1d`

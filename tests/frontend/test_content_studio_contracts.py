@@ -15,7 +15,8 @@ def test_official_coreui_source_and_runtime_are_vendored() -> None:
     base = read("web/templates/base.html")
 
     assert '"version": "5.6.0"' in package
-    assert '"@coreui/coreui": "^5.9.0"' in package
+    assert '"@coreui/coreui": "5.9.0"' in package
+    assert '"@coreui/coreui": "5.9.0"' in lock
     assert '"node_modules/@coreui/coreui"' in lock
     assert '"version": "5.9.0"' in lock
     assert "da2c89f5e71a762fb46a3583f42d5f740d965b1d" in notices

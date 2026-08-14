@@ -54,7 +54,12 @@ def test_platform_catalog_freezes_public_capability_contract() -> None:
         "xiaohongshu",
         "douyin",
     )
-    assert DELIVERY_ENABLED_PLATFORMS == ("xiaoheihe", "zol", "zhihu")
+    assert DELIVERY_ENABLED_PLATFORMS == (
+        "xiaoheihe",
+        "zol",
+        "zhihu",
+        "xiaohongshu",
+    )
 
     by_id = {item.id: item for item in PLATFORM_CATALOG}
     assert by_id["zhihu"].status == "AVAILABLE"
@@ -65,7 +70,7 @@ def test_platform_catalog_freezes_public_capability_contract() -> None:
     assert by_id["douyin"].delivery_enabled is False
     assert by_id["xiaohongshu"].status == "AVAILABLE"
     assert by_id["xiaohongshu"].account_enabled is True
-    assert by_id["xiaohongshu"].delivery_enabled is False
+    assert by_id["xiaohongshu"].delivery_enabled is True
     assert by_id["weibo"].status == "AVAILABLE"
     assert by_id["weibo"].account_enabled is True
     assert by_id["weibo"].delivery_enabled is False

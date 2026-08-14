@@ -15,9 +15,21 @@
 编辑器（https://mp.toutiao.com/profile_v4/graphic/publish）：
 - 标题：textarea[placeholder*="文章标题"]（2~30 字，最少 2 字）。
 - 正文：div.ProseMirror（contenteditable，TipTap/ProseMirror 系）。
-- 草稿：无独立存草稿按钮，「草稿将自动保存」；验证 = 捕获自动保存
-  接口 2xx + 草稿箱（profile_v4/manage/draft）标题关键字出现。
-- 草稿箱正文 tab：全部/文章/视频/微头条/小视频/音频/合集。
+- 封面模式：单图(2)/三图(3)/无封面(1)；纯文字文章需选「无封面」。
+- 草稿：无独立存草稿按钮，「草稿将自动保存」（自动保存接口
+  POST /mp/agw/article/publish?type=article，save=0）。
+
+2026-08 真实验收结论：**头条自动化草稿保存被风控稳定拒绝**——
+- 自动保存请求（带正文，save=0）返回 code 7050「保存失败」；
+  空正文保存可通过（深诊空草稿成功落库）。
+- 已排除：封面模式（选无封面 coverType=1 仍 7050）、输入节奏
+  （超真人慢速/随机停顿/打错重打仍 7050）、频率（冷却后仍 7050）、
+  发布路径（点「预览并发布」同样 save=0 → 7050）。
+- 人工手动（真人浏览器）保存/发布正常——是**字节系风控判定
+  Playwright 启动的 Chrome 为自动化环境**，带内容（高风险）保存被拒。
+- 因此头条**不满足「真实草稿验收」前置条件，投递保持关闭**；
+  save_draft 如实失败（返回空串），绝不以假成功放行。将来若需
+  头条投递，只能在真人浏览器手动操作或另行评估风控规避（有账号风险）。
 """
 
 from __future__ import annotations
@@ -438,7 +450,12 @@ class ToutiaoPlatform(BasePlatform):
         }
 
     async def save_draft(self, title: str = "") -> str:
-        """头条号「草稿将自动保存」；验证 = 自动保存接口 2xx + 草稿箱标题出现。"""
+        """头条号「草稿将自动保存」；验证 = 自动保存接口成功响应 + 草稿箱标题。
+
+        2026-08 实测：自动保存接口 POST /mp/agw/article/publish?type=article
+        （save=0）在自动化环境下对带正文请求返回 7050「保存失败」（风控），
+        仅空正文可保存成功；因此本方法按真实结果如实失败，绝不假成功。
+        """
 
         self._require_page_alive("头条号保存草稿")
         captured: dict = {}
@@ -446,16 +463,15 @@ class ToutiaoPlatform(BasePlatform):
         async def _on_response(response) -> None:
             try:
                 if response.request.method in ("POST", "PUT", "PATCH") and (
-                    "save" in response.url.lower()
-                    or "draft" in response.url.lower()
-                    or "article" in response.url.lower()
-                    or "publish" in response.url.lower()
+                    "/mp/agw/article/publish" in response.url
                 ):
                     captured["status"] = response.status
                     try:
                         body = await response.json()
                         if isinstance(body, dict):
+                            captured["code"] = body.get("code")
                             captured["err_no"] = body.get("err_no")
+                            captured["reason"] = body.get("reason")
                     except Exception:
                         pass
             except Exception:  # noqa: BLE001
@@ -463,9 +479,9 @@ class ToutiaoPlatform(BasePlatform):
 
         try:
             self.page.on("response", _on_response)
-            # 触发一次内容变化（末尾追加空格再移除，或直接等待自动保存）
-            await self.simulator.random_delay(2, 3)
-            for _ in range(20):
+            # 不手动触发内容变化：头条为纯自动保存，输入过程已自然触发。
+            # 若此前未发生任何保存请求，等待一个防抖周期后如实失败。
+            for _ in range(25):
                 if captured.get("status"):
                     break
                 await asyncio.sleep(2)
@@ -477,6 +493,14 @@ class ToutiaoPlatform(BasePlatform):
 
         if not captured.get("status"):
             logger.error("头条号保存草稿未产生任何自动保存请求")
+            return ""
+        if captured.get("err_no"):
+            logger.error(
+                "头条号自动保存被拒: code={} err_no={} reason={}",
+                captured.get("code"),
+                captured.get("err_no"),
+                captured.get("reason"),
+            )
             return ""
 
         # 草稿箱验证：标题关键字出现（成功判据）

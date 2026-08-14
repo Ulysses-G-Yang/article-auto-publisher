@@ -7,8 +7,12 @@
 真实发布页（https://creator.douyin.com/creator-micro/content/publish?type=article）：
 - 标题：``input.semi-input``，placeholder「填写作品标题，为作品获得更多流量」。
 - 正文：``div.zone-container.editor-kit-container``（contenteditable，作品描述 0/1000）。
-- 草稿保存：「暂存离开」按钮触发草稿 API；保存判据 = 草稿 API 成功 + 内容管理页标题验证。
-- 公开话题选择与公开发布（publish_now）仍明确拒绝：真实发布验收完成前不允许。
+
+2026-08 真实验收结论：抖音创作者中心 Web 端**没有草稿机制**——无草稿箱、
+管理页无草稿 API、「暂存离开」点击后不产生任何保存请求且内容直接丢失。
+因此抖音**不满足「真实草稿验收」前置条件，投递保持关闭**；save_draft
+如实失败（返回空串），绝不以假成功放行。将来若需投递抖音，只能走公开
+发布验收（需另行决策并显式开启公开发布开关）。
 
 登录页（https://creator.douyin.com/）：
 - 「扫码登录」为默认 Tab，二维码为约 180x180 的 base64 PNG。

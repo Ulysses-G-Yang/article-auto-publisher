@@ -550,6 +550,8 @@
         const account = selectedAccount();
         const mode = document.querySelector('input[name="target-mode"]:checked')?.value || 'DRAFT';
         if (!state.selectedPlatform) { setMessage('target-builder-error', '请先选择平台。'); byId('platform-selector-grid').focus(); return; }
+        const selected = state.platforms.find(item => item.id === state.selectedPlatform);
+        if (!selected?.delivery_enabled) { setMessage('target-builder-error', '该平台未开放投递，不能添加为投递目标。'); return; }
         if (!account) { setMessage('target-builder-error', '请选择一个状态有效的账号。'); byId('target-account').focus(); return; }
         if (state.draft.targets.some(target => target.account_id === account.account_id)) { setMessage('target-builder-error', '同一草稿不能重复添加同一账号。'); return; }
         setMessage('target-builder-error', '');

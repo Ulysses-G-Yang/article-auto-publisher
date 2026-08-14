@@ -12,7 +12,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 DraftSourceType = Literal["BLANK", "DOCX", "LEGACY_ARTICLE", "SYSTEM_SEED"]
 DraftStatus = Literal["ACTIVE", "ARCHIVED"]
 BlockType = Literal["text", "image"]
-PlatformName = Literal["xiaoheihe", "zol", "zhihu", "xiaohongshu"]
+PlatformName = Literal["xiaoheihe", "zol", "zhihu", "xiaohongshu", "baijiahao"]
 DeliveryMode = Literal["DRAFT", "PUBLISH"]
 
 

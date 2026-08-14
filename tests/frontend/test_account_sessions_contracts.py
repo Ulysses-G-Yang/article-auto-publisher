@@ -1,6 +1,5 @@
 from pathlib import Path
 
-
 ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -95,6 +94,21 @@ def test_add_account_creates_isolated_profile_without_auto_selection() -> None:
     assert "打开交互登录" in template
     assert "selectedAccount" not in script
     assert ".checked = true" not in script
+
+
+def test_account_removal_confirms_before_delete_and_uses_delete_endpoint() -> None:
+    template = read("web/templates/accounts.html")
+    script = read("web/static/js/account-sessions.js")
+
+    assert 'data-delete-account-url-template="/api/account-sessions/{account_id}"' in template
+    assert "删除账号" in script
+    assert "function removeAccount(account)" in script
+    assert "method: 'DELETE'" in script
+    assert "window.confirm" in script
+    assert "拥有投递历史的账号会被拒绝删除" in script
+    assert "隔离浏览器 Profile" in script
+    assert "此操作不可撤销" in script
+    assert "loadAccounts()" in script
 
 
 def test_session_policy_and_activity_have_independent_states() -> None:

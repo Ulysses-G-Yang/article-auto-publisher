@@ -4,7 +4,7 @@
 {% block extra_head %}<link rel="stylesheet" href="{{ url_for('static', filename='css/delivery.css') }}">{% endblock %}
 
 {% block content %}
-<div id="delivery-app" class="delivery-shell" data-accounts-url-template="/api/platforms/{platform}/accounts?usable=true" data-session-policy-url-template="/api/accounts/{account_id}/session-policy" data-delivery-url="/api/delivery-operations" data-activity-url-template="/api/account-sessions/{account_id}/activity">
+<div id="delivery-app" class="delivery-shell" data-platforms-url="/api/platforms" data-accounts-url-template="/api/platforms/{platform}/accounts?usable=true" data-session-policy-url-template="/api/accounts/{account_id}/session-policy" data-delivery-url="/api/delivery-operations" data-activity-url-template="/api/account-sessions/{account_id}/activity">
     <nav aria-label="面包屑导航">
         <ol class="breadcrumb"><li class="breadcrumb-item"><a href="/">首页</a></li><li class="breadcrumb-item active" aria-current="page">内容投递</li></ol>
     </nav>
@@ -17,14 +17,9 @@
         <div class="delivery-main">
             <section class="card delivery-step" aria-labelledby="platform-heading">
                 <div class="card-body">
-                    <div class="step-heading"><span class="step-number">1</span><div><h2 id="platform-heading">选择投递平台</h2><p>选择平台后才会读取该平台的可用账号。</p></div></div>
-                    <fieldset class="platform-options">
-                        <legend class="visually-hidden">投递平台</legend>
-                        <input class="btn-check" type="radio" name="delivery-platform" id="platform-xiaoheihe" value="xiaoheihe" autocomplete="off">
-                        <label class="btn platform-option" for="platform-xiaoheihe"><i class="bi bi-controller" aria-hidden="true"></i><span><strong>小黑盒</strong><small>Xiaoheihe</small></span></label>
-                        <input class="btn-check" type="radio" name="delivery-platform" id="platform-zol" value="zol" autocomplete="off">
-                        <label class="btn platform-option" for="platform-zol"><i class="bi bi-pc-display" aria-hidden="true"></i><span><strong>中关村在线</strong><small>ZOL</small></span></label>
-                    </fieldset>
+                    <div class="step-heading"><span class="step-number">1</span><div><h2 id="platform-heading">选择投递平台</h2><p>仅显示已通过验收、开放投递的平台。</p></div></div>
+                    <div id="platform-loading" class="account-placeholder" role="status"><span class="spinner-border spinner-border-sm" aria-hidden="true"></span>正在读取平台目录…</div>
+                    <fieldset class="platform-options" id="platform-track" role="radiogroup" aria-label="投递平台"></fieldset>
                     <div id="platform-error" class="alert alert-danger d-none mt-3 mb-0" role="alert"></div>
                 </div>
             </section>

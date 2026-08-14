@@ -106,6 +106,7 @@
             actions.append(button('退出该账号', 'btn btn-outline-danger btn-sm', () => logoutAccount(account)));
         }
         actions.append(button('活动日志', 'btn btn-outline-secondary btn-sm', () => openActivity(account)));
+        actions.append(button('删除账号', 'btn btn-outline-danger btn-sm', () => removeAccount(account)));
         card.append(top, meta, actions);
         return card;
     }
@@ -305,6 +306,20 @@
             await jsonResponse(await fetch(url, { method: 'POST', headers: { Accept: 'application/json' } }));
             await loadAccounts();
         } catch (error) { setMessage('session-accounts-error', error.message || '账号退出失败。'); }
+    }
+
+    async function removeAccount(account) {
+        const label = accountLabel(account);
+        if (!window.confirm(`确定永久删除账号「${label}」吗？\n\n将删除该账号的隔离浏览器 Profile 及其活动记录；拥有投递历史的账号会被拒绝删除。此操作不可撤销。`)) return;
+        setMessage('session-accounts-error', '');
+        try {
+            const url = endpoint(root.dataset.deleteAccountUrlTemplate, 'account_id', account.account_id);
+            const payload = await jsonResponse(await fetch(url, { method: 'DELETE', headers: { Accept: 'application/json' } }));
+            setMessage('session-login-status', `已删除账号「${label}」。`);
+            await loadAccounts();
+        } catch (error) {
+            setMessage('session-accounts-error', error.message || '账号删除失败。');
+        }
     }
 
     function activityItem(event) {

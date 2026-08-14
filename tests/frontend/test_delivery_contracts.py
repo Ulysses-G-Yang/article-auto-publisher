@@ -1,6 +1,5 @@
 from pathlib import Path
 
-
 ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -12,12 +11,30 @@ def test_delivery_page_starts_with_platform_choice_only() -> None:
     template = read("web/templates/delivery.html")
     script = read("web/static/js/delivery.js")
 
-    assert 'name="delivery-platform"' in template
+    assert 'id="platform-track"' in template
     assert 'id="account-placeholder"' in template
     assert "请先选择平台" in template
     assert "loadAccounts(platform)" in script
     assert "loadAccounts('xiaoheihe')" not in script
     assert "loadAccounts('zol')" not in script
+
+
+def test_delivery_platforms_load_from_catalog_and_only_allow_delivery_enabled() -> None:
+    template = read("web/templates/delivery.html")
+    script = read("web/static/js/delivery.js")
+
+    assert 'data-platforms-url="/api/platforms"' in template
+    assert "loadPlatforms()" in script
+    assert "renderPlatformOptions()" in script
+    assert "delivery_enabled === true" in script
+    assert "item.delivery_enabled" in script
+    assert "state.platforms.some(item => item.id === platform)" in script
+    assert "platformLabel(platform)" in script
+    # 不再硬编码只有两个投递平台
+    assert "platformLabels = { xiaoheihe" not in script
+    assert "['xiaoheihe', 'zol'].includes(platform)" not in script
+    assert 'id="platform-xiaoheihe"' not in template
+    assert 'id="platform-zol"' not in template
 
 
 def test_platform_change_clears_selection_and_blocks_stale_responses() -> None:
@@ -27,7 +44,7 @@ def test_platform_change_clears_selection_and_blocks_stale_responses() -> None:
     assert "state.selectedAccountId = null" in script
     assert "state.accountRequestController?.abort()" in script
     assert "const requestSequence = ++state.accountRequestSequence" in script
-    assert "requestSequence !== state.accountRequestSequence || platform !== state.platform" in script
+    assert "requestSequence !== state.accountRequestSequence || platform !== state.platform" in script  # noqa: E501
     assert "/api/platforms/{platform}/accounts?usable=true" in read("web/templates/delivery.html")
 
 

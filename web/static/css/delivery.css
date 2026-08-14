@@ -6,7 +6,7 @@
 .step-heading h2, .delivery-summary h2, .operation-result h2 { margin: 0; font-size: 1rem; font-weight: 700; }
 .step-heading p { margin: .25rem 0 0; color: var(--app-muted); font-size: .78rem; }
 .step-number { display: grid; width: 28px; height: 28px; flex: 0 0 28px; place-items: center; border-radius: 50%; background: rgba(88,86,214,.12); color: var(--app-primary); font-size: .75rem; font-weight: 800; }
-.platform-options { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .75rem; }
+.platform-options { display: grid; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); gap: .75rem; }
 .platform-option { display: flex; min-height: 76px; align-items: center; justify-content: flex-start; gap: .8rem; padding: .9rem 1rem; border: 1px solid var(--app-card-border); text-align: left; }
 .platform-option i { color: var(--app-primary); font-size: 1.5rem; }
 .platform-option span, .mode-control label span { display: flex; flex-direction: column; }

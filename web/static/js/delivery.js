@@ -5,6 +5,7 @@
     if (!root) return;
 
     const state = {
+        platforms: [],
         platform: null,
         accounts: [],
         selectedAccountId: null,
@@ -17,7 +18,6 @@
     };
 
     const byId = id => document.getElementById(id);
-    const platformLabels = { xiaoheihe: '小黑盒', zol: '中关村在线' };
     const sessionLabels = {
         VALID: '有效', EXPIRED: '已过期', VERIFYING: '验证中', BUSY: '使用中', LOGIN_REQUIRED: '需要登录',
     };
@@ -28,6 +28,11 @@
 
     function endpoint(template, key, value) {
         return template.replace(`{${key}}`, encodeURIComponent(value));
+    }
+
+    function platformLabel(platform) {
+        const item = state.platforms.find(entry => entry.id === platform);
+        return item ? item.display_name : platform;
     }
 
     function setError(id, message) {
@@ -59,10 +64,68 @@
     }
 
     function updateSummary() {
-        byId('summary-platform').textContent = state.platform ? platformLabels[state.platform] : '未选择';
+        byId('summary-platform').textContent = state.platform ? platformLabel(state.platform) : '未选择';
         byId('summary-account').textContent = safeAccountLabel(selectedAccount());
         byId('summary-mode').textContent = state.mode === 'DRAFT' ? '保存到平台草稿箱' : '公开发布（需二次确认）';
         byId('submit-delivery').disabled = !state.platform || !state.selectedAccountId || state.deliveryBusy;
+    }
+
+    async function loadPlatforms() {
+        const track = byId('platform-track');
+        const loading = byId('platform-loading');
+        try {
+            const response = await fetch(root.dataset.platformsUrl, { headers: { Accept: 'application/json' } });
+            const payload = await responseJson(response);
+            const platforms = Array.isArray(payload) ? payload : (payload.platforms || []);
+            state.platforms = platforms
+                .filter(item => item && typeof item.id === 'string' && item.delivery_enabled === true)
+                .map(item => ({
+                    id: item.id,
+                    display_name: item.display_name || item.id,
+                    logo_url: typeof item.logo_url === 'string' ? item.logo_url : '',
+                    sort_order: Number(item.sort_order || 0),
+                }))
+                .sort((left, right) => left.sort_order - right.sort_order);
+            renderPlatformOptions();
+        } catch (error) {
+            setError('platform-error', `平台目录加载失败：${error.message || '未知错误'}`);
+        } finally {
+            loading?.classList.add('d-none');
+            track?.classList.remove('d-none');
+        }
+    }
+
+    function renderPlatformOptions() {
+        const track = byId('platform-track');
+        if (!track) return;
+        track.replaceChildren(...state.platforms.map((platform, index) => {
+            const input = document.createElement('input');
+            input.className = 'btn-check';
+            input.type = 'radio';
+            input.name = 'delivery-platform';
+            input.id = `platform-${platform.id}`;
+            input.value = platform.id;
+            input.autocomplete = 'off';
+            input.addEventListener('change', () => selectPlatform(platform.id));
+
+            const label = document.createElement('label');
+            label.className = 'btn platform-option';
+            label.htmlFor = input.id;
+            const icon = document.createElement('i');
+            icon.className = 'cil-paper-plane';
+            icon.setAttribute('aria-hidden', 'true');
+            const copy = document.createElement('span');
+            const name = document.createElement('strong');
+            name.textContent = platform.display_name;
+            const note = document.createElement('small');
+            note.textContent = '可投递';
+            copy.append(name, note);
+            label.append(icon, copy);
+            return [input, label];
+        }));
+        if (state.platforms.length === 0) {
+            setError('platform-error', '当前没有已开放投递的平台，请先在“平台账号”页完成账号接入与投递验收。');
+        }
     }
 
     function resetAccounts() {
@@ -131,7 +194,7 @@
         resetAccounts();
         byId('account-placeholder').classList.add('d-none');
         byId('account-loading').classList.remove('d-none');
-        byId('account-help').textContent = `正在读取${platformLabels[platform]}可用账号…`;
+        byId('account-help').textContent = `正在读取${platformLabel(platform)}可用账号…`;
         try {
             const url = endpoint(root.dataset.accountsUrlTemplate, 'platform', platform);
             const response = await fetch(url, { headers: { Accept: 'application/json' }, signal: state.accountRequestController.signal });
@@ -150,8 +213,8 @@
     }
 
     function selectPlatform(platform) {
-        if (!['xiaoheihe', 'zol'].includes(platform)) {
-            setError('platform-error', '不支持的平台，请重新选择。');
+        if (!state.platforms.some(item => item.id === platform)) {
+            setError('platform-error', '该平台未开放投递，请重新选择。');
             return;
         }
         setError('platform-error', '');
@@ -222,7 +285,7 @@
     function summaryRows(container, includeRisk = false) {
         const account = selectedAccount();
         const values = [
-            ['平台', platformLabels[state.platform]], ['账号', safeAccountLabel(account)],
+            ['平台', platformLabel(state.platform)], ['账号', safeAccountLabel(account)],
             ['标题', byId('article-title').value.trim()], ['模式', state.mode === 'DRAFT' ? '保存到平台草稿箱' : '公开发布'],
         ];
         container.replaceChildren(...values.map(([term, value]) => {
@@ -287,11 +350,11 @@
         }
     }
 
-    document.querySelectorAll('input[name="delivery-platform"]').forEach(input => input.addEventListener('change', event => selectPlatform(event.target.value)));
     document.querySelectorAll('input[name="delivery-mode"]').forEach(input => input.addEventListener('change', event => { state.mode = event.target.value; state.confirmationToken = null; updateSummary(); }));
     byId('persist-login').addEventListener('change', event => updateSessionPolicy(event.target.checked));
     byId('submit-delivery').addEventListener('click', () => state.mode === 'DRAFT' ? showDraftConfirmation() : submitDelivery(null));
     byId('confirm-draft').addEventListener('click', () => { bootstrap.Modal.getOrCreateInstance(byId('draft-confirmation')).hide(); submitDelivery(null); });
     byId('confirm-publish').addEventListener('click', () => { bootstrap.Modal.getOrCreateInstance(byId('publish-confirmation')).hide(); submitDelivery(state.confirmationToken); });
+    loadPlatforms();
     updateSummary();
 })();

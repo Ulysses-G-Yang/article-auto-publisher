@@ -18,6 +18,8 @@ from platforms.baijiahao import (
 from platforms.base import BasePlatform, BrowserLifecycleError, PlatformAccessError
 from platforms.content_validation import ContentValidationError
 from platforms.douyin import DouyinPlatform, PlatformNotImplementedError
+from platforms.smzdm import PlatformNotImplementedError as SmzdmNotImplementedError
+from platforms.smzdm import SmzdmPlatform
 from platforms.weibo import PlatformNotImplementedError as WeiboNotImplementedError
 from platforms.weibo import WeiboPlatform
 from platforms.xiaoheihe import XiaoheihePlatform
@@ -1587,6 +1589,88 @@ class RegressionTests(DatabaseTestCase):
             ("publish_now", ()),
         ]:
             with self.assertRaises(BaijiahaoNotImplementedError):
+                asyncio.run(getattr(platform, method)(*args))
+
+    def test_smzdm_cookie_check_accepts_sess(self):
+        platform = SmzdmPlatform()
+        platform.context = type(
+            "Context",
+            (),
+            {
+                "cookies": AsyncMock(
+                    return_value=[
+                        {"name": "sess", "value": "opaque"},
+                        {"name": "smzdm_id", "value": "opaque"},
+                    ]
+                ),
+            },
+        )()
+        self.assertTrue(asyncio.run(platform._has_session_cookie_signal()))
+
+    def test_smzdm_cookie_check_rejects_guest_state(self):
+        platform = SmzdmPlatform()
+        platform.context = type(
+            "Context",
+            (),
+            {
+                "cookies": AsyncMock(
+                    return_value=[{"name": "smzdm_id", "value": "opaque"}]
+                ),
+            },
+        )()
+        self.assertFalse(asyncio.run(platform._has_session_cookie_signal()))
+
+    def test_smzdm_fetch_identity_uses_captured_payload(self):
+        platform = SmzdmPlatform()
+        platform._identity_payload = {
+            "ok": True,
+            "user_id": "10234567",
+            "display_name": "值友昵称",
+        }
+        result = asyncio.run(platform.fetch_identity_payload())
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["display_name"], "值友昵称")
+
+    def test_smzdm_fetch_identity_fails_closed_without_capture(self):
+        platform = SmzdmPlatform()
+        platform.page = type(
+            "Page",
+            (),
+            {
+                "goto": AsyncMock(),
+                "on": lambda *a, **k: None,
+                "remove_listener": lambda *a, **k: None,
+                "evaluate": AsyncMock(return_value={"user_id": "", "display_name": ""}),
+            },
+        )()
+        with patch("platforms.smzdm.asyncio.sleep", new=AsyncMock()):
+            result = asyncio.run(platform.fetch_identity_payload())
+        self.assertEqual(result, {"ok": False, "user_id": "", "display_name": ""})
+
+    def test_smzdm_identity_extraction_requires_payload(self):
+        platform = SmzdmPlatform()
+        platform.fetch_identity_payload = AsyncMock(
+            return_value={
+                "ok": True,
+                "user_id": "10234567",
+                "display_name": "值友昵称",
+            }
+        )
+        identity = asyncio.run(extract_identity(platform))
+        self.assertEqual(identity.platform_user_id, "10234567")
+        self.assertEqual(identity.display_name, "值友昵称")
+
+    def test_smzdm_delivery_methods_fail_closed(self):
+        platform = SmzdmPlatform()
+        for method, args in [
+            ("navigate_to_editor", ()),
+            ("fill_title", ("标题",)),
+            ("fill_content", ([], [])),
+            ("select_topic", ()),
+            ("save_draft", ()),
+            ("publish_now", ()),
+        ]:
+            with self.assertRaises(SmzdmNotImplementedError):
                 asyncio.run(getattr(platform, method)(*args))
 
     def test_xiaoheihe_manual_override_is_forwarded(self):

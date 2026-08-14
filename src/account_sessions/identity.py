@@ -41,6 +41,8 @@ async def extract_identity(platform) -> AccountIdentity:
         return await _extract_weibo(platform)
     if platform.platform_name == "baijiahao":
         return await _extract_baijiahao(platform)
+    if platform.platform_name == "smzdm":
+        return await _extract_smzdm(platform)
     raise AccountIdentityError("不支持的平台身份提取")
 
 
@@ -217,4 +219,20 @@ async def _extract_baijiahao(platform) -> AccountIdentity:
     )
     if not user_id or not display_name:
         raise AccountIdentityError("百家号已登录，但无法同时确认账号 ID 和真实昵称")
+    return AccountIdentity(user_id, display_name)
+
+
+async def _extract_smzdm(platform) -> AccountIdentity:
+    """只采用 smzdm 同源确认的身份（昵称 + 稳定 ID 同时确认）。"""
+
+    fetcher = getattr(platform, "fetch_identity_payload", None)
+    payload = {}
+    if callable(fetcher):
+        payload = await fetcher()
+    user_id = _clean(payload.get("user_id")) if isinstance(payload, dict) else ""
+    display_name = (
+        _clean(payload.get("display_name")) if isinstance(payload, dict) else ""
+    )
+    if not user_id or not display_name:
+        raise AccountIdentityError("smzdm 已登录，但无法同时确认账号 ID 和真实昵称")
     return AccountIdentity(user_id, display_name)

@@ -445,6 +445,10 @@ def _platform_instance(account: PlatformAccount):
         from platforms.baijiahao import BaijiahaoPlatform
 
         return BaijiahaoPlatform(**kwargs)
+    if account.platform == "smzdm":
+        from platforms.smzdm import SmzdmPlatform
+
+        return SmzdmPlatform(**kwargs)
     raise AccountPlatformMismatchError("不支持的平台")
 
 

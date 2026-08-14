@@ -333,12 +333,37 @@ class BaijiahaoPlatform(BasePlatform):
             logger.error("百家号标题填写失败: {}", exc)
             raise SelectorError("百家号标题编辑器未找到或填写失败") from exc
 
+    async def _body_editor_locator(self):
+        """定位 UEditor 正文 iframe 内的可编辑 body。
+
+        百家号正文是 UEditor，可编辑区在 iframe（body.view.news-editor-pc）
+        内；标题在主页面的 FeEditor。返回 Playwright Locator 或 None。
+        """
+        for frame in self.page.frames:
+            try:
+                is_body = await frame.evaluate(
+                    """() => {
+                        const b = document.body;
+                        return Boolean(
+                            b && b.isContentEditable
+                            && (b.className || '').includes('news-editor-pc')
+                        );
+                    }"""
+                )
+                if is_body:
+                    return frame.locator("body")
+            except Exception:  # noqa: BLE001
+                continue
+        return None
+
     async def fill_content(self, content_blocks: list, images: list):
-        """填写正文（第二个 FeEditor contenteditable），回读并有序校验。"""
+        """填写正文（UEditor iframe 内可编辑 body），回读并有序校验。"""
 
         self._require_page_alive("百家号填写正文")
-        editor = self._editors().nth(1)
         try:
+            editor = await self._body_editor_locator()
+            if editor is None or await editor.count() == 0:
+                raise RuntimeError("正文编辑器不可见")
             await self._focus_editor(editor, "正文")
             await self.simulator.random_delay(0.5, 1)
             try:

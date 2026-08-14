@@ -1528,18 +1528,49 @@ class RegressionTests(DatabaseTestCase):
         self.assertEqual(found, ("1234567890", "微博昵称"))
         self.assertIsNone(platform._extract_identity_from_json({"foo": "bar"}))
 
-    def test_weibo_delivery_methods_fail_closed(self):
+    def test_weibo_publish_now_still_fails_closed(self):
         platform = WeiboPlatform()
-        for method, args in [
-            ("navigate_to_editor", ()),
-            ("fill_title", ("标题",)),
-            ("fill_content", ([], [])),
-            ("select_topic", ()),
-            ("save_draft", ()),
-            ("publish_now", ()),
-        ]:
-            with self.assertRaises(WeiboNotImplementedError):
-                asyncio.run(getattr(platform, method)(*args))
+        with self.assertRaises(WeiboNotImplementedError):
+            asyncio.run(platform.publish_now())
+
+    def test_weibo_navigate_to_editor_sequence(self):
+        platform = WeiboPlatform()
+        platform.simulator.random_delay = AsyncMock()
+        page = type(
+            "Page",
+            (),
+            {
+                "goto": AsyncMock(),
+                "wait_for_selector": AsyncMock(return_value=True),
+                "evaluate": AsyncMock(return_value=True),
+            },
+        )()
+        platform.page = page
+        with patch("platforms.weibo.asyncio.sleep", new=AsyncMock()):
+            asyncio.run(platform.navigate_to_editor())
+        self.assertIn("article/v5/editor", page.goto.await_args.args[0])
+        self.assertTrue(hasattr(platform, "_draft_box_count_before"))
+
+    def test_weibo_fill_title_writes_into_title_field(self):
+        platform = WeiboPlatform()
+        title_field = type(
+            "First",
+            (),
+            {
+                "count": AsyncMock(return_value=1),
+                "is_visible": AsyncMock(return_value=True),
+                "click": AsyncMock(),
+                "fill": AsyncMock(),
+            },
+        )()
+        title_locator = type("Loc", (), {"first": title_field})()
+        platform.page = type(
+            "Page",
+            (),
+            {"locator": staticmethod(lambda _sel: title_locator)},
+        )()
+        asyncio.run(platform.fill_title("微博标题"))
+        title_field.fill.assert_awaited_with("微博标题")
 
     def test_baijiahao_cookie_check_accepts_bduss(self):
         platform = BaijiahaoPlatform()

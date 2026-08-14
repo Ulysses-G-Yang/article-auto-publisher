@@ -307,6 +307,7 @@ class XiaohongshuPlatform(BasePlatform):
 
         真实结构（2026-08 探测）：标题 ``textarea.d-text``（0/64），
         正文 ``div.tiptap.ProseMirror``（TipTap contenteditable）。
+        进入编辑器前先记录发布页侧栏的草稿箱计数，供 save_draft 验证。
         """
         self._require_page_alive("小红书打开编辑器")
         try:
@@ -315,6 +316,7 @@ class XiaohongshuPlatform(BasePlatform):
                 wait_until="domcontentloaded",
                 timeout=30000,
             )
+            self._draft_box_count_before = await self._draft_box_count()
             await self._click_sidebar_text("写长文")
             await self._click_sidebar_text("新的创作")
             await self.page.wait_for_selector(
@@ -330,6 +332,26 @@ class XiaohongshuPlatform(BasePlatform):
                     "BROWSER_CONTEXT_CLOSED: 小红书打开编辑器时页面已关闭"
                 ) from exc
             raise SelectorError("小红书长文编辑器未找到标题输入框") from exc
+
+    async def _draft_box_count(self) -> int | None:
+        """读取发布页侧栏「草稿箱(N)」计数；读不到返回 None。"""
+
+        try:
+            value = await self.page.evaluate(
+                """() => {
+                    const nodes = Array.from(document.querySelectorAll('*'));
+                    const el = nodes.find((n) => {
+                        const t = (n.innerText || '').trim();
+                        return t.startsWith('草稿箱') && t.length < 20;
+                    });
+                    if (!el) return null;
+                    const m = (el.innerText || '').match(/草稿箱\\s*\\((\\d+)\\)/);
+                    return m ? parseInt(m[1], 10) : null;
+                }"""
+            )
+            return value if isinstance(value, int) else None
+        except Exception:  # noqa: BLE001
+            return None
 
     async def _click_sidebar_text(self, text: str) -> None:
         """点击侧栏中文本精确匹配的元素（写长文/新的创作）。
@@ -574,26 +596,10 @@ class XiaohongshuPlatform(BasePlatform):
         发布页 URL；否则如实返回空串，绝不以当前页 URL 冒充成功。
         """
         self._require_page_alive("小红书保存草稿")
-
-        async def _draft_box_count() -> int | None:
-            try:
-                value = await self.page.evaluate(
-                    """() => {
-                        const nodes = Array.from(document.querySelectorAll('*'));
-                        const el = nodes.find((n) => {
-                            const t = (n.innerText || '').trim();
-                            return t.startsWith('草稿箱') && t.length < 20;
-                        });
-                        if (!el) return null;
-                        const m = (el.innerText || '').match(/草稿箱\\s*\\((\\d+)\\)/);
-                        return m ? parseInt(m[1], 10) : null;
-                    }"""
-                )
-                return value if isinstance(value, int) else None
-            except Exception:  # noqa: BLE001
-                return None
-
-        before = await _draft_box_count()
+        before = getattr(self, "_draft_box_count_before", None)
+        if not isinstance(before, int):
+            # 未在发布页记录基准计数（如直接进入编辑器），读不到则如实失败
+            before = await self._draft_box_count()
         captured: dict = {}
 
         async def _on_response(response) -> None:
@@ -663,7 +669,7 @@ class XiaohongshuPlatform(BasePlatform):
             after = None
             for _ in range(3):
                 await self.simulator.random_delay(3, 5)
-                after = await _draft_box_count()
+                after = await self._draft_box_count()
                 if after is not None and before is not None and after == before + 1:
                     break
             if after is None or before is None:

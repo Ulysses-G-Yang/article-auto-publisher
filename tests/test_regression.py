@@ -1660,6 +1660,23 @@ class RegressionTests(DatabaseTestCase):
         self.assertEqual(identity.platform_user_id, "10234567")
         self.assertEqual(identity.display_name, "值友昵称")
 
+    def test_smzdm_parse_jsonp_extracts_payload(self):
+        platform = SmzdmPlatform()
+        payload = platform._parse_jsonp(
+            'jQuery123({"smzdm_id": "4668373440", "nickname": "值友3424774480"})'
+        )
+        self.assertEqual(payload["smzdm_id"], "4668373440")
+        self.assertEqual(payload["nickname"], "值友3424774480")
+        self.assertIsNone(platform._parse_jsonp("not jsonp"))
+
+    def test_smzdm_extract_identity_json_supports_smzdm_id(self):
+        platform = SmzdmPlatform()
+        found = platform._extract_identity_from_json(
+            {"smzdm_id": "4668373440", "nickname": "值友3424774480"}
+        )
+        self.assertEqual(found, ("4668373440", "值友3424774480"))
+        self.assertIsNone(platform._extract_identity_from_json({"foo": "bar"}))
+
     def test_smzdm_delivery_methods_fail_closed(self):
         platform = SmzdmPlatform()
         for method, args in [

@@ -15,6 +15,8 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import re
 
 from loguru import logger
 
@@ -29,7 +31,7 @@ LOGIN_URL = "https://zhiyou.smzdm.com/user/login"
 HOME_URL = "https://zhiyou.smzdm.com/"
 USERNAME_SELECTOR = "input#username.form-input"
 IDENTITY_NAME_KEYS = {"nickname", "user_name", "screen_name", "name", "nick"}
-IDENTITY_UID_KEYS = {"uid", "user_id", "id"}
+IDENTITY_UID_KEYS = {"smzdm_id", "uid", "user_id", "id"}
 
 
 class PlatformNotImplementedError(PlatformAutomationError):
@@ -169,7 +171,12 @@ class SmzdmPlatform(BasePlatform):
                             for key in ("user", "profile", "account", "info")
                         )
                     ):
-                        payload = await response.json()
+                        # smzdm 当前用户接口是 JSONP（callback 包裹），
+                        # response.json() 会失败，必须取文本后剥壳解析。
+                        text = await response.text()
+                        payload = self._parse_jsonp(text)
+                        if not isinstance(payload, dict):
+                            return
                         found = self._extract_identity_from_json(payload)
                         if found and self._identity_payload is None:
                             self._identity_payload = {
@@ -205,39 +212,55 @@ class SmzdmPlatform(BasePlatform):
                 ) from exc
             logger.warning("smzdm 身份捕获失败: {}", exc)
 
-        # DOM 兜底：顶部用户区昵称 + 个人中心 ID
+        # DOM 兜底：个人中心昵称 + user cookie 中的用户 ID
         if not (
             isinstance(self._identity_payload, dict) and self._identity_payload.get("ok")
         ):
             try:
-                dom = await self.page.evaluate(
+                nickname = await self.page.evaluate(
                     """() => {
-                        const body = document.body.innerText || '';
-                        const nickEl = document.querySelector(
-                            '[class*="user-name"], [class*="nickname"],'
-                            + ' [class*="userinfo"] [class*="name"]'
-                        );
-                        let nickname = nickEl
-                            ? (nickEl.innerText || '').trim()
-                            : '';
-                        if (!nickname) {
-                            const m = body.match(
-                                /(?:欢迎|Hi)\\s*[，,~]?\\s*([\\u4e00-\\u9fa5A-Za-z0-9_]{2,20})/
-                            );
-                            nickname = m ? m[1] : '';
-                        }
-                        return { user_id: '', display_name: nickname };
+                        const el = document.querySelector('.info-stuff-nickname');
+                        return el ? (el.innerText || '').trim() : '';
                     }"""
                 )
-                if isinstance(dom, dict) and dom.get("display_name"):
-                    # 仅拿到昵称不足以确认稳定 ID，如实标记未完成，等待捕获兜底
-                    pass
+                user_id = ""
+                if self.context is not None:
+                    cookies = await self.context.cookies([
+                        "https://www.smzdm.com/",
+                        "https://zhiyou.smzdm.com/",
+                    ])
+                    user_cookie = next(
+                        (c.get("value", "") for c in cookies if c.get("name") == "user"),
+                        "",
+                    )
+                    m = re.search(r"user%3A(\d+)\|(\d+)", str(user_cookie))
+                    if m:
+                        user_id = m.group(2) or m.group(1)
+                if user_id and nickname:
+                    self._identity_payload = {
+                        "ok": True,
+                        "user_id": user_id,
+                        "display_name": nickname,
+                    }
             except Exception:  # noqa: BLE001
                 pass
 
         if isinstance(self._identity_payload, dict) and self._identity_payload.get("ok"):
             return dict(self._identity_payload)
         return {"ok": False, "user_id": "", "display_name": ""}
+
+    @staticmethod
+    def _parse_jsonp(text: str) -> dict | None:
+        """剥掉 JSONP 的 callback 包裹并解析为 dict；失败返回 None。"""
+
+        match = re.match(r"^[^(]*\((.*)\)\s*;?\s*$", text or "", re.S)
+        if not match:
+            return None
+        try:
+            payload = json.loads(match.group(1))
+            return payload if isinstance(payload, dict) else None
+        except Exception:  # noqa: BLE001
+            return None
 
     @staticmethod
     def _extract_identity_from_json(payload) -> tuple[str, str] | None:

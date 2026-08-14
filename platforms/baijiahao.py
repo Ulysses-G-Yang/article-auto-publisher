@@ -361,6 +361,7 @@ class BaijiahaoPlatform(BasePlatform):
         """填写正文（UEditor iframe 内可编辑 body），回读并有序校验。"""
 
         self._require_page_alive("百家号填写正文")
+        self._content_blocks = list(content_blocks)
         try:
             editor = await self._body_editor_locator()
             if editor is None or await editor.count() == 0:
@@ -470,6 +471,15 @@ class BaijiahaoPlatform(BasePlatform):
                 uploaded_images,
                 len(failed_images),
             )
+
+        cover_result: dict | None = None
+        if uploaded_images > 0:
+            cover_result = await self.set_cover() or {}
+            if not cover_result.get("success"):
+                logger.warning(
+                    "百家号封面设置失败: {}", cover_result.get("error")
+                )
+
         return {
             "text_ok": True,
             "expected_images": expected_images,
@@ -477,6 +487,7 @@ class BaijiahaoPlatform(BasePlatform):
             "failed_images": failed_images,
             "media_status": media_status,
             "media_error": media_error,
+            "cover": cover_result,
         }
 
     async def _upload_image(self, image_path: str) -> dict:
@@ -512,6 +523,80 @@ class BaijiahaoPlatform(BasePlatform):
                     "BROWSER_CONTEXT_CLOSED: 百家号上传图片时页面已关闭"
                 ) from exc
             return {"success": False, "error": str(exc)}
+
+    async def set_cover(self) -> dict:
+        """通过「选择封面」弹窗上传本地图片设为封面（3:2 预览后确定）。
+
+        2026-08 实测：点「选择封面」弹窗含「点击本地上传」与
+        accept="image/*" 文件控件；上传后封面预览 (3:2)，点「确定」完成。
+        """
+
+        self._require_page_alive("百家号设置封面")
+        clicked = await self.page.evaluate(
+            """() => {
+                const nodes = Array.from(document.querySelectorAll('*'));
+                const target = nodes.find(el => {
+                    const t = (el.innerText || '').trim();
+                    return t === '选择封面' && el.children.length === 0;
+                });
+                if (!target) return 'not-found';
+                target.click();
+                return 'clicked';
+            }"""
+        )
+        if clicked != "clicked":
+            return {"success": False, "error": "百家号「选择封面」按钮未找到"}
+        await self.simulator.random_delay(1, 2)
+
+        # 弹窗出现后上传图片（accept="image/*" 的控件）
+        image_input = self.page.locator('input[type=file][accept*="image"]')
+        if await image_input.count() == 0:
+            return {"success": False, "error": "百家号封面上传控件未找到"}
+        # 上传使用内容第一张本地图片
+        first_image = ""
+        try:
+            blocks = getattr(self, "_content_blocks", []) or []
+            for block in blocks:
+                if block.get("type") == "image" and block.get("local_path"):
+                    first_image = str(block["local_path"])
+                    break
+        except Exception:  # noqa: BLE001
+            pass
+        if not first_image:
+            return {"success": False, "error": "百家号封面缺少本地图片素材"}
+        await image_input.first.set_input_files(first_image, timeout=20000)
+        await self.simulator.random_delay(3, 5)
+
+        # 等待封面预览出现后点「确定」
+        confirmed = await self.page.evaluate(
+            """() => {
+                const nodes = Array.from(
+                    document.querySelectorAll('button, [role="button"], [class*="btn" i]')
+                );
+                const target = nodes.find(el => (el.innerText || '').trim() === '确定');
+                if (target) { target.click(); return 'clicked'; }
+                return 'no-confirm';
+            }"""
+        )
+        await self.simulator.random_delay(2, 3)
+
+        # 成功判据：封面上传弹窗关闭
+        dialog_open = await self.page.evaluate(
+            """() => {
+                const nodes = Array.from(document.querySelectorAll('*'));
+                return nodes.some(el => {
+                    const t = (el.innerText || '').trim();
+                    return t === '点击本地上传' && el.children.length === 0;
+                });
+            }"""
+        )
+        if dialog_open:
+            return {
+                "success": False,
+                "error": f"百家号封面上传弹窗未关闭（confirm={confirmed}）",
+            }
+        logger.info("百家号封面已设置（本地首图）")
+        return {"success": True, "error": ""}
 
     async def select_topic(
         self,

@@ -505,6 +505,13 @@ class WeiboPlatform(BasePlatform):
                 uploaded_images,
                 len(failed_images),
             )
+
+        cover_result: dict | None = None
+        if uploaded_images > 0:
+            cover_result = await self.set_cover() or {}
+            if not cover_result.get("success"):
+                logger.warning("微博封面设置失败: {}", cover_result.get("error"))
+
         return {
             "text_ok": True,
             "expected_images": expected_images,
@@ -512,6 +519,7 @@ class WeiboPlatform(BasePlatform):
             "failed_images": failed_images,
             "media_status": media_status,
             "media_error": media_error,
+            "cover": cover_result,
         }
 
     async def _upload_image(self, image_path: str) -> dict:

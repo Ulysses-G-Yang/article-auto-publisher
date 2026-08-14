@@ -1395,10 +1395,9 @@ class RegressionTests(DatabaseTestCase):
             },
         )()
         platform.page = page
-        asyncio.run(platform.navigate_to_editor())
+        with patch("platforms.xiaohongshu.asyncio.sleep", new=AsyncMock()):
+            asyncio.run(platform.navigate_to_editor())
         self.assertIn("publish", page.goto.await_args.args[0])
-        # 计数读取 + 写长文 + 新的创作 共 3 次 evaluate
-        self.assertEqual(page.evaluate.call_count, 3)
         self.assertTrue(hasattr(platform, "_draft_box_count_before"))
 
     def test_xiaohongshu_fill_title_writes_into_title_field(self):

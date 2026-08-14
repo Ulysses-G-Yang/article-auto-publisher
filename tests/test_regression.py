@@ -1757,18 +1757,47 @@ class RegressionTests(DatabaseTestCase):
         self.assertEqual(found, ("4668373440", "值友3424774480"))
         self.assertIsNone(platform._extract_identity_from_json({"foo": "bar"}))
 
-    def test_smzdm_delivery_methods_fail_closed(self):
+    def test_smzdm_publish_now_still_fails_closed(self):
         platform = SmzdmPlatform()
-        for method, args in [
-            ("navigate_to_editor", ()),
-            ("fill_title", ("标题",)),
-            ("fill_content", ([], [])),
-            ("select_topic", ()),
-            ("save_draft", ()),
-            ("publish_now", ()),
-        ]:
-            with self.assertRaises(SmzdmNotImplementedError):
-                asyncio.run(getattr(platform, method)(*args))
+        with self.assertRaises(SmzdmNotImplementedError):
+            asyncio.run(platform.publish_now())
+
+    def test_smzdm_navigate_to_editor_sequence(self):
+        platform = SmzdmPlatform()
+        platform.simulator.random_delay = AsyncMock()
+        page = type(
+            "Page",
+            (),
+            {
+                "goto": AsyncMock(),
+                "wait_for_selector": AsyncMock(return_value=True),
+                "wait_for_function": AsyncMock(),
+                "evaluate": AsyncMock(return_value=True),
+            },
+        )()
+        platform.page = page
+        asyncio.run(platform.navigate_to_editor())
+        self.assertIn("tougao", page.goto.await_args.args[0])
+
+    def test_smzdm_fill_title_writes_into_title_field(self):
+        platform = SmzdmPlatform()
+        title_field = type(
+            "First",
+            (),
+            {
+                "count": AsyncMock(return_value=1),
+                "is_visible": AsyncMock(return_value=True),
+                "fill": AsyncMock(),
+            },
+        )()
+        title_locator = type("Loc", (), {"first": title_field})()
+        platform.page = type(
+            "Page",
+            (),
+            {"locator": staticmethod(lambda _sel: title_locator)},
+        )()
+        asyncio.run(platform.fill_title("smzdm标题"))
+        title_field.fill.assert_awaited_with("smzdm标题")
 
     def test_xiaoheihe_manual_override_is_forwarded(self):
         platform = XiaoheihePlatform()

@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from loguru import logger
 
@@ -530,17 +531,37 @@ class ZhihuPlatform(BasePlatform):
         return await self._api_draft_list_contains(keyword)
 
     async def _api_draft_list_contains(self, keyword: str) -> bool:
-        """重载草稿箱页面并捕获页面自身的草稿列表 API 响应，按标题验证。"""
+        """重载草稿箱页面、点击「草稿箱」入口，捕获列表 API 响应按标题验证。
+
+        注意：``articles/my_drafts/count`` 与列表端点共享 URL 前缀，谓词必须
+        精确匹配路径，否则会误捕获计数响应（无 data 字段）。
+        """
 
         try:
             async with self.page.expect_response(
                 self._is_drafts_list_response,
-                timeout=15000,
+                timeout=20000,
             ) as response_info:
                 await self.page.reload(
                     wait_until="domcontentloaded",
                     timeout=30000,
                 )
+                await self.simulator.random_delay(2, 4)
+                clicked = await self.page.evaluate(
+                    """() => {
+                        const nodes = Array.from(
+                            document.querySelectorAll('a, button, [role=button]')
+                        );
+                        const target = nodes.find((el) =>
+                            (el.innerText || '').trim().startsWith('草稿箱')
+                        );
+                        if (target) { target.click(); return true; }
+                        return false;
+                    }"""
+                )
+                await self.simulator.random_delay(2, 4)
+            if not clicked:
+                return False
             response = await response_info.value
             payload = await response.json()
             titles = [
@@ -548,7 +569,15 @@ class ZhihuPlatform(BasePlatform):
                 for item in (payload.get("data") or [])
                 if isinstance(item, dict)
             ]
-            return any(keyword in title for title in titles)
+            if any(keyword in title for title in titles):
+                return True
+            # 兜底：列表区可能已直接渲染标题
+            return bool(
+                await self.page.evaluate(
+                    "(kw) => (document.body.innerText || '').includes(kw)",
+                    keyword,
+                )
+            )
         except BrowserLifecycleError:
             raise
         except Exception as exc:
@@ -561,8 +590,9 @@ class ZhihuPlatform(BasePlatform):
 
     @staticmethod
     def _is_drafts_list_response(response) -> bool:
+        parts = urlsplit(response.url)
         return (
-            "api/v4/articles/my_drafts" in response.url
+            parts.path == "/api/v4/articles/my_drafts"
             and response.request.method == "GET"
         )
 

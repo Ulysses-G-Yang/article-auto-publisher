@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 
 from loguru import logger
 
@@ -21,7 +22,9 @@ from platforms.base import (
     BrowserLifecycleError,
     LoginRequiredError,
     PlatformAutomationError,
+    SelectorError,
 )
+from platforms.content_validation import ensure_valid_content, safe_media_error
 
 LOGIN_URL = "https://passport.baidu.com/v2/?login"
 HOME_URL = "https://baijiahao.baidu.com/"
@@ -238,7 +241,7 @@ class BaijiahaoPlatform(BasePlatform):
         walk(payload)
         return found[0] if found else None
 
-    # ==================== 投递链路（尚未接入） ====================
+    # ==================== 草稿投递链路 ====================
 
     @staticmethod
     def _not_implemented(operation: str):
@@ -247,13 +250,242 @@ class BaijiahaoPlatform(BasePlatform):
         )
 
     async def navigate_to_editor(self):
-        self._not_implemented("编辑器导航")
+        """打开百家号图文编辑器（type=news），等待「存草稿」按钮出现。
+
+        真实结构（2026-08 探测）：标题与正文均为 FeEditor contenteditable
+        （标题占位「请输入标题（2 - 64字）」，正文占位「请输入正文」），
+        底部有「存草稿」按钮，编辑器自动保存。
+        """
+        self._require_page_alive("百家号打开编辑器")
+        try:
+            await self.page.goto(
+                "https://baijiahao.baidu.com/builder/rc/edit?type=news",
+                wait_until="domcontentloaded",
+                timeout=30000,
+            )
+            await self.page.wait_for_function(
+                """() => {
+                    const nodes = Array.from(document.querySelectorAll('button, [role=button]'));
+                    return nodes.some((el) =>
+                        (el.innerText || '').replace(/\\s+/g, '').includes('存草稿'));
+                }""",
+                timeout=25000,
+            )
+            # 等待标题/正文编辑器渲染
+            await self.page.wait_for_function(
+                """() => Array.from(document.querySelectorAll(
+                    "div[class*='FeEditorApp-'][contenteditable='true']"
+                )).length >= 1""",
+                timeout=25000,
+            )
+        except BrowserLifecycleError:
+            raise
+        except Exception as exc:
+            if self._exception_means_browser_closed(exc):
+                raise BrowserLifecycleError(
+                    "BROWSER_CONTEXT_CLOSED: 百家号打开编辑器时页面已关闭"
+                ) from exc
+            raise SelectorError("百家号编辑器未就绪") from exc
+
+    def _editors(self):
+        return self.page.locator(
+            "div[class*='FeEditorApp-'][contenteditable='true']:visible"
+        )
+
+    async def _focus_editor(self, editor, label: str):
+        if await editor.count() == 0 or not await editor.is_visible():
+            raise RuntimeError(f"{label}编辑器不可见")
+        try:
+            await editor.click(timeout=5000)
+        except Exception:
+            await editor.evaluate("(el) => el.focus()")
+        focused = await self.page.evaluate(
+            """() => {
+                const el = document.activeElement;
+                return el ? el.isContentEditable : false;
+            }"""
+        )
+        if not focused:
+            raise RuntimeError(f"{label}编辑器未能获得焦点")
 
     async def fill_title(self, title: str):
-        self._not_implemented("标题填写")
+        """填写百家号标题（第一个 FeEditor contenteditable）。"""
+
+        self._require_page_alive("百家号填写标题")
+        try:
+            editor = self._editors().first
+            await self._focus_editor(editor, "标题")
+            await self.simulator.random_delay(0.3, 0.8)
+            try:
+                await self.page.keyboard.press("Control+A")
+                await self.page.keyboard.press("Backspace")
+            except Exception:
+                pass
+            await self.page.keyboard.insert_text(str(title or "").strip())
+            actual = await editor.inner_text()
+            if (title or "").strip() and title.strip() not in actual:
+                raise RuntimeError("标题回读不一致")
+        except Exception as exc:
+            if self._exception_means_browser_closed(exc):
+                raise BrowserLifecycleError(
+                    "BROWSER_CONTEXT_CLOSED: 百家号填写标题时页面已关闭"
+                ) from exc
+            logger.error("百家号标题填写失败: {}", exc)
+            raise SelectorError("百家号标题编辑器未找到或填写失败") from exc
 
     async def fill_content(self, content_blocks: list, images: list):
-        self._not_implemented("正文填写")
+        """填写正文（第二个 FeEditor contenteditable），回读并有序校验。"""
+
+        self._require_page_alive("百家号填写正文")
+        editor = self._editors().nth(1)
+        try:
+            await self._focus_editor(editor, "正文")
+            await self.simulator.random_delay(0.5, 1)
+            try:
+                await self.page.keyboard.press("Control+A")
+                await self.page.keyboard.press("Backspace")
+            except Exception:
+                pass
+            await self.simulator.random_delay(0.3, 0.8)
+        except Exception as exc:
+            if self._exception_means_browser_closed(exc):
+                raise BrowserLifecycleError(
+                    "BROWSER_CONTEXT_CLOSED: 百家号定位正文编辑器时页面已关闭"
+                ) from exc
+            raise SelectorError("百家号正文编辑器未找到") from exc
+
+        first_text = True
+        for block in content_blocks:
+            btype = block.get("type")
+            if btype in ("text", "heading") and block.get("text"):
+                text = str(block["text"]).strip()
+                if not text:
+                    continue
+                if not first_text:
+                    await self.page.keyboard.press("Enter")
+                lines = text.splitlines() or [text]
+                for i, line in enumerate(lines):
+                    if line.strip():
+                        await self.page.keyboard.insert_text(line.strip())
+                    if i < len(lines) - 1:
+                        await self.page.keyboard.press("Enter")
+                first_text = False
+
+        actual_text = await editor.inner_text()
+        expected_count = ensure_valid_content(
+            content_blocks,
+            actual_text,
+            platform="百家号",
+            phase="输入后",
+        )
+        logger.info("百家号正文文字输入并验证成功: {} 个文本段落", expected_count)
+
+        expected_images = sum(
+            1 for block in content_blocks if block.get("type") == "image"
+        )
+        uploaded_images = 0
+        failed_images = []
+        for block in content_blocks:
+            if block.get("type") == "image":
+                img_path = block.get("local_path")
+                if not img_path and images:
+                    for img in images:
+                        if img.get("position_index") == block.get("position"):
+                            img_path = img.get("local_path")
+                            break
+                    if not img_path:
+                        img_path = images[0].get("local_path")
+                if img_path:
+                    upload_result = await self._upload_image(img_path) or {}
+                    if upload_result.get("success"):
+                        uploaded_images += 1
+                    else:
+                        failed_images.append(
+                            {
+                                "filename": Path(str(img_path)).name,
+                                "error": safe_media_error(
+                                    upload_result.get("error"),
+                                    fallback="图片上传失败",
+                                ),
+                            }
+                        )
+                    await self.simulator.random_delay(0.2, 0.5)
+                else:
+                    failed_images.append(
+                        {"filename": "", "error": "文章图片块没有对应本地文件"}
+                    )
+
+        actual_text = await editor.inner_text()
+        ensure_valid_content(
+            content_blocks,
+            actual_text,
+            platform="百家号",
+            phase="图片处理后",
+        )
+        logger.info("百家号正文输入并最终验证成功: {} 个文本段落", expected_count)
+
+        if expected_images == 0:
+            media_status = "not_required"
+            media_error = None
+        elif uploaded_images == expected_images:
+            media_status = "completed"
+            media_error = None
+        elif uploaded_images == 0:
+            media_status = "failed"
+            media_error = f"{expected_images} 张图片全部上传失败"
+        else:
+            media_status = "partial"
+            media_error = f"{expected_images - uploaded_images} 张图片上传失败"
+
+        if failed_images:
+            logger.warning(
+                "百家号图片处理结果: expected={}, uploaded={}, failed={}",
+                expected_images,
+                uploaded_images,
+                len(failed_images),
+            )
+        return {
+            "text_ok": True,
+            "expected_images": expected_images,
+            "uploaded_images": uploaded_images,
+            "failed_images": failed_images,
+            "media_status": media_status,
+            "media_error": media_error,
+        }
+
+    async def _upload_image(self, image_path: str) -> dict:
+        """通过编辑器文件控件上传图片；以编辑器内图片数量增加为判据。"""
+
+        self._require_page_alive("百家号上传图片")
+        try:
+            file_inputs = self.page.locator("input[type=file]")
+            if await file_inputs.count() == 0:
+                return {"success": False, "error": "百家号图片上传控件未找到"}
+            before = await self.page.evaluate(
+                """() => document.querySelectorAll(
+                    "div[class*='FeEditorApp-'][contenteditable='true'] img"
+                ).length"""
+            )
+            await file_inputs.first.set_input_files(str(image_path), timeout=15000)
+            after = before
+            for _ in range(10):
+                await asyncio.sleep(1)
+                after = await self.page.evaluate(
+                    """() => document.querySelectorAll(
+                        "div[class*='FeEditorApp-'][contenteditable='true'] img"
+                    ).length"""
+                )
+                if after > before:
+                    break
+            if after <= before:
+                return {"success": False, "error": "上传后编辑器图片数量未增加"}
+            return {"success": True, "error": ""}
+        except Exception as exc:
+            if self._exception_means_browser_closed(exc):
+                raise BrowserLifecycleError(
+                    "BROWSER_CONTEXT_CLOSED: 百家号上传图片时页面已关闭"
+                ) from exc
+            return {"success": False, "error": str(exc)}
 
     async def select_topic(
         self,
@@ -262,10 +494,79 @@ class BaijiahaoPlatform(BasePlatform):
         selection_query: str = "",
         selection_override: dict | None = None,
     ):
-        self._not_implemented("话题选择")
+        """百家号保存草稿不需要话题；公开话题选择尚未接入，如实报告。"""
+
+        if not (topic or community or selection_query):
+            return {
+                "success": True,
+                "selection_status": "not_required",
+                "selection": {},
+            }
+        return {
+            "success": False,
+            "needs_selection": True,
+            "error_code": "TOPIC_SELECTION_NOT_IMPLEMENTED",
+            "error": "百家号话题选择尚未接入（保存草稿不需要话题）",
+            "selection": {},
+        }
 
     async def save_draft(self, title: str = "") -> str:
-        self._not_implemented("草稿保存")
+        """点击「存草稿」，以「保存接口 2xx」验证。
+
+        百家号编辑器自动保存且草稿入口在内容管理；保存判据 = 点击存草稿
+        后捕获保存接口 2xx。标题关键字验证在内容管理草稿列表中补充。
+        """
+        self._require_page_alive("百家号保存草稿")
+        captured: dict = {}
+
+        async def _on_response(response) -> None:
+            try:
+                if response.request.method in ("POST", "PUT", "PATCH") and (
+                    "save" in response.url.lower()
+                    or "draft" in response.url.lower()
+                    or "article" in response.url.lower()
+                ):
+                    captured["status"] = response.status
+                    try:
+                        body = await response.json()
+                        if isinstance(body, dict):
+                            captured["errno"] = body.get("errno")
+                    except Exception:
+                        pass
+            except Exception:  # noqa: BLE001
+                pass
+
+        try:
+            self.page.on("response", _on_response)
+            await self.page.evaluate(
+                """() => {
+                    const nodes = Array.from(
+                        document.querySelectorAll('button, [role=button]')
+                    );
+                    const target = nodes.find((el) =>
+                        (el.innerText || '').replace(/\\s+/g, '').includes('存草稿'));
+                    if (target) target.click();
+                }"""
+            )
+            await self.simulator.random_delay(2, 4)
+            for _ in range(10):
+                if captured.get("status"):
+                    break
+                await asyncio.sleep(1)
+        finally:
+            try:
+                self.page.remove_listener("response", _on_response)
+            except Exception:  # noqa: BLE001
+                pass
+
+        if not captured.get("status"):
+            logger.error("百家号存草稿未产生任何保存请求")
+            return ""
+        if captured.get("errno") not in (None, 0):
+            logger.error("百家号存草稿接口返回错误: {}", captured)
+            return ""
+        logger.info("百家号存草稿验证成功: 保存接口 {}", captured.get("status"))
+        return "https://baijiahao.baidu.com/builder/rc/edit?type=news"
 
     async def publish_now(self, title: str = "") -> str:
         self._not_implemented("公开发布")

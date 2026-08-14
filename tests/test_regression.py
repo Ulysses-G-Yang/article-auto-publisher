@@ -1651,18 +1651,25 @@ class RegressionTests(DatabaseTestCase):
         self.assertEqual(identity.platform_user_id, "170123456789")
         self.assertEqual(identity.display_name, "百家号昵称")
 
-    def test_baijiahao_delivery_methods_fail_closed(self):
+    def test_baijiahao_publish_now_still_fails_closed(self):
         platform = BaijiahaoPlatform()
-        for method, args in [
-            ("navigate_to_editor", ()),
-            ("fill_title", ("标题",)),
-            ("fill_content", ([], [])),
-            ("select_topic", ()),
-            ("save_draft", ()),
-            ("publish_now", ()),
-        ]:
-            with self.assertRaises(BaijiahaoNotImplementedError):
-                asyncio.run(getattr(platform, method)(*args))
+        with self.assertRaises(BaijiahaoNotImplementedError):
+            asyncio.run(platform.publish_now())
+
+    def test_baijiahao_navigate_to_editor_waits_for_editor(self):
+        platform = BaijiahaoPlatform()
+        platform.simulator.random_delay = AsyncMock()
+        page = type(
+            "Page",
+            (),
+            {
+                "goto": AsyncMock(),
+                "wait_for_function": AsyncMock(),
+            },
+        )()
+        platform.page = page
+        asyncio.run(platform.navigate_to_editor())
+        self.assertIn("rc/edit", page.goto.await_args.args[0])
 
     def test_smzdm_cookie_check_accepts_sess(self):
         platform = SmzdmPlatform()

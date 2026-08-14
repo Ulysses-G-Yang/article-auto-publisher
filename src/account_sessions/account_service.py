@@ -524,6 +524,10 @@ def _platform_instance(account: PlatformAccount):
         from platforms.smzdm import SmzdmPlatform
 
         return SmzdmPlatform(**kwargs)
+    if account.platform == "toutiao":
+        from platforms.toutiao import ToutiaoPlatform
+
+        return ToutiaoPlatform(**kwargs)
     raise AccountPlatformMismatchError("不支持的平台")
 
 

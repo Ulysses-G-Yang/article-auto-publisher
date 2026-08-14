@@ -50,6 +50,7 @@ def test_platform_catalog_freezes_public_capability_contract() -> None:
         "zhihu",
         "weibo",
         "smzdm",
+        "toutiao",
         "baijiahao",
         "xiaohongshu",
         "douyin",
@@ -83,13 +84,23 @@ def test_platform_catalog_freezes_public_capability_contract() -> None:
     assert by_id["smzdm"].status == "AVAILABLE"
     assert by_id["smzdm"].account_enabled is True
     assert by_id["smzdm"].delivery_enabled is True
+    assert by_id["toutiao"].status == "AVAILABLE"
+    assert by_id["toutiao"].account_enabled is True
+    assert by_id["toutiao"].delivery_enabled is False
     assert all(
         by_id[platform_id].status == "COMING_SOON"
         and by_id[platform_id].account_enabled is False
         and by_id[platform_id].delivery_enabled is False
         for platform_id in EXPECTED_IDS[3:]
         if platform_id
-        not in {"weibo", "smzdm", "baijiahao", "douyin", "xiaohongshu"}
+        not in {
+            "weibo",
+            "smzdm",
+            "baijiahao",
+            "douyin",
+            "xiaohongshu",
+            "toutiao",
+        }
     )
     assert all(
         item.logo_url == f"/static/img/platforms/{item.id}.svg"
@@ -133,7 +144,7 @@ def test_platform_catalog_api_exposes_only_public_fields(tmp_path: Path) -> None
 def test_unknown_platform_cannot_fall_back_to_zol() -> None:
     account = PlatformAccount(
         account_id=str(uuid.uuid4()),
-        platform="toutiao",
+        platform="wechat_mp",
         display_name="规划中平台账号",
         profile_path="unused-profile",
         session_status="UNVERIFIED",

@@ -1,12 +1,14 @@
 """多平台账号和持久登录态用例。"""
 
+import logging
+import shutil
 import uuid
 from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import delete, func, select
 from sqlalchemy.exc import IntegrityError
 
 from account_sessions.database import AccountDatabase
@@ -14,13 +16,23 @@ from account_sessions.errors import (
     AccountIdentityError,
     AccountNotFoundError,
     AccountPlatformMismatchError,
+    AccountSessionError,
 )
 from account_sessions.identity import extract_identity
-from account_sessions.leases import AccountProfileLease
-from account_sessions.models import AccountActivity, PlatformAccount
+from account_sessions.leases import AccountProfileLease, _is_within
+from account_sessions.models import (
+    AccountActivity,
+    DeliveryOperation,
+    PlatformAccount,
+    PublishConfirmation,
+)
 from account_sessions.permissions import AccessContext
 from account_sessions.platform_catalog import ACCOUNT_ENABLED_PLATFORMS
-from account_sessions.runtime_paths import legacy_profile_path, managed_profile_path
+from account_sessions.runtime_paths import (
+    default_root,
+    legacy_profile_path,
+    managed_profile_path,
+)
 from account_sessions.security import mask_platform_user_id, safe_error_message
 
 SUPPORTED_PLATFORMS = ACCOUNT_ENABLED_PLATFORMS
@@ -313,6 +325,69 @@ class AccountSessionService:
                 )
             )
             return public_account(stored)
+
+    async def remove_account(
+        self,
+        account_id: str,
+        access: AccessContext,
+    ) -> dict:
+        """永久删除一个账号及其隔离 Profile。
+
+        安全护栏：存在投递历史（delivery_operations）的账号拒绝删除，
+        投递记录需要保留审计；仅允许删除无历史、失效或占位账号。
+        Profile 目录只在受控根目录内清理，避免误删任意路径。
+        """
+
+        access.require("session.manage", account_id)
+        async with self.database.session() as session:
+            account = await session.get(PlatformAccount, account_id)
+            if account is None:
+                raise AccountNotFoundError("平台账号不存在")
+            history_count = await session.scalar(
+                select(func.count())
+                .select_from(DeliveryOperation)
+                .where(DeliveryOperation.account_id == account_id)
+            )
+            if history_count:
+                raise AccountSessionError(
+                    "该账号存在投递历史，禁止删除；投递记录需要保留审计",
+                    error_code="ACCOUNT_HAS_DELIVERY_HISTORY",
+                )
+            summary = public_account(account)
+            await session.execute(
+                delete(AccountActivity).where(AccountActivity.account_id == account_id)
+            )
+            await session.execute(
+                delete(PublishConfirmation).where(
+                    PublishConfirmation.account_id == account_id
+                )
+            )
+            await session.delete(account)
+            await session.flush()
+            profile = Path(account.profile_path)
+
+        if self._profile_within_roots(profile, account.platform):
+            try:
+                shutil.rmtree(profile)
+            except OSError as exc:
+                logging.warning("删除账号 %s 后 Profile 清理失败: %s", account_id, exc)
+        return {"deleted": summary}
+
+    def _profile_within_roots(self, profile: Path, platform: str) -> bool:
+        """复用租约的根目录约束：仅允许受控 Profile 根内的目录。"""
+
+        path = Path(profile).expanduser().resolve()
+        roots = {
+            Path(root).expanduser().resolve()
+            for root in (
+                self.allowed_profile_roots
+                or (
+                    default_root() / "profiles",
+                    legacy_profile_path(platform).parent,
+                )
+            )
+        }
+        return any(_is_within(path, root) for root in roots)
 
     async def _mark_verification_failure(
         self,

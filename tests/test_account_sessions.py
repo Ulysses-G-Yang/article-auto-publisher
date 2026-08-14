@@ -24,13 +24,19 @@ from account_sessions.database import AccountDatabase
 from account_sessions.delivery_service import DeliveryService
 from account_sessions.errors import (
     AccountBusyError,
+    AccountNotFoundError,
     AccountPlatformMismatchError,
+    AccountSessionError,
     ConfirmationRequiredError,
     PublicPublishDisabledError,
 )
 from account_sessions.leases import AccountProfileLease
 from account_sessions.identity import _clean
-from account_sessions.models import AccountActivity, PlatformAccount
+from account_sessions.models import (
+    AccountActivity,
+    DeliveryOperation,
+    PlatformAccount,
+)
 from account_sessions.permissions import LOCAL_WEB_CONTEXT, AccessContext
 from account_sessions.web import create_account_session_blueprint
 from article_mvp.errors import PlatformBusyError
@@ -620,4 +626,93 @@ def test_account_activity_table_contains_no_cross_account_rows(tmp_path: Path) -
     assert rows[0].display_name_snapshot == "夜航员"
     assert rows[0].actor_id == "local-web-user"
     assert rows[0].source == "WEB"
+    run(database.dispose())
+
+
+def test_remove_account_deletes_row_activity_and_profile(tmp_path: Path) -> None:
+    database = AccountDatabase(sqlite_database_url(tmp_path))
+    profile_root = tmp_path / "runtime" / "profiles"
+    service = AccountSessionService(
+        database,
+        seed_legacy_profiles=False,
+        allowed_profile_roots=(profile_root,),
+    )
+    run(service.initialize())
+    profile = make_profile(tmp_path, "xiaoheihe", "remove-me")
+    account = run(insert_account(database, profile, session_status="LOGIN_REQUIRED"))
+    run(service.set_session_policy(account.account_id, False, LOCAL_WEB_CONTEXT))
+
+    result = run(service.remove_account(account.account_id, LOCAL_WEB_CONTEXT))
+    assert result["deleted"]["account_id"] == account.account_id
+    assert result["deleted"]["session_status"] == "LOGIN_REQUIRED"
+    assert not profile.exists()
+
+    async def query_account() -> PlatformAccount | None:
+        async with database.session() as session:
+            return await session.get(PlatformAccount, account.account_id)
+
+    assert run(query_account()) is None
+
+    async def count_activity() -> int:
+        async with database.session() as session:
+            statement = select(AccountActivity).where(
+                AccountActivity.account_id == account.account_id
+            )
+            return len((await session.scalars(statement)).all())
+
+    assert run(count_activity()) == 0
+    run(database.dispose())
+
+
+def test_remove_account_refuses_delivery_history(tmp_path: Path) -> None:
+    database = AccountDatabase(sqlite_database_url(tmp_path))
+    profile_root = tmp_path / "runtime" / "profiles"
+    service = AccountSessionService(
+        database,
+        seed_legacy_profiles=False,
+        allowed_profile_roots=(profile_root,),
+    )
+    run(service.initialize())
+    profile = make_profile(tmp_path, "xiaoheihe", "with-history")
+    account = run(insert_account(database, profile))
+
+    async def attach_operation() -> None:
+        async with database.session() as session:
+            session.add(
+                DeliveryOperation(
+                    operation_id=str(uuid.uuid4()),
+                    account_id=account.account_id,
+                    platform="xiaoheihe",
+                    mode="DRAFT",
+                    source="WEB",
+                    actor_id="local-web-user",
+                    title=SAMPLE_ARTICLE_TITLE,
+                    body=SAMPLE_ARTICLE_BODY,
+                    content_version="test-v1",
+                    account_display_name_snapshot=account.display_name,
+                    status="DRAFT_SAVED",
+                )
+            )
+            await session.flush()
+
+    run(attach_operation())
+    with pytest.raises(AccountSessionError) as exc_info:
+        run(service.remove_account(account.account_id, LOCAL_WEB_CONTEXT))
+    assert exc_info.value.error_code == "ACCOUNT_HAS_DELIVERY_HISTORY"
+    assert profile.exists()
+
+    async def query_account() -> PlatformAccount | None:
+        async with database.session() as session:
+            return await session.get(PlatformAccount, account.account_id)
+
+    assert run(query_account()) is not None
+    run(database.dispose())
+
+
+def test_remove_account_unknown_account_returns_not_found(tmp_path: Path) -> None:
+    database = AccountDatabase(sqlite_database_url(tmp_path))
+    service = AccountSessionService(database, seed_legacy_profiles=False)
+    run(service.initialize())
+    with pytest.raises(AccountNotFoundError):
+        run(service.remove_account("missing-account-id", LOCAL_WEB_CONTEXT))
     run(database.dispose())

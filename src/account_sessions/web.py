@@ -228,6 +228,16 @@ def create_account_session_blueprint(
         )
         return jsonify(account)
 
+    @blueprint.delete("/api/account-sessions/<account_id>")
+    def remove_account(account_id: str):
+        """永久删除无投递历史的账号及其隔离 Profile。"""
+
+        account = state.run(
+            state.accounts.remove_account(account_id, LOCAL_WEB_CONTEXT),
+            timeout=60,
+        )
+        return jsonify(account)
+
     @blueprint.get("/api/account-sessions/<account_id>/activity")
     def account_activity(account_id: str):
         rows = state.run(state.accounts.list_activity(account_id, LOCAL_WEB_CONTEXT))

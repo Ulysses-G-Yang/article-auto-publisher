@@ -328,6 +328,15 @@ class WeiboPlatform(BasePlatform):
                 state="visible",
                 timeout=20000,
             )
+            # 编辑器加载中的 spinner 遮罩会拦截点击，等它消失
+            try:
+                await self.page.wait_for_selector(
+                    ".wb-editor-spin, .n-spin-body",
+                    state="detached",
+                    timeout=20000,
+                )
+            except Exception:
+                pass
         except BrowserLifecycleError:
             raise
         except Exception as exc:
@@ -408,7 +417,7 @@ class WeiboPlatform(BasePlatform):
         try:
             if await title_field.count() == 0 or not await title_field.is_visible():
                 raise RuntimeError("标题输入框不可见")
-            await title_field.click()
+            # 直接 fill（不依赖 click，避免加载遮罩拦截命中）
             await title_field.fill(str(title or "").strip())
         except Exception as exc:
             if self._exception_means_browser_closed(exc):

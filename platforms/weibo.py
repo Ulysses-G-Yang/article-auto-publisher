@@ -435,7 +435,16 @@ class WeiboPlatform(BasePlatform):
         try:
             if await editor.count() == 0 or not await editor.is_visible():
                 raise RuntimeError("正文编辑器不可见")
-            await editor.click()
+            # 等待可能的加载遮罩消失后，用 evaluate 聚焦（不依赖点击命中测试）
+            try:
+                await self.page.wait_for_selector(
+                    ".wb-editor-spin, .n-spin-body",
+                    state="detached",
+                    timeout=10000,
+                )
+            except Exception:
+                pass
+            await editor.evaluate("(el) => el.focus()")
         except Exception as exc:
             if self._exception_means_browser_closed(exc):
                 raise BrowserLifecycleError(

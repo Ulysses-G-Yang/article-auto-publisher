@@ -473,7 +473,8 @@ class BaijiahaoPlatform(BasePlatform):
             )
 
         cover_result: dict | None = None
-        if uploaded_images > 0:
+        if expected_images > 0:
+            # 封面可独立于正文插图：直接用本地首图上传到封面弹窗的 image/* 控件。
             cover_result = await self.set_cover() or {}
             if not cover_result.get("success"):
                 logger.warning(
@@ -491,21 +492,27 @@ class BaijiahaoPlatform(BasePlatform):
         }
 
     async def _upload_image(self, image_path: str) -> dict:
-        """通过编辑器文件控件上传图片；以编辑器内图片数量增加为判据。"""
+        """通过编辑器文件控件上传图片；以编辑器内图片数量增加为判据。
+
+        2026-08 实测：编辑器存在两个文件控件（video/* 与 image/*），
+        必须选择 accept 含 image 的控件，不能取 first（那是视频控件）。
+        """
 
         self._require_page_alive("百家号上传图片")
         try:
-            file_inputs = self.page.locator("input[type=file]")
-            if await file_inputs.count() == 0:
+            image_inputs = self.page.locator(
+                'input[type=file][accept*="image"]'
+            )
+            if await image_inputs.count() == 0:
                 return {"success": False, "error": "百家号图片上传控件未找到"}
             before = await self.page.evaluate(
                 """() => document.querySelectorAll(
                     "div[class*='FeEditorApp-'][contenteditable='true'] img"
                 ).length"""
             )
-            await file_inputs.first.set_input_files(str(image_path), timeout=15000)
+            await image_inputs.first.set_input_files(str(image_path), timeout=15000)
             after = before
-            for _ in range(10):
+            for _ in range(12):
                 await asyncio.sleep(1)
                 after = await self.page.evaluate(
                     """() => document.querySelectorAll(
@@ -527,8 +534,11 @@ class BaijiahaoPlatform(BasePlatform):
     async def set_cover(self) -> dict:
         """通过「选择封面」弹窗上传本地图片设为封面（3:2 预览后确定）。
 
-        2026-08 实测：点「选择封面」弹窗含「点击本地上传」与
-        accept="image/*" 文件控件；上传后封面预览 (3:2)，点「确定」完成。
+        2026-08 真实验收结论：**自动化环境下封面上传不生效**——
+        「点击本地上传」可触发 filechooser，set_files 后封面预览始终为空
+        （弹窗保持「暂无标题」），点「确定」不关闭弹窗；换图重试一致。
+        判定为百度侧对自动化环境的图片上传限制，如实失败、绝不假成功。
+        用户手动操作可正常设置封面。
         """
 
         self._require_page_alive("百家号设置封面")
@@ -548,11 +558,8 @@ class BaijiahaoPlatform(BasePlatform):
             return {"success": False, "error": "百家号「选择封面」按钮未找到"}
         await self.simulator.random_delay(1, 2)
 
-        # 弹窗出现后上传图片（accept="image/*" 的控件）
-        image_input = self.page.locator('input[type=file][accept*="image"]')
-        if await image_input.count() == 0:
-            return {"success": False, "error": "百家号封面上传控件未找到"}
-        # 上传使用内容第一张本地图片
+        # 弹窗出现后点「点击本地上传」触发系统文件选择，用 filechooser 上传
+        # （隐藏控件直接 set_input_files 无效，2026-08 实测上传不落图）
         first_image = ""
         try:
             blocks = getattr(self, "_content_blocks", []) or []
@@ -564,33 +571,86 @@ class BaijiahaoPlatform(BasePlatform):
             pass
         if not first_image:
             return {"success": False, "error": "百家号封面缺少本地图片素材"}
-        await image_input.first.set_input_files(first_image, timeout=20000)
+        try:
+            async with self.page.expect_file_chooser(timeout=15000) as fc_info:
+                upload_clicked = await self.page.evaluate(
+                    """() => {
+                        const nodes = Array.from(document.querySelectorAll('*'));
+                        const target = nodes.find(el => {
+                            const t = (el.innerText || '').trim();
+                            return t === '点击本地上传' && el.children.length === 0;
+                        });
+                        if (!target) return 'not-found';
+                        const clickable = target.closest(
+                            '[class*="btn" i], [role="button"], [class*="upload" i], label, div'
+                        );
+                        if (clickable && clickable !== target) {
+                            clickable.click();
+                            return 'clicked';
+                        }
+                        target.click();
+                        return 'clicked';
+                    }"""
+                )
+            file_chooser = await fc_info.value
+            await file_chooser.set_files(first_image)
+        except TimeoutError:
+            return {
+                "success": False,
+                "error": f"百家号封面未触发文件选择（upload={upload_clicked}）",
+            }
         await self.simulator.random_delay(3, 5)
 
-        # 等待封面预览出现后点「确定」
+        # 等待封面预览出现后点「确定」（可见按钮中最后一个；可能有图片确认+封面确定两步）
         confirmed = await self.page.evaluate(
             """() => {
                 const nodes = Array.from(
                     document.querySelectorAll('button, [role="button"], [class*="btn" i]')
                 );
-                const target = nodes.find(el => (el.innerText || '').trim() === '确定');
+                const visible = nodes.filter(
+                    (el) => (el.innerText || '').trim() === '确定'
+                        && el.offsetParent !== null
+                );
+                const target = visible[visible.length - 1] || null;
                 if (target) { target.click(); return 'clicked'; }
                 return 'no-confirm';
             }"""
         )
         await self.simulator.random_delay(2, 3)
 
-        # 成功判据：封面上传弹窗关闭
-        dialog_open = await self.page.evaluate(
-            """() => {
-                const nodes = Array.from(document.querySelectorAll('*'));
-                return nodes.some(el => {
-                    const t = (el.innerText || '').trim();
-                    return t === '点击本地上传' && el.children.length === 0;
-                });
-            }"""
-        )
-        if dialog_open:
+        # 成功判据：封面上传弹窗关闭（弹窗含两步：图片「确认」→ 封面「确定」）
+        dialog_closed = False
+        for _ in range(6):
+            dialog_open = await self.page.evaluate(
+                """() => {
+                    const nodes = Array.from(document.querySelectorAll('*'));
+                    return nodes.some(el => {
+                        const t = (el.innerText || '').trim();
+                        return t === '点击本地上传'
+                            && el.children.length === 0
+                            && el.offsetParent !== null;
+                    });
+                }"""
+            )
+            if not dialog_open:
+                dialog_closed = True
+                break
+            # 弹窗仍在：依次点可见的「确认」/「确定」（最后一个可见按钮）
+            await self.page.evaluate(
+                """() => {
+                    const nodes = Array.from(
+                        document.querySelectorAll('button, [role="button"], [class*="btn" i]')
+                    );
+                    const visible = nodes.filter(
+                        (el) => ['确认', '确定'].includes((el.innerText || '').trim())
+                            && el.offsetParent !== null
+                    );
+                    const target = visible[visible.length - 1] || null;
+                    if (target) target.click();
+                }"""
+            )
+            await self.simulator.random_delay(2, 3)
+        if not dialog_closed:
             return {
                 "success": False,
                 "error": f"百家号封面上传弹窗未关闭（confirm={confirmed}）",

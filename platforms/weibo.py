@@ -559,9 +559,11 @@ class WeiboPlatform(BasePlatform):
     async def set_cover(self) -> dict:
         """从正文图片中选择第一张设为文章封面（微博封面必须来自正文图）。
 
-        2026-08 实测：点「设置文章封面」弹出 naive-ui 对话框
-        「请从正文图片中选择一张作为封面图」；正文图片来自 fill_content
-        已上传的正文插图。选择第一张后点「下一步」完成。
+        2026-08 真实验收结论：**自动化环境下正文插图不可用**——编辑器
+        无 input[type=file] 控件、insert 卡片菜单无图片入口、合成 drop
+        事件不插入图片，判定为微博 Web 对自动化上传的限制。正文无图则
+        封面弹窗无图可选，set_cover 如实失败、绝不假成功；用户手动粘贴
+        /拖拽插图后可手动设置封面。
         """
 
         self._require_page_alive("微博设置封面")

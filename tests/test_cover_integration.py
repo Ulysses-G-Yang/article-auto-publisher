@@ -50,6 +50,14 @@ class _FakeLocator:
         return self._count
 
 
+class _FakeFileChooser:
+    def __init__(self) -> None:
+        self.files: list[str] = []
+
+    async def set_files(self, path: str, **_kwargs) -> None:
+        self.files.append(path)
+
+
 class _FakePage:
     """evaluate 按调用顺序消费预设返回值。"""
 
@@ -57,6 +65,8 @@ class _FakePage:
         self._results = list(evaluate_results)
         self.evaluate_calls: list[str] = []
         self.file_input = _FakeFileInput()
+        self.file_chooser = _FakeFileChooser()
+        self._chooser_triggered = True
 
     def is_closed(self) -> bool:
         return False
@@ -73,6 +83,26 @@ class _FakePage:
         if "input[type=file]" in selector:
             return self.file_input
         return _FakeLocator()
+
+    def expect_file_chooser(self, **_kwargs):
+        class _Expect:
+            def __init__(self, page):
+                self.page = page
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_exc):
+                return False
+
+            @property
+            def value(self):
+                async def _resolve():
+                    return self.page.file_chooser
+
+                return _resolve()
+
+        return _Expect(self)
 
 
 def _make_weibo(page: _FakePage) -> WeiboPlatform:
@@ -126,7 +156,7 @@ def test_weibo_set_cover_fails_when_dialog_has_no_images() -> None:
 
 
 def test_baijiahao_set_cover_success_flow() -> None:
-    page = _FakePage(["clicked", "clicked", False])
+    page = _FakePage(["clicked", False])
     platform = _make_baijiahao(page)
     platform._content_blocks = [
         {"type": "text", "text": "正文"},
@@ -136,8 +166,7 @@ def test_baijiahao_set_cover_success_flow() -> None:
     result = run(platform.set_cover())
 
     assert result["success"] is True
-    assert page.file_input.set_files == [r"C:\tmp\cover.png"]
-    assert len(page.evaluate_calls) == 3
+    assert page.file_chooser.files == [r"C:\tmp\cover.png"]
 
 
 def test_baijiahao_set_cover_fails_when_button_missing() -> None:
@@ -160,17 +189,3 @@ def test_baijiahao_set_cover_fails_without_image_material() -> None:
 
     assert result["success"] is False
     assert "缺少本地图片素材" in result["error"]
-
-
-def test_baijiahao_set_cover_fails_when_upload_control_missing() -> None:
-    page = _FakePage(["clicked"])
-    page.file_input._count = 0
-    platform = _make_baijiahao(page)
-    platform._content_blocks = [
-        {"type": "image", "local_path": r"C:\tmp\cover.png"}
-    ]
-
-    result = run(platform.set_cover())
-
-    assert result["success"] is False
-    assert "上传控件未找到" in result["error"]

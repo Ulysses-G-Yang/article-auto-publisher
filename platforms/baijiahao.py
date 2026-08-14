@@ -299,7 +299,8 @@ class BaijiahaoPlatform(BasePlatform):
             await editor.click(timeout=5000)
         except Exception:
             await editor.evaluate("(el) => el.focus()")
-        focused = await self.page.evaluate(
+        # 焦点检查必须在编辑器所属 frame 内执行（正文在 iframe 中）
+        focused = await editor.evaluate(
             """() => {
                 const el = document.activeElement;
                 return el ? el.isContentEditable : false;

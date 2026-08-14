@@ -46,7 +46,10 @@ async def _cookie_map(context) -> dict[str, str]:
 
 async def _extract_xiaoheihe(platform) -> AccountIdentity:
     cookies = await _cookie_map(platform.context)
-    user_id = _clean(cookies.get("heybox_id"))
+    # 小黑盒已把登录 cookie 更名为 user_heybox_id / user_pkey；旧名保留兼容。
+    user_id = _clean(
+        cookies.get("user_heybox_id") or cookies.get("heybox_id")
+    )
     display_name = _clean(cookies.get("nickname"))
     if not display_name:
         display_name = _clean(

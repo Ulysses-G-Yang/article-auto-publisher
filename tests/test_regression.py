@@ -5,9 +5,10 @@ import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
+from account_sessions.identity import extract_identity
 from config import get_config
-from models.database import Database
 from core.queue_manager import classify_task_error, normalize_selection_query
+from models.database import Database
 from platforms.base import BasePlatform, BrowserLifecycleError, PlatformAccessError
 from platforms.content_validation import ContentValidationError
 from platforms.zol import ZOLPlatform
@@ -1019,6 +1020,77 @@ class RegressionTests(DatabaseTestCase):
         self.assertTrue(platform._candidate_is_invalid("显示器 桌面 输出", "显示器 桌面 输出"))
         self.assertTrue(platform._candidate_is_invalid('{"word": "显示器"}', "显示器"))
         self.assertFalse(platform._candidate_is_invalid("导师模拟器：桌面实验室", "显示器"))
+
+    def test_xiaoheihe_cookie_check_accepts_renamed_login_cookies(self):
+        """小黑盒已把登录 cookie 更名为 user_heybox_id / user_pkey，必须识别。"""
+        platform = XiaoheihePlatform()
+        platform.context = type(
+            "Context",
+            (),
+            {
+                "cookies": AsyncMock(
+                    return_value=[
+                        {"name": "user_heybox_id", "value": "102503316"},
+                        {"name": "user_pkey", "value": "opaque"},
+                        {"name": "x_xhh_tokenid", "value": "opaque"},
+                    ]
+                ),
+            },
+        )()
+        self.assertTrue(asyncio.run(platform._is_logged_in_dom()))
+
+    def test_xiaoheihe_cookie_check_accepts_legacy_login_cookies(self):
+        platform = XiaoheihePlatform()
+        platform.context = type(
+            "Context",
+            (),
+            {
+                "cookies": AsyncMock(
+                    return_value=[
+                        {"name": "heybox_id", "value": "102503316"},
+                        {"name": "pkey", "value": "opaque"},
+                    ]
+                ),
+            },
+        )()
+        self.assertTrue(asyncio.run(platform._is_logged_in_dom()))
+
+    def test_xiaoheihe_cookie_check_rejects_guest_state(self):
+        platform = XiaoheihePlatform()
+        platform.context = type(
+            "Context",
+            (),
+            {
+                "cookies": AsyncMock(
+                    return_value=[{"name": "x_xhh_tokenid", "value": "opaque"}]
+                ),
+            },
+        )()
+        platform.page = type(
+            "Page", (), {"evaluate": AsyncMock(return_value=False), "locator": None}
+        )()
+        self.assertFalse(asyncio.run(platform._is_logged_in_dom()))
+
+    def test_xiaoheihe_identity_uses_renamed_cookie_and_dom_nickname(self):
+        platform = XiaoheihePlatform()
+        platform.context = type(
+            "Context",
+            (),
+            {
+                "cookies": AsyncMock(
+                    return_value=[
+                        {"name": "user_heybox_id", "value": "102503316"},
+                        {"name": "x_xhh_tokenid", "value": "opaque"},
+                    ]
+                ),
+            },
+        )()
+        platform.page = type(
+            "Page", (), {"evaluate": AsyncMock(return_value="夜航员")}
+        )()
+        identity = asyncio.run(extract_identity(platform))
+        self.assertEqual(identity.platform_user_id, "102503316")
+        self.assertEqual(identity.display_name, "夜航员")
 
     def test_xiaoheihe_manual_override_is_forwarded(self):
         platform = XiaoheihePlatform()

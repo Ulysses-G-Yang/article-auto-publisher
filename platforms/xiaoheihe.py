@@ -60,7 +60,18 @@ class XiaoheihePlatform(BasePlatform):
         但用户登录后若未设自定义头像，小黑盒返回的就是默认图，导致已登录被误判为游客。
         现改为以「登录态 cookie」为权威信号：heybox_id / nickname / pkey 是登录后
         才有且非 httponly 的 cookie，游客态不存在这些。
+
+        2026-08 稳定性验收修正：小黑盒已把登录 cookie 更名为 user_heybox_id /
+        user_pkey（旧名 heybox_id / pkey 不再下发），两种命名都纳入登录态信号，
+        避免真实已登录账号被误判为 LOGIN_REQUIRED。
         """
+        LOGIN_COOKIE_NAMES = {
+            "heybox_id",
+            "nickname",
+            "pkey",
+            "user_heybox_id",
+            "user_pkey",
+        }
         # 1. 权威信号：Playwright context.cookies()，同时覆盖 HttpOnly Cookie。
         try:
             if self.context:
@@ -69,7 +80,7 @@ class XiaoheihePlatform(BasePlatform):
                     "https://www.xiaoheihe.cn/creator/editor",
                 ])
                 cookie_names = {item.get("name", "") for item in cookies}
-                if cookie_names.intersection({"heybox_id", "nickname", "pkey"}):
+                if cookie_names.intersection(LOGIN_COOKIE_NAMES):
                     return True
         except Exception as exc:
             logger.debug("小黑盒 context Cookie 检测失败: {}", exc)
@@ -78,7 +89,9 @@ class XiaoheihePlatform(BasePlatform):
         try:
             cookie_signal = await self.page.evaluate("""() => {
                 const c = document.cookie || '';
-                return c.includes('heybox_id=') || c.includes('nickname=') || c.includes('pkey=');
+                return c.includes('heybox_id=') || c.includes('nickname=')
+                    || c.includes('pkey=') || c.includes('user_heybox_id=')
+                    || c.includes('user_pkey=');
             }""")
             if cookie_signal:
                 return True

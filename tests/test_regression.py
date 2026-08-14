@@ -1092,6 +1092,46 @@ class RegressionTests(DatabaseTestCase):
         self.assertEqual(identity.platform_user_id, "102503316")
         self.assertEqual(identity.display_name, "夜航员")
 
+    def test_xiaoheihe_identity_prefers_restore_login_payload(self):
+        platform = XiaoheihePlatform()
+        platform.fetch_identity_payload = AsyncMock(
+            return_value={
+                "ok": True,
+                "user_id": "102503316",
+                "display_name": "玩家102503316",
+            }
+        )
+        identity = asyncio.run(extract_identity(platform))
+        self.assertEqual(identity.platform_user_id, "102503316")
+        self.assertEqual(identity.display_name, "玩家102503316")
+
+    def test_xiaoheihe_fetch_identity_replays_captured_restore_url(self):
+        platform = XiaoheihePlatform()
+        platform._restore_url = (
+            "https://api.xiaoheihe.cn/account/restore_login?hkey=X&nonce=Y"
+        )
+        platform.page = type(
+            "Page",
+            (),
+            {
+                "evaluate": AsyncMock(
+                    return_value={
+                        "ok": True,
+                        "user_id": "102503316",
+                        "display_name": "玩家102503316",
+                    }
+                )
+            },
+        )()
+        result = asyncio.run(platform.fetch_identity_payload())
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["display_name"], "玩家102503316")
+
+    def test_xiaoheihe_fetch_identity_fails_closed_without_capture(self):
+        platform = XiaoheihePlatform()
+        result = asyncio.run(platform.fetch_identity_payload())
+        self.assertEqual(result, {"ok": False, "user_id": "", "display_name": ""})
+
     def test_xiaoheihe_manual_override_is_forwarded(self):
         platform = XiaoheihePlatform()
         platform.select_community = AsyncMock(return_value={"success": True, "value": "手动社区"})

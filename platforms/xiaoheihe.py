@@ -42,6 +42,76 @@ class XiaoheihePlatform(BasePlatform):
     def _raise_if_page_closed(self, stage: str):
         self._require_page_alive(stage)
 
+    async def initialize(self):
+        """标准初始化 + 监听 restore_login 响应，暂存同源确认的平台身份。"""
+        await super().initialize()
+        self._restore_profile: dict | None = None
+        self._restore_url: str | None = None
+        self._install_restore_capture()
+
+    def _install_restore_capture(self):
+        """监听页面自身的 ``account/restore_login`` 响应（带平台签名参数）。
+
+        小黑盒首页导航不渲染昵称，昵称只存在于该登录态恢复接口的响应里；
+        页面自身发起的请求携带 JS 计算的 hkey/nonce 签名，直接重放 URL 也可用。
+        """
+
+        try:
+            async def _on_response(response) -> None:
+                try:
+                    if (
+                        "account/restore_login" in response.url
+                        and response.request.method == "GET"
+                    ):
+                        self._restore_url = response.url
+                        payload = await response.json()
+                        profile = (payload.get("result") or {}).get("profile") or {}
+                        if profile.get("nickname") and profile.get("heybox_id"):
+                            self._restore_profile = {
+                                "ok": True,
+                                "user_id": str(profile["heybox_id"]),
+                                "display_name": str(profile["nickname"]),
+                            }
+                except Exception:  # noqa: BLE001
+                    pass
+
+            self.page.on("response", _on_response)
+        except Exception:  # noqa: BLE001
+            pass
+
+    async def fetch_identity_payload(self) -> dict:
+        """返回 restore_login 捕获/重放的最小平台身份；缺失时如实返回未确认。"""
+
+        payload = getattr(self, "_restore_profile", None)
+        if isinstance(payload, dict) and payload.get("ok"):
+            return dict(payload)
+        url = getattr(self, "_restore_url", None)
+        if not url:
+            return {"ok": False, "user_id": "", "display_name": ""}
+        try:
+            result = await self.page.evaluate(
+                """async (u) => {
+                    try {
+                        const response = await fetch(u, { credentials: 'include' });
+                        const body = await response.json().catch(() => ({}));
+                        const profile = (body && body.result && body.result.profile) || {};
+                        return {
+                            ok: Boolean(response.ok && profile.nickname && profile.heybox_id),
+                            user_id: profile.heybox_id ? String(profile.heybox_id) : '',
+                            display_name: profile.nickname ? String(profile.nickname) : '',
+                        };
+                    } catch (_) {
+                        return { ok: false, user_id: '', display_name: '' };
+                    }
+                }""",
+                url,
+            )
+            if isinstance(result, dict) and result.get("ok"):
+                return result
+        except Exception:  # noqa: BLE001
+            pass
+        return {"ok": False, "user_id": "", "display_name": ""}
+
     async def _wait_first_visible(self, selector: str, timeout_ms: int = 5000):
         """等待 SPA 弹窗/编辑器控件完成渲染，再返回第一个可见元素。"""
         self._raise_if_page_closed(f"等待控件: {selector}")

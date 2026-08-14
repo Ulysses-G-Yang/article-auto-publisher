@@ -45,8 +45,18 @@ async def _cookie_map(context) -> dict[str, str]:
 
 
 async def _extract_xiaoheihe(platform) -> AccountIdentity:
+    # 权威优先：restore_login 捕获/重放的同源平台身份（ID+昵称同时确认）。
+    # 小黑盒首页导航不渲染昵称，cookie 里也没有昵称，只有该接口返回真实昵称。
+    fetcher = getattr(platform, "fetch_identity_payload", None)
+    if callable(fetcher):
+        payload = await fetcher()
+        if isinstance(payload, dict) and payload.get("ok"):
+            user_id = _clean(payload.get("user_id"))
+            display_name = _clean(payload.get("display_name"))
+            if user_id and display_name:
+                return AccountIdentity(user_id, display_name)
+    # 回退：cookie（user_heybox_id 为现行命名，heybox_id 兼容旧名）+ DOM 昵称。
     cookies = await _cookie_map(platform.context)
-    # 小黑盒已把登录 cookie 更名为 user_heybox_id / user_pkey；旧名保留兼容。
     user_id = _clean(
         cookies.get("user_heybox_id") or cookies.get("heybox_id")
     )

@@ -44,7 +44,13 @@ EXPECTED_IDS = [
 def test_platform_catalog_freezes_public_capability_contract() -> None:
     assert [item.id for item in PLATFORM_CATALOG] == EXPECTED_IDS
     assert [item.sort_order for item in PLATFORM_CATALOG] == list(range(10, 101, 10))
-    assert ACCOUNT_ENABLED_PLATFORMS == ("xiaoheihe", "zol", "zhihu", "douyin")
+    assert ACCOUNT_ENABLED_PLATFORMS == (
+        "xiaoheihe",
+        "zol",
+        "zhihu",
+        "xiaohongshu",
+        "douyin",
+    )
     assert DELIVERY_ENABLED_PLATFORMS == ("xiaoheihe", "zol", "zhihu")
 
     by_id = {item.id: item for item in PLATFORM_CATALOG}
@@ -54,12 +60,15 @@ def test_platform_catalog_freezes_public_capability_contract() -> None:
     assert by_id["douyin"].status == "AVAILABLE"
     assert by_id["douyin"].account_enabled is True
     assert by_id["douyin"].delivery_enabled is False
+    assert by_id["xiaohongshu"].status == "AVAILABLE"
+    assert by_id["xiaohongshu"].account_enabled is True
+    assert by_id["xiaohongshu"].delivery_enabled is False
     assert all(
         by_id[platform_id].status == "COMING_SOON"
         and by_id[platform_id].account_enabled is False
         and by_id[platform_id].delivery_enabled is False
         for platform_id in EXPECTED_IDS[3:]
-        if platform_id != "douyin"
+        if platform_id not in {"douyin", "xiaohongshu"}
     )
     assert all(
         item.logo_url == f"/static/img/platforms/{item.id}.svg"
@@ -103,7 +112,7 @@ def test_platform_catalog_api_exposes_only_public_fields(tmp_path: Path) -> None
 def test_unknown_platform_cannot_fall_back_to_zol() -> None:
     account = PlatformAccount(
         account_id=str(uuid.uuid4()),
-        platform="xiaohongshu",
+        platform="smzdm",
         display_name="规划中平台账号",
         profile_path="unused-profile",
         session_status="UNVERIFIED",

@@ -13,6 +13,10 @@ from platforms.base import BasePlatform, BrowserLifecycleError, PlatformAccessEr
 from platforms.content_validation import ContentValidationError
 from platforms.douyin import DouyinPlatform, PlatformNotImplementedError
 from platforms.xiaoheihe import XiaoheihePlatform
+from platforms.xiaohongshu import (
+    PlatformNotImplementedError as XhsNotImplementedError,
+)
+from platforms.xiaohongshu import XiaohongshuPlatform
 from platforms.zol import ZOLPlatform
 
 
@@ -1253,6 +1257,87 @@ class RegressionTests(DatabaseTestCase):
         )
         self.assertEqual(found, ("MS4wLjABAAAAx", "夜航员"))
         self.assertIsNone(platform._extract_identity_from_json({"foo": "bar"}))
+
+    def test_xiaohongshu_cookie_check_accepts_web_session(self):
+        platform = XiaohongshuPlatform()
+        platform.context = type(
+            "Context",
+            (),
+            {
+                "cookies": AsyncMock(
+                    return_value=[
+                        {"name": "web_session", "value": "opaque"},
+                        {"name": "webId", "value": "opaque"},
+                    ]
+                ),
+            },
+        )()
+        self.assertTrue(asyncio.run(platform._has_session_cookie_signal()))
+
+    def test_xiaohongshu_cookie_check_rejects_guest_state(self):
+        platform = XiaohongshuPlatform()
+        platform.context = type(
+            "Context",
+            (),
+            {
+                "cookies": AsyncMock(
+                    return_value=[{"name": "webId", "value": "opaque"}]
+                ),
+            },
+        )()
+        self.assertFalse(asyncio.run(platform._has_session_cookie_signal()))
+
+    def test_xiaohongshu_fetch_identity_uses_captured_payload(self):
+        platform = XiaohongshuPlatform()
+        platform._identity_payload = {
+            "ok": True,
+            "user_id": "5f3e2a1b",
+            "display_name": "小红书昵称",
+        }
+        result = asyncio.run(platform.fetch_identity_payload())
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["display_name"], "小红书昵称")
+
+    def test_xiaohongshu_fetch_identity_fails_closed_without_capture(self):
+        platform = XiaohongshuPlatform()
+        platform.page = type(
+            "Page",
+            (),
+            {
+                "goto": AsyncMock(),
+                "on": lambda *a, **k: None,
+                "remove_listener": lambda *a, **k: None,
+            },
+        )()
+        with patch("platforms.xiaohongshu.asyncio.sleep", new=AsyncMock()):
+            result = asyncio.run(platform.fetch_identity_payload())
+        self.assertEqual(result, {"ok": False, "user_id": "", "display_name": ""})
+
+    def test_xiaohongshu_identity_extraction_requires_payload(self):
+        platform = XiaohongshuPlatform()
+        platform.fetch_identity_payload = AsyncMock(
+            return_value={
+                "ok": True,
+                "user_id": "5f3e2a1b",
+                "display_name": "小红书昵称",
+            }
+        )
+        identity = asyncio.run(extract_identity(platform))
+        self.assertEqual(identity.platform_user_id, "5f3e2a1b")
+        self.assertEqual(identity.display_name, "小红书昵称")
+
+    def test_xiaohongshu_delivery_methods_fail_closed(self):
+        platform = XiaohongshuPlatform()
+        for method, args in [
+            ("navigate_to_editor", ()),
+            ("fill_title", ("标题",)),
+            ("fill_content", ([], [])),
+            ("select_topic", ()),
+            ("save_draft", ()),
+            ("publish_now", ()),
+        ]:
+            with self.assertRaises(XhsNotImplementedError):
+                asyncio.run(getattr(platform, method)(*args))
 
     def test_xiaoheihe_manual_override_is_forwarded(self):
         platform = XiaoheihePlatform()

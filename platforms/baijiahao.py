@@ -1,13 +1,13 @@
-"""微博账号会话适配器。
+"""百家号（百度创作平台）账号会话适配器。
 
-登录态与身份验证链路（真实扫码 → 跳转回首页 → 身份捕获/DOM 确认），
+登录态与身份验证链路（真实扫码 → BDUSS 会话 cookie → 身份捕获/DOM），
 内容投递能力尚未接入：所有投递方法显式拒绝。
 
-真实登录页（https://passport.weibo.com/sso/signin?entry=miniblog...）：
-- 「扫描二维码登录」为默认 Tab，二维码为约 140x140 的 img（v2.qr.weibo.cn）。
-- 登录成功信号：扫码确认后页面从 passport 跳转回 weibo.com。
-- 身份接口带签名/cookie 约束，裸 fetch 不可靠；采用「捕获页面自身响应」
-  模式 + 首页 DOM 兜底，与小黑盒/小红书一致。
+真实登录载体（百度 passport，扫码登录为默认 Tab）：
+- 登录页：https://passport.baidu.com/v2/?login
+- 二维码：约 138x138 的 ``img.tang-pass-qrcode-img``（passport 二维码接口）。
+- 登录成功信号：.baidu.com 出现 BDUSS cookie（百度核心会话凭证）。
+- 身份接口带 cookie/签名约束，采用「捕获页面自身响应」模式 + 首页 DOM 兜底。
 """
 
 from __future__ import annotations
@@ -23,13 +23,11 @@ from platforms.base import (
     PlatformAutomationError,
 )
 
-LOGIN_URL = (
-    "https://passport.weibo.com/sso/signin?entry=miniblog"
-    "&source=miniblog&disp=popup&url=https%3A%2F%2Fweibo.com%2F"
-)
-HOME_URL = "https://weibo.com/"
+LOGIN_URL = "https://passport.baidu.com/v2/?login"
+HOME_URL = "https://baijiahao.baidu.com/"
+CREATOR_HOME = "https://baijiahao.baidu.com/builder/rc/edit"
 IDENTITY_NAME_KEYS = {"nickname", "user_name", "screen_name", "name", "nick"}
-IDENTITY_UID_KEYS = {"uid", "user_id"}
+IDENTITY_UID_KEYS = {"uid", "user_id", "bjh_id", "id"}
 
 
 class PlatformNotImplementedError(PlatformAutomationError):
@@ -38,12 +36,11 @@ class PlatformNotImplementedError(PlatformAutomationError):
     error_code = "PLATFORM_NOT_IMPLEMENTED"
 
 
-class WeiboPlatform(BasePlatform):
-    """微博账号会话适配器；内容投递能力保持关闭。"""
+class BaijiahaoPlatform(BasePlatform):
+    """百家号账号会话适配器；内容投递能力保持关闭。"""
 
-    platform_name = "weibo"
-    # 游客也有 SUB/SUBP/WBPSESS；SCF/ALF/SSOLoginState 仅登录后存在。
-    SESSION_COOKIE_NAMES = frozenset({"SCF", "ALF", "SSOLoginState"})
+    platform_name = "baijiahao"
+    SESSION_COOKIE_NAMES = frozenset({"BDUSS"})
     LOGIN_POLL_ATTEMPTS = 40
     LOGIN_POLL_INTERVAL_SECONDS = 3
 
@@ -59,15 +56,14 @@ class WeiboPlatform(BasePlatform):
     # ==================== 登录态与身份 ====================
 
     async def _has_session_cookie_signal(self) -> bool:
-        """登录会话 cookie（SCF/ALF/SSOLoginState）作为登录成功信号。"""
+        """BDUSS 会话 cookie 作为登录成功信号；不返回、不记录 cookie 值。"""
 
         if self.context is None:
             return False
         try:
             cookies = await self.context.cookies([
-                "https://weibo.com/",
-                "https://www.weibo.com/",
-                "https://weibo.cn/",
+                "https://passport.baidu.com/",
+                "https://baijiahao.baidu.com/",
             ])
         except Exception:
             return False
@@ -76,21 +72,12 @@ class WeiboPlatform(BasePlatform):
             for item in cookies
         )
 
-    async def _on_home(self) -> bool:
-        """是否已离开 passport 并处于微博首页（登录成功信号）。"""
-
-        try:
-            url = self.page.url or ""
-            return "passport.weibo.com" not in url and "weibo.com" in url
-        except Exception:
-            return False
-
     async def check_login(self) -> bool:
-        """只读验证现有 Profile；首页身份确认成功才认定登录有效。"""
+        """只读验证现有 Profile；BDUSS 会话 cookie 出现才认定登录有效。"""
 
         try:
             self.last_login_error = ""
-            self._require_page_alive("微博登录态检测")
+            self._require_page_alive("百家号登录态检测")
             await self.page.goto(
                 HOME_URL,
                 wait_until="domcontentloaded",
@@ -98,29 +85,23 @@ class WeiboPlatform(BasePlatform):
             )
             await asyncio.sleep(4)
             if await self._has_session_cookie_signal():
-                identity = await self.fetch_identity_payload()
-                if identity.get("ok"):
-                    return True
-                self.last_login_error = (
-                    "WEIBO_IDENTITY_MISSING: 微博会话存在但身份未确认"
-                )
-                return False
-            self.last_login_error = "LOGIN_REQUIRED: 微博账号需要登录"
+                return True
+            self.last_login_error = "LOGIN_REQUIRED: 百家号账号需要登录"
             return False
         except BrowserLifecycleError:
             raise
         except Exception as exc:
             if self._exception_means_browser_closed(exc):
                 raise BrowserLifecycleError(
-                    "BROWSER_CONTEXT_CLOSED: 微博登录态检测时页面已关闭"
+                    "BROWSER_CONTEXT_CLOSED: 百家号登录态检测时页面已关闭"
                 ) from exc
-            self.last_login_error = "WEIBO_LOGIN_CHECK_ERROR: 微博登录态验证失败"
+            self.last_login_error = "BAIJIAHAO_LOGIN_CHECK_ERROR: 百家号登录态验证失败"
             return False
 
     async def login(self):
-        """打开微博扫码登录页，等待用户在隔离 Profile 中扫码登录。"""
+        """打开百度扫码登录页，等待用户在隔离 Profile 中扫码登录。"""
 
-        self._require_page_alive("微博打开登录页")
+        self._require_page_alive("百家号打开登录页")
         await self.page.goto(
             LOGIN_URL,
             wait_until="domcontentloaded",
@@ -130,13 +111,11 @@ class WeiboPlatform(BasePlatform):
             await self.page.wait_for_function(
                 """() => {
                     const imgs = Array.from(
-                        document.querySelectorAll('img')
+                        document.querySelectorAll('img.tang-pass-qrcode-img')
                     );
-                    return imgs.some((i) => {
-                        const src = i.src || '';
-                        return src.includes('qr.weibo.cn')
-                            && i.naturalWidth > 100 && i.naturalWidth < 260;
-                    });
+                    return imgs.some(
+                        (i) => i.naturalWidth > 100 && i.naturalWidth < 260
+                    );
                 }""",
                 timeout=20000,
             )
@@ -145,12 +124,12 @@ class WeiboPlatform(BasePlatform):
         await self._show_scan_hint()
 
         for _ in range(self.LOGIN_POLL_ATTEMPTS):
-            self._require_page_alive("微博等待登录")
-            if await self._on_home() or await self._has_session_cookie_signal():
+            self._require_page_alive("百家号等待登录")
+            if await self._has_session_cookie_signal():
                 self.last_login_error = ""
                 return
             await asyncio.sleep(self.LOGIN_POLL_INTERVAL_SECONDS)
-        self.last_login_error = "LOGIN_REQUIRED: 微博登录超时，请重新完成登录"
+        self.last_login_error = "LOGIN_REQUIRED: 百家号登录超时，请重新完成登录"
         raise LoginRequiredError(self.last_login_error)
 
     async def _show_scan_hint(self):
@@ -160,13 +139,13 @@ class WeiboPlatform(BasePlatform):
             await self.page.evaluate(
                 """() => {
                     const div = document.createElement('div');
-                    div.id = 'wb-login-hint';
+                    div.id = 'bjh-login-hint';
                     div.style.cssText = 'position:fixed;top:10px;left:50%;'
-                        + 'transform:translateX(-50%);background:#ff8200;color:#fff;'
+                        + 'transform:translateX(-50%);background:#2932e1;color:#fff;'
                         + 'padding:12px 24px;border-radius:8px;font-size:16px;'
                         + 'z-index:999999;box-shadow:0 4px 12px rgba(0,0,0,0.3);'
                         + 'text-align:center;';
-                    div.innerHTML = '请用微博 App 扫码登录'
+                    div.innerHTML = '请用百度 App 扫码登录'
                         + '<br><small>登录成功后此窗口自动关闭</small>';
                     document.body.appendChild(div);
                 }"""
@@ -175,7 +154,7 @@ class WeiboPlatform(BasePlatform):
             pass
 
     async def fetch_identity_payload(self) -> dict[str, str | int | bool]:
-        """返回微博首页同源确认的最小平台身份（捕获 + DOM 兜底）。"""
+        """返回百家号同源确认的最小平台身份（捕获 + DOM 兜底）。"""
 
         if isinstance(self._identity_payload, dict) and self._identity_payload.get("ok"):
             return dict(self._identity_payload)
@@ -184,10 +163,10 @@ class WeiboPlatform(BasePlatform):
                 try:
                     if (
                         response.request.resource_type in ("xhr", "fetch")
-                        and "weibo.com" in response.url
+                        and "baidu.com" in response.url
                         and any(
                             key in response.url.lower()
-                            for key in ("user", "logininfo", "profile", "account")
+                            for key in ("logininfo", "user", "profile", "account")
                         )
                     ):
                         payload = await response.json()
@@ -204,7 +183,7 @@ class WeiboPlatform(BasePlatform):
             self.page.on("response", _on_response)
             try:
                 await self.page.goto(
-                    HOME_URL,
+                    CREATOR_HOME,
                     wait_until="domcontentloaded",
                     timeout=30000,
                 )
@@ -222,46 +201,9 @@ class WeiboPlatform(BasePlatform):
         except Exception as exc:
             if self._exception_means_browser_closed(exc):
                 raise BrowserLifecycleError(
-                    "BROWSER_CONTEXT_CLOSED: 微博身份捕获时页面已关闭"
+                    "BROWSER_CONTEXT_CLOSED: 百家号身份捕获时页面已关闭"
                 ) from exc
-            logger.warning("微博身份捕获失败: {}", exc)
-
-        # DOM 兜底：头像链接 /u/<uid> + 顶部用户区昵称（登录后首页）
-        if not (
-            isinstance(self._identity_payload, dict) and self._identity_payload.get("ok")
-        ):
-            try:
-                dom = await self.page.evaluate(
-                    """() => {
-                        const uidLink = document.querySelector('a[href*="/u/"]');
-                        const uidMatch = uidLink
-                            ? (uidLink.getAttribute('href') || '').match(/\\/u\\/(\\d+)/)
-                            : null;
-                        const nameEl = document.querySelector(
-                            '[class*="woo-pop-avatar"] [class*="name"],'
-                            + ' [class*="user-info"] [class*="name"]'
-                        );
-                        const nickname = nameEl
-                            ? (nameEl.innerText || '').trim()
-                            : '';
-                        return {
-                            user_id: uidMatch ? uidMatch[1] : '',
-                            display_name: nickname,
-                        };
-                    }"""
-                )
-                if (
-                    isinstance(dom, dict)
-                    and dom.get("user_id")
-                    and dom.get("display_name")
-                ):
-                    self._identity_payload = {
-                        "ok": True,
-                        "user_id": str(dom["user_id"]),
-                        "display_name": str(dom["display_name"]),
-                    }
-            except Exception:  # noqa: BLE001
-                pass
+            logger.warning("百家号身份捕获失败: {}", exc)
 
         if isinstance(self._identity_payload, dict) and self._identity_payload.get("ok"):
             return dict(self._identity_payload)
@@ -301,7 +243,7 @@ class WeiboPlatform(BasePlatform):
     @staticmethod
     def _not_implemented(operation: str):
         raise PlatformNotImplementedError(
-            f"PLATFORM_NOT_IMPLEMENTED: 微博{operation}能力尚未接入"
+            f"PLATFORM_NOT_IMPLEMENTED: 百家号{operation}能力尚未接入"
         )
 
     async def navigate_to_editor(self):

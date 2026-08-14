@@ -9,6 +9,12 @@ from account_sessions.identity import extract_identity
 from config import get_config
 from core.queue_manager import classify_task_error, normalize_selection_query
 from models.database import Database
+from platforms.baijiahao import (
+    BaijiahaoPlatform,
+)
+from platforms.baijiahao import (
+    PlatformNotImplementedError as BaijiahaoNotImplementedError,
+)
 from platforms.base import BasePlatform, BrowserLifecycleError, PlatformAccessError
 from platforms.content_validation import ContentValidationError
 from platforms.douyin import DouyinPlatform, PlatformNotImplementedError
@@ -641,8 +647,8 @@ class RegressionTests(DatabaseTestCase):
         self.assertEqual(self.db.get_account("zol")["status"], "logged_in")
 
     def test_resume_endpoint_requires_login_and_selection(self):
-        from app import create_app
         import web.routes as routes
+        from app import create_app
 
         article_id = self.create_article()
         task_id = self.db.create_task(article_id, "xiaoheihe")
@@ -1395,6 +1401,40 @@ class RegressionTests(DatabaseTestCase):
         )()
         self.assertTrue(asyncio.run(platform._on_home()))
 
+    def test_weibo_cookie_check_accepts_login_only_cookies(self):
+        platform = WeiboPlatform()
+        platform.context = type(
+            "Context",
+            (),
+            {
+                "cookies": AsyncMock(
+                    return_value=[
+                        {"name": "SCF", "value": "opaque"},
+                        {"name": "ALF", "value": "opaque"},
+                        {"name": "SUB", "value": "opaque"},
+                    ]
+                ),
+            },
+        )()
+        self.assertTrue(asyncio.run(platform._has_session_cookie_signal()))
+
+    def test_weibo_cookie_check_rejects_guest_state(self):
+        platform = WeiboPlatform()
+        platform.context = type(
+            "Context",
+            (),
+            {
+                "cookies": AsyncMock(
+                    return_value=[
+                        {"name": "SUB", "value": "opaque"},
+                        {"name": "SUBP", "value": "opaque"},
+                        {"name": "WBPSESS", "value": "opaque"},
+                    ]
+                ),
+            },
+        )()
+        self.assertFalse(asyncio.run(platform._has_session_cookie_signal()))
+
     def test_weibo_on_home_false_on_passport(self):
         platform = WeiboPlatform()
         platform.page = type(
@@ -1466,6 +1506,87 @@ class RegressionTests(DatabaseTestCase):
             ("publish_now", ()),
         ]:
             with self.assertRaises(WeiboNotImplementedError):
+                asyncio.run(getattr(platform, method)(*args))
+
+    def test_baijiahao_cookie_check_accepts_bduss(self):
+        platform = BaijiahaoPlatform()
+        platform.context = type(
+            "Context",
+            (),
+            {
+                "cookies": AsyncMock(
+                    return_value=[
+                        {"name": "BDUSS", "value": "opaque"},
+                        {"name": "BAIDUID", "value": "opaque"},
+                    ]
+                ),
+            },
+        )()
+        self.assertTrue(asyncio.run(platform._has_session_cookie_signal()))
+
+    def test_baijiahao_cookie_check_rejects_guest_state(self):
+        platform = BaijiahaoPlatform()
+        platform.context = type(
+            "Context",
+            (),
+            {
+                "cookies": AsyncMock(
+                    return_value=[{"name": "BAIDUID", "value": "opaque"}]
+                ),
+            },
+        )()
+        self.assertFalse(asyncio.run(platform._has_session_cookie_signal()))
+
+    def test_baijiahao_fetch_identity_uses_captured_payload(self):
+        platform = BaijiahaoPlatform()
+        platform._identity_payload = {
+            "ok": True,
+            "user_id": "170123456789",
+            "display_name": "百家号昵称",
+        }
+        result = asyncio.run(platform.fetch_identity_payload())
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["display_name"], "百家号昵称")
+
+    def test_baijiahao_fetch_identity_fails_closed_without_capture(self):
+        platform = BaijiahaoPlatform()
+        platform.page = type(
+            "Page",
+            (),
+            {
+                "goto": AsyncMock(),
+                "on": lambda *a, **k: None,
+                "remove_listener": lambda *a, **k: None,
+            },
+        )()
+        with patch("platforms.baijiahao.asyncio.sleep", new=AsyncMock()):
+            result = asyncio.run(platform.fetch_identity_payload())
+        self.assertEqual(result, {"ok": False, "user_id": "", "display_name": ""})
+
+    def test_baijiahao_identity_extraction_requires_payload(self):
+        platform = BaijiahaoPlatform()
+        platform.fetch_identity_payload = AsyncMock(
+            return_value={
+                "ok": True,
+                "user_id": "170123456789",
+                "display_name": "百家号昵称",
+            }
+        )
+        identity = asyncio.run(extract_identity(platform))
+        self.assertEqual(identity.platform_user_id, "170123456789")
+        self.assertEqual(identity.display_name, "百家号昵称")
+
+    def test_baijiahao_delivery_methods_fail_closed(self):
+        platform = BaijiahaoPlatform()
+        for method, args in [
+            ("navigate_to_editor", ()),
+            ("fill_title", ("标题",)),
+            ("fill_content", ([], [])),
+            ("select_topic", ()),
+            ("save_draft", ()),
+            ("publish_now", ()),
+        ]:
+            with self.assertRaises(BaijiahaoNotImplementedError):
                 asyncio.run(getattr(platform, method)(*args))
 
     def test_xiaoheihe_manual_override_is_forwarded(self):

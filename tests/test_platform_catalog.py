@@ -49,6 +49,7 @@ def test_platform_catalog_freezes_public_capability_contract() -> None:
         "zol",
         "zhihu",
         "weibo",
+        "baijiahao",
         "xiaohongshu",
         "douyin",
     )
@@ -67,12 +68,15 @@ def test_platform_catalog_freezes_public_capability_contract() -> None:
     assert by_id["weibo"].status == "AVAILABLE"
     assert by_id["weibo"].account_enabled is True
     assert by_id["weibo"].delivery_enabled is False
+    assert by_id["baijiahao"].status == "AVAILABLE"
+    assert by_id["baijiahao"].account_enabled is True
+    assert by_id["baijiahao"].delivery_enabled is False
     assert all(
         by_id[platform_id].status == "COMING_SOON"
         and by_id[platform_id].account_enabled is False
         and by_id[platform_id].delivery_enabled is False
         for platform_id in EXPECTED_IDS[3:]
-        if platform_id not in {"weibo", "douyin", "xiaohongshu"}
+        if platform_id not in {"weibo", "baijiahao", "douyin", "xiaohongshu"}
     )
     assert all(
         item.logo_url == f"/static/img/platforms/{item.id}.svg"

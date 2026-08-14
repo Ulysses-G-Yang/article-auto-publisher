@@ -53,7 +53,7 @@ PLATFORM_CATALOG: tuple[PlatformCatalogItem, ...] = (
     _item("weibo", "微博", 40, account_enabled=True),
     _item("smzdm", "什么值得买", 50),
     _item("toutiao", "头条号", 60),
-    _item("baijiahao", "百家号", 70),
+    _item("baijiahao", "百家号", 70, account_enabled=True),
     _item("xiaohongshu", "小红书", 80, account_enabled=True),
     _item("douyin", "抖音", 90, account_enabled=True),
     _item("wechat_mp", "微信公众号", 100),

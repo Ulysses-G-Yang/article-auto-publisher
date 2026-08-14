@@ -58,8 +58,8 @@ def test_platform_catalog_freezes_public_capability_contract() -> None:
         "xiaoheihe",
         "zol",
         "zhihu",
-        "xiaohongshu",
         "baijiahao",
+        "xiaohongshu",
     )
 
     by_id = {item.id: item for item in PLATFORM_CATALOG}

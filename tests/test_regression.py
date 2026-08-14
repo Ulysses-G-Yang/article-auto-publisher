@@ -12,8 +12,8 @@ from models.database import Database
 from platforms.base import BasePlatform, BrowserLifecycleError, PlatformAccessError
 from platforms.content_validation import ContentValidationError
 from platforms.douyin import DouyinPlatform, PlatformNotImplementedError
-from platforms.zol import ZOLPlatform
 from platforms.xiaoheihe import XiaoheihePlatform
+from platforms.zol import ZOLPlatform
 
 
 class FakeKeyboard:
@@ -1204,18 +1204,44 @@ class RegressionTests(DatabaseTestCase):
         self.assertEqual(identity.platform_user_id, "MS4wLjABAAAAx")
         self.assertEqual(identity.display_name, "抖音昵称")
 
-    def test_douyin_delivery_methods_fail_closed(self):
+    def test_douyin_publish_now_still_fails_closed(self):
         platform = DouyinPlatform()
-        for method, args in [
-            ("navigate_to_editor", ()),
-            ("fill_title", ("标题",)),
-            ("fill_content", ([], [])),
-            ("select_topic", ()),
-            ("save_draft", ()),
-            ("publish_now", ()),
-        ]:
-            with self.assertRaises(PlatformNotImplementedError):
-                asyncio.run(getattr(platform, method)(*args))
+        with self.assertRaises(PlatformNotImplementedError):
+            asyncio.run(platform.publish_now())
+
+    def test_douyin_navigate_to_editor_opens_publish_page(self):
+        platform = DouyinPlatform()
+        platform.page = type(
+            "Page",
+            (),
+            {
+                "goto": AsyncMock(),
+                "wait_for_selector": AsyncMock(return_value=True),
+            },
+        )()
+        asyncio.run(platform.navigate_to_editor())
+        self.assertIn("content/publish", platform.page.goto.await_args.args[0])
+
+    def test_douyin_fill_title_writes_into_semi_input(self):
+        platform = DouyinPlatform()
+        title_field = type(
+            "First",
+            (),
+            {
+                "count": AsyncMock(return_value=1),
+                "is_visible": AsyncMock(return_value=True),
+                "click": AsyncMock(),
+                "fill": AsyncMock(),
+            },
+        )()
+        title_locator = type("Loc", (), {"first": title_field})()
+        platform.page = type(
+            "Page",
+            (),
+            {"locator": staticmethod(lambda _sel: title_locator)},
+        )()
+        asyncio.run(platform.fill_title("抖音标题"))
+        title_field.fill.assert_awaited_with("抖音标题")
 
     def test_douyin_extract_identity_json_finds_name_and_uid(self):
         platform = DouyinPlatform()

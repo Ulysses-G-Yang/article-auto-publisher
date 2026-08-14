@@ -1,10 +1,16 @@
-"""抖音创作者中心账号会话适配器。
+"""抖音创作者中心账号会话与草稿投递适配器。
 
-当前实现登录态与身份验证链路（真实扫码 → 会话 cookie → 身份捕获），
-内容投递能力尚未接入：所有投递方法显式拒绝，避免把未经真实编辑器
-验证的逻辑伪装成可用能力。
+登录态与身份验证链路已接入（真实扫码 → 会话 cookie → 身份捕获），
+草稿投递链路（2026-08 真实编辑器结构探测后实现）：
+    navigate_to_editor → fill_title → fill_content → save_draft
 
-真实登录页（https://creator.douyin.com/）：
+真实发布页（https://creator.douyin.com/creator-micro/content/publish?type=article）：
+- 标题：``input.semi-input``，placeholder「填写作品标题，为作品获得更多流量」。
+- 正文：``div.zone-container.editor-kit-container``（contenteditable，作品描述 0/1000）。
+- 草稿保存：「暂存离开」按钮触发草稿 API；保存判据 = 草稿 API 成功 + 内容管理页标题验证。
+- 公开话题选择与公开发布（publish_now）仍明确拒绝：真实发布验收完成前不允许。
+
+登录页（https://creator.douyin.com/）：
 - 「扫码登录」为默认 Tab，二维码为约 180x180 的 base64 PNG。
 - 登录成功信号：.douyin.com 出现 sessionid / sessionid_ss / sid_tt cookie。
 - 创作者首页身份接口带 a_bogus/msToken 签名，裸 fetch 会被拒；
@@ -14,6 +20,7 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 
 from loguru import logger
 
@@ -22,10 +29,15 @@ from platforms.base import (
     BrowserLifecycleError,
     LoginRequiredError,
     PlatformAutomationError,
+    SelectorError,
 )
+from platforms.content_validation import ensure_valid_content, safe_media_error
 
 CREATOR_HOME = "https://creator.douyin.com/"
 CREATOR_MICRO_HOME = "https://creator.douyin.com/creator-micro/home"
+PUBLISH_URL = "https://creator.douyin.com/creator-micro/content/publish?type=article"
+TITLE_SELECTOR = "input.semi-input[placeholder^='填写作品标题']"
+BODY_SELECTOR = "div.zone-container.editor-kit-container[contenteditable='true']"
 IDENTITY_NAME_KEYS = {"nickname", "user_name", "screen_name", "name"}
 IDENTITY_UID_KEYS = {"sec_uid", "uid", "user_id"}
 
@@ -252,7 +264,7 @@ class DouyinPlatform(BasePlatform):
         walk(payload)
         return found[0] if found else None
 
-    # ==================== 投递链路（尚未接入） ====================
+    # ==================== 草稿投递链路 ====================
 
     @staticmethod
     def _not_implemented(operation: str):
@@ -261,13 +273,207 @@ class DouyinPlatform(BasePlatform):
         )
 
     async def navigate_to_editor(self):
-        self._not_implemented("编辑器导航")
+        """打开抖音文章发布页（type=article），等待标题输入框出现。"""
+
+        self._require_page_alive("抖音打开编辑器")
+        try:
+            await self.page.goto(
+                PUBLISH_URL,
+                wait_until="domcontentloaded",
+                timeout=30000,
+            )
+            await self.page.wait_for_selector(
+                TITLE_SELECTOR,
+                state="visible",
+                timeout=20000,
+            )
+        except BrowserLifecycleError:
+            raise
+        except Exception as exc:
+            if self._exception_means_browser_closed(exc):
+                raise BrowserLifecycleError(
+                    "BROWSER_CONTEXT_CLOSED: 抖音打开编辑器时页面已关闭"
+                ) from exc
+            raise SelectorError("抖音编辑器未找到标题输入框") from exc
 
     async def fill_title(self, title: str):
-        self._not_implemented("标题填写")
+        """填写抖音作品标题（semi-input，placeholder 以「填写作品标题」开头）。"""
+
+        self._require_page_alive("抖音填写标题")
+        title_field = self.page.locator(TITLE_SELECTOR).first
+        try:
+            if await title_field.count() == 0 or not await title_field.is_visible():
+                raise RuntimeError("标题输入框不可见")
+            await title_field.click()
+            await title_field.fill(str(title or "").strip())
+        except Exception as exc:
+            if self._exception_means_browser_closed(exc):
+                raise BrowserLifecycleError(
+                    "BROWSER_CONTEXT_CLOSED: 抖音填写标题时页面已关闭"
+                ) from exc
+            logger.error("抖音标题填写失败: {}", exc)
+            raise SelectorError("抖音标题输入框未找到或填写失败") from exc
 
     async def fill_content(self, content_blocks: list, images: list):
-        self._not_implemented("正文填写")
+        """填写正文：键盘逐段写入作品描述编辑器，回读并有序校验。
+
+        标题/描述计数器（0/30、0/1000）由页面自行管理；正文完整性以
+        content_validation 有序段落校验为准，绝不伪造。
+        """
+        self._require_page_alive("抖音填写正文")
+        editor = self.page.locator(BODY_SELECTOR).first
+        try:
+            if await editor.count() == 0 or not await editor.is_visible():
+                raise RuntimeError("正文编辑器不可见")
+            await editor.click()
+        except Exception as exc:
+            if self._exception_means_browser_closed(exc):
+                raise BrowserLifecycleError(
+                    "BROWSER_CONTEXT_CLOSED: 抖音定位正文编辑器时页面已关闭"
+                ) from exc
+            raise SelectorError("抖音正文编辑器未找到") from exc
+
+        try:
+            await self.page.keyboard.press("Control+A")
+            await self.page.keyboard.press("Backspace")
+        except Exception:
+            pass
+        await self.simulator.random_delay(0.3, 0.8)
+
+        first_text = True
+        for block in content_blocks:
+            btype = block.get("type")
+            if btype in ("text", "heading") and block.get("text"):
+                text = str(block["text"]).strip()
+                if not text:
+                    continue
+                if not first_text:
+                    await self.page.keyboard.press("Enter")
+                lines = text.splitlines() or [text]
+                for i, line in enumerate(lines):
+                    if line.strip():
+                        await self.page.keyboard.insert_text(line.strip())
+                    if i < len(lines) - 1:
+                        await self.page.keyboard.press("Enter")
+                first_text = False
+
+        actual_text = await editor.inner_text()
+        expected_count = ensure_valid_content(
+            content_blocks,
+            actual_text,
+            platform="抖音",
+            phase="输入后",
+        )
+        logger.info("抖音正文文字输入并验证成功: {} 个文本段落", expected_count)
+
+        expected_images = sum(
+            1 for block in content_blocks if block.get("type") == "image"
+        )
+        uploaded_images = 0
+        failed_images = []
+        for block in content_blocks:
+            if block.get("type") == "image":
+                img_path = block.get("local_path")
+                if not img_path and images:
+                    for img in images:
+                        if img.get("position_index") == block.get("position"):
+                            img_path = img.get("local_path")
+                            break
+                    if not img_path:
+                        img_path = images[0].get("local_path")
+                if img_path:
+                    upload_result = await self._upload_image(img_path) or {}
+                    if upload_result.get("success"):
+                        uploaded_images += 1
+                    else:
+                        failed_images.append(
+                            {
+                                "filename": Path(str(img_path)).name,
+                                "error": safe_media_error(
+                                    upload_result.get("error"),
+                                    fallback="图片上传失败",
+                                ),
+                            }
+                        )
+                    await self.simulator.random_delay(0.2, 0.5)
+                else:
+                    failed_images.append(
+                        {"filename": "", "error": "文章图片块没有对应本地文件"}
+                    )
+
+        actual_text = await editor.inner_text()
+        ensure_valid_content(
+            content_blocks,
+            actual_text,
+            platform="抖音",
+            phase="图片处理后",
+        )
+        logger.info("抖音正文输入并最终验证成功: {} 个文本段落", expected_count)
+
+        if expected_images == 0:
+            media_status = "not_required"
+            media_error = None
+        elif uploaded_images == expected_images:
+            media_status = "completed"
+            media_error = None
+        elif uploaded_images == 0:
+            media_status = "failed"
+            media_error = f"{expected_images} 张图片全部上传失败"
+        else:
+            media_status = "partial"
+            media_error = f"{expected_images - uploaded_images} 张图片上传失败"
+
+        if failed_images:
+            logger.warning(
+                "抖音图片处理结果: expected={}, uploaded={}, failed={}",
+                expected_images,
+                uploaded_images,
+                len(failed_images),
+            )
+        return {
+            "text_ok": True,
+            "expected_images": expected_images,
+            "uploaded_images": uploaded_images,
+            "failed_images": failed_images,
+            "media_status": media_status,
+            "media_error": media_error,
+        }
+
+    async def _upload_image(self, image_path: str) -> dict:
+        """通过作品编辑器的文件控件上传图片；以编辑器内图片数量增加为成功判据。"""
+
+        self._require_page_alive("抖音上传图片")
+        try:
+            file_inputs = self.page.locator(
+                "input[type=file]:not([accept*='video'])"
+            )
+            if await file_inputs.count() == 0:
+                return {"success": False, "error": "抖音图片上传控件未找到"}
+            before = await self.page.evaluate(
+                """() => document.querySelectorAll(
+                    '.zone-container img, .editor-kit-container img'
+                ).length"""
+            )
+            await file_inputs.first.set_input_files(str(image_path), timeout=15000)
+            after = before
+            for _ in range(10):
+                await asyncio.sleep(1)
+                after = await self.page.evaluate(
+                    """() => document.querySelectorAll(
+                        '.zone-container img, .editor-kit-container img'
+                    ).length"""
+                )
+                if after > before:
+                    break
+            if after <= before:
+                return {"success": False, "error": "上传后编辑器图片数量未增加"}
+            return {"success": True, "error": ""}
+        except Exception as exc:
+            if self._exception_means_browser_closed(exc):
+                raise BrowserLifecycleError(
+                    "BROWSER_CONTEXT_CLOSED: 抖音上传图片时页面已关闭"
+                ) from exc
+            return {"success": False, "error": str(exc)}
 
     async def select_topic(
         self,
@@ -276,10 +482,122 @@ class DouyinPlatform(BasePlatform):
         selection_query: str = "",
         selection_override: dict | None = None,
     ):
-        self._not_implemented("话题选择")
+        """抖音保存草稿不需要话题；公开话题选择尚未接入，如实报告。"""
+
+        if not (topic or community or selection_query):
+            return {
+                "success": True,
+                "selection_status": "not_required",
+                "selection": {},
+            }
+        return {
+            "success": False,
+            "needs_selection": True,
+            "error_code": "TOPIC_SELECTION_NOT_IMPLEMENTED",
+            "error": "抖音话题选择尚未接入（保存草稿不需要话题）",
+            "selection": {},
+        }
 
     async def save_draft(self, title: str = "") -> str:
-        self._not_implemented("草稿保存")
+        """点击「暂存离开」保存草稿，捕获草稿 API 响应，并在内容管理页按标题验证。
+
+        返回内容管理页 URL；验证失败返回空串（绝不以当前页 URL 冒充成功）。
+        """
+        self._require_page_alive("抖音保存草稿")
+        captured: dict = {}
+
+        async def _on_response(response) -> None:
+            try:
+                if "draft" in response.url and response.request.method in {
+                    "POST",
+                    "PUT",
+                }:
+                    captured["status"] = response.status
+                    try:
+                        body = await response.json()
+                        if isinstance(body, dict):
+                            captured["ok"] = (
+                                body.get("status_code") in (0, None)
+                                or body.get("status") in (0, "ok", "success")
+                            )
+                    except Exception:
+                        captured["ok"] = response.status < 300
+            except Exception:  # noqa: BLE001
+                pass
+
+        try:
+            self.page.on("response", _on_response)
+            await self.page.evaluate(
+                """() => {
+                    const nodes = Array.from(document.querySelectorAll('button, [role=button]'));
+                    const target = nodes.find((el) =>
+                        (el.innerText || '').replace(/\\s+/g, '').includes('暂存离开'));
+                    if (target) target.click();
+                }"""
+            )
+            await self.simulator.random_delay(2, 4)
+            # 可能的确认弹窗
+            try:
+                confirm = self.page.locator(
+                    "button:has-text('确定'), button:has-text('暂存')"
+                ).first
+                if await confirm.count() > 0:
+                    await confirm.click(timeout=3000)
+                    await self.simulator.random_delay(2, 4)
+            except Exception:
+                pass
+            # 等待草稿 API 响应
+            for _ in range(10):
+                if captured.get("status"):
+                    break
+                await asyncio.sleep(1)
+        finally:
+            try:
+                self.page.remove_listener("response", _on_response)
+            except Exception:  # noqa: BLE001
+                pass
+
+        if not captured.get("ok"):
+            logger.error("抖音草稿 API 未确认成功: {}", captured)
+            return ""
+        # 去内容管理页验证标题
+        try:
+            await self.page.goto(
+                "https://creator.douyin.com/creator-micro/content/manage",
+                wait_until="domcontentloaded",
+                timeout=30000,
+            )
+            await self.simulator.random_delay(3, 5)
+            keyword = str(title or "").strip()[:12]
+            found = False
+            if keyword:
+                found = bool(
+                    await self.page.evaluate(
+                        "(kw) => (document.body.innerText || '').includes(kw)",
+                        keyword,
+                    )
+                )
+                if not found:
+                    await self.simulator.random_delay(3, 5)
+                    found = bool(
+                        await self.page.evaluate(
+                            "(kw) => (document.body.innerText || '').includes(kw)",
+                            keyword,
+                        )
+                    )
+            if keyword and not found:
+                logger.error("抖音内容管理页未找到标题包含「{}」的草稿", keyword)
+                return ""
+            return "https://creator.douyin.com/creator-micro/content/manage"
+        except BrowserLifecycleError:
+            raise
+        except Exception as exc:
+            if self._exception_means_browser_closed(exc):
+                raise BrowserLifecycleError(
+                    "BROWSER_CONTEXT_CLOSED: 抖音验证草稿时页面已关闭"
+                ) from exc
+            logger.error("抖音草稿验证失败: {}", exc)
+            return ""
 
     async def publish_now(self, title: str = "") -> str:
         self._not_implemented("公开发布")

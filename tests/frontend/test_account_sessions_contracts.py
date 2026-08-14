@@ -61,7 +61,7 @@ def test_account_actions_follow_frozen_session_states() -> None:
     assert "/api/accounts/{account_id}/verify" in template
     assert "重新登录" in script
     assert "function loginAccount(account)" in script
-    assert "/api/accounts/{account_id}/login" in template
+    assert "/api/account-sessions/{account_id}/login" in template
     assert "/api/account-sessions/{account_id}/logout" in template
 
 

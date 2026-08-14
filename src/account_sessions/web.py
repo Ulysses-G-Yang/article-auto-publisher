@@ -190,7 +190,7 @@ def create_account_session_blueprint(
         )
         return jsonify(account), 202
 
-    @blueprint.post("/api/accounts/<account_id>/login")
+    @blueprint.post("/api/account-sessions/<account_id>/login")
     def login_existing_account(account_id: str):
         """复用指定账号的隔离 Profile，启动交互式重新登录。"""
 

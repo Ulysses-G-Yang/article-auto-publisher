@@ -570,7 +570,7 @@ def test_existing_account_login_route_reuses_profile_and_enables_interaction(
     monkeypatch.setattr(state, "submit", lambda work: captured.setdefault("submitted", work))
 
     account_id = "existing-account"
-    response = app.test_client().post(f"/api/accounts/{account_id}/login")
+    response = app.test_client().post(f"/api/account-sessions/{account_id}/login")
 
     assert response.status_code == 202
     assert response.get_json() == {"account_id": account_id, "session_status": "VERIFYING"}

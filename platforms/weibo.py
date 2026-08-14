@@ -548,6 +548,80 @@ class WeiboPlatform(BasePlatform):
                 ) from exc
             return {"success": False, "error": str(exc)}
 
+    async def set_cover(self) -> dict:
+        """从正文图片中选择第一张设为文章封面（微博封面必须来自正文图）。
+
+        2026-08 实测：点「设置文章封面」弹出 naive-ui 对话框
+        「请从正文图片中选择一张作为封面图」；正文图片来自 fill_content
+        已上传的正文插图。选择第一张后点「下一步」完成。
+        """
+
+        self._require_page_alive("微博设置封面")
+        clicked = await self.page.evaluate(
+            """() => {
+                const nodes = Array.from(document.querySelectorAll('*'));
+                const target = nodes.find(el => {
+                    const t = (el.innerText || '').trim();
+                    return t === '设置文章封面' && el.children.length === 0;
+                });
+                if (!target) return 'not-found';
+                const clickable = target.closest(
+                    'button, [role="button"], [class*="btn" i], [class*="click" i], label, a'
+                );
+                if (clickable) { clickable.click(); return 'clicked'; }
+                target.click();
+                return 'clicked';
+            }"""
+        )
+        if clicked != "clicked":
+            return {"success": False, "error": "微博「设置文章封面」按钮未找到"}
+        await self.simulator.random_delay(1, 2)
+
+        # 弹窗中选择第一张正文图片（缩略图/图片容器）
+        picked = await self.page.evaluate(
+            """() => {
+                const dialog = document.querySelector('.n-dialog');
+                if (!dialog) return 'no-dialog';
+                const imgs = Array.from(dialog.querySelectorAll('img'));
+                if (imgs.length === 0) return 'no-images';
+                const container = imgs[0].closest(
+                    '[class*="item" i], [class*="pic" i], label'
+                );
+                const target = container || imgs[0];
+                target.click();
+                return 'picked';
+            }"""
+        )
+        await self.simulator.random_delay(1, 2)
+        if picked != "picked":
+            return {"success": False, "error": "微博封面弹窗未找到正文图片"}
+
+        # 点「下一步」（有图片时弹窗按钮应为「下一步」）
+        next_clicked = await self.page.evaluate(
+            """() => {
+                const dialog = document.querySelector('.n-dialog');
+                if (!dialog) return 'no-dialog';
+                const buttons = Array.from(dialog.querySelectorAll('button'));
+                const target = buttons.find(b =>
+                    ['下一步', '确定', '完成', '使用该图'].includes((b.innerText || '').trim()));
+                if (target) { target.click(); return 'clicked'; }
+                return 'no-next-btn';
+            }"""
+        )
+        await self.simulator.random_delay(2, 3)
+
+        # 成功判据：弹窗关闭
+        dialog_open = await self.page.evaluate(
+            "() => !!document.querySelector('.n-dialog')"
+        )
+        if dialog_open:
+            return {
+                "success": False,
+                "error": f"微博封面设置弹窗未关闭（pick={picked} next={next_clicked}）",
+            }
+        logger.info("微博封面已从正文首图设置完成")
+        return {"success": True, "error": ""}
+
     async def select_topic(
         self,
         topic: str = "",

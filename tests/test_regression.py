@@ -1542,14 +1542,25 @@ class RegressionTests(DatabaseTestCase):
             {
                 "goto": AsyncMock(),
                 "wait_for_selector": AsyncMock(return_value=True),
-                "evaluate": AsyncMock(return_value=True),
+                "wait_for_function": AsyncMock(),
+                "get_by_text": staticmethod(
+                    lambda text: type(
+                        "Loc",
+                        (),
+                        {
+                            "first": type(
+                                "First",
+                                (),
+                                {"click": AsyncMock()},
+                            )()
+                        },
+                    )()
+                ),
             },
         )()
         platform.page = page
-        with patch("platforms.weibo.asyncio.sleep", new=AsyncMock()):
-            asyncio.run(platform.navigate_to_editor())
+        asyncio.run(platform.navigate_to_editor())
         self.assertIn("article/v5/editor", page.goto.await_args.args[0])
-        self.assertTrue(hasattr(platform, "_draft_box_count_before"))
 
     def test_weibo_fill_title_writes_into_title_field(self):
         platform = WeiboPlatform()

@@ -308,11 +308,11 @@ class WeiboPlatform(BasePlatform):
         )
 
     async def navigate_to_editor(self):
-        """打开微博头条文章编辑器：草稿箱视图 → 写文章。
+        """打开微博头条文章编辑器：草稿箱视图 → 真实点击「写文章」。
 
-        真实结构（2026-08 探测）：标题 ``textarea``「请输入标题」（0/32），
-        正文 ``div.tiptap.ProseMirror``（TipTap），保存草稿按钮常驻，
-        侧栏「草稿箱 (N/30)」计数可供验证。
+        2026-08 实测：必须用真实鼠标点击「写文章」才会创建草稿并切换到
+        ``#/draft/{id}`` 视图（JS 模拟点击不会触发导航，导致保存草稿时
+        id 为空、服务端返回参数错误）。创建后标题/正文字段即可填写。
         """
         self._require_page_alive("微博打开编辑器")
         try:
@@ -321,14 +321,28 @@ class WeiboPlatform(BasePlatform):
                 wait_until="domcontentloaded",
                 timeout=30000,
             )
-            self._draft_box_count_before = await self._draft_box_count()
-            await self._click_sidebar_text("写文章")
+            await self.page.wait_for_function(
+                """() => {
+                    const nodes = Array.from(document.querySelectorAll('*'));
+                    return nodes.some((el) => {
+                        const txt = (el.innerText || '').trim();
+                        return txt === '写文章' && el.children.length <= 3;
+                    });
+                }""",
+                timeout=15000,
+            )
+            write_btn = self.page.get_by_text("写文章", exact=True).first
+            await write_btn.click(timeout=10000)
+            # 等待切换到已创建的草稿视图 #/draft/{id}
+            await self.page.wait_for_function(
+                """() => /#/draft/\\d+/.test(location.hash)""",
+                timeout=20000,
+            )
             await self.page.wait_for_selector(
                 "textarea[placeholder='请输入标题']",
                 state="visible",
                 timeout=20000,
             )
-            # 编辑器加载中的 spinner 遮罩会拦截点击，等它消失
             try:
                 await self.page.wait_for_selector(
                     ".wb-editor-spin, .n-spin-body",
@@ -345,69 +359,6 @@ class WeiboPlatform(BasePlatform):
                     "BROWSER_CONTEXT_CLOSED: 微博打开编辑器时页面已关闭"
                 ) from exc
             raise SelectorError("微博头条文章编辑器未找到标题输入框") from exc
-
-    async def _click_sidebar_text(self, text: str) -> None:
-        """点击侧栏中文本精确匹配的元素（写文章），等待渲染后点击。"""
-
-        try:
-            await self.page.wait_for_function(
-                """(t) => {
-                    const nodes = Array.from(document.querySelectorAll('*'));
-                    return nodes.some((el) => {
-                        const txt = (el.innerText || '').trim();
-                        return txt === t && el.children.length <= 3;
-                    });
-                }""",
-                arg=text,
-                timeout=15000,
-            )
-        except Exception:
-            pass
-        clicked = await self.page.evaluate(
-            """(t) => {
-                const nodes = Array.from(document.querySelectorAll('*'));
-                const target = nodes.find((el) => {
-                    const txt = (el.innerText || '').trim();
-                    return txt === t && el.children.length <= 3;
-                });
-                if (target) { target.click(); return true; }
-                return false;
-            }""",
-            text,
-        )
-        if not clicked:
-            raise SelectorError(f"微博侧栏未找到「{text}」入口")
-        await self.simulator.random_delay(1, 2)
-
-    async def _draft_box_count(self) -> int | None:
-        """读取头条文章编辑器侧栏「草稿箱 (N/30)」计数。
-
-        页面可能先渲染占位值，要求两次连续读数一致才算稳定。
-        """
-
-        last: int | None = None
-        for _ in range(6):
-            try:
-                value = await self.page.evaluate(
-                    """() => {
-                        const nodes = Array.from(document.querySelectorAll('*'));
-                        const el = nodes.find((n) => {
-                            const t = (n.innerText || '').trim();
-                            return t.startsWith('草稿箱') && t.length < 20;
-                        });
-                        if (!el) return null;
-                        const m = (el.innerText || '').match(/草稿箱\\s*\\(\\s*(\\d+)\\s*\\//);
-                        return m ? parseInt(m[1], 10) : null;
-                    }"""
-                )
-                if isinstance(value, int):
-                    if last is not None and value == last:
-                        return value
-                    last = value
-            except Exception:  # noqa: BLE001
-                pass
-            await asyncio.sleep(3)
-        return last
 
     async def fill_title(self, title: str):
         """填写微博头条文章标题（textarea，placeholder「请输入标题」，0/32）。"""
@@ -616,21 +567,28 @@ class WeiboPlatform(BasePlatform):
         }
 
     async def save_draft(self, title: str = "") -> str:
-        """点击「保存草稿」，以「草稿箱计数 +1」验证。
+        """点击「保存草稿」，以「保存接口 2xx + 草稿箱标题关键字」验证。
 
-        头条文章草稿箱为侧栏「草稿箱 (N/30)」计数（Web 端草稿卡片在
-        草稿箱视图中，保存后回到草稿箱视图可核对计数与标题关键字）。
+        头条文章在点击「写文章」时已创建草稿（草稿箱 +1），保存草稿更新
+        同一草稿（计数不变），因此验证以保存接口成功 + 回到草稿箱列表
+        出现标题关键字为准；标题缺失时如实失败。
         """
         self._require_page_alive("微博保存草稿")
-        before = getattr(self, "_draft_box_count_before", None)
-        if not isinstance(before, int):
-            before = await self._draft_box_count()
         captured: dict = {}
 
         async def _on_response(response) -> None:
             try:
-                if response.request.method in ("POST", "PUT", "PATCH"):
+                if "draft/save" in response.url and response.request.method in (
+                    "POST",
+                    "PUT",
+                ):
                     captured["status"] = response.status
+                    try:
+                        body = await response.json()
+                        if isinstance(body, dict):
+                            captured["code"] = body.get("code")
+                    except Exception:
+                        pass
             except Exception:  # noqa: BLE001
                 pass
 
@@ -660,40 +618,38 @@ class WeiboPlatform(BasePlatform):
         if not captured.get("status"):
             logger.error("微博保存草稿未产生任何保存请求")
             return ""
+        if captured.get("code") not in (None, 0, "0"):
+            logger.error("微博保存草稿接口返回错误: {}", captured)
+            return ""
 
-        # 回到草稿箱视图验证计数 +1 与标题关键字
+        # 回到草稿箱列表，按标题关键字验证草稿卡片
         try:
             await self.page.goto(
                 "https://card.weibo.com/article/v5/editor#/draft",
                 wait_until="domcontentloaded",
                 timeout=30000,
             )
-            after = None
+            keyword = str(title or "").strip()[:12]
+            if not keyword:
+                logger.error("微博草稿验证缺少标题关键字")
+                return ""
+            found = False
             for _ in range(3):
                 await self.simulator.random_delay(3, 5)
-                after = await self._draft_box_count()
-                if after is not None and before is not None and after == before + 1:
-                    break
-            if after is None or before is None:
-                logger.error("微博草稿箱计数读取失败: before={}, after={}", before, after)
-                return ""
-            if after != before + 1:
-                logger.error("微博草稿箱计数未增加: before={}, after={}", before, after)
-                return ""
-            keyword = str(title or "").strip()[:12]
-            if keyword:
                 found = bool(
                     await self.page.evaluate(
                         "(kw) => (document.body.innerText || '').includes(kw)",
                         keyword,
                     )
                 )
-                if not found:
-                    logger.warning("微博草稿箱页面未显示标题关键字（计数已验证）: {}", keyword)
+                if found:
+                    break
+            if not found:
+                logger.error("微博草稿箱未找到标题包含「{}」的草稿", keyword)
+                return ""
             logger.info(
-                "微博草稿验证成功: 草稿箱计数 {} -> {}，保存接口 {}",
-                before,
-                after,
+                "微博草稿验证成功: 草稿箱出现标题「{}」，保存接口 {}",
+                keyword,
                 captured.get("status"),
             )
             return "https://card.weibo.com/article/v5/editor#/draft"

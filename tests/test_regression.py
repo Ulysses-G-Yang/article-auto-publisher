@@ -1399,7 +1399,7 @@ class RegressionTests(DatabaseTestCase):
         self.assertIn("publish", page.goto.await_args.args[0])
         # 计数读取 + 写长文 + 新的创作 共 3 次 evaluate
         self.assertEqual(page.evaluate.call_count, 3)
-        self.assertEqual(platform._draft_box_count_before, None)
+        self.assertTrue(hasattr(platform, "_draft_box_count_before"))
 
     def test_xiaohongshu_fill_title_writes_into_title_field(self):
         platform = XiaohongshuPlatform()

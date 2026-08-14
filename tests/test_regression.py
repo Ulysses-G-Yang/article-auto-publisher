@@ -1331,6 +1331,29 @@ class RegressionTests(DatabaseTestCase):
             result = asyncio.run(platform.fetch_identity_payload())
         self.assertEqual(result, {"ok": False, "user_id": "", "display_name": ""})
 
+    def test_xiaohongshu_fetch_identity_falls_back_to_home_dom(self):
+        platform = XiaohongshuPlatform()
+        platform.page = type(
+            "Page",
+            (),
+            {
+                "goto": AsyncMock(),
+                "on": lambda *a, **k: None,
+                "remove_listener": lambda *a, **k: None,
+                "evaluate": AsyncMock(
+                    return_value={
+                        "user_id": "42221583540",
+                        "display_name": "jayoma",
+                    }
+                ),
+            },
+        )()
+        with patch("platforms.xiaohongshu.asyncio.sleep", new=AsyncMock()):
+            result = asyncio.run(platform.fetch_identity_payload())
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["user_id"], "42221583540")
+        self.assertEqual(result["display_name"], "jayoma")
+
     def test_xiaohongshu_identity_extraction_requires_payload(self):
         platform = XiaohongshuPlatform()
         platform.fetch_identity_payload = AsyncMock(

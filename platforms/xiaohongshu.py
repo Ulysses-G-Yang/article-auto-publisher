@@ -170,9 +170,11 @@ class XiaohongshuPlatform(BasePlatform):
             pass
 
     async def fetch_identity_payload(self) -> dict[str, str | int | bool]:
-        """捕获创作服务平台自身的身份响应，返回最小平台身份。
+        """返回创作者首页同源确认的最小平台身份。
 
-        缺失时如实返回未确认，绝不伪造。
+        策略：优先捕获页面自身的用户接口响应（resource_type 同时覆盖
+        xhr 与 fetch）；捕获失败时回退到首页 DOM 提取（侧栏 ``user-info``
+        昵称 + 「小红书账号:」正则）。缺失时如实返回未确认，绝不伪造。
         """
 
         if isinstance(self._identity_payload, dict) and self._identity_payload.get("ok"):
@@ -181,14 +183,11 @@ class XiaohongshuPlatform(BasePlatform):
             async def _on_response(response) -> None:
                 try:
                     if (
-                        response.request.resource_type == "xhr"
-                        and (
-                            "edith.xiaohongshu.com" in response.url
-                            or "creator.xiaohongshu.com" in response.url
-                        )
+                        response.request.resource_type in ("xhr", "fetch")
+                        and "xiaohongshu.com" in response.url
                         and any(
                             key in response.url.lower()
-                            for key in ("user", "profile", "account")
+                            for key in ("user", "profile", "account", "selfinfo")
                         )
                     ):
                         payload = await response.json()
@@ -226,6 +225,38 @@ class XiaohongshuPlatform(BasePlatform):
                     "BROWSER_CONTEXT_CLOSED: 小红书身份捕获时页面已关闭"
                 ) from exc
             logger.warning("小红书身份捕获失败: {}", exc)
+
+        # DOM 兜底：侧栏 user-info 昵称 + 「小红书账号:」行
+        if not (
+            isinstance(self._identity_payload, dict) and self._identity_payload.get("ok")
+        ):
+            try:
+                dom = await self.page.evaluate(
+                    """() => {
+                        const body = document.body.innerText || '';
+                        const idMatch = body.match(/小红书账号[:：]\\s*(\\d{5,})/);
+                        const userInfo = document.querySelector('[class*="user-info"]');
+                        const nickname = userInfo
+                            ? (userInfo.innerText || '').trim()
+                            : '';
+                        return {
+                            user_id: idMatch ? idMatch[1] : '',
+                            display_name: nickname,
+                        };
+                    }"""
+                )
+                if (
+                    isinstance(dom, dict)
+                    and dom.get("user_id")
+                    and dom.get("display_name")
+                ):
+                    self._identity_payload = {
+                        "ok": True,
+                        "user_id": str(dom["user_id"]),
+                        "display_name": str(dom["display_name"]),
+                    }
+            except Exception:  # noqa: BLE001
+                pass
 
         if isinstance(self._identity_payload, dict) and self._identity_payload.get("ok"):
             return dict(self._identity_payload)

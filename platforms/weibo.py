@@ -237,13 +237,13 @@ class WeiboPlatform(BasePlatform):
                         const uidMatch = uidLink
                             ? (uidLink.getAttribute('href') || '').match(/\\/u\\/(\\d+)/)
                             : null;
-                        const nameEl = document.querySelector(
-                            '[class*="woo-pop-avatar"] [class*="name"],'
-                            + ' [class*="user-info"] [class*="name"]'
-                        );
-                        const nickname = nameEl
-                            ? (nameEl.innerText || '').trim()
+                        const nickEl = document.querySelector('[class*="_nick_"]');
+                        let nickname = nickEl
+                            ? (nickEl.innerText || '').trim()
                             : '';
+                        if (nickname.startsWith('@')) {
+                            nickname = '';
+                        }
                         return {
                             user_id: uidMatch ? uidMatch[1] : '',
                             display_name: nickname,

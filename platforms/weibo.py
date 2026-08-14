@@ -399,6 +399,8 @@ class WeiboPlatform(BasePlatform):
             )
             if not focused:
                 raise RuntimeError("正文编辑器未能获得焦点")
+            # 标题填充可能触发编辑器重渲染，等它稳定再输入
+            await self.simulator.random_delay(1, 2)
         except Exception as exc:
             if self._exception_means_browser_closed(exc):
                 raise BrowserLifecycleError(

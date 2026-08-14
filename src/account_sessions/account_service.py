@@ -437,6 +437,10 @@ def _platform_instance(account: PlatformAccount):
         from platforms.xiaohongshu import XiaohongshuPlatform
 
         return XiaohongshuPlatform(**kwargs)
+    if account.platform == "weibo":
+        from platforms.weibo import WeiboPlatform
+
+        return WeiboPlatform(**kwargs)
     raise AccountPlatformMismatchError("不支持的平台")
 
 

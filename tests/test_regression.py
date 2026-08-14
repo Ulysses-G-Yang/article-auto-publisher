@@ -12,6 +12,8 @@ from models.database import Database
 from platforms.base import BasePlatform, BrowserLifecycleError, PlatformAccessError
 from platforms.content_validation import ContentValidationError
 from platforms.douyin import DouyinPlatform, PlatformNotImplementedError
+from platforms.weibo import PlatformNotImplementedError as WeiboNotImplementedError
+from platforms.weibo import WeiboPlatform
 from platforms.xiaoheihe import XiaoheihePlatform
 from platforms.xiaohongshu import (
     PlatformNotImplementedError as XhsNotImplementedError,
@@ -1378,6 +1380,92 @@ class RegressionTests(DatabaseTestCase):
             ("publish_now", ()),
         ]:
             with self.assertRaises(XhsNotImplementedError):
+                asyncio.run(getattr(platform, method)(*args))
+
+    def test_weibo_on_home_detects_redirect_after_login(self):
+        platform = WeiboPlatform()
+        platform.page = type(
+            "Page",
+            (),
+            {
+                "url": "https://weibo.com/",
+                "is_closed": lambda: False,
+                "context": None,
+            },
+        )()
+        self.assertTrue(asyncio.run(platform._on_home()))
+
+    def test_weibo_on_home_false_on_passport(self):
+        platform = WeiboPlatform()
+        platform.page = type(
+            "Page",
+            (),
+            {
+                "url": "https://passport.weibo.com/sso/signin?entry=miniblog",
+                "is_closed": lambda: False,
+            },
+        )()
+        self.assertFalse(asyncio.run(platform._on_home()))
+
+    def test_weibo_fetch_identity_uses_captured_payload(self):
+        platform = WeiboPlatform()
+        platform._identity_payload = {
+            "ok": True,
+            "user_id": "1234567890",
+            "display_name": "微博昵称",
+        }
+        result = asyncio.run(platform.fetch_identity_payload())
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["display_name"], "微博昵称")
+
+    def test_weibo_fetch_identity_fails_closed_without_capture(self):
+        platform = WeiboPlatform()
+        platform.page = type(
+            "Page",
+            (),
+            {
+                "goto": AsyncMock(),
+                "on": lambda *a, **k: None,
+                "remove_listener": lambda *a, **k: None,
+                "evaluate": AsyncMock(return_value={"user_id": "", "display_name": ""}),
+            },
+        )()
+        with patch("platforms.weibo.asyncio.sleep", new=AsyncMock()):
+            result = asyncio.run(platform.fetch_identity_payload())
+        self.assertEqual(result, {"ok": False, "user_id": "", "display_name": ""})
+
+    def test_weibo_identity_extraction_requires_payload(self):
+        platform = WeiboPlatform()
+        platform.fetch_identity_payload = AsyncMock(
+            return_value={
+                "ok": True,
+                "user_id": "1234567890",
+                "display_name": "微博昵称",
+            }
+        )
+        identity = asyncio.run(extract_identity(platform))
+        self.assertEqual(identity.platform_user_id, "1234567890")
+        self.assertEqual(identity.display_name, "微博昵称")
+
+    def test_weibo_extract_identity_json_supports_nick_field(self):
+        platform = WeiboPlatform()
+        found = platform._extract_identity_from_json(
+            {"data": {"uid": "1234567890", "nick": "微博昵称"}}
+        )
+        self.assertEqual(found, ("1234567890", "微博昵称"))
+        self.assertIsNone(platform._extract_identity_from_json({"foo": "bar"}))
+
+    def test_weibo_delivery_methods_fail_closed(self):
+        platform = WeiboPlatform()
+        for method, args in [
+            ("navigate_to_editor", ()),
+            ("fill_title", ("标题",)),
+            ("fill_content", ([], [])),
+            ("select_topic", ()),
+            ("save_draft", ()),
+            ("publish_now", ()),
+        ]:
+            with self.assertRaises(WeiboNotImplementedError):
                 asyncio.run(getattr(platform, method)(*args))
 
     def test_xiaoheihe_manual_override_is_forwarded(self):

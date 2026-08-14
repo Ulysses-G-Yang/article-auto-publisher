@@ -37,6 +37,8 @@ async def extract_identity(platform) -> AccountIdentity:
         return await _extract_douyin(platform)
     if platform.platform_name == "xiaohongshu":
         return await _extract_xiaohongshu(platform)
+    if platform.platform_name == "weibo":
+        return await _extract_weibo(platform)
     raise AccountIdentityError("不支持的平台身份提取")
 
 
@@ -181,4 +183,20 @@ async def _extract_xiaohongshu(platform) -> AccountIdentity:
     )
     if not user_id or not display_name:
         raise AccountIdentityError("小红书已登录，但无法同时确认账号 ID 和真实昵称")
+    return AccountIdentity(user_id, display_name)
+
+
+async def _extract_weibo(platform) -> AccountIdentity:
+    """只采用微博首页同源确认的身份（昵称 + 稳定 uid 同时确认）。"""
+
+    fetcher = getattr(platform, "fetch_identity_payload", None)
+    payload = {}
+    if callable(fetcher):
+        payload = await fetcher()
+    user_id = _clean(payload.get("user_id")) if isinstance(payload, dict) else ""
+    display_name = (
+        _clean(payload.get("display_name")) if isinstance(payload, dict) else ""
+    )
+    if not user_id or not display_name:
+        raise AccountIdentityError("微博已登录，但无法同时确认账号 ID 和真实昵称")
     return AccountIdentity(user_id, display_name)

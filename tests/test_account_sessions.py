@@ -472,7 +472,7 @@ def test_blueprint_matches_frontend_contract_and_injects_article(tmp_path: Path)
         "display_name": "知乎",
         "logo_url": "/static/img/platforms/zhihu.svg",
         "status": "AVAILABLE",
-        "delivery_enabled": False,
+        "delivery_enabled": True,
         "account_enabled": True,
         "sort_order": 30,
     }

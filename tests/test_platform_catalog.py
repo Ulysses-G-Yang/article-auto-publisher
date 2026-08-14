@@ -9,7 +9,6 @@ from pathlib import Path
 
 import pytest
 from flask import Flask
-from pydantic import ValidationError
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 SRC_ROOT = PROJECT_ROOT / "src"
@@ -46,12 +45,12 @@ def test_platform_catalog_freezes_public_capability_contract() -> None:
     assert [item.id for item in PLATFORM_CATALOG] == EXPECTED_IDS
     assert [item.sort_order for item in PLATFORM_CATALOG] == list(range(10, 101, 10))
     assert ACCOUNT_ENABLED_PLATFORMS == ("xiaoheihe", "zol", "zhihu")
-    assert DELIVERY_ENABLED_PLATFORMS == ("xiaoheihe", "zol")
+    assert DELIVERY_ENABLED_PLATFORMS == ("xiaoheihe", "zol", "zhihu")
 
     by_id = {item.id: item for item in PLATFORM_CATALOG}
     assert by_id["zhihu"].status == "AVAILABLE"
     assert by_id["zhihu"].account_enabled is True
-    assert by_id["zhihu"].delivery_enabled is False
+    assert by_id["zhihu"].delivery_enabled is True
     assert all(
         by_id[platform_id].status == "COMING_SOON"
         and by_id[platform_id].account_enabled is False
@@ -110,9 +109,10 @@ def test_unknown_platform_cannot_fall_back_to_zol() -> None:
         _platform_instance(account)
 
 
-def test_zhihu_is_account_only_and_cannot_enter_delivery_contracts(
+def test_zhihu_can_enter_delivery_contracts_after_real_acceptance(
     tmp_path: Path,
 ) -> None:
+    """知乎已通过真实草稿验收，可进入投递契约；未知账号仍被账号域拒绝。"""
     app = Flask(__name__)
     database_path = tmp_path / "account-sessions.db"
     blueprint = create_account_session_blueprint(
@@ -124,6 +124,17 @@ def test_zhihu_is_account_only_and_cannot_enter_delivery_contracts(
     client = app.test_client()
     account_id = str(uuid.uuid4())
 
+    # 契约层接受知乎投递目标
+    target = DraftTargetInput.model_validate(
+        {
+            "platform": "zhihu",
+            "account_id": account_id,
+            "mode": "DRAFT",
+        }
+    )
+    assert target.platform == "zhihu"
+
+    # API 层：未知账号被账号域拒绝（不再因平台不在白名单而 422）
     response = client.post(
         "/api/delivery-operations",
         json={
@@ -135,15 +146,7 @@ def test_zhihu_is_account_only_and_cannot_enter_delivery_contracts(
         },
     )
 
-    assert response.status_code == 422
-    assert response.get_json()["error"] == "REQUEST_VALIDATION_FAILED"
-    with pytest.raises(ValidationError):
-        DraftTargetInput.model_validate(
-            {
-                "platform": "zhihu",
-                "account_id": account_id,
-                "mode": "DRAFT",
-            }
-        )
+    assert response.status_code != 422
+    assert response.get_json()["error"] != "REQUEST_VALIDATION_FAILED"
 
     app.extensions["account_sessions"].close()

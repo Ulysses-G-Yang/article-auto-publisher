@@ -4,7 +4,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-PlatformName = Literal["xiaoheihe", "zol"]
+PlatformName = Literal["xiaoheihe", "zol", "zhihu"]
 DeliveryMode = Literal["DRAFT", "PUBLISH"]
 
 

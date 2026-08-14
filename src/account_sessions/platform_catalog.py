@@ -49,7 +49,7 @@ def _item(
 PLATFORM_CATALOG: tuple[PlatformCatalogItem, ...] = (
     _item("xiaoheihe", "小黑盒", 10, delivery_enabled=True, account_enabled=True),
     _item("zol", "中关村在线", 20, delivery_enabled=True, account_enabled=True),
-    _item("zhihu", "知乎", 30, account_enabled=True),
+    _item("zhihu", "知乎", 30, delivery_enabled=True, account_enabled=True),
     _item("weibo", "微博", 40),
     _item("smzdm", "什么值得买", 50),
     _item("toutiao", "头条号", 60),

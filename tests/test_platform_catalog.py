@@ -44,18 +44,22 @@ EXPECTED_IDS = [
 def test_platform_catalog_freezes_public_capability_contract() -> None:
     assert [item.id for item in PLATFORM_CATALOG] == EXPECTED_IDS
     assert [item.sort_order for item in PLATFORM_CATALOG] == list(range(10, 101, 10))
-    assert ACCOUNT_ENABLED_PLATFORMS == ("xiaoheihe", "zol", "zhihu")
+    assert ACCOUNT_ENABLED_PLATFORMS == ("xiaoheihe", "zol", "zhihu", "douyin")
     assert DELIVERY_ENABLED_PLATFORMS == ("xiaoheihe", "zol", "zhihu")
 
     by_id = {item.id: item for item in PLATFORM_CATALOG}
     assert by_id["zhihu"].status == "AVAILABLE"
     assert by_id["zhihu"].account_enabled is True
     assert by_id["zhihu"].delivery_enabled is True
+    assert by_id["douyin"].status == "AVAILABLE"
+    assert by_id["douyin"].account_enabled is True
+    assert by_id["douyin"].delivery_enabled is False
     assert all(
         by_id[platform_id].status == "COMING_SOON"
         and by_id[platform_id].account_enabled is False
         and by_id[platform_id].delivery_enabled is False
         for platform_id in EXPECTED_IDS[3:]
+        if platform_id != "douyin"
     )
     assert all(
         item.logo_url == f"/static/img/platforms/{item.id}.svg"

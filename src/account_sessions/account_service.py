@@ -429,6 +429,10 @@ def _platform_instance(account: PlatformAccount):
         from platforms.zhihu import ZhihuPlatform
 
         return ZhihuPlatform(**kwargs)
+    if account.platform == "douyin":
+        from platforms.douyin import DouyinPlatform
+
+        return DouyinPlatform(**kwargs)
     raise AccountPlatformMismatchError("不支持的平台")
 
 

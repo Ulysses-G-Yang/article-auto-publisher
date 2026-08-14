@@ -33,6 +33,8 @@ async def extract_identity(platform) -> AccountIdentity:
         return await _extract_zol(platform)
     if platform.platform_name == "zhihu":
         return await _extract_zhihu(platform)
+    if platform.platform_name == "douyin":
+        return await _extract_douyin(platform)
     raise AccountIdentityError("不支持的平台身份提取")
 
 
@@ -145,4 +147,20 @@ async def _extract_zhihu(platform) -> AccountIdentity:
     )
     if not user_id or not display_name:
         raise AccountIdentityError("知乎已登录，但身份 API 未同时确认账号 ID 和昵称")
+    return AccountIdentity(user_id, display_name)
+
+
+async def _extract_douyin(platform) -> AccountIdentity:
+    """只采用创作者首页捕获的同源身份（昵称 + 稳定 ID 同时确认）。"""
+
+    fetcher = getattr(platform, "fetch_identity_payload", None)
+    payload = {}
+    if callable(fetcher):
+        payload = await fetcher()
+    user_id = _clean(payload.get("user_id")) if isinstance(payload, dict) else ""
+    display_name = (
+        _clean(payload.get("display_name")) if isinstance(payload, dict) else ""
+    )
+    if not user_id or not display_name:
+        raise AccountIdentityError("抖音已登录，但无法同时确认账号 ID 和真实昵称")
     return AccountIdentity(user_id, display_name)

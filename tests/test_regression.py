@@ -11,6 +11,7 @@ from core.queue_manager import classify_task_error, normalize_selection_query
 from models.database import Database
 from platforms.base import BasePlatform, BrowserLifecycleError, PlatformAccessError
 from platforms.content_validation import ContentValidationError
+from platforms.douyin import DouyinPlatform, PlatformNotImplementedError
 from platforms.zol import ZOLPlatform
 from platforms.xiaoheihe import XiaoheihePlatform
 
@@ -1131,6 +1132,101 @@ class RegressionTests(DatabaseTestCase):
         platform = XiaoheihePlatform()
         result = asyncio.run(platform.fetch_identity_payload())
         self.assertEqual(result, {"ok": False, "user_id": "", "display_name": ""})
+
+    def test_douyin_cookie_check_accepts_session_cookie(self):
+        platform = DouyinPlatform()
+        platform.context = type(
+            "Context",
+            (),
+            {
+                "cookies": AsyncMock(
+                    return_value=[
+                        {"name": "sessionid", "value": "opaque"},
+                        {"name": "ttwid", "value": "opaque"},
+                    ]
+                ),
+            },
+        )()
+        self.assertTrue(asyncio.run(platform._has_session_cookie_signal()))
+
+    def test_douyin_cookie_check_rejects_guest_state(self):
+        platform = DouyinPlatform()
+        platform.context = type(
+            "Context",
+            (),
+            {
+                "cookies": AsyncMock(
+                    return_value=[
+                        {"name": "ttwid", "value": "opaque"},
+                        {"name": "passport_csrf_token", "value": "opaque"},
+                    ]
+                ),
+            },
+        )()
+        self.assertFalse(asyncio.run(platform._has_session_cookie_signal()))
+
+    def test_douyin_fetch_identity_uses_captured_payload(self):
+        platform = DouyinPlatform()
+        platform._identity_payload = {
+            "ok": True,
+            "user_id": "MS4wLjABAAAAx",
+            "display_name": "抖音昵称",
+        }
+        result = asyncio.run(platform.fetch_identity_payload())
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["display_name"], "抖音昵称")
+
+    def test_douyin_fetch_identity_fails_closed_without_capture(self):
+        platform = DouyinPlatform()
+        platform.page = type(
+            "Page",
+            (),
+            {
+                "goto": AsyncMock(),
+                "on": lambda *a, **k: None,
+                "remove_listener": lambda *a, **k: None,
+            },
+        )()
+        with patch("platforms.douyin.asyncio.sleep", new=AsyncMock()):
+            result = asyncio.run(platform.fetch_identity_payload())
+        self.assertEqual(result, {"ok": False, "user_id": "", "display_name": ""})
+
+    def test_douyin_identity_extraction_requires_payload(self):
+        platform = DouyinPlatform()
+        platform.fetch_identity_payload = AsyncMock(
+            return_value={
+                "ok": True,
+                "user_id": "MS4wLjABAAAAx",
+                "display_name": "抖音昵称",
+            }
+        )
+        identity = asyncio.run(extract_identity(platform))
+        self.assertEqual(identity.platform_user_id, "MS4wLjABAAAAx")
+        self.assertEqual(identity.display_name, "抖音昵称")
+
+    def test_douyin_delivery_methods_fail_closed(self):
+        platform = DouyinPlatform()
+        for method, args in [
+            ("navigate_to_editor", ()),
+            ("fill_title", ("标题",)),
+            ("fill_content", ([], [])),
+            ("select_topic", ()),
+            ("save_draft", ()),
+            ("publish_now", ()),
+        ]:
+            with self.assertRaises(PlatformNotImplementedError):
+                asyncio.run(getattr(platform, method)(*args))
+
+    def test_douyin_extract_identity_json_finds_name_and_uid(self):
+        platform = DouyinPlatform()
+        found = platform._extract_identity_from_json(
+            {
+                "base_resp": {"status_code": 0},
+                "user_info": {"nickname": "夜航员", "sec_uid": "MS4wLjABAAAAx"},
+            }
+        )
+        self.assertEqual(found, ("MS4wLjABAAAAx", "夜航员"))
+        self.assertIsNone(platform._extract_identity_from_json({"foo": "bar"}))
 
     def test_xiaoheihe_manual_override_is_forwarded(self):
         platform = XiaoheihePlatform()

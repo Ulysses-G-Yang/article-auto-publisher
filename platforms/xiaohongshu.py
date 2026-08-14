@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 
 from loguru import logger
 
@@ -25,7 +26,9 @@ from platforms.base import (
     BrowserLifecycleError,
     LoginRequiredError,
     PlatformAutomationError,
+    SelectorError,
 )
+from platforms.content_validation import ensure_valid_content, safe_media_error
 
 CREATOR_HOME = "https://creator.xiaohongshu.com/"
 CREATOR_MAIN = "https://creator.xiaohongshu.com/new/home"
@@ -300,13 +303,226 @@ class XiaohongshuPlatform(BasePlatform):
         )
 
     async def navigate_to_editor(self):
-        self._not_implemented("编辑器导航")
+        """打开小红书长文编辑器：发布页 → 写长文 → 新的创作。
+
+        真实结构（2026-08 探测）：标题 ``textarea.d-text``（0/64），
+        正文 ``div.tiptap.ProseMirror``（TipTap contenteditable）。
+        """
+        self._require_page_alive("小红书打开编辑器")
+        try:
+            await self.page.goto(
+                "https://creator.xiaohongshu.com/publish/publish",
+                wait_until="domcontentloaded",
+                timeout=30000,
+            )
+            await self._click_sidebar_text("写长文")
+            await self._click_sidebar_text("新的创作")
+            await self.page.wait_for_selector(
+                "textarea.d-text",
+                state="visible",
+                timeout=20000,
+            )
+        except BrowserLifecycleError:
+            raise
+        except Exception as exc:
+            if self._exception_means_browser_closed(exc):
+                raise BrowserLifecycleError(
+                    "BROWSER_CONTEXT_CLOSED: 小红书打开编辑器时页面已关闭"
+                ) from exc
+            raise SelectorError("小红书长文编辑器未找到标题输入框") from exc
+
+    async def _click_sidebar_text(self, text: str) -> None:
+        """点击侧栏中文本精确匹配的元素（写长文/新的创作）。"""
+
+        clicked = await self.page.evaluate(
+            """(t) => {
+                const nodes = Array.from(document.querySelectorAll('*'));
+                const target = nodes.find((el) => {
+                    const txt = (el.innerText || '').trim();
+                    return txt === t && el.children.length <= 3;
+                });
+                if (target) { target.click(); return true; }
+                return false;
+            }""",
+            text,
+        )
+        if not clicked:
+            raise SelectorError(f"小红书侧栏未找到「{text}」入口")
+        await self.simulator.random_delay(1, 2)
 
     async def fill_title(self, title: str):
-        self._not_implemented("标题填写")
+        """填写小红书长文标题（textarea.d-text，placeholder「输入标题」）。"""
+
+        self._require_page_alive("小红书填写标题")
+        title_field = self.page.locator("textarea.d-text").first
+        try:
+            if await title_field.count() == 0 or not await title_field.is_visible():
+                raise RuntimeError("标题输入框不可见")
+            await title_field.click()
+            await title_field.fill(str(title or "").strip())
+        except Exception as exc:
+            if self._exception_means_browser_closed(exc):
+                raise BrowserLifecycleError(
+                    "BROWSER_CONTEXT_CLOSED: 小红书填写标题时页面已关闭"
+                ) from exc
+            logger.error("小红书标题填写失败: {}", exc)
+            raise SelectorError("小红书标题输入框未找到或填写失败") from exc
 
     async def fill_content(self, content_blocks: list, images: list):
-        self._not_implemented("正文填写")
+        """填写正文：键盘逐段写入 TipTap 编辑器，回读并有序校验。"""
+
+        self._require_page_alive("小红书填写正文")
+        editor = self.page.locator("div.tiptap.ProseMirror").first
+        try:
+            if await editor.count() == 0 or not await editor.is_visible():
+                raise RuntimeError("正文编辑器不可见")
+            await editor.click()
+        except Exception as exc:
+            if self._exception_means_browser_closed(exc):
+                raise BrowserLifecycleError(
+                    "BROWSER_CONTEXT_CLOSED: 小红书定位正文编辑器时页面已关闭"
+                ) from exc
+            raise SelectorError("小红书正文编辑器未找到") from exc
+
+        try:
+            await self.page.keyboard.press("Control+A")
+            await self.page.keyboard.press("Backspace")
+        except Exception:
+            pass
+        await self.simulator.random_delay(0.3, 0.8)
+
+        first_text = True
+        for block in content_blocks:
+            btype = block.get("type")
+            if btype in ("text", "heading") and block.get("text"):
+                text = str(block["text"]).strip()
+                if not text:
+                    continue
+                if not first_text:
+                    await self.page.keyboard.press("Enter")
+                lines = text.splitlines() or [text]
+                for i, line in enumerate(lines):
+                    if line.strip():
+                        await self.page.keyboard.insert_text(line.strip())
+                    if i < len(lines) - 1:
+                        await self.page.keyboard.press("Enter")
+                first_text = False
+
+        actual_text = await editor.inner_text()
+        expected_count = ensure_valid_content(
+            content_blocks,
+            actual_text,
+            platform="小红书",
+            phase="输入后",
+        )
+        logger.info("小红书正文文字输入并验证成功: {} 个文本段落", expected_count)
+
+        expected_images = sum(
+            1 for block in content_blocks if block.get("type") == "image"
+        )
+        uploaded_images = 0
+        failed_images = []
+        for block in content_blocks:
+            if block.get("type") == "image":
+                img_path = block.get("local_path")
+                if not img_path and images:
+                    for img in images:
+                        if img.get("position_index") == block.get("position"):
+                            img_path = img.get("local_path")
+                            break
+                    if not img_path:
+                        img_path = images[0].get("local_path")
+                if img_path:
+                    upload_result = await self._upload_image(img_path) or {}
+                    if upload_result.get("success"):
+                        uploaded_images += 1
+                    else:
+                        failed_images.append(
+                            {
+                                "filename": Path(str(img_path)).name,
+                                "error": safe_media_error(
+                                    upload_result.get("error"),
+                                    fallback="图片上传失败",
+                                ),
+                            }
+                        )
+                    await self.simulator.random_delay(0.2, 0.5)
+                else:
+                    failed_images.append(
+                        {"filename": "", "error": "文章图片块没有对应本地文件"}
+                    )
+
+        actual_text = await editor.inner_text()
+        ensure_valid_content(
+            content_blocks,
+            actual_text,
+            platform="小红书",
+            phase="图片处理后",
+        )
+        logger.info("小红书正文输入并最终验证成功: {} 个文本段落", expected_count)
+
+        if expected_images == 0:
+            media_status = "not_required"
+            media_error = None
+        elif uploaded_images == expected_images:
+            media_status = "completed"
+            media_error = None
+        elif uploaded_images == 0:
+            media_status = "failed"
+            media_error = f"{expected_images} 张图片全部上传失败"
+        else:
+            media_status = "partial"
+            media_error = f"{expected_images - uploaded_images} 张图片上传失败"
+
+        if failed_images:
+            logger.warning(
+                "小红书图片处理结果: expected={}, uploaded={}, failed={}",
+                expected_images,
+                uploaded_images,
+                len(failed_images),
+            )
+        return {
+            "text_ok": True,
+            "expected_images": expected_images,
+            "uploaded_images": uploaded_images,
+            "failed_images": failed_images,
+            "media_status": media_status,
+            "media_error": media_error,
+        }
+
+    async def _upload_image(self, image_path: str) -> dict:
+        """通过长文编辑器的文件控件上传图片；以编辑器内图片数量增加为成功判据。"""
+
+        self._require_page_alive("小红书上传图片")
+        try:
+            file_inputs = self.page.locator("input[type=file]")
+            if await file_inputs.count() == 0:
+                return {"success": False, "error": "小红书图片上传控件未找到"}
+            before = await self.page.evaluate(
+                """() => document.querySelectorAll(
+                    '.tiptap img, .ProseMirror img'
+                ).length"""
+            )
+            await file_inputs.first.set_input_files(str(image_path), timeout=15000)
+            after = before
+            for _ in range(10):
+                await asyncio.sleep(1)
+                after = await self.page.evaluate(
+                    """() => document.querySelectorAll(
+                        '.tiptap img, .ProseMirror img'
+                    ).length"""
+                )
+                if after > before:
+                    break
+            if after <= before:
+                return {"success": False, "error": "上传后编辑器图片数量未增加"}
+            return {"success": True, "error": ""}
+        except Exception as exc:
+            if self._exception_means_browser_closed(exc):
+                raise BrowserLifecycleError(
+                    "BROWSER_CONTEXT_CLOSED: 小红书上传图片时页面已关闭"
+                ) from exc
+            return {"success": False, "error": str(exc)}
 
     async def select_topic(
         self,
@@ -315,10 +531,123 @@ class XiaohongshuPlatform(BasePlatform):
         selection_query: str = "",
         selection_override: dict | None = None,
     ):
-        self._not_implemented("话题选择")
+        """小红书保存草稿不需要话题；公开话题选择尚未接入，如实报告。"""
+
+        if not (topic or community or selection_query):
+            return {
+                "success": True,
+                "selection_status": "not_required",
+                "selection": {},
+            }
+        return {
+            "success": False,
+            "needs_selection": True,
+            "error_code": "TOPIC_SELECTION_NOT_IMPLEMENTED",
+            "error": "小红书话题选择尚未接入（保存草稿不需要话题）",
+            "selection": {},
+        }
 
     async def save_draft(self, title: str = "") -> str:
-        self._not_implemented("草稿保存")
+        """点击「暂存离开」保存草稿，捕获草稿 API 响应，并在草稿箱按标题验证。
+
+        返回草稿箱 URL；验证失败返回空串（绝不以当前页 URL 冒充成功）。
+        """
+        self._require_page_alive("小红书保存草稿")
+        captured: dict = {}
+
+        async def _on_response(response) -> None:
+            try:
+                if (
+                    "draft" in response.url.lower()
+                    and response.request.method in ("POST", "PUT")
+                ):
+                    captured["status"] = response.status
+                    try:
+                        body = await response.json()
+                        if isinstance(body, dict):
+                            captured["ok"] = (
+                                body.get("code") in (0, None)
+                                or body.get("success") is True
+                                or response.status < 300
+                            )
+                    except Exception:
+                        captured["ok"] = response.status < 300
+            except Exception:  # noqa: BLE001
+                pass
+
+        try:
+            self.page.on("response", _on_response)
+            await self.page.evaluate(
+                """() => {
+                    const nodes = Array.from(
+                        document.querySelectorAll('button, [role=button]')
+                    );
+                    const target = nodes.find((el) =>
+                        (el.innerText || '').replace(/\\s+/g, '').includes('暂存离开'));
+                    if (target) target.click();
+                }"""
+            )
+            await self.simulator.random_delay(2, 4)
+            try:
+                confirm = self.page.locator(
+                    "button:has-text('确定'), button:has-text('暂存')"
+                ).first
+                if await confirm.count() > 0:
+                    await confirm.click(timeout=3000)
+                    await self.simulator.random_delay(2, 4)
+            except Exception:
+                pass
+            for _ in range(10):
+                if captured.get("status"):
+                    break
+                await asyncio.sleep(1)
+        finally:
+            try:
+                self.page.remove_listener("response", _on_response)
+            except Exception:  # noqa: BLE001
+                pass
+
+        if not captured.get("ok"):
+            logger.error("小红书草稿 API 未确认成功: {}", captured)
+            return ""
+        # 草稿箱验证：发布页侧栏草稿箱入口
+        try:
+            await self.page.goto(
+                "https://creator.xiaohongshu.com/publish/publish",
+                wait_until="domcontentloaded",
+                timeout=30000,
+            )
+            await self.simulator.random_delay(3, 5)
+            keyword = str(title or "").strip()[:12]
+            found = False
+            if keyword:
+                found = bool(
+                    await self.page.evaluate(
+                        "(kw) => (document.body.innerText || '').includes(kw)",
+                        keyword,
+                    )
+                )
+                if not found:
+                    await self.simulator.random_delay(3, 5)
+                    found = bool(
+                        await self.page.evaluate(
+                            "(kw) => (document.body.innerText || '').includes(kw)",
+                            keyword,
+                        )
+                    )
+            if keyword and not found:
+                logger.error("小红书草稿箱未找到标题包含「{}」的草稿", keyword)
+                return ""
+            return "https://creator.xiaohongshu.com/publish/publish"
+        except BrowserLifecycleError:
+            raise
+        except Exception as exc:
+            if self._exception_means_browser_closed(exc):
+                raise BrowserLifecycleError(
+                    "BROWSER_CONTEXT_CLOSED: 小红书验证草稿时页面已关闭"
+                ) from exc
+            logger.error("小红书草稿验证失败: {}", exc)
+            return ""
 
     async def publish_now(self, title: str = "") -> str:
         self._not_implemented("公开发布")

@@ -1377,18 +1377,48 @@ class RegressionTests(DatabaseTestCase):
         self.assertEqual(identity.platform_user_id, "5f3e2a1b")
         self.assertEqual(identity.display_name, "小红书昵称")
 
-    def test_xiaohongshu_delivery_methods_fail_closed(self):
+    def test_xiaohongshu_publish_now_still_fails_closed(self):
         platform = XiaohongshuPlatform()
-        for method, args in [
-            ("navigate_to_editor", ()),
-            ("fill_title", ("标题",)),
-            ("fill_content", ([], [])),
-            ("select_topic", ()),
-            ("save_draft", ()),
-            ("publish_now", ()),
-        ]:
-            with self.assertRaises(XhsNotImplementedError):
-                asyncio.run(getattr(platform, method)(*args))
+        with self.assertRaises(XhsNotImplementedError):
+            asyncio.run(platform.publish_now())
+
+    def test_xiaohongshu_navigate_to_editor_sequence(self):
+        platform = XiaohongshuPlatform()
+        platform.simulator.random_delay = AsyncMock()
+        page = type(
+            "Page",
+            (),
+            {
+                "goto": AsyncMock(),
+                "wait_for_selector": AsyncMock(return_value=True),
+                "evaluate": AsyncMock(return_value=True),
+            },
+        )()
+        platform.page = page
+        asyncio.run(platform.navigate_to_editor())
+        self.assertIn("publish", page.goto.await_args.args[0])
+        self.assertEqual(page.evaluate.call_count, 2)
+
+    def test_xiaohongshu_fill_title_writes_into_title_field(self):
+        platform = XiaohongshuPlatform()
+        title_field = type(
+            "First",
+            (),
+            {
+                "count": AsyncMock(return_value=1),
+                "is_visible": AsyncMock(return_value=True),
+                "click": AsyncMock(),
+                "fill": AsyncMock(),
+            },
+        )()
+        title_locator = type("Loc", (), {"first": title_field})()
+        platform.page = type(
+            "Page",
+            (),
+            {"locator": staticmethod(lambda _sel: title_locator)},
+        )()
+        asyncio.run(platform.fill_title("小红书标题"))
+        title_field.fill.assert_awaited_with("小红书标题")
 
     def test_weibo_on_home_detects_redirect_after_login(self):
         platform = WeiboPlatform()

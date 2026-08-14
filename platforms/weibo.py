@@ -572,11 +572,11 @@ class WeiboPlatform(BasePlatform):
         }
 
     async def save_draft(self, title: str = "") -> str:
-        """点击「保存草稿」，以「保存接口 2xx + 草稿箱标题关键字」验证。
+        """点击「保存草稿」，以「草稿箱标题出现」为成功判据。
 
-        头条文章在点击「写文章」时已创建草稿（草稿箱 +1），保存草稿更新
-        同一草稿（计数不变），因此验证以保存接口成功 + 回到草稿箱列表
-        出现标题关键字为准；标题缺失时如实失败。
+        2026-08 实测：保存接口可能返回 code 100000（geetest 风控软提示），
+        但保存实际生效（草稿卡片标题更新）。因此以草稿箱列表出现标题
+        关键字为准；接口 code 仅作日志参考，不据此判失败。
         """
         self._require_page_alive("微博保存草稿")
         captured: dict = {}
@@ -623,11 +623,8 @@ class WeiboPlatform(BasePlatform):
         if not captured.get("status"):
             logger.error("微博保存草稿未产生任何保存请求")
             return ""
-        if captured.get("code") not in (None, 0, "0"):
-            logger.error("微博保存草稿接口返回错误: {}", captured)
-            return ""
 
-        # 回到草稿箱列表，按标题关键字验证草稿卡片
+        # 回到草稿箱列表，按标题关键字验证草稿卡片（成功判据）
         try:
             await self.page.goto(
                 "https://card.weibo.com/article/v5/editor#/draft",
@@ -650,12 +647,17 @@ class WeiboPlatform(BasePlatform):
                 if found:
                     break
             if not found:
-                logger.error("微博草稿箱未找到标题包含「{}」的草稿", keyword)
+                logger.error(
+                    "微博草稿箱未找到标题包含「{}」的草稿（接口 code={}）",
+                    keyword,
+                    captured.get("code"),
+                )
                 return ""
             logger.info(
-                "微博草稿验证成功: 草稿箱出现标题「{}」，保存接口 {}",
+                "微博草稿验证成功: 草稿箱出现标题「{}」，接口 status={} code={}",
                 keyword,
                 captured.get("status"),
+                captured.get("code"),
             )
             return "https://card.weibo.com/article/v5/editor#/draft"
         except BrowserLifecycleError:

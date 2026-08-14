@@ -499,7 +499,11 @@ class ZhihuPlatform(BasePlatform):
         return drafts_url
 
     async def _draft_list_contains(self, keyword: str) -> bool:
-        """草稿箱页面正文是否包含关键字；必要时先点击侧栏「草稿箱」入口。"""
+        """草稿箱页面正文是否包含关键字；必要时先点击侧栏「草稿箱」入口。
+
+        页面文本检查失败（例如知乎列表区维护中显示「系统升级中」）时，
+        回退到捕获页面自身发出的 ``articles/my_drafts`` API 响应验证标题。
+        """
 
         if "creation/drafts" not in (self.page.url or ""):
             clicked = await self.page.evaluate(
@@ -521,7 +525,46 @@ class ZhihuPlatform(BasePlatform):
             "(kw) => (document.body.innerText || '').includes(kw)",
             keyword,
         )
-        return bool(found)
+        if found:
+            return True
+        return await self._api_draft_list_contains(keyword)
+
+    async def _api_draft_list_contains(self, keyword: str) -> bool:
+        """重载草稿箱页面并捕获页面自身的草稿列表 API 响应，按标题验证。"""
+
+        try:
+            async with self.page.expect_response(
+                self._is_drafts_list_response,
+                timeout=15000,
+            ) as response_info:
+                await self.page.reload(
+                    wait_until="domcontentloaded",
+                    timeout=30000,
+                )
+            response = await response_info.value
+            payload = await response.json()
+            titles = [
+                str(item.get("title") or "")
+                for item in (payload.get("data") or [])
+                if isinstance(item, dict)
+            ]
+            return any(keyword in title for title in titles)
+        except BrowserLifecycleError:
+            raise
+        except Exception as exc:
+            if self._exception_means_browser_closed(exc):
+                raise BrowserLifecycleError(
+                    "BROWSER_CONTEXT_CLOSED: 知乎草稿列表 API 验证时页面已关闭"
+                ) from exc
+            logger.warning("知乎草稿列表 API 验证失败: {}", exc)
+            return False
+
+    @staticmethod
+    def _is_drafts_list_response(response) -> bool:
+        return (
+            "api/v4/articles/my_drafts" in response.url
+            and response.request.method == "GET"
+        )
 
     @staticmethod
     def _not_implemented(operation: str):

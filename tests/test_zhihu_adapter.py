@@ -363,15 +363,45 @@ class _FakeEditorKeyboard:
         self.page.body.value = self.page.body.text
 
 
+class _FakeDraftsResponse:
+    def __init__(self, titles):
+        self._titles = titles
+
+    async def json(self):
+        return {
+            "paging": {"totals": len(self._titles)},
+            "data": [{"title": title} for title in self._titles],
+        }
+
+
+class _FakeResponseInfo:
+    def __init__(self, titles):
+        self._titles = titles
+
+    @property
+    def value(self):
+        async def _resolve():
+            return _FakeDraftsResponse(self._titles)
+
+        return _resolve()
+
+
 class _FakeEditorPage:
     """模拟知乎 /write 页面：标题 textarea + Draft.js contenteditable + 草稿箱。"""
 
-    def __init__(self, body_text="", title_text="", drafts_text=""):
+    def __init__(
+        self,
+        body_text="",
+        title_text="",
+        drafts_text="",
+        drafts_api_titles=None,
+    ):
         self.url = ""
         self.keyboard = _FakeEditorKeyboard(self)
         self.title = _FakeLocator(self, text=title_text)
         self.body = _FakeLocator(self, text=body_text)
         self.drafts_text = drafts_text
+        self.drafts_api_titles = list(drafts_api_titles or [])
         self.selected_all = False
         self.active = None
 
@@ -380,6 +410,9 @@ class _FakeEditorPage:
 
     async def goto(self, url: str, **_kwargs) -> None:
         self.url = url
+
+    async def reload(self, **_kwargs) -> None:
+        return None
 
     async def wait_for_selector(self, selector: str, **_kwargs):
         if ".DraftStatusTip" in selector:
@@ -401,6 +434,23 @@ class _FakeEditorPage:
         if "img" in script and "querySelector" in script:
             return 0
         return None
+
+    def expect_response(self, predicate, **_kwargs):
+        class _Expect:
+            def __init__(self, page):
+                self.page = page
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_exc):
+                return False
+
+            @property
+            def value(self):
+                return _FakeResponseInfo(self.page.drafts_api_titles).value
+
+        return _Expect(self)
 
 
 class _LossyEditorPage(_FakeEditorPage):
@@ -488,6 +538,30 @@ def test_save_draft_returns_empty_when_title_missing() -> None:
     platform = _make_delivery_platform(page)
 
     url = run(platform.save_draft("深夜食堂的标题"))
+
+    assert url == ""
+
+
+def test_save_draft_falls_back_to_drafts_api_when_list_ui_unavailable() -> None:
+    page = _FakeEditorPage(
+        drafts_text="草稿箱(4)\n系统升级中，请稍后再试",
+        drafts_api_titles=["凌晨三点，公司的智能马桶开始给我做绩效面谈"],
+    )
+    platform = _make_delivery_platform(page)
+
+    url = run(platform.save_draft("凌晨三点，公司的智能马桶"))
+
+    assert url == DRAFTS_URL
+
+
+def test_save_draft_fails_honestly_when_api_also_misses_title() -> None:
+    page = _FakeEditorPage(
+        drafts_text="草稿箱(4)\n系统升级中，请稍后再试",
+        drafts_api_titles=["别的文章的标题"],
+    )
+    platform = _make_delivery_platform(page)
+
+    url = run(platform.save_draft("凌晨三点，公司的智能马桶"))
 
     assert url == ""
 

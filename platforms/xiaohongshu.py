@@ -332,8 +332,25 @@ class XiaohongshuPlatform(BasePlatform):
             raise SelectorError("小红书长文编辑器未找到标题输入框") from exc
 
     async def _click_sidebar_text(self, text: str) -> None:
-        """点击侧栏中文本精确匹配的元素（写长文/新的创作）。"""
+        """点击侧栏中文本精确匹配的元素（写长文/新的创作）。
 
+        先等待目标文本渲染完成（SPA 侧栏异步加载），再点击。
+        """
+
+        try:
+            await self.page.wait_for_function(
+                """(t) => {
+                    const nodes = Array.from(document.querySelectorAll('*'));
+                    return nodes.some((el) => {
+                        const txt = (el.innerText || '').trim();
+                        return txt === t && el.children.length <= 3;
+                    });
+                }""",
+                arg=text,
+                timeout=15000,
+            )
+        except Exception:
+            pass
         clicked = await self.page.evaluate(
             """(t) => {
                 const nodes = Array.from(document.querySelectorAll('*'));

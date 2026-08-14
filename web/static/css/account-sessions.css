@@ -3,7 +3,16 @@
 .multi-account-header h2 { margin: .15rem 0 0; font-size: 1.05rem; font-weight: 700; }
 .multi-account-header p { margin: .35rem 0 0; color: var(--app-muted); font-size: .75rem; }
 .section-eyebrow { color: var(--app-primary); font-size: .62rem; font-weight: 800; letter-spacing: .08em; }
-.session-platforms { display: flex; flex-wrap: wrap; gap: .55rem; }
+.session-platform-catalog-state { display: flex; min-height: 72px; align-items: center; justify-content: center; gap: .55rem; color: var(--app-muted); font-size: .75rem; }
+.session-platforms { display: grid; grid-auto-flow: column; grid-template-rows: 1fr; grid-auto-columns: minmax(132px, 1fr); gap: .6rem; padding: .15rem .1rem .65rem; overflow-x: auto; overscroll-behavior-inline: contain; scrollbar-width: thin; }
+.session-platform-card { display: flex; min-width: 0; min-height: 76px; align-items: center; gap: .65rem; padding: .75rem; border: 1px solid var(--app-card-border); border-radius: var(--app-radius); background: var(--cui-body-bg); color: var(--cui-body-color); cursor: pointer; transition: border-color .15s ease, box-shadow .15s ease, background-color .15s ease; }
+.btn-check:checked + .session-platform-card { border-color: var(--app-primary); background: rgba(88, 86, 214, .08); box-shadow: 0 0 0 2px rgba(88, 86, 214, .15); }
+.btn-check:focus-visible + .session-platform-card { outline: 3px solid rgba(88, 86, 214, .28); outline-offset: 2px; }
+.btn-check:disabled + .session-platform-card { filter: grayscale(1); opacity: .48; cursor: not-allowed; }
+.session-platform-logo { width: 32px; height: 32px; flex: 0 0 32px; object-fit: contain; }
+.session-platform-copy { display: flex; min-width: 0; flex-direction: column; gap: .2rem; }
+.session-platform-copy strong { overflow: hidden; font-size: .78rem; text-overflow: ellipsis; white-space: nowrap; }
+.session-platform-copy span { color: var(--app-muted); font-size: .63rem; white-space: nowrap; }
 .session-placeholder { display: flex; min-height: 100px; align-items: center; justify-content: center; gap: .65rem; border: 1px dashed var(--app-card-border); border-radius: var(--app-radius); color: var(--app-muted); font-size: .8rem; }
 .session-account-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .8rem; }
 .session-account-card { display: grid; gap: .85rem; padding: 1rem; border: 1px solid var(--app-card-border); border-radius: var(--app-radius); background: var(--cui-body-bg); }

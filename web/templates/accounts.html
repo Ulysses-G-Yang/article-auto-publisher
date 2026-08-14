@@ -337,7 +337,7 @@
 <div id="account-toast-container" class="account-toast-container toast-container position-fixed top-0 end-0 p-3" aria-live="polite" aria-atomic="true"></div>
 </div>
 
-<section id="multi-account-sessions" class="container multi-account-sessions mt-4" style="max-width: 1100px;" data-accounts-url-template="/api/platforms/{platform}/accounts?usable=false" data-verify-url-template="/api/accounts/{account_id}/verify" data-account-login-url-template="/api/account-sessions/{account_id}/login" data-login-url-template="/api/platforms/{platform}/accounts/login" data-policy-url-template="/api/accounts/{account_id}/session-policy" data-logout-url-template="/api/account-sessions/{account_id}/logout" data-activity-url-template="/api/account-sessions/{account_id}/activity" aria-labelledby="multi-account-heading">
+<section id="multi-account-sessions" class="container multi-account-sessions mt-4" style="max-width: 1100px;" data-platforms-url="/api/platforms" data-accounts-url-template="/api/platforms/{platform}/accounts?usable=false" data-verify-url-template="/api/accounts/{account_id}/verify" data-account-login-url-template="/api/account-sessions/{account_id}/login" data-login-url-template="/api/platforms/{platform}/accounts/login" data-policy-url-template="/api/accounts/{account_id}/session-policy" data-logout-url-template="/api/account-sessions/{account_id}/logout" data-activity-url-template="/api/account-sessions/{account_id}/activity" aria-labelledby="multi-account-heading">
     <div class="card">
         <div class="card-header multi-account-header">
             <div><span class="section-eyebrow">ISOLATED ACCOUNT SESSIONS</span><h2 id="multi-account-heading">多账号会话</h2><p>每个账号使用独立浏览器 Profile，公开信息仅展示真实昵称和脱敏 ID。</p></div>
@@ -346,12 +346,9 @@
         <div class="card-body">
             <fieldset class="mb-3">
                 <legend class="form-label small fw-semibold">先选择平台</legend>
-                <div class="session-platforms" role="radiogroup" aria-label="多账号会话平台">
-                    <input class="btn-check" type="radio" name="session-platform" id="session-platform-xiaoheihe" value="xiaoheihe" autocomplete="off">
-                    <label class="btn btn-outline-primary" for="session-platform-xiaoheihe"><i class="cil-gamepad me-1" aria-hidden="true"></i>小黑盒</label>
-                    <input class="btn-check" type="radio" name="session-platform" id="session-platform-zol" value="zol" autocomplete="off">
-                    <label class="btn btn-outline-primary" for="session-platform-zol"><i class="cil-screen-desktop me-1" aria-hidden="true"></i>中关村在线</label>
-                </div>
+                <div id="session-platforms-loading" class="session-platform-catalog-state" role="status"><span class="spinner-border spinner-border-sm" aria-hidden="true"></span><span>正在读取平台目录…</span></div>
+                <div id="session-platforms-error" class="alert alert-danger d-none" role="alert"></div>
+                <div id="session-platforms" class="session-platforms" role="radiogroup" aria-label="多账号会话平台"></div>
             </fieldset>
             <div id="session-accounts-placeholder" class="session-placeholder"><i class="cil-arrow-top" aria-hidden="true"></i><span>选择平台后加载该平台账号</span></div>
             <div id="session-accounts-loading" class="session-placeholder d-none" role="status"><span class="spinner-border spinner-border-sm" aria-hidden="true"></span><span>正在读取账号…</span></div>
@@ -766,4 +763,4 @@ document.addEventListener('alpine:init', () => {
 </script>
 {% endblock %}
 
-{% block extra_scripts %}<script src="{{ url_for('static', filename='js/account-sessions.js', v='20260814-account-relogin') }}"></script>{% endblock %}
+{% block extra_scripts %}<script src="{{ url_for('static', filename='js/account-sessions.js', v='20260814-dynamic-platforms') }}"></script>{% endblock %}

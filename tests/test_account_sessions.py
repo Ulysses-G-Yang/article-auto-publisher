@@ -462,6 +462,20 @@ def test_blueprint_matches_frontend_contract_and_injects_article(tmp_path: Path)
         )
     )
     client = app.test_client()
+    platforms_response = client.get("/api/platforms")
+    assert platforms_response.status_code == 200
+    platforms = platforms_response.get_json()["platforms"]
+    assert len(platforms) == 10
+    zhihu = next(item for item in platforms if item["id"] == "zhihu")
+    assert zhihu == {
+        "id": "zhihu",
+        "display_name": "知乎",
+        "logo_url": "/static/img/platforms/zhihu.svg",
+        "status": "AVAILABLE",
+        "delivery_enabled": False,
+        "account_enabled": True,
+        "sort_order": 30,
+    }
 
     page = client.get("/delivery/new", follow_redirects=False)
     assert page.status_code == 302

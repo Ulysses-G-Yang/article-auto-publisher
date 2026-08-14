@@ -26,10 +26,30 @@ def test_multi_account_area_waits_for_platform_before_loading() -> None:
 
     assert 'id="multi-account-sessions"' in template
     assert "/api/platforms/{platform}/accounts?usable=false" in template
-    assert 'name="session-platform"' in template
+    assert "input.name = 'session-platform'" in script
     assert "if (!state.platform) return" in script
     assert "loadAccounts('zol')" not in script
     assert "loadAccounts('xiaoheihe')" not in script
+
+
+def test_account_platform_matrix_is_dynamic_and_capability_aware() -> None:
+    template = read("web/templates/accounts.html")
+    script = read("web/static/js/account-sessions.js")
+    styles = read("web/static/css/account-sessions.css")
+
+    assert 'data-platforms-url="/api/platforms"' in template
+    assert 'id="session-platforms"' in template
+    assert 'id="session-platform-xiaoheihe"' not in template
+    assert 'id="session-platform-zol"' not in template
+    assert "fetch(root.dataset.platformsUrl" in script
+    assert "Array.isArray(payload.platforms)" in script
+    assert "input.disabled = !platform.account_enabled" in script
+    assert "platform.delivery_enabled ? '账号与投递' : '仅账号管理'" in script
+    assert "'即将接入'" in script
+    assert "loadPlatforms();" in script
+    assert "grid-auto-flow: column" in styles
+    assert "overflow-x: auto" in styles
+    assert "session-platform-logo" in styles
 
 
 def test_only_public_account_fields_are_rendered() -> None:

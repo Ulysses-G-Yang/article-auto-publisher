@@ -11,6 +11,7 @@
         'session_status', 'persist_login', 'last_verified_at',
     ];
     const state = {
+        platforms: [],
         platform: null,
         accounts: [],
         requestSequence: 0,
@@ -18,7 +19,6 @@
         targetedPolls: new Map(),
     };
     const byId = id => document.getElementById(id);
-    const platformLabels = { xiaoheihe: '小黑盒', zol: '中关村在线' };
     const sessionLabels = {
         VALID: '有效', UNVERIFIED: '未验证', LOGIN_REQUIRED: '需要登录', ERROR: '异常',
         EXPIRED: '已过期', VERIFYING: '验证中', BUSY: '使用中',
@@ -110,6 +110,81 @@
         return card;
     }
 
+    function platformLabel(platformId) {
+        return state.platforms.find(item => item.id === platformId)?.display_name || platformId;
+    }
+
+    function safeLogoUrl(value) {
+        const url = typeof value === 'string' ? value : '';
+        return /^\/static\/img\/platforms\/[a-z0-9_-]+\.svg$/.test(url) ? url : '';
+    }
+
+    function platformOption(platform) {
+        const input = document.createElement('input');
+        input.className = 'btn-check';
+        input.type = 'radio';
+        input.name = 'session-platform';
+        input.id = `session-platform-${platform.id}`;
+        input.value = platform.id;
+        input.autocomplete = 'off';
+        input.disabled = !platform.account_enabled;
+        input.addEventListener('change', () => selectPlatform(platform.id));
+
+        const label = document.createElement('label');
+        label.className = 'session-platform-card';
+        label.htmlFor = input.id;
+        label.dataset.platformId = platform.id;
+        const logo = document.createElement('img');
+        logo.className = 'session-platform-logo';
+        logo.src = safeLogoUrl(platform.logo_url);
+        logo.hidden = !logo.src;
+        logo.alt = '';
+        logo.setAttribute('aria-hidden', 'true');
+        const copy = document.createElement('span');
+        copy.className = 'session-platform-copy';
+        const name = document.createElement('strong');
+        name.textContent = platform.display_name;
+        const capability = document.createElement('span');
+        capability.textContent = platform.account_enabled
+            ? (platform.delivery_enabled ? '账号与投递' : '仅账号管理')
+            : '即将接入';
+        copy.append(name, capability);
+        label.append(logo, copy);
+        return [input, label];
+    }
+
+    function renderPlatforms() {
+        byId('session-platforms').replaceChildren(...state.platforms.flatMap(platformOption));
+    }
+
+    async function loadPlatforms() {
+        byId('session-platforms-loading').classList.remove('d-none');
+        setMessage('session-platforms-error', '');
+        try {
+            const payload = await jsonResponse(await fetch(root.dataset.platformsUrl, {
+                headers: { Accept: 'application/json' },
+            }));
+            const platforms = Array.isArray(payload.platforms) ? payload.platforms : [];
+            state.platforms = platforms
+                .filter(platform => platform && typeof platform.id === 'string' && /^[a-z0-9_-]+$/.test(platform.id))
+                .map(platform => ({
+                    id: platform.id,
+                    display_name: String(platform.display_name || platform.id),
+                    logo_url: platform.logo_url,
+                    account_enabled: platform.account_enabled === true,
+                    delivery_enabled: platform.delivery_enabled === true,
+                    sort_order: Number(platform.sort_order || 0),
+                }))
+                .sort((left, right) => left.sort_order - right.sort_order);
+            if (state.platforms.length === 0) throw new Error('平台目录为空。');
+            renderPlatforms();
+        } catch (error) {
+            setMessage('session-platforms-error', error.message || '平台目录加载失败。');
+        } finally {
+            byId('session-platforms-loading').classList.add('d-none');
+        }
+    }
+
     function renderAccounts() {
         const list = byId('session-account-list');
         list.replaceChildren(...state.accounts.map(accountCard));
@@ -143,6 +218,8 @@
     }
 
     function selectPlatform(platform) {
+        const selectedPlatform = state.platforms.find(item => item.id === platform);
+        if (!selectedPlatform?.account_enabled) return;
         state.platform = platform;
         state.accounts = [];
         state.targetedPolls.forEach(timer => clearTimeout(timer));
@@ -150,6 +227,7 @@
         renderAccounts();
         byId('refresh-account-sessions').disabled = false;
         byId('add-platform-account').disabled = false;
+        byId('add-platform-account').textContent = `添加${selectedPlatform.display_name}账号`;
         setMessage('session-login-status', '');
         loadAccounts();
     }
@@ -213,7 +291,7 @@
         try {
             const url = endpoint(root.dataset.loginUrlTemplate, 'platform', state.platform);
             const payload = await jsonResponse(await fetch(url, { method: 'POST', headers: { Accept: 'application/json' } }));
-            setMessage('session-login-status', `已创建${platformLabels[state.platform]}隔离浏览器 Profile，请在打开的窗口中完成交互登录。`);
+            setMessage('session-login-status', `已创建${platformLabel(state.platform)}隔离浏览器 Profile，请在打开的窗口中完成交互登录。`);
             const targetAccountId = payload.account_id || payload.account?.account_id;
             if (targetAccountId) startTargetedPolling(targetAccountId);
         } catch (error) { setMessage('session-accounts-error', error.message || '无法创建隔离账号登录。'); }
@@ -256,7 +334,7 @@
         finally { byId('account-activity-loading').classList.add('d-none'); }
     }
 
-    document.querySelectorAll('input[name="session-platform"]').forEach(input => input.addEventListener('change', event => selectPlatform(event.target.value)));
+    loadPlatforms();
     byId('refresh-account-sessions').addEventListener('click', () => loadAccounts());
     byId('add-platform-account').addEventListener('click', addPlatformAccount);
 })();

@@ -6,6 +6,7 @@
 
 import hashlib
 import hmac
+import logging
 import os
 import secrets
 import uuid
@@ -64,11 +65,13 @@ class DeliveryService:
         public_publish_enabled: bool | None = None,
         content_resolver: Callable[[str], Awaitable[tuple[str, list[dict], list[dict]]]]
         | None = None,
+        delivery_event_sink: Callable[..., Awaitable[Any]] | None = None,
     ) -> None:
         self.accounts = accounts
         self.database = accounts.database
         self.platform_factory = platform_factory or accounts.platform_factory
         self.content_resolver = content_resolver
+        self.delivery_event_sink = delivery_event_sink
         self.public_publish_enabled = (
             _env_flag("ACCOUNT_SESSIONS_ALLOW_PUBLIC_PUBLISH")
             if public_publish_enabled is None
@@ -516,6 +519,24 @@ class DeliveryService:
                 )
             )
             await session.flush()
+            # best-effort 桥接：投递结果映射到 PlatformArticle（失败不影响执行单）
+            if self.delivery_event_sink is not None:
+                try:
+                    await self.delivery_event_sink(
+                        operation_id=operation_id,
+                        platform=account.platform,
+                        mode=operation.mode,
+                        title=operation.title,
+                        draft_url=operation.draft_url,
+                        platform_url=operation.platform_url,
+                        completed_at=operation.completed_at,
+                        content_reference=operation.content_reference,
+                    )
+                except BaseException as exc:  # noqa: BLE001
+                    logging.getLogger(__name__).warning(
+                        "投递结果桥接失败（执行单仍为成功）: %s",
+                        safe_error_message(exc),
+                    )
             return operation_payload(operation, account)
 
     async def _mark_failed(

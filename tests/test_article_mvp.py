@@ -782,3 +782,68 @@ def test_dashboard_shows_safe_summary_without_raw_payloads(tmp_path):
         assert "error_message" not in serialized
     finally:
         runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_delivery_bridge_records_draft_mapping_idempotently(tmp_path: Path) -> None:
+    from article_mvp.services.delivery_bridge import (
+        DeliveryBridge,
+        synthesize_task_id,
+    )
+
+    url = database_url(tmp_path)
+    bridge = DeliveryBridge(url)
+    try:
+        first = await bridge.record(
+            operation_id="3fa85f64-5717-4562-b3fc-2c963f66afa6",
+            platform="xiaoheihe",
+            mode="DRAFT",
+            title="凌晨三点，公司的智能马桶开始给我做绩效面谈",
+            draft_url="https://www.xiaoheihe.cn/creator/draft",
+            content_reference="draft:8b2a96e6-7faa-501e-9430-1a1b3256202c",
+        )
+        assert first.status == PlatformArticleStatus.UNMAPPED
+        assert first.platform_url == "https://www.xiaoheihe.cn/creator/draft"
+        assert first.task_id == synthesize_task_id("3fa85f64-5717-4562-b3fc-2c963f66afa6")
+        assert first.extra_data["mode"] == "DRAFT"
+        assert first.extra_data["operation_id"] == "3fa85f64-5717-4562-b3fc-2c963f66afa6"
+
+        second = await bridge.record(
+            operation_id="3fa85f64-5717-4562-b3fc-2c963f66afa6",
+            platform="xiaoheihe",
+            mode="DRAFT",
+            title="凌晨三点，公司的智能马桶开始给我做绩效面谈",
+            draft_url="https://www.xiaoheihe.cn/creator/draft",
+        )
+        assert second.id == first.id
+    finally:
+        await dispose_db()
+
+
+@pytest.mark.asyncio
+async def test_delivery_bridge_records_publish_mapping(tmp_path: Path) -> None:
+    from article_mvp.services.delivery_bridge import (
+        DeliveryBridge,
+        extract_article_id,
+    )
+
+    url = database_url(tmp_path)
+    bridge = DeliveryBridge(url)
+    try:
+        record = await bridge.record(
+            operation_id="7c9e6679-7425-40de-944b-e07fc1f90ae7",
+            platform="zhihu",
+            mode="PUBLISH",
+            title="知乎已发布文章",
+            platform_url="https://zhuanlan.zhihu.com/p/123456789",
+        )
+        assert record.status == PlatformArticleStatus.MAPPED
+        assert record.external_article_id == "123456789"
+        assert record.platform_url == "https://zhuanlan.zhihu.com/p/123456789"
+        assert record.event_id == "delivery:7c9e6679-7425-40de-944b-e07fc1f90ae7"
+    finally:
+        await dispose_db()
+
+    assert extract_article_id("https://www.xiaoheihe.cn/bbs/post/987654") == "987654"
+    assert extract_article_id("https://weibo.com/ttarticle/p/show?id=230940123") == ""
+    assert extract_article_id("") == ""

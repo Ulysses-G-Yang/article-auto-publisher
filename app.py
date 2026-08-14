@@ -19,6 +19,7 @@ from flask import Flask
 from loguru import logger
 
 from account_sessions import create_account_session_blueprint
+from article_mvp.services.delivery_bridge import DeliveryBridge
 from article_mvp.web import create_dashboard_blueprint
 from config import get_config
 from content_studio import create_content_studio_blueprint
@@ -27,6 +28,13 @@ from web.routes import register_routes
 
 _QUEUE_START_LOCK = threading.Lock()
 _QUEUE_STARTED = False
+
+
+def _make_delivery_event_sink():
+    """构造投递结果 → PlatformArticle 的幂等桥接回调（best-effort）。"""
+
+    bridge = DeliveryBridge()
+    return bridge.record
 
 
 def clear_platform_cookies(platform: str) -> bool:
@@ -131,7 +139,9 @@ def create_app() -> Flask:
         create_dashboard_blueprint(),
         url_prefix="/data-center",
     )
-    account_blueprint = create_account_session_blueprint()
+    account_blueprint = create_account_session_blueprint(
+        delivery_event_sink=_make_delivery_event_sink(),
+    )
     app.register_blueprint(account_blueprint)
     app.register_blueprint(
         create_content_studio_blueprint(

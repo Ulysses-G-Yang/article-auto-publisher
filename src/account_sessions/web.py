@@ -41,6 +41,7 @@ class AccountSessionRuntimeState:
         acquire_legacy_guard=None,
         release_legacy_guard=None,
         allowed_profile_roots=None,
+        delivery_event_sink=None,
     ) -> None:
         self.database = AccountDatabase(database_url)
         self.accounts = AccountSessionService(
@@ -55,6 +56,7 @@ class AccountSessionRuntimeState:
             self.accounts,
             platform_factory=platform_factory,
             public_publish_enabled=public_publish_enabled,
+            delivery_event_sink=delivery_event_sink,
         )
         self.auto_execute = auto_execute
         self._runtime = runtime
@@ -107,6 +109,7 @@ def create_account_session_blueprint(
     platform_factory=None,
     public_publish_enabled: bool | None = None,
     allowed_profile_roots=None,
+    delivery_event_sink=None,
 ) -> Blueprint:
     """创建可挂载到现役 5000 端口的账号会话 Blueprint。"""
 
@@ -129,6 +132,7 @@ def create_account_session_blueprint(
         acquire_legacy_guard=try_acquire_platform,
         release_legacy_guard=release_platform,
         allowed_profile_roots=allowed_profile_roots,
+        delivery_event_sink=delivery_event_sink,
     )
 
     @blueprint.record_once

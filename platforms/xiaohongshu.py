@@ -334,24 +334,28 @@ class XiaohongshuPlatform(BasePlatform):
             raise SelectorError("小红书长文编辑器未找到标题输入框") from exc
 
     async def _draft_box_count(self) -> int | None:
-        """读取发布页侧栏「草稿箱(N)」计数；读不到返回 None。"""
+        """读取发布页侧栏「草稿箱(N)」计数；带重试等待渲染，读不到返回 None。"""
 
-        try:
-            value = await self.page.evaluate(
-                """() => {
-                    const nodes = Array.from(document.querySelectorAll('*'));
-                    const el = nodes.find((n) => {
-                        const t = (n.innerText || '').trim();
-                        return t.startsWith('草稿箱') && t.length < 20;
-                    });
-                    if (!el) return null;
-                    const m = (el.innerText || '').match(/草稿箱\\s*\\((\\d+)\\)/);
-                    return m ? parseInt(m[1], 10) : null;
-                }"""
-            )
-            return value if isinstance(value, int) else None
-        except Exception:  # noqa: BLE001
-            return None
+        for _ in range(6):
+            try:
+                value = await self.page.evaluate(
+                    """() => {
+                        const nodes = Array.from(document.querySelectorAll('*'));
+                        const el = nodes.find((n) => {
+                            const t = (n.innerText || '').trim();
+                            return t.startsWith('草稿箱') && t.length < 20;
+                        });
+                        if (!el) return null;
+                        const m = (el.innerText || '').match(/草稿箱\\s*\\((\\d+)\\)/);
+                        return m ? parseInt(m[1], 10) : null;
+                    }"""
+                )
+                if isinstance(value, int):
+                    return value
+            except Exception:  # noqa: BLE001
+                pass
+            await asyncio.sleep(2)
+        return None
 
     async def _click_sidebar_text(self, text: str) -> None:
         """点击侧栏中文本精确匹配的元素（写长文/新的创作）。

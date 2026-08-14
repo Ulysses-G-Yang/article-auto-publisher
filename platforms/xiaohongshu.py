@@ -565,30 +565,52 @@ class XiaohongshuPlatform(BasePlatform):
         }
 
     async def save_draft(self, title: str = "") -> str:
-        """点击「暂存离开」保存草稿，捕获草稿 API 响应，并在草稿箱按标题验证。
+        """点击「暂存离开」保存草稿，以「草稿箱计数 +1 + 保存接口 2xx」验证。
 
-        返回草稿箱 URL；验证失败返回空串（绝不以当前页 URL 冒充成功）。
+        2026-08 实测：小红书 Web 端草稿的唯一可见入口是发布页侧栏的
+        「草稿箱(N)」计数（写长文子视图/笔记管理均无草稿卡片列表），
+        因此验证语义 = 保存前计数 N → 点击暂存离开（捕获全部 POST/PUT，
+        任一 2xx 视为保存信号）→ 重新加载后计数 N+1。两者都满足才返回
+        发布页 URL；否则如实返回空串，绝不以当前页 URL 冒充成功。
         """
         self._require_page_alive("小红书保存草稿")
+
+        async def _draft_box_count() -> int | None:
+            try:
+                value = await self.page.evaluate(
+                    """() => {
+                        const nodes = Array.from(document.querySelectorAll('*'));
+                        const el = nodes.find((n) => {
+                            const t = (n.innerText || '').trim();
+                            return t.startsWith('草稿箱') && t.length < 20;
+                        });
+                        if (!el) return null;
+                        const m = (el.innerText || '').match(/草稿箱\\s*\\((\\d+)\\)/);
+                        return m ? parseInt(m[1], 10) : null;
+                    }"""
+                )
+                return value if isinstance(value, int) else None
+            except Exception:  # noqa: BLE001
+                return None
+
+        before = await _draft_box_count()
         captured: dict = {}
 
         async def _on_response(response) -> None:
             try:
-                if (
-                    "draft" in response.url.lower()
-                    and response.request.method in ("POST", "PUT")
-                ):
+                if response.request.method in ("POST", "PUT", "PATCH"):
                     captured["status"] = response.status
-                    try:
-                        body = await response.json()
-                        if isinstance(body, dict):
-                            captured["ok"] = (
-                                body.get("code") in (0, None)
-                                or body.get("success") is True
-                                or response.status < 300
-                            )
-                    except Exception:
-                        captured["ok"] = response.status < 300
+                    if "draft" in response.url.lower():
+                        captured["url"] = response.url[:160]
+                        try:
+                            body = await response.json()
+                            if isinstance(body, dict):
+                                captured["ok"] = (
+                                    body.get("code") in (0, None)
+                                    or body.get("success") is True
+                                )
+                        except Exception:
+                            captured["ok"] = response.status < 300
             except Exception:  # noqa: BLE001
                 pass
 
@@ -624,37 +646,40 @@ class XiaohongshuPlatform(BasePlatform):
             except Exception:  # noqa: BLE001
                 pass
 
-        if not captured.get("ok"):
+        if not captured.get("status"):
+            logger.error("小红书暂存离开未产生任何保存请求")
+            return ""
+        if not captured.get("ok", captured.get("status", 0) < 300):
             logger.error("小红书草稿 API 未确认成功: {}", captured)
             return ""
-        # 草稿箱验证：发布页侧栏草稿箱入口
+
+        # 重新加载发布页，确认草稿箱计数 +1
         try:
             await self.page.goto(
                 "https://creator.xiaohongshu.com/publish/publish",
                 wait_until="domcontentloaded",
                 timeout=30000,
             )
-            await self.simulator.random_delay(3, 5)
-            keyword = str(title or "").strip()[:12]
-            found = False
-            if keyword:
-                found = bool(
-                    await self.page.evaluate(
-                        "(kw) => (document.body.innerText || '').includes(kw)",
-                        keyword,
-                    )
-                )
-                if not found:
-                    await self.simulator.random_delay(3, 5)
-                    found = bool(
-                        await self.page.evaluate(
-                            "(kw) => (document.body.innerText || '').includes(kw)",
-                            keyword,
-                        )
-                    )
-            if keyword and not found:
-                logger.error("小红书草稿箱未找到标题包含「{}」的草稿", keyword)
+            after = None
+            for _ in range(3):
+                await self.simulator.random_delay(3, 5)
+                after = await _draft_box_count()
+                if after is not None and before is not None and after == before + 1:
+                    break
+            if after is None or before is None:
+                logger.error("小红书草稿箱计数读取失败: before={}, after={}", before, after)
                 return ""
+            if after != before + 1:
+                logger.error(
+                    "小红书草稿箱计数未增加: before={}, after={}", before, after
+                )
+                return ""
+            logger.info(
+                "小红书草稿验证成功: 草稿箱计数 {} -> {}，保存接口 {}",
+                before,
+                after,
+                captured.get("status"),
+            )
             return "https://creator.xiaohongshu.com/publish/publish"
         except BrowserLifecycleError:
             raise

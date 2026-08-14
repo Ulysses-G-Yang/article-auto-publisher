@@ -1274,6 +1274,24 @@ class RegressionTests(DatabaseTestCase):
         )()
         self.assertTrue(asyncio.run(platform._has_session_cookie_signal()))
 
+    def test_xiaohongshu_cookie_check_accepts_renamed_session_cookies(self):
+        platform = XiaohongshuPlatform()
+        platform.context = type(
+            "Context",
+            (),
+            {
+                "cookies": AsyncMock(
+                    return_value=[
+                        {"name": "customer-sso-sid", "value": "opaque"},
+                        {"name": "customerClientId", "value": "opaque"},
+                        {"name": "x-user-id-creator.xiaohongshu.com", "value": "opaque"},
+                        {"name": "a1", "value": "opaque"},
+                    ]
+                ),
+            },
+        )()
+        self.assertTrue(asyncio.run(platform._has_session_cookie_signal()))
+
     def test_xiaohongshu_cookie_check_rejects_guest_state(self):
         platform = XiaohongshuPlatform()
         platform.context = type(

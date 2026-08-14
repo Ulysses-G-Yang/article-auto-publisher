@@ -44,7 +44,18 @@ class XiaohongshuPlatform(BasePlatform):
     """小红书创作服务平台账号会话适配器；内容投递能力保持关闭。"""
 
     platform_name = "xiaohongshu"
-    SESSION_COOKIE_NAMES = frozenset({"web_session"})
+    # 2026-08 真实验证：小红书已不再下发 web_session，现行会话 cookie 为
+    # customer-sso-sid / customerClientId / access-token-creator.* /
+    # x-user-id-creator.* / galaxy_creator_session_id；web_session 保留兼容。
+    SESSION_COOKIE_NAMES = frozenset({
+        "web_session",
+        "customer-sso-sid",
+        "customerClientId",
+        "access-token-creator.xiaohongshu.com",
+        "x-user-id-creator.xiaohongshu.com",
+        "galaxy_creator_session_id",
+        "galaxy.creator.beaker.session.id",
+    })
     LOGIN_POLL_ATTEMPTS = 40
     LOGIN_POLL_INTERVAL_SECONDS = 3
 

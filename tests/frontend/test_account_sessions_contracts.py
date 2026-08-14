@@ -53,11 +53,15 @@ def test_account_actions_follow_frozen_session_states() -> None:
     template = read("web/templates/accounts.html")
     script = read("web/static/js/account-sessions.js")
 
-    assert "['UNVERIFIED', 'LOGIN_REQUIRED', 'ERROR', 'EXPIRED']" in script
+    assert "['UNVERIFIED', 'ERROR', 'EXPIRED']" in script
+    assert "account.session_status === 'LOGIN_REQUIRED'" in script
     assert "account.session_status === 'VALID'" in script
     assert "验证现有登录态" in script
     assert "不会自动打开扫码" in script
     assert "/api/accounts/{account_id}/verify" in template
+    assert "重新登录" in script
+    assert "function loginAccount(account)" in script
+    assert "/api/accounts/{account_id}/login" in template
     assert "/api/account-sessions/{account_id}/logout" in template
 
 

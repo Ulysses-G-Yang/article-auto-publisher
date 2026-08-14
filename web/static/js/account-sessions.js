@@ -96,8 +96,11 @@
         policy.append(policyInput); meta.append(verified, policy);
 
         const actions = document.createElement('div'); actions.className = 'session-account-actions';
-        if (['UNVERIFIED', 'LOGIN_REQUIRED', 'ERROR', 'EXPIRED'].includes(account.session_status)) {
+        if (['UNVERIFIED', 'ERROR', 'EXPIRED'].includes(account.session_status)) {
             actions.append(button('验证现有登录态', 'btn btn-outline-primary btn-sm', () => verifyAccount(account)));
+        }
+        if (account.session_status === 'LOGIN_REQUIRED') {
+            actions.append(button('重新登录', 'btn btn-primary btn-sm', () => loginAccount(account)));
         }
         if (account.session_status === 'VALID') {
             actions.append(button('退出该账号', 'btn btn-outline-danger btn-sm', () => logoutAccount(account)));
@@ -174,6 +177,16 @@
             setMessage('session-login-status', `正在验证 ${accountLabel(account)} 的现有登录态；不会自动打开扫码。`);
             startTargetedPolling(account.account_id);
         } catch (error) { setMessage('session-accounts-error', error.message || '无法启动登录态验证。'); }
+    }
+
+    async function loginAccount(account) {
+        setMessage('session-accounts-error', '');
+        try {
+            const url = endpoint(root.dataset.accountLoginUrlTemplate, 'account_id', account.account_id);
+            await jsonResponse(await fetch(url, { method: 'POST', headers: { Accept: 'application/json' } }));
+            setMessage('session-login-status', `正在为 ${accountLabel(account)} 打开扫码登录窗口；将复用该账号的隔离 Profile。`);
+            startTargetedPolling(account.account_id);
+        } catch (error) { setMessage('session-accounts-error', error.message || '无法启动账号重新登录。'); }
     }
 
     function startTargetedPolling(accountId) {

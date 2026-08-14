@@ -42,6 +42,8 @@ from account_sessions.security import (
     safe_error_message,
 )
 
+SESSION_INVALIDATING_ERROR_CODES = frozenset({"LOGIN_REQUIRED", "SESSION_EXPIRED"})
+
 
 class BufferedPlatformLog:
     """适配旧发布流水线的同步日志接口，但不写旧任务数据库。"""
@@ -532,6 +534,13 @@ class DeliveryService:
             operation.error_code = getattr(exc, "error_code", None) or "DELIVERY_FAILED"
             operation.error_message = safe_error_message(exc)
             operation.completed_at = datetime.now(timezone.utc)
+            stored_account = await session.get(PlatformAccount, operation.account_id)
+            if (
+                stored_account is not None
+                and operation.error_code in SESSION_INVALIDATING_ERROR_CODES
+            ):
+                stored_account.session_status = "LOGIN_REQUIRED"
+                stored_account.last_verified_at = None
             _append_buffered_logs(session, operation, account, access, logs)
             session.add(
                 activity_for(

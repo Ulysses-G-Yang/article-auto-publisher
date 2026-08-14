@@ -190,6 +190,20 @@ def create_account_session_blueprint(
         )
         return jsonify(account), 202
 
+    @blueprint.post("/api/accounts/<account_id>/login")
+    def login_existing_account(account_id: str):
+        """复用指定账号的隔离 Profile，启动交互式重新登录。"""
+
+        account = state.run(state.accounts.mark_verifying(account_id, LOCAL_WEB_CONTEXT))
+        state.submit(
+            state.accounts.verify_account(
+                account_id,
+                LOCAL_WEB_CONTEXT,
+                allow_interactive_login=True,
+            )
+        )
+        return jsonify(account), 202
+
     @blueprint.post("/api/accounts/<account_id>/session-policy")
     def update_session_policy(account_id: str):
         payload = SessionPolicyRequest.model_validate(request.get_json(silent=True) or {})

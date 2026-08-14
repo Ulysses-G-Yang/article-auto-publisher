@@ -7,6 +7,7 @@ import asyncio
 import sqlite3
 import sys
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -33,7 +34,7 @@ from account_sessions.models import AccountActivity, PlatformAccount
 from account_sessions.permissions import LOCAL_WEB_CONTEXT, AccessContext
 from account_sessions.web import create_account_session_blueprint
 from article_mvp.errors import PlatformBusyError
-from platforms.base import PlatformAutomationError
+from platforms.base import LoginRequiredError, PlatformAutomationError, SelectorError
 from platforms.xiaoheihe import XiaoheihePlatform
 
 SAMPLE_ARTICLE_TITLE = "账号域投递契约样例"
@@ -348,6 +349,69 @@ def test_draft_executor_records_platform_logs_and_success(tmp_path: Path) -> Non
     run(database.dispose())
 
 
+@pytest.mark.parametrize(
+    ("failure", "expected_session_status"),
+    [
+        (LoginRequiredError("登录态失效"), "LOGIN_REQUIRED"),
+        (SelectorError("编辑器控件缺失"), "VALID"),
+    ],
+)
+def test_delivery_failure_downgrades_only_invalid_sessions(
+    tmp_path: Path,
+    failure: PlatformAutomationError,
+    expected_session_status: str,
+) -> None:
+    class FailingPlatform:
+        platform_name = "xiaoheihe"
+        context = None
+
+        async def initialize(self) -> None:
+            return None
+
+        async def publish(self, **_kwargs) -> dict:
+            raise failure
+
+        async def cleanup(self) -> None:
+            return None
+
+    async def stamp_verification(database: AccountDatabase, account_id: str) -> None:
+        async with database.session() as session:
+            stored = await session.get(PlatformAccount, account_id)
+            assert stored is not None
+            stored.last_verified_at = datetime.now(timezone.utc)
+
+    database = AccountDatabase(sqlite_database_url(tmp_path))
+    fake = FailingPlatform()
+    accounts = AccountSessionService(
+        database,
+        seed_legacy_profiles=False,
+        platform_factory=lambda _account: fake,
+        allowed_profile_roots=(tmp_path / "runtime" / "profiles",),
+    )
+    run(accounts.initialize())
+    profile = make_profile(tmp_path, "xiaoheihe", "failure-state")
+    account = run(insert_account(database, profile))
+    run(stamp_verification(database, account.account_id))
+    delivery = DeliveryService(
+        accounts,
+        platform_factory=lambda _account: fake,
+        public_publish_enabled=False,
+    )
+    request = DeliveryRequest.model_validate(delivery_payload(account.account_id))
+    queued = run(delivery.request_delivery(request, LOCAL_WEB_CONTEXT))
+
+    with pytest.raises(type(failure)):
+        run(delivery.execute_operation(queued["operation_id"], LOCAL_WEB_CONTEXT))
+
+    stored = run(accounts.get_account(account.account_id))
+    assert stored.session_status == expected_session_status
+    if expected_session_status == "LOGIN_REQUIRED":
+        assert stored.last_verified_at is None
+    else:
+        assert stored.last_verified_at is not None
+    run(database.dispose())
+
+
 def test_publish_requires_single_use_confirmation_and_gate_stays_closed(
     tmp_path: Path,
 ) -> None:
@@ -454,6 +518,66 @@ def test_blueprint_matches_frontend_contract_and_injects_article(tmp_path: Path)
     assert confirmation.get_json()["confirmation_token"]
 
     state = app.extensions["account_sessions"]
+    state.close()
+
+
+def test_existing_account_login_route_reuses_profile_and_enables_interaction(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from flask import Flask
+
+    template_root = PROJECT_ROOT / "web" / "templates"
+    static_root = template_root.parent / "static"
+    app = Flask(
+        "account-relogin-test",
+        template_folder=str(template_root),
+        static_folder=str(static_root),
+    )
+    app.secret_key = "test"
+    app.register_blueprint(
+        create_account_session_blueprint(
+            database_url=sqlite_database_url(tmp_path),
+            seed_legacy_profiles=False,
+            auto_execute=False,
+            public_publish_enabled=False,
+            allowed_profile_roots=(tmp_path / "runtime" / "profiles",),
+        )
+    )
+    state = app.extensions["account_sessions"]
+    captured: dict = {}
+
+    async def fake_mark_verifying(account_id: str, _access: AccessContext) -> dict:
+        captured["marked_account_id"] = account_id
+        return {"account_id": account_id, "session_status": "VERIFYING"}
+
+    def fake_verify_account(
+        account_id: str,
+        _access: AccessContext,
+        *,
+        allow_interactive_login: bool = False,
+    ) -> object:
+        captured["verified_account_id"] = account_id
+        captured["allow_interactive_login"] = allow_interactive_login
+        return object()
+
+    def forbid_new_account(*_args, **_kwargs):
+        raise AssertionError("existing-account login must not create a new account")
+
+    monkeypatch.setattr(state.accounts, "mark_verifying", fake_mark_verifying)
+    monkeypatch.setattr(state.accounts, "verify_account", fake_verify_account)
+    monkeypatch.setattr(state.accounts, "create_login_candidate", forbid_new_account)
+    monkeypatch.setattr(state, "submit", lambda work: captured.setdefault("submitted", work))
+
+    account_id = "existing-account"
+    response = app.test_client().post(f"/api/accounts/{account_id}/login")
+
+    assert response.status_code == 202
+    assert response.get_json() == {"account_id": account_id, "session_status": "VERIFYING"}
+    assert captured["marked_account_id"] == account_id
+    assert captured["verified_account_id"] == account_id
+    assert captured["allow_interactive_login"] is True
+    assert captured["submitted"] is not None
     state.close()
 
 

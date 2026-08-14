@@ -382,26 +382,29 @@ class WeiboPlatform(BasePlatform):
         """填写正文：键盘逐段写入 TipTap 编辑器，回读并有序校验。"""
 
         self._require_page_alive("微博填写正文")
-        editor = self.page.locator("div.tiptap.ProseMirror").first
+        # 草稿视图可能含隐藏的编辑器实例，必须取可见的那个
+        editor = self.page.locator("div.tiptap.ProseMirror:visible").first
         try:
             if await editor.count() == 0 or not await editor.is_visible():
                 raise RuntimeError("正文编辑器不可见")
-            # 等待可能的加载遮罩消失后，用 evaluate 聚焦（不依赖点击命中测试）
             try:
-                await self.page.wait_for_selector(
-                    ".wb-editor-spin, .n-spin-body",
-                    state="detached",
-                    timeout=10000,
-                )
+                await editor.click(timeout=5000)
             except Exception:
-                pass
-            await editor.evaluate("(el) => el.focus()")
+                await editor.evaluate("(el) => el.focus()")
+            focused = await self.page.evaluate(
+                """() => {
+                    const el = document.activeElement;
+                    return el ? el.isContentEditable : false;
+                }"""
+            )
+            if not focused:
+                raise RuntimeError("正文编辑器未能获得焦点")
         except Exception as exc:
             if self._exception_means_browser_closed(exc):
                 raise BrowserLifecycleError(
                     "BROWSER_CONTEXT_CLOSED: 微博定位正文编辑器时页面已关闭"
                 ) from exc
-            raise SelectorError("微博正文编辑器未找到") from exc
+            raise SelectorError("微博正文编辑器未找到或无法聚焦") from exc
 
         try:
             await self.page.keyboard.press("Control+A")

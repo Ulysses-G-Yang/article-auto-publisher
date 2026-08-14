@@ -1544,7 +1544,7 @@ class RegressionTests(DatabaseTestCase):
                 "wait_for_selector": AsyncMock(return_value=True),
                 "wait_for_function": AsyncMock(),
                 "get_by_text": staticmethod(
-                    lambda text: type(
+                    lambda text, **_kw: type(
                         "Loc",
                         (),
                         {

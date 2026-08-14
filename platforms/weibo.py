@@ -335,7 +335,7 @@ class WeiboPlatform(BasePlatform):
             await write_btn.click(timeout=10000)
             # 等待切换到已创建的草稿视图 #/draft/{id}
             await self.page.wait_for_function(
-                """() => /#/draft/\\d+/.test(location.hash)""",
+                """() => /#\\/draft\\/\\d+/.test(location.hash)""",
                 timeout=20000,
             )
             await self.page.wait_for_selector(

@@ -25,16 +25,11 @@
 
     <nav class="sidebar-nav" data-simplebar aria-label="业务导航">
       <div class="nav-title">工作台</div>
-      <a class="nav-link" href="/"><i class="nav-icon cil-speedometer" aria-hidden="true"></i>发布概览</a>
-      <a class="nav-link" href="/upload"><i class="nav-icon cil-pencil" aria-hidden="true"></i>创作与投递</a>
-      <a class="nav-link" href="/accounts"><i class="nav-icon cil-user" aria-hidden="true"></i>平台账号</a>
-      <a class="nav-link active" href="/data-center/" aria-current="page"><i class="nav-icon cil-chart" aria-hidden="true"></i>数据中心</a>
-
-      <div class="nav-title">数据模块</div>
-      <a class="nav-link" href="#module-current-tasks"><i class="nav-icon cil-list" aria-hidden="true"></i>发布任务</a>
-      <a class="nav-link" href="#module-contract"><i class="nav-icon cil-check-circle" aria-hidden="true"></i>接口契约</a>
-      <a class="nav-link" href="#module-articles"><i class="nav-icon cil-notes" aria-hidden="true"></i>文章映射</a>
-      <a class="nav-link" href="#module-runs"><i class="nav-icon cil-storage" aria-hidden="true"></i>采集运行</a>
+      <a class="nav-link {% if request.path == '/' or request.path.startswith('/task/') %}active{% endif %}" href="/" {% if request.path == '/' or request.path.startswith('/task/') %}aria-current="page"{% endif %}><i class="nav-icon cil-speedometer" aria-hidden="true"></i><span>发布概览</span></a>
+      <a class="nav-link {% if request.path == '/upload' %}active{% endif %}" href="/upload" {% if request.path == '/upload' %}aria-current="page"{% endif %}><i class="nav-icon cil-pencil" aria-hidden="true"></i><span>创作与投递</span></a>
+      <div class="nav-title">运营管理</div>
+      <a class="nav-link {% if request.path == '/accounts' %}active{% endif %}" href="/accounts" {% if request.path == '/accounts' %}aria-current="page"{% endif %}><i class="nav-icon cil-user" aria-hidden="true"></i><span>平台账号</span></a>
+      <a class="nav-link active" href="/data-center/" aria-current="page"><i class="nav-icon cil-chart" aria-hidden="true"></i><span>数据中心</span></a>
     </nav>
 
     <div class="sidebar-footer border-top">

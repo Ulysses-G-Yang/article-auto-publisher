@@ -7,16 +7,17 @@ def read(relative_path: str) -> str:
     return (ROOT / relative_path).read_text(encoding="utf-8")
 
 
-def test_legacy_account_area_and_endpoints_are_preserved() -> None:
+def test_legacy_account_area_is_removed() -> None:
     template = read("web/templates/accounts.html")
 
-    assert 'x-data="accounts" x-init="init()"' in template
-    assert "fetch('/api/accounts')" in template
-    assert "/api/accounts/${platform}/logout" in template
-    assert "/api/accounts/${platform}/clear-cookies" in template
-    assert "fetch('/api/accounts/' + platform + '/login'" in template
-    assert "fetch('/api/cleanup'" in template
-    assert 'id="reloginModal"' in template
+    # legacy 硬编码账号板块（ZOL/小黑盒 + Alpine 轮询）已删除，现代模块是唯一界面。
+    assert 'x-data="accounts" x-init="init()"' not in template
+    assert "fetch('/api/accounts')" not in template
+    assert "/api/accounts/${platform}/logout" not in template
+    assert "/api/accounts/${platform}/clear-cookies" not in template
+    assert "fetch('/api/accounts/' + platform + '/login'" not in template
+    assert "fetch('/api/cleanup'" not in template
+    assert 'id="reloginModal"' not in template
 
 
 def test_multi_account_area_waits_for_platform_before_loading() -> None:

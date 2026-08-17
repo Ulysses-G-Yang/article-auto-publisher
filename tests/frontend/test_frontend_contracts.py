@@ -68,13 +68,22 @@ def test_read_only_legacy_pages_keep_their_compatible_contracts() -> None:
 
     assert "fetch('/api/tasks')" in index
     assert "fetch('/api/status')" in index
-    assert "fetch('/api/accounts')" in accounts
-    assert "/api/accounts/${platform}/logout" in accounts
-    assert "/api/accounts/${platform}/clear-cookies" in accounts
-    assert "fetch('/api/accounts/' + platform + '/login', { method: 'POST' })" in accounts
-    assert "fetch('/api/cleanup', { method: 'POST' })" in accounts
     assert "/api/tasks/{{ task.id if task else 0 }}/resume" in task
     assert "JSON.stringify({community: this.community, topic: this.topic})" in task
+
+
+def test_accounts_page_is_the_modern_multi_account_module_only() -> None:
+    accounts = read("web/templates/accounts.html")
+
+    # legacy 硬编码账号板块（ZOL/小黑盒 + Alpine /api/accounts 轮询）已删除。
+    assert "x-data=" not in accounts
+    assert "fetch('/api/accounts')" not in accounts
+    assert "xiaoheihe" not in accounts
+    assert "中关村在线" not in accounts
+    # 现代多账号会话模块与活动抽屉保留。
+    assert "multi-account-sessions" in accounts
+    assert "data-delete-account-url-template" in accounts
+    assert "account-activity-drawer" in accounts
 
 
 def test_legacy_upload_queue_is_not_used_by_new_page() -> None:

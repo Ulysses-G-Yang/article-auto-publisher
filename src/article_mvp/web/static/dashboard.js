@@ -211,9 +211,26 @@ function setMetricMode(mode) {
 
 function statusNode(value) {
   const span = document.createElement("span");
-  const label = { UNMAPPED: "草稿待映射", MAPPED: "已映射" }[value] || value || "—";
+  const labels = {
+    // 平台文章映射
+    UNMAPPED: "草稿待映射",
+    MAPPED: "已映射",
+    // 发布任务（legacy queue）
+    queued: "排队中",
+    processing: "处理中",
+    completed: "已完成",
+    completed_with_warnings: "草稿已保存（有警告）",
+    failed: "失败",
+    retrying: "重试中",
+    cancelled: "已取消",
+    paused: "已暂停",
+    needs_selection: "待选择话题",
+    // 采集运行
+    SUCCESS: "成功",
+    FATAL: "失败",
+  };
   span.className = `status-label ${value || ""}`;
-  span.textContent = label;
+  span.textContent = labels[value] || value || "—";
   return span;
 }
 

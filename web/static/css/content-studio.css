@@ -240,3 +240,6 @@
     .target-platform-head { flex-wrap: wrap; }
     .target-mode-switch { order: 5; width: 100%; }
 }
+
+/* 图片拖拽插入（E1） */
+.content-blocks.is-drop-target { outline: 2px dashed var(--cui-primary, #0d6efd); outline-offset: 4px; border-radius: .5rem; }

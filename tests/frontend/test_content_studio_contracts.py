@@ -76,6 +76,9 @@ def test_block_editor_has_drag_keyboard_and_mobile_alternatives() -> None:
     assert 'id="asset-upload"' in template
     assert "article.draggable = true" in script
     assert "reorderByDrop" in script
+    assert "is-drop-target" in script
+    assert "dataTransfer?.types" in script
+    assert "file.type.startsWith('image/')" in script
     assert "move-up" in script
     assert "move-down" in script
     assert "delete-block" in script

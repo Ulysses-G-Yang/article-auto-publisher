@@ -870,6 +870,26 @@
         byId('content-blocks').addEventListener('input', event => { const block = state.draft.blocks.find(item => item.block_id === event.target.dataset.blockId); if (!block) return; if (event.target.dataset.action === 'text-input') block.text = event.target.value; if (event.target.dataset.action === 'image-alt') block.alt = event.target.value; markDirty(); });
         byId('content-blocks').addEventListener('click', event => { const button = event.target.closest('button[data-action]'); if (!button) return; if (button.dataset.action === 'move-up') moveBlock(button.dataset.blockId, -1); if (button.dataset.action === 'move-down') moveBlock(button.dataset.blockId, 1); if (button.dataset.action === 'delete-block') { state.draft.blocks = state.draft.blocks.filter(block => block.block_id !== button.dataset.blockId); renderBlocks(); markDirty(); } });
         byId('asset-upload').addEventListener('change', event => { uploadAssets(Array.from(event.target.files || [])); event.target.value = ''; });
+        // 拖拽图片到正文区直接插入（增强 E1）
+        const blocksDrop = byId('content-blocks');
+        ['dragenter', 'dragover'].forEach(type => blocksDrop.addEventListener(type, event => {
+            if (Array.from(event.dataTransfer?.types || []).includes('Files')) {
+                event.preventDefault();
+                blocksDrop.classList.add('is-drop-target');
+            }
+        }));
+        ['dragleave', 'drop'].forEach(type => blocksDrop.addEventListener(type, event => {
+            if (type === 'dragleave' && blocksDrop.contains(event.relatedTarget)) return;
+            blocksDrop.classList.remove('is-drop-target');
+        }));
+        blocksDrop.addEventListener('drop', event => {
+            const images = Array.from(event.dataTransfer?.files || [])
+                .filter(file => file.type.startsWith('image/'));
+            if (images.length) {
+                event.preventDefault();
+                uploadAssets(images);
+            }
+        });
         byId('create-plan').addEventListener('click', createPlan);
         byId('save-draft-now').addEventListener('click', () => saveDraftNow());
         byId('execute-plan').addEventListener('click', () => { const hasDraft = state.plan.targets.some(target => target.mode === 'DRAFT'); if (hasDraft && !byId('draft-batch-confirmed').checked) { setMessage('plan-review-error', '请先勾选平台草稿批量摘要确认。'); byId('draft-batch-confirmed').focus(); return; } executePlan({ draft_batch_confirmed: !hasDraft || byId('draft-batch-confirmed').checked, confirmations: {} }, { fromReview: true }); });

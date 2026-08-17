@@ -200,6 +200,17 @@ class DocxImportAdapter:
                             "position": position,
                         }
                     )
+                # The title is persisted separately from the body.  Remove only
+                # the first matching text block so repeated in-body headings stay
+                # intact, then close the position gap.
+                normalized_title = _normalize_title(title)
+                if normalized_title:
+                    for index, block in enumerate(blocks):
+                        if block.get("type") != "text":
+                            continue
+                        if _normalize_title(block.get("text")) == normalized_title:
+                            del blocks[index]
+                        break
                 return title, _normalize_positions(blocks), stored_assets
             except Exception:
                 _remove_stored_assets(self.asset_store, stored_assets)
@@ -302,6 +313,10 @@ def _normalize_positions(blocks: list[dict]) -> list[dict]:
     for position, block in enumerate(blocks):
         block["position"] = position
     return blocks
+
+
+def _normalize_title(value: object) -> str:
+    return " ".join(str(value or "").split())
 
 
 def _is_within(target: Path, root: Path) -> bool:

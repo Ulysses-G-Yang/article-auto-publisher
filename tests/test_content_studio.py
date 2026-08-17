@@ -235,7 +235,6 @@ def test_docx_import_uses_unified_blocks_and_controlled_assets(tmp_path: Path) -
         assert imported["title"] == "导入标题"
         assert [block["type"] for block in imported["blocks"]] == [
             "text",
-            "text",
             "image",
             "text",
         ]
@@ -703,6 +702,7 @@ def test_docx_mixed_text_and_image_keeps_all_blocks(tmp_path: Path) -> None:
     image_path = tmp_path / "inline.png"
     image_path.write_bytes(image_buffer.getvalue())
     document = Document()
+    document.core_properties.title = "独立文档标题"
     paragraph = document.add_paragraph()
     paragraph.add_run("图片之前")
     paragraph.add_run().add_picture(str(image_path), width=Inches(0.2))

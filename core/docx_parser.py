@@ -2,12 +2,22 @@
 
 import json
 import os
+import re
 from dataclasses import dataclass, field
 
 from docx import Document
 from PIL import Image
 
 from config import get_config
+
+W_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+A_NS = "http://schemas.openxmlformats.org/drawingml/2006/main"
+R_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+W_TEXT = f"{{{W_NS}}}t"
+W_TAB = f"{{{W_NS}}}tab"
+W_BREAK = f"{{{W_NS}}}br"
+W_CARRIAGE_RETURN = f"{{{W_NS}}}cr"
+A_BLIP = f"{{{A_NS}}}blip"
 
 
 @dataclass
@@ -34,6 +44,7 @@ class ParsedArticle:
     plain_text: str = ""
     image_count: int = 0
     char_count: int = 0
+    document_title: str | None = None
 
 
 class DocxParser:
@@ -50,6 +61,7 @@ class DocxParser:
         article = ParsedArticle(
             filename=filename,
             original_path=filepath,
+            document_title=self._normalize_title(doc.core_properties.title) or None,
         )
 
         # 创建文章专属图片目录
@@ -74,31 +86,17 @@ class DocxParser:
                 if para is None:
                     continue
 
-                # 逐 Run 保留同一段落里的文字与图片。旧实现一旦发现图片就会
-                # 丢弃整段文字，常见的“文字 + 内嵌图片 + 文字”会导入不完整。
-                paragraph_parts = []
-                for run in para.runs:
-                    run_text = run.text.strip()
-                    if run_text:
-                        paragraph_parts.append(("text", run_text))
-                    for blip in run._element.findall(
-                        ".//{http://schemas.openxmlformats.org/drawingml/2006/main}blip"
-                    ):
-                        embed = blip.get(
-                            "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}embed"
-                        )
-                        if embed and embed in image_parts:
-                            paragraph_parts.append(("image", image_parts[embed]))
+                # Walk the run XML in document order.  Text runs are accumulated
+                # until an inline image boundary, so spaces at run boundaries are
+                # preserved and adjacent runs become one text block.
+                paragraph_parts = self._paragraph_parts(para, image_parts)
 
                 # 部分 Word 生成器不会把纯文字暴露为标准 Run，保留段落级兜底。
                 if not paragraph_parts and para.text.strip():
-                    paragraph_parts.append(("text", para.text.strip()))
+                    paragraph_parts.append(("text", para.text))
 
-                is_heading = bool(
-                    para.style
-                    and para.style.name
-                    and ("Heading" in para.style.name or "Title" in para.style.name)
-                )
+                style_name = para.style.name if para.style else None
+                is_heading = self._is_heading_style(style_name)
                 for part_type, value in paragraph_parts:
                     if part_type == "text":
                         block = ContentBlock(
@@ -156,6 +154,52 @@ class DocxParser:
             if para._element is element:
                 return para
         return None
+
+    def _paragraph_parts(self, para, image_parts):
+        """Return text/image parts while preserving paragraph XML order."""
+        parts = []
+        text_buffer = []
+
+        def flush_text() -> None:
+            if not text_buffer:
+                return
+            text = "".join(text_buffer)
+            text_buffer.clear()
+            if text.strip():
+                parts.append(("text", text))
+
+        for run in para.runs:
+            for node in run._element.iter():
+                if node.tag == W_TEXT:
+                    text_buffer.append(node.text or "")
+                elif node.tag == W_TAB:
+                    text_buffer.append("\t")
+                elif node.tag in {W_BREAK, W_CARRIAGE_RETURN}:
+                    text_buffer.append("\n")
+                elif node.tag == A_BLIP:
+                    embed = node.get(f"{{{R_NS}}}embed")
+                    image_part = image_parts.get(embed)
+                    if image_part is not None:
+                        flush_text()
+                        parts.append(("image", image_part))
+
+        flush_text()
+        return parts
+
+    @staticmethod
+    def _normalize_title(value: str | None) -> str:
+        """Normalize title whitespace without changing non-whitespace text."""
+        return " ".join(str(value or "").split())
+
+    @staticmethod
+    def _is_heading_style(style_name: str | None) -> bool:
+        normalized = " ".join(str(style_name or "").split()).casefold()
+        return normalized == "title" or bool(re.fullmatch(r"heading\s*[1-9]", normalized))
+
+    @staticmethod
+    def _is_document_title_style(style_name: str | None) -> bool:
+        normalized = " ".join(str(style_name or "").split()).casefold()
+        return normalized == "title" or bool(re.fullmatch(r"heading\s*1", normalized))
 
     def _extract_table_text(self, tbl_element) -> str:
         """提取表格文本"""
@@ -216,14 +260,22 @@ class DocxParser:
         return json.dumps(data, ensure_ascii=False, indent=2)
 
     def get_title_from_article(self, article: ParsedArticle) -> str:
-        """从文章中提取可能的标题（第一个标题块或第一段文本的前30字）"""
-        for block in article.blocks:
-            if block.type == "heading" and block.text:
-                return block.text[:50]
+        """Extract the selected title using core properties/style/body priority."""
+        core_title = article.document_title or ""
+        if core_title:
+            return core_title
 
-        # 取第一段非空文本
         for block in article.blocks:
-            if block.type == "text" and block.text:
-                return block.text[:30] + ("..." if len(block.text) > 30 else "")
+            if (
+                block.type == "heading"
+                and self._is_document_title_style(block.style_name)
+                and block.text
+            ):
+                return self._normalize_title(block.text)
 
-        return article.filename.replace(".docx", "")
+        # Fall back to the first non-empty body block, without truncating it.
+        for block in article.blocks:
+            if block.type == "text" and block.text and block.text.strip():
+                return self._normalize_title(block.text)
+
+        return os.path.splitext(article.filename)[0]

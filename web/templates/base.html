@@ -27,7 +27,7 @@
             <a class="nav-link {% if request.path == '/' or request.path.startswith('/task/') %}active{% endif %}" href="/" {% if request.path == '/' or request.path.startswith('/task/') %}aria-current="page"{% endif %}>
                 <i class="nav-icon cil-speedometer" aria-hidden="true"></i><span>发布概览</span>
             </a>
-            <a class="nav-link {% if request.path == '/upload' or request.path.startswith('/delivery/') %}active{% endif %}" href="/upload" {% if request.path == '/upload' or request.path.startswith('/delivery/') %}aria-current="page"{% endif %}>
+            <a class="nav-link {% if request.path == '/upload' %}active{% endif %}" href="/upload" {% if request.path == '/upload' %}aria-current="page"{% endif %}>
                 <i class="nav-icon cil-pencil" aria-hidden="true"></i><span>创作与投递</span>
             </a>
             <div class="nav-title">运营管理</div>

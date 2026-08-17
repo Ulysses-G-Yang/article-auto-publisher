@@ -232,10 +232,22 @@ class DeliveryService:
                     result.get("error") or "平台未确认投递成功",
                     error_code=result.get("error_code") or "DELIVERY_FAILED",
                 )
-            if result.get("media_status") in {"partial", "failed"}:
+            media_incomplete = result.get("media_status") in {"partial", "failed"}
+            if media_incomplete and not result.get("draft_url"):
+                # 草稿都没保存下来，才整体判失败
                 raise AccountUnavailableError(
-                    "图片未完整写入平台，已拒绝把本次投递标记为成功",
+                    "图片未完整写入平台且草稿未保存",
                     error_code=(result.get("media_error_code") or "PLATFORM_MEDIA_INCOMPLETE"),
+                )
+            if media_incomplete:
+                # 草稿已保存但图片未完整：如实标记「已保存（图片未完整）」，
+                # 绝不伪装成完整成功，也绝不把已保存的草稿抹成失败。
+                return await self._mark_completed_with_warnings(
+                    operation_id,
+                    account,
+                    access,
+                    result,
+                    buffered_log.entries,
                 )
             if operation.mode == "PUBLISH" and not result.get("post_url"):
                 raise AccountUnavailableError(
@@ -552,6 +564,71 @@ class DeliveryService:
             )
             await session.flush()
             # best-effort 桥接：投递结果映射到 PlatformArticle（失败不影响执行单）
+            if self.delivery_event_sink is not None:
+                try:
+                    await self.delivery_event_sink(
+                        operation_id=operation_id,
+                        platform=account.platform,
+                        mode=operation.mode,
+                        title=operation.title,
+                        draft_url=operation.draft_url,
+                        platform_url=operation.platform_url,
+                        completed_at=operation.completed_at,
+                        content_reference=operation.content_reference,
+                    )
+                except BaseException as exc:  # noqa: BLE001
+                    logging.getLogger(__name__).warning(
+                        "投递结果桥接失败（执行单仍为成功）: %s",
+                        safe_error_message(exc),
+                    )
+            return operation_payload(operation, account)
+
+    async def _mark_completed_with_warnings(
+        self,
+        operation_id: str,
+        account: PlatformAccount,
+        access: AccessContext,
+        result: dict,
+        logs: list[tuple[str, str]],
+    ) -> dict:
+        """草稿已保存但图片未完整写入：状态置为 *_WITH_WARNINGS，保留草稿链接。
+
+        图片失败信息写入 error_message（业务可读，不伪装成功）；PlatformArticle
+        桥接照常执行（草稿确实存在），status 由桥接侧记录为 UNMAPPED 草稿。
+        """
+        async with self.database.session() as session:
+            operation = await session.get(DeliveryOperation, operation_id)
+            if operation is None:
+                raise AccountNotFoundError("投递执行单不存在")
+            base = "DRAFT_SAVED" if operation.mode == "DRAFT" else "PUBLISHED"
+            operation.status = f"{base}_WITH_WARNINGS"
+            operation.draft_url = result.get("draft_url")
+            operation.platform_url = result.get("post_url") or None
+            operation.error_code = result.get("media_error_code") or "PLATFORM_MEDIA_INCOMPLETE"
+            operation.error_message = (
+                result.get("media_error")
+                or (
+                    "图片未完整写入平台"
+                    f"（{result.get('uploaded_images', 0)}"
+                    f"/{result.get('expected_images', 0)}）"
+                )
+            )
+            operation.completed_at = datetime.now(timezone.utc)
+            _append_buffered_logs(session, operation, account, access, logs)
+            session.add(
+                activity_for(
+                    account,
+                    access,
+                    action="DELIVERY_COMPLETED_WITH_WARNINGS",
+                    level="WARN",
+                    message=(
+                        f"草稿已保存，但图片未完整写入: {operation.error_message}"
+                    ),
+                    operation_id=operation_id,
+                )
+            )
+            await session.flush()
+            # 桥接照常执行：草稿真实存在，映射为 UNMAPPED 草稿记录
             if self.delivery_event_sink is not None:
                 try:
                     await self.delivery_event_sink(

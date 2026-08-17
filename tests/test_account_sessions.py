@@ -27,6 +27,7 @@ from account_sessions.errors import (
     AccountNotFoundError,
     AccountPlatformMismatchError,
     AccountSessionError,
+    AccountUnavailableError,
     ConfirmationRequiredError,
     PublicPublishDisabledError,
 )
@@ -352,6 +353,112 @@ def test_draft_executor_records_platform_logs_and_success(tmp_path: Path) -> Non
         "DRAFT_SAVED",
         "SESSION_CLEARED_AFTER_OPERATION",
     }
+    run(database.dispose())
+
+
+def test_media_incomplete_with_saved_draft_is_with_warnings_not_failed(
+    tmp_path: Path,
+) -> None:
+    """草稿已保存但图片未完整：状态 *_WITH_WARNINGS，不抹成失败。"""
+
+    class FakePlatform:
+        platform_name = "xiaoheihe"
+        context = None
+
+        async def initialize(self) -> None:
+            return None
+
+        async def publish(self, **kwargs) -> dict:
+            return {
+                "success": True,
+                "draft_url": "https://example.invalid/drafts/media1",
+                "post_url": "",
+                "media_status": "failed",
+                "media_error": "3 张图片全部上传失败",
+                "expected_images": 3,
+                "uploaded_images": 0,
+                "failed_images": [{"filename": "a.png", "error": "风控"}],
+            }
+
+        async def cleanup(self) -> None:
+            return None
+
+    database = AccountDatabase(sqlite_database_url(tmp_path))
+    fake = FakePlatform()
+    accounts = AccountSessionService(
+        database,
+        seed_legacy_profiles=False,
+        platform_factory=lambda _account: fake,
+        allowed_profile_roots=(tmp_path / "runtime" / "profiles",),
+    )
+    run(accounts.initialize())
+    profile = make_profile(tmp_path, "xiaoheihe", "media-warning")
+    account = run(insert_account(database, profile))
+    delivery = DeliveryService(
+        accounts,
+        platform_factory=lambda _account: fake,
+        public_publish_enabled=False,
+    )
+    request = DeliveryRequest.model_validate(delivery_payload(account.account_id))
+    queued = run(delivery.request_delivery(request, LOCAL_WEB_CONTEXT))
+    completed = run(delivery.execute_operation(queued["operation_id"], LOCAL_WEB_CONTEXT))
+
+    assert completed["status"] == "DRAFT_SAVED_WITH_WARNINGS"
+    assert completed["draft_url"].endswith("/drafts/media1")
+    assert completed["error_code"] == "PLATFORM_MEDIA_INCOMPLETE"
+    assert "图片" in (completed["error_message"] or "")
+    logs = run(accounts.list_activity(account.account_id, LOCAL_WEB_CONTEXT))
+    assert "DELIVERY_COMPLETED_WITH_WARNINGS" in {row["action"] for row in logs}
+    run(database.dispose())
+
+
+def test_media_incomplete_without_draft_still_fails(tmp_path: Path) -> None:
+    """图片未完整且草稿也没保存：整体判失败，杜绝假成功。"""
+
+    class FakePlatform:
+        platform_name = "xiaoheihe"
+        context = None
+
+        async def initialize(self) -> None:
+            return None
+
+        async def publish(self, **kwargs) -> dict:
+            return {
+                "success": True,
+                "draft_url": "",
+                "post_url": "",
+                "media_status": "failed",
+                "media_error": "1 张图片全部上传失败",
+                "expected_images": 1,
+                "uploaded_images": 0,
+                "failed_images": [],
+            }
+
+        async def cleanup(self) -> None:
+            return None
+
+    database = AccountDatabase(sqlite_database_url(tmp_path))
+    fake = FakePlatform()
+    accounts = AccountSessionService(
+        database,
+        seed_legacy_profiles=False,
+        platform_factory=lambda _account: fake,
+        allowed_profile_roots=(tmp_path / "runtime" / "profiles",),
+    )
+    run(accounts.initialize())
+    profile = make_profile(tmp_path, "xiaoheihe", "media-fail")
+    account = run(insert_account(database, profile))
+    delivery = DeliveryService(
+        accounts,
+        platform_factory=lambda _account: fake,
+        public_publish_enabled=False,
+    )
+    request = DeliveryRequest.model_validate(delivery_payload(account.account_id))
+    queued = run(delivery.request_delivery(request, LOCAL_WEB_CONTEXT))
+
+    with pytest.raises(AccountUnavailableError) as exc_info:
+        run(delivery.execute_operation(queued["operation_id"], LOCAL_WEB_CONTEXT))
+    assert exc_info.value.error_code == "PLATFORM_MEDIA_INCOMPLETE"
     run(database.dispose())
 
 

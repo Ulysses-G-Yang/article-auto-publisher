@@ -470,7 +470,8 @@ class WeiboPlatform(BasePlatform):
                                 ),
                             }
                         )
-                    await self.simulator.random_delay(0.2, 0.5)
+                    # 每张图片之间放慢节奏，降低风控敏感度
+                    await self.simulator.random_delay(2.5, 4.5)
                 else:
                     failed_images.append(
                         {"filename": "", "error": "文章图片块没有对应本地文件"}
@@ -523,19 +524,34 @@ class WeiboPlatform(BasePlatform):
         }
 
     async def _upload_image(self, image_path: str) -> dict:
-        """通过头条文章编辑器的文件控件上传图片；以编辑器内图片数量增加为判据。"""
+        """通过头条文章编辑器的文件控件上传图片；以编辑器内图片数量增加为判据。
+
+        2026-08-17 用户实测：**微博正文插图可以自动化上传**（图片随文章
+        一起保存/发布成功）——编辑器存在 input[type=file] 控件。优先选择
+        accept 含 image 的控件，避免误选封面/其他上传控件（百家号 video
+        控件教训）；找不到 image 控件时退回第一个文件控件。
+        """
 
         self._require_page_alive("微博上传图片")
         try:
             file_inputs = self.page.locator("input[type=file]")
-            if await file_inputs.count() == 0:
+            count = await file_inputs.count()
+            if count == 0:
                 return {"success": False, "error": "微博图片上传控件未找到"}
+            target_input = None
+            for i in range(count):
+                accept = (await file_inputs.nth(i).get_attribute("accept")) or ""
+                if "image" in accept.lower():
+                    target_input = file_inputs.nth(i)
+                    break
+            if target_input is None:
+                target_input = file_inputs.first
             before = await self.page.evaluate(
                 """() => document.querySelectorAll(
                     '.tiptap img, .ProseMirror img'
                 ).length"""
             )
-            await file_inputs.first.set_input_files(str(image_path), timeout=15000)
+            await target_input.set_input_files(str(image_path), timeout=15000)
             after = before
             for _ in range(10):
                 await asyncio.sleep(1)
@@ -559,11 +575,10 @@ class WeiboPlatform(BasePlatform):
     async def set_cover(self) -> dict:
         """从正文图片中选择第一张设为文章封面（微博封面必须来自正文图）。
 
-        2026-08 真实验收结论：**自动化环境下正文插图不可用**——编辑器
-        无 input[type=file] 控件、insert 卡片菜单无图片入口、合成 drop
-        事件不插入图片，判定为微博 Web 对自动化上传的限制。正文无图则
-        封面弹窗无图可选，set_cover 如实失败、绝不假成功；用户手动粘贴
-        /拖拽插图后可手动设置封面。
+        2026-08-17 用户实测：**微博正文插图可自动化上传**（input[type=file]
+        控件存在，图片随文章保存/发布成功）。封面弹窗从正文图缩略图中选
+        第一张；正文无图则弹窗无图可选，set_cover 如实失败、绝不假成功。
+        用户手动粘贴/拖拽插图后可手动设置封面。
         """
 
         self._require_page_alive("微博设置封面")

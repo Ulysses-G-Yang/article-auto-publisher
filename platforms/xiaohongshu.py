@@ -450,12 +450,16 @@ class XiaohongshuPlatform(BasePlatform):
                     continue
                 if not first_text:
                     await self.page.keyboard.press("Enter")
+                    # 分段间留足节奏，降低风控敏感度
+                    await self.simulator.random_delay(0.8, 1.5)
                 lines = text.splitlines() or [text]
                 for i, line in enumerate(lines):
                     if line.strip():
                         await self.page.keyboard.insert_text(line.strip())
+                        await self.simulator.random_delay(0.1, 0.3)
                     if i < len(lines) - 1:
                         await self.page.keyboard.press("Enter")
+                        await self.simulator.random_delay(0.8, 1.5)
                 first_text = False
 
         actual_text = await editor.inner_text()
@@ -496,7 +500,8 @@ class XiaohongshuPlatform(BasePlatform):
                                 ),
                             }
                         )
-                    await self.simulator.random_delay(0.2, 0.5)
+                    # 每张图片之间放慢节奏，避免触发平台风控
+                    await self.simulator.random_delay(2.5, 4.5)
                 else:
                     failed_images.append(
                         {"filename": "", "error": "文章图片块没有对应本地文件"}
@@ -541,21 +546,35 @@ class XiaohongshuPlatform(BasePlatform):
         }
 
     async def _upload_image(self, image_path: str) -> dict:
-        """通过长文编辑器的文件控件上传图片；以编辑器内图片数量增加为成功判据。"""
+        """通过长文编辑器的文件控件上传图片；以编辑器内图片数量增加为成功判据。
+
+        2026-08-17 用户反馈：小红书图片上传应可用，失败疑似自动化节奏
+        过快触发风控。优先选择 accept 含 image 的控件（避免封面/其他
+        上传控件），上传后等待放宽到 15 秒轮询，节奏放缓。
+        """
 
         self._require_page_alive("小红书上传图片")
         try:
             file_inputs = self.page.locator("input[type=file]")
-            if await file_inputs.count() == 0:
+            count = await file_inputs.count()
+            if count == 0:
                 return {"success": False, "error": "小红书图片上传控件未找到"}
+            target_input = None
+            for i in range(count):
+                accept = (await file_inputs.nth(i).get_attribute("accept")) or ""
+                if "image" in accept.lower():
+                    target_input = file_inputs.nth(i)
+                    break
+            if target_input is None:
+                target_input = file_inputs.first
             before = await self.page.evaluate(
                 """() => document.querySelectorAll(
                     '.tiptap img, .ProseMirror img'
                 ).length"""
             )
-            await file_inputs.first.set_input_files(str(image_path), timeout=15000)
+            await target_input.set_input_files(str(image_path), timeout=20000)
             after = before
-            for _ in range(10):
+            for _ in range(15):
                 await asyncio.sleep(1)
                 after = await self.page.evaluate(
                     """() => document.querySelectorAll(
@@ -643,20 +662,22 @@ class XiaohongshuPlatform(BasePlatform):
                     if (target) target.click();
                 }"""
             )
-            await self.simulator.random_delay(2, 4)
+            # 风控敏感：点击后放慢节奏，给平台保存请求留足时间
+            await self.simulator.random_delay(5, 8)
             try:
                 confirm = self.page.locator(
                     "button:has-text('确定'), button:has-text('暂存')"
                 ).first
                 if await confirm.count() > 0:
                     await confirm.click(timeout=3000)
-                    await self.simulator.random_delay(2, 4)
+                    await self.simulator.random_delay(4, 6)
             except Exception:
                 pass
-            for _ in range(10):
+            for _ in range(15):
                 if captured.get("status"):
                     break
                 await asyncio.sleep(1)
+            await self.simulator.random_delay(2, 3)
         finally:
             try:
                 self.page.remove_listener("response", _on_response)
@@ -679,7 +700,7 @@ class XiaohongshuPlatform(BasePlatform):
             )
             after = None
             for _ in range(3):
-                await self.simulator.random_delay(3, 5)
+                await self.simulator.random_delay(5, 8)
                 after = await self._draft_box_count()
                 if after is not None and before is not None and after == before + 1:
                     break

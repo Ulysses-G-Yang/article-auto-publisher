@@ -598,6 +598,47 @@ class ZOLPlatform(BasePlatform):
             ) from exc
         raise SelectorError(f"ZOL_CONTENT_READ_ERROR: 未知编辑器策略 {editor_kind!r}")
 
+    async def _dismiss_editor_overlays(self) -> None:
+        """收拢会拦截编辑器点击的悬浮层（如草稿保存提示框）。
+
+        2026-08-17 实测：输入内容后编辑器上方出现
+        ``.editor-draft-tip-box`` 悬浮提示，拦截 pointer events 导致
+        editor.click() 超时（原报错：draft-tip-box 拦截）。先尝试点掉
+        其关闭按钮，否则强制隐藏，保证后续点击落在编辑器上。
+        """
+
+        try:
+            dismissed = await self.page.evaluate(
+                """() => {
+                    const tips = Array.from(
+                        document.querySelectorAll('.editor-draft-tip-box')
+                    );
+                    if (!tips.length) return true;
+                    for (const tip of tips) {
+                        const closeBtn = tip.querySelector(
+                            '[class*="close" i], .el-icon-close, [aria-label*="关闭" i]'
+                        );
+                        if (closeBtn) { closeBtn.click(); continue; }
+                        tip.style.display = 'none';
+                    }
+                    return true;
+                }"""
+            )
+            if dismissed:
+                await self.simulator.random_delay(0.3, 0.8)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("ZOL 悬浮层收拢失败（继续尝试点击）: {}", exc)
+
+    async def _click_editor(self, editor) -> None:
+        """先收拢拦截点击的悬浮层，再点击编辑器；失败时回退到 focus。"""
+
+        await self._dismiss_editor_overlays()
+        try:
+            await editor.click(timeout=45000)
+        except Exception:
+            await editor.evaluate("(el) => el.focus()")
+            await self.simulator.random_delay(0.3, 0.8)
+
     async def fill_content(self, content_blocks: list, images: list):
         """填写正文、插入图片，并验证文字和图片数量。"""
         editor, editor_kind = await self._resolve_content_editor()
@@ -618,9 +659,10 @@ class ZOLPlatform(BasePlatform):
         # 没有图片时保留原 fill 快速路径；有图片时仍按原始块顺序输入，
         # 规范化只用于读回比较，不得改变冻结内容的写入文本或排版。
         if not has_images:
+            await self._dismiss_editor_overlays()
             await editor.fill(expected_value)
         else:
-            await editor.click(timeout=45000)
+            await self._click_editor(editor)
             await self.page.keyboard.press("Control+A")
             await self.page.keyboard.press("Backspace")
             previous_kind = None
@@ -628,7 +670,7 @@ class ZOLPlatform(BasePlatform):
                 btype = block.get("type")
                 block_text = (block.get("text") or "").strip()
                 if btype in ("text", "heading") and block_text:
-                    await editor.click(timeout=45000)
+                    await self._click_editor(editor)
                     await self.page.keyboard.press("Control+End")
                     if previous_kind == "text":
                         await self.page.keyboard.press("Enter")
@@ -643,7 +685,7 @@ class ZOLPlatform(BasePlatform):
                             await self.page.keyboard.press("Enter")
                     previous_kind = "text"
                 elif btype == "image":
-                    await editor.click(timeout=45000)
+                    await self._click_editor(editor)
                     await self.page.keyboard.press("Control+End")
                     image_file = next(
                         (
@@ -676,7 +718,8 @@ class ZOLPlatform(BasePlatform):
                             "error_code": "ZOL_IMAGE_FILE_MISSING",
                         })
                     previous_kind = "image"
-                await self.simulator.random_delay(0.3, 1.0)
+                # 块与块之间放慢节奏，降低风控敏感度
+                await self.simulator.random_delay(1.5, 3.0)
             await editor.evaluate(
                 "el => el.dispatchEvent(new InputEvent('input', {bubbles: true, inputType: 'insertText'}))"
             )

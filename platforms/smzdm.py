@@ -452,7 +452,8 @@ class SmzdmPlatform(BasePlatform):
                                 ),
                             }
                         )
-                    await self.simulator.random_delay(0.2, 0.5)
+                    # 每张图片之间放慢节奏，降低风控敏感度
+                    await self.simulator.random_delay(2.5, 4.5)
                 else:
                     failed_images.append(
                         {"filename": "", "error": "文章图片块没有对应本地文件"}

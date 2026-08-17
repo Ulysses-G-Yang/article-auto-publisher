@@ -177,6 +177,9 @@ def test_delivery_statuses_are_explicit_and_never_auto_retry_publish() -> None:
     assert "['PARTIAL_FAIL', 'CONFIRMATION_REQUIRED', 'RESULT_UNKNOWN']" in script
     assert "['CREATING', 'QUEUED', 'RUNNING']" in script
     assert "系统不会自动重试" in script
+    assert "platformDraftBoxUrl" in script
+    assert "查看平台草稿箱" in script
+    assert "target.status === 'DRAFT_SAVED'" in script
     assert "retry-target" not in script
     assert "不提供公开发布自动重试按钮" in docs
 

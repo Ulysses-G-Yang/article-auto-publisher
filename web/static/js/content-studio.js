@@ -766,6 +766,19 @@
         return 'text-bg-info';
     }
 
+    function platformDraftBoxUrl(platform) {
+        // 各平台草稿箱直达地址（2026-08 盘点确认）
+        return {
+            xiaoheihe: 'https://www.xiaoheihe.cn/creator/draft',
+            zhihu: 'https://www.zhihu.com/creator/manage/creation/drafts',
+            weibo: 'https://card.weibo.com/article/v5/editor#/draft',
+            smzdm: 'https://post.smzdm.com/tougao/',
+            baijiahao: 'https://baijiahao.baidu.com/builder/rc/manage',
+            xiaohongshu: 'https://creator.xiaohongshu.com/publish/publish',
+            zol: 'https://post.zol.com.cn/v2/home',
+        }[platform] || '';
+    }
+
     function planTargetDetail(target) {
         if (target.status === 'RESULT_UNKNOWN') {
             return '结果未知，请先到平台人工核对；系统不会自动重试。';
@@ -795,6 +808,19 @@
             const row = document.createElement('article'); row.className = 'plan-target';
             const copy = document.createElement('div'); copy.className = 'plan-target-copy'; const strong = document.createElement('strong'); strong.textContent = `${platformLabel(target.platform)} · ${target.account_display_name || '平台账号'}`; const small = document.createElement('small'); small.textContent = planTargetDetail(target); copy.append(strong, small);
             const actions = document.createElement('div'); actions.className = 'plan-target-actions'; const badge = document.createElement('span'); badge.className = `badge ${planBadge(target.status)}`; badge.textContent = planStatusLabels[target.status] || target.status; actions.appendChild(badge);
+            if (target.status === 'DRAFT_SAVED') {
+                const draftBoxUrl = platformDraftBoxUrl(target.platform);
+                if (draftBoxUrl) {
+                    const link = document.createElement('a');
+                    link.className = 'btn btn-sm btn-outline-primary';
+                    link.href = draftBoxUrl;
+                    link.target = '_blank';
+                    link.rel = 'noopener noreferrer';
+                    link.textContent = '查看平台草稿箱';
+                    link.setAttribute('aria-label', `在新标签页打开${platformLabel(target.platform)}草稿箱`);
+                    actions.appendChild(link);
+                }
+            }
             row.append(copy, actions); return row;
         }));
     }

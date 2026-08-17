@@ -30,7 +30,8 @@ def test_navigation_has_one_content_entry() -> None:
     base = read("web/templates/base.html")
     dashboard = read("src/article_mvp/web/templates/dashboard.html")
 
-    assert base.count('href="/upload"') == 2  # sidebar and header primary action
+    # 侧边栏是 /upload 的唯一导航入口（顶部按钮已去重，避免多入口冗余）。
+    assert base.count('href="/upload"') == 1
     assert "创作与投递" in base
     assert 'href="/delivery/new"' not in base
     assert "内容投递</span>" not in base

@@ -620,7 +620,7 @@ class ZOLPlatform(BasePlatform):
         if not has_images:
             await editor.fill(expected_value)
         else:
-            await editor.click()
+            await editor.click(timeout=45000)
             await self.page.keyboard.press("Control+A")
             await self.page.keyboard.press("Backspace")
             previous_kind = None
@@ -628,7 +628,7 @@ class ZOLPlatform(BasePlatform):
                 btype = block.get("type")
                 block_text = (block.get("text") or "").strip()
                 if btype in ("text", "heading") and block_text:
-                    await editor.click()
+                    await editor.click(timeout=45000)
                     await self.page.keyboard.press("Control+End")
                     if previous_kind == "text":
                         await self.page.keyboard.press("Enter")
@@ -643,7 +643,7 @@ class ZOLPlatform(BasePlatform):
                             await self.page.keyboard.press("Enter")
                     previous_kind = "text"
                 elif btype == "image":
-                    await editor.click()
+                    await editor.click(timeout=45000)
                     await self.page.keyboard.press("Control+End")
                     image_file = next(
                         (

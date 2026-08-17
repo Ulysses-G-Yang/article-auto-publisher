@@ -263,20 +263,20 @@ class BaijiahaoPlatform(BasePlatform):
                 wait_until="domcontentloaded",
                 timeout=30000,
             )
+            # 等待编辑器就绪：存草稿按钮或 FeEditor contenteditable 任一出现即可。
+            # 多平台并发投递时页面加载变慢，放宽到 45s。
             await self.page.wait_for_function(
                 """() => {
-                    const nodes = Array.from(document.querySelectorAll('button, [role=button]'));
-                    return nodes.some((el) =>
+                    const hasSave = Array.from(
+                        document.querySelectorAll('button, [role=button]')
+                    ).some((el) =>
                         (el.innerText || '').replace(/\\s+/g, '').includes('存草稿'));
+                    const hasEditor = Array.from(document.querySelectorAll(
+                        "div[class*='FeEditorApp-'][contenteditable='true']"
+                    )).length >= 1;
+                    return hasSave || hasEditor;
                 }""",
-                timeout=25000,
-            )
-            # 等待标题/正文编辑器渲染
-            await self.page.wait_for_function(
-                """() => Array.from(document.querySelectorAll(
-                    "div[class*='FeEditorApp-'][contenteditable='true']"
-                )).length >= 1""",
-                timeout=25000,
+                timeout=45000,
             )
         except BrowserLifecycleError:
             raise

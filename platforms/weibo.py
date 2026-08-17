@@ -661,16 +661,20 @@ class WeiboPlatform(BasePlatform):
         2026-08 实测：保存接口可能返回 code 100000（geetest 风控软提示），
         但保存实际生效（草稿卡片标题更新）。因此以草稿箱列表出现标题
         关键字为准；接口 code 仅作日志参考，不据此判失败。
+
+        安全约束（2026-08-17 修复）：**绝不触发公开发布**——
+        1. 「保存草稿」按钮精确匹配（不做模糊 includes，避免命中发布相关按钮）；
+        2. 点击后监听发布接口（/publish/ 等），一旦捕获到发布请求立即失败；
+        3. 草稿箱验证只认 #/draft 草稿箱列表，不把已发布内容当作草稿。
         """
         self._require_page_alive("微博保存草稿")
         captured: dict = {}
 
         async def _on_response(response) -> None:
             try:
-                if "draft/save" in response.url and response.request.method in (
-                    "POST",
-                    "PUT",
-                ):
+                url = response.url
+                method = response.request.method
+                if "draft/save" in url and method in ("POST", "PUT"):
                     captured["status"] = response.status
                     try:
                         body = await response.json()
@@ -678,6 +682,14 @@ class WeiboPlatform(BasePlatform):
                             captured["code"] = body.get("code")
                     except Exception:
                         pass
+                if (
+                    "/publish" in url
+                    or "/article/publish" in url
+                    or (method in ("POST", "PUT") and "publish" in url.lower())
+                ):
+                    # 一旦出现发布请求，立即标记为误发布，绝不放行
+                    captured["published"] = True
+                    captured["publish_url"] = url[:200]
             except Exception:  # noqa: BLE001
                 pass
 
@@ -688,21 +700,32 @@ class WeiboPlatform(BasePlatform):
                     const nodes = Array.from(
                         document.querySelectorAll('button, [role=button]')
                     );
+                    // 精确匹配「保存草稿」文本（去空白后完全相等），
+                    // 不做 includes，避免命中「发布/下一步」等危险按钮。
                     const target = nodes.find((el) =>
-                        (el.innerText || '').replace(/\\s+/g, '').includes('保存草稿'));
+                        (el.innerText || '').replace(/\\s+/g, '') === '保存草稿');
                     if (target) target.click();
                 }"""
             )
             await self.simulator.random_delay(2, 4)
             for _ in range(10):
-                if captured.get("status"):
+                if captured.get("status") or captured.get("published"):
                     break
                 await asyncio.sleep(1)
+            # 给发布/保存响应一个收敛窗口，避免 status 先到、publish 后到被漏检
+            await self.simulator.random_delay(1, 2)
         finally:
             try:
                 self.page.remove_listener("response", _on_response)
             except Exception:  # noqa: BLE001
                 pass
+
+        if captured.get("published"):
+            logger.error(
+                "微博保存草稿时检测到发布请求，立即失败（绝不误发布）: {}",
+                captured.get("publish_url"),
+            )
+            return ""
 
         if not captured.get("status"):
             logger.error("微博保存草稿未产生任何保存请求")

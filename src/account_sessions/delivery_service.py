@@ -140,9 +140,7 @@ class DeliveryService:
             mode=request.mode,
             source=access.source,
             actor_id=access.actor_id,
-            title=(
-                "[Content Studio immutable version]" if content_reference else request.article.title
-            ),
+            title=request.article.title,
             body=(
                 "[Content Studio content reference]" if content_reference else request.article.body
             ),

@@ -211,8 +211,9 @@ function setMetricMode(mode) {
 
 function statusNode(value) {
   const span = document.createElement("span");
+  const label = { UNMAPPED: "草稿待映射", MAPPED: "已映射" }[value] || value || "—";
   span.className = `status-label ${value || ""}`;
-  span.textContent = value || "—";
+  span.textContent = label;
   return span;
 }
 
@@ -232,9 +233,25 @@ function renderArticles(articles) {
   for (const article of articles) {
     const row = document.createElement("tr");
     appendCell(row, statusNode(article.status));
+    appendCell(row, platformLabel(article.platform));
+    appendCell(row, article.title || "—");
 
     const articleCell = document.createElement("span");
-    if (article.platform_url) {
+    // 草稿模式：external_article_id 是 draft:xxx，展示草稿箱链接更可读
+    const draftUrl = (article.extra_data && article.extra_data.draft_url) || article.platform_url;
+    if (String(article.external_article_id || "").startsWith("draft:")) {
+      if (draftUrl) {
+        const link = document.createElement("a");
+        link.href = draftUrl;
+        link.target = "_blank";
+        link.rel = "noopener noreferrer";
+        link.textContent = "查看平台草稿箱";
+        link.setAttribute("aria-label", "在新标签页打开平台草稿箱");
+        articleCell.appendChild(link);
+      } else {
+        articleCell.textContent = "草稿";
+      }
+    } else if (article.platform_url) {
       const link = document.createElement("a");
       link.href = article.platform_url;
       link.target = "_blank";

@@ -47,7 +47,58 @@
         </div>
     </div>
 
-    <!-- 任务列表 -->
+    <!-- 最近投递（新架构 delivery_operations）置顶显示 -->
+    <div class="card mb-4">
+        <div class="card-header d-flex justify-content-between align-items-center">
+            <h5 class="mb-0"><i class="cil-paper-plane me-1"></i>最近投递</h5>
+            <button class="btn btn-sm btn-outline-secondary" @click="loadDeliveries">
+                <i class="cil-reload me-1"></i>刷新
+            </button>
+        </div>
+        <div class="table-responsive">
+            <table class="table table-hover mb-0">
+                <thead>
+                    <tr>
+                        <th>平台</th>
+                        <th>账号</th>
+                        <th>模式</th>
+                        <th>状态</th>
+                        <th>时间</th>
+                        <th>操作</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <template x-if="deliveries.length === 0">
+                        <tr>
+                            <td colspan="6" class="empty-state">
+                                <i class="cil-paper-plane fs-3 d-block mb-2"></i>
+                                暂无投递记录，去 <a href="/upload">创作与投递</a>
+                            </td>
+                        </tr>
+                    </template>
+                    <template x-for="op in deliveries" :key="op.operation_id">
+                        <tr>
+                            <td><span class="badge bg-info" x-text="platformLabel(op.platform)"></span></td>
+                            <td x-text="op.account_display_name || '-'"></td>
+                            <td><span class="badge text-bg-secondary" x-text="op.mode === 'PUBLISH' ? '公开发布' : '平台草稿'"></span></td>
+                            <td>
+                                <span class="badge" :class="deliveryClass(op.status)" x-text="deliveryLabel(op.status)"></span>
+                                <small class="d-block text-danger" x-show="op.error_code" x-text="op.error_code"></small>
+                            </td>
+                            <td><small class="text-muted" x-text="formatTime(op.created_at)"></small></td>
+                            <td>
+                                <a x-show="op.draft_url" :href="op.draft_url" target="_blank" rel="noopener noreferrer" class="btn btn-sm btn-outline-primary">
+                                    <i class="cil-external-link"></i> 草稿箱
+                                </a>
+                            </td>
+                        </tr>
+                    </template>
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <!-- 任务列表（legacy 队列） -->
     <div class="card">
         <div class="card-header d-flex justify-content-between align-items-center">
             <h5 class="mb-0">任务列表</h5>
@@ -229,7 +280,8 @@ document.addEventListener('alpine:init', () => {
             const m = {
                 queued: '排队中', processing: '处理中', completed: '已完成',
                 completed_with_warnings: '草稿已保存（有警告）',
-                failed: '失败', retrying: '重试中', cancelled: '已取消'
+                failed: '失败', retrying: '重试中', cancelled: '已取消',
+                paused: '已暂停', needs_selection: '待选择话题',
             };
             return m[s] || s;
         },
@@ -239,6 +291,7 @@ document.addEventListener('alpine:init', () => {
                 queued: 'bg-secondary', processing: 'bg-warning text-dark',
                 completed: 'bg-success', completed_with_warnings: 'bg-warning text-dark',
                 failed: 'bg-danger', retrying: 'bg-info',
+                paused: 'bg-warning text-dark', needs_selection: 'bg-warning text-dark',
             };
             return m[s] || 'bg-light text-dark';
         },

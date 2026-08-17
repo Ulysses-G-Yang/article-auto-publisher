@@ -501,13 +501,24 @@ class SmzdmPlatform(BasePlatform):
 
         self._require_page_alive("smzdm 上传图片")
         try:
+            # 优先选择 accept 含 image 的文件控件，避免误选封面/视频控件
+            # （百家号 video 控件教训：file_inputs.first 可能选错）。
+            target_input = None
             file_inputs = self.page.locator("input[type=file]")
-            if await file_inputs.count() == 0:
+            count = await file_inputs.count()
+            if count == 0:
                 return {"success": False, "error": "smzdm 图片上传控件未找到"}
+            for i in range(count):
+                accept = (await file_inputs.nth(i).get_attribute("accept")) or ""
+                if "image" in accept.lower():
+                    target_input = file_inputs.nth(i)
+                    break
+            if target_input is None:
+                target_input = file_inputs.first
             before = await self.page.evaluate(
                 """() => document.querySelectorAll('.ProseMirror img').length"""
             )
-            await file_inputs.first.set_input_files(str(image_path), timeout=15000)
+            await target_input.set_input_files(str(image_path), timeout=15000)
             after = before
             for _ in range(10):
                 await asyncio.sleep(1)
@@ -550,10 +561,15 @@ class SmzdmPlatform(BasePlatform):
         }
 
     async def save_draft(self, title: str = "") -> str:
-        """smzdm 编辑器「草稿将自动保存」；验证 = 捕获自动保存接口 2xx。
+        """smzdm 编辑器「草稿将自动保存」；验证 = 草稿箱出现标题。
 
-        无独立存草稿按钮，自动保存在内容变化后触发；捕获保存相关
-        POST/PUT 2xx 作为成功判据，否则如实失败。
+        无独立存草稿按钮，自动保存在内容变化后触发。要点：
+        1. fill_content 输入期间自动保存已可能触发（此时监听器尚未挂上），
+           因此仅等待「新请求」会误报失败——本方法先主动制造一次内容变化
+           （光标处空格+退格，文档内容不变但触发 onChange），强制刷新自动保存；
+        2. 捕获保存相关 POST/PUT/PATCH 2xx 作为补充证据；
+        3. **平台真值**：回到投稿页「我的草稿」区块，标题关键字出现才算成功
+           （2026-08 实测该区块展示 标题/字数/图数/创建时间/继续编辑）。
         """
         self._require_page_alive("smzdm 保存草稿")
         captured: dict = {}
@@ -578,7 +594,18 @@ class SmzdmPlatform(BasePlatform):
 
         try:
             self.page.on("response", _on_response)
-            # 触发一次显式保存：blur 标题/正文 + 短暂等待自动保存
+            # 主动制造一次内容变化，强制触发自动保存（文档内容保持不变）：
+            # 聚焦正文 → 移到末尾 → 输入一个空格 → 删除 → 失焦。
+            await self.page.evaluate(
+                """() => {
+                    const el = document.querySelector('.ProseMirror');
+                    if (el) el.focus();
+                }"""
+            )
+            await self.simulator.random_delay(0.3, 0.8)
+            await self.page.keyboard.press("End")
+            await self.page.keyboard.type(" ", delay=50)
+            await self.page.keyboard.press("Backspace")
             await self.page.evaluate(
                 """() => {
                     const el = document.activeElement;
@@ -590,6 +617,8 @@ class SmzdmPlatform(BasePlatform):
                 if captured.get("status"):
                     break
                 await asyncio.sleep(1)
+            # 自动保存可能有防抖，多等一会儿让请求落地
+            await self.simulator.random_delay(1, 2)
         finally:
             try:
                 self.page.remove_listener("response", _on_response)
@@ -597,13 +626,52 @@ class SmzdmPlatform(BasePlatform):
                 pass
 
         if not captured.get("status"):
-            logger.error("smzdm 自动保存未产生任何保存请求")
+            logger.warning("smzdm 未捕获到保存请求（继续以草稿箱真值验证）")
+
+        # 平台真值：投稿页「我的草稿」区块出现标题关键字
+        try:
+            await self.page.goto(
+                "https://post.smzdm.com/tougao/",
+                wait_until="domcontentloaded",
+                timeout=30000,
+            )
+            keyword = str(title or "").strip()[:12]
+            if not keyword:
+                logger.error("smzdm 草稿验证缺少标题关键字")
+                return ""
+            found = False
+            for _ in range(3):
+                await self.simulator.random_delay(3, 5)
+                found = bool(
+                    await self.page.evaluate(
+                        "(kw) => (document.body.innerText || '').includes(kw)",
+                        keyword,
+                    )
+                )
+                if found:
+                    break
+            if not found:
+                logger.error(
+                    "smzdm 草稿箱未找到标题包含「{}」的草稿（保存请求={}）",
+                    keyword,
+                    captured.get("status"),
+                )
+                return ""
+            logger.info(
+                "smzdm 草稿验证成功: 草稿箱出现标题「{}」（保存请求={}）",
+                keyword,
+                captured.get("status"),
+            )
+            return "https://post.smzdm.com/tougao/"
+        except BrowserLifecycleError:
+            raise
+        except Exception as exc:
+            if self._exception_means_browser_closed(exc):
+                raise BrowserLifecycleError(
+                    "BROWSER_CONTEXT_CLOSED: smzdm 草稿验证时页面已关闭"
+                ) from exc
+            logger.error("smzdm 草稿箱验证失败: {}", exc)
             return ""
-        if captured.get("error_code") not in (None, 0):
-            logger.error("smzdm 自动保存接口返回错误: {}", captured)
-            return ""
-        logger.info("smzdm 自动保存验证成功: 保存接口 {}", captured.get("status"))
-        return self.page.url or "https://post.smzdm.com/tougao/"
 
     async def publish_now(self, title: str = "") -> str:
         self._not_implemented("公开发布")

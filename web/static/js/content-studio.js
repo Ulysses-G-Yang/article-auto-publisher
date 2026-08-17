@@ -871,6 +871,7 @@
         byId('content-blocks').addEventListener('click', event => { const button = event.target.closest('button[data-action]'); if (!button) return; if (button.dataset.action === 'move-up') moveBlock(button.dataset.blockId, -1); if (button.dataset.action === 'move-down') moveBlock(button.dataset.blockId, 1); if (button.dataset.action === 'delete-block') { state.draft.blocks = state.draft.blocks.filter(block => block.block_id !== button.dataset.blockId); renderBlocks(); markDirty(); } });
         byId('asset-upload').addEventListener('change', event => { uploadAssets(Array.from(event.target.files || [])); event.target.value = ''; });
         byId('create-plan').addEventListener('click', createPlan);
+        byId('save-draft-now').addEventListener('click', () => saveDraftNow());
         byId('execute-plan').addEventListener('click', () => { const hasDraft = state.plan.targets.some(target => target.mode === 'DRAFT'); if (hasDraft && !byId('draft-batch-confirmed').checked) { setMessage('plan-review-error', '请先勾选平台草稿批量摘要确认。'); byId('draft-batch-confirmed').focus(); return; } executePlan({ draft_batch_confirmed: !hasDraft || byId('draft-batch-confirmed').checked, confirmations: {} }, { fromReview: true }); });
         byId('confirm-publish-target').addEventListener('click', confirmPublishTarget);
         byId('new-blank-draft').addEventListener('click', createBlankDraft);

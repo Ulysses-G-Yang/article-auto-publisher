@@ -57,6 +57,8 @@ def test_autosave_and_conflict_paths_are_explicit() -> None:
     script = read("web/static/js/content-studio.js")
 
     assert 'id="save-indicator"' in template
+    assert 'id="save-draft-now"' in template
+    assert "saveDraftNow()" in script
     assert "indexedDB.open('articleops-content-studio', 1)" in script
     assert "setTimeout(() => saveDraftNow(), 1000)" in script
     assert "method: 'PATCH'" in script

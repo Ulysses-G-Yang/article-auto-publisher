@@ -924,11 +924,20 @@
 
     function bindEvents() {
         byId('draft-title').addEventListener('input', event => { state.draft.title = event.target.value; byId('side-draft-title').textContent = event.target.value || '未命名草稿'; markDirty(); });
-        // 知乎式连续编辑区：输入防抖同步，粘贴仅保留纯文本
+        // 知乎式连续编辑区：输入防抖同步；粘贴图片直接上传插入光标处，文字仅保留纯文本
         byId('rich-editor').addEventListener('input', handleEditorInput);
         byId('rich-editor').addEventListener('paste', event => {
             event.preventDefault();
-            const text = (event.clipboardData || window.clipboardData).getData('text/plain');
+            const clipboard = event.clipboardData || window.clipboardData;
+            const pastedImages = Array.from(clipboard.items || [])
+                .filter(item => item.type && item.type.startsWith('image/'))
+                .map(item => item.getAsFile())
+                .filter(Boolean);
+            if (pastedImages.length) {
+                uploadAssets(pastedImages);
+                return;
+            }
+            const text = clipboard.getData('text/plain');
             document.execCommand('insertText', false, text);
         });
         byId('clear-blocks').addEventListener('click', clearAllBlocks);

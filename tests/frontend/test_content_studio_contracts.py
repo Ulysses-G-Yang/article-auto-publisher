@@ -81,6 +81,9 @@ def test_rich_editor_has_continuous_editing_and_drag_import() -> None:
     assert "handleEditorInput" in script
     assert "insertImageIntoEditor" in script
     assert "document.execCommand('insertText'" in script
+    assert "pastedImages" in script
+    assert "item.type.startsWith('image/')" in script
+    assert "getAsFile()" in script
     assert "is-drop-target" in script
     assert "dataTransfer?.types" in script
     assert "startsWith('image/')" in script

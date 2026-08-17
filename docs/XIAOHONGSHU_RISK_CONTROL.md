@@ -45,14 +45,27 @@
 
 ## 4. 后续小红书图片真实验收要求
 
-1. 如需继续探测，用户必须先手动打开已有草稿；禁止工具点击「新的创作」或自动创建草稿。
-2. 只读探测必须复用隔离 Profile 与账号租约，只记录 file input 的脱敏结构。
-3. 只有能证明控件属于正文编辑器且 accept 含 image 的唯一候选，才允许冻结 selector；
-   封面控件、歧义控件和缺失证据一律拒绝。
-4. 真实草稿验收必须由用户明确选择账号、内容和 DRAFT 模式；失败不自动重试。
-5. 图片成功判据是正文编辑器图片数量稳定增加；文字草稿已验收不等于图片已验收。
-6. 公开发布始终关闭；每次涉及小红的操作后，在本文件「操作记录」追加一行。
+1. 默认固定落地页模式只探测 `https://creator.xiaohongshu.com/publish/publish`；
+   若需等待已有草稿，必须显式运行：
+   `probe_xiaohongshu_editor.py --account-id <id> --manual-handoff --handoff-timeout-seconds 300`。
+2. `--manual-handoff` 复用隔离 Profile 与账号租约，启动一个受控 persistent context，
+   然后在同一个 page 上等待已有草稿编辑器出现。主线程未来可用 Computer Use 导航这一个受控页面；
+   普通浏览器、普通标签页或另一上下文中的手动草稿状态不会传递。
+3. 等待期间只读取当前 page 的 origin/path（不记录 query/fragment）和已知正文编辑器是否存在；
+   工具不点击「新的创作」或任何业务按钮，不输入、不选文件、不打开 file chooser、不上传、不保存、不发布、不登录。
+4. 出现正文编辑器后只运行脱敏 DOM 探测：file input 的数量、type/accept/multiple/visible、
+   正文编辑器归属、邻近短标签，以及 toolbar/image-trigger 候选的白名单字段和正文编辑器邻近性；
+   不记录 value/path/href/src/style/class 全量、Cookie、Token、响应正文。
+5. `LOGIN_REQUIRED`、`CHALLENGE`、`PROFILE_IN_USE`、`MANUAL_HANDOFF_TIMEOUT`、
+   `UNEXPECTED_ORIGIN` 均 fail closed 且不自动重试；成功等待只报告 `EDITOR_READY`。
+   固定落地页没有正文图片控件时报告 `LANDING_NO_INPUT`，不得自动创建草稿。
+6. 只有能证明控件属于正文编辑器且 accept 含 image 的唯一候选，才允许冻结 selector；
+   封面控件、歧义控件和缺失证据一律拒绝。本轮不冻结生产 selector。
+7. 真实草稿验收必须由用户明确选择账号、内容和 DRAFT 模式；失败不自动重试。
+8. 图片成功判据是正文编辑器图片数量稳定增加；文字草稿已验收不等于图片已验收。
+9. 公开发布始终关闭；每次涉及小红的操作后，在本文件「操作记录」追加一行。
 
 ## 5. 操作记录
 
 - 2026-08-17 / Codex：复用现有账号租约执行一次发布页只读 DOM 探测；落地页无 file input，未登录、未点击、未输入、未选文件、未保存；图片待真实验收，公开发布关闭。
+- 2026-08-17 / Codex：仅实现同上下文人工交接只读探测模式与测试；本轮未启动浏览器、未执行真实探测；图片待真实验收，公开发布关闭。

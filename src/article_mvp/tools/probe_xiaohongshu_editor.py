@@ -14,7 +14,7 @@ import sqlite3
 import sys
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 SRC_ROOT = PROJECT_ROOT / "src"
@@ -30,6 +30,13 @@ from account_sessions.runtime_paths import default_database_path
 from platforms.xiaohongshu import XiaohongshuPlatform
 
 CREATOR_PUBLISH_URL = "https://creator.xiaohongshu.com/publish/publish"
+CREATOR_ORIGIN = "https://creator.xiaohongshu.com"
+BODY_EDITOR_SELECTOR = "div.tiptap.ProseMirror"
+DEFAULT_MANUAL_HANDOFF_TIMEOUT_SECONDS = 300
+MAX_MANUAL_HANDOFF_TIMEOUT_SECONDS = 600
+MANUAL_HANDOFF_POLL_INTERVAL_SECONDS = 1
+_LOGIN_PATH_MARKERS = ("/login", "/auth", "/passport")
+_CHALLENGE_PATH_MARKERS = ("captcha", "challenge", "verify", "security", "risk")
 _SENSITIVE_VALUE_RE = re.compile(
     r"(?ix)"
     r"(?:[a-z]:[\\/][^\s,;]+|"
@@ -112,6 +119,40 @@ DOM_PROBE_SCRIPT = r"""() => {
         }
         return labels.slice(0, 6);
     };
+    const bodyEditor = document.querySelector(
+        '.tiptap.ProseMirror, [contenteditable="true"]'
+    );
+    const nearBodyEditor = (element) => {
+        if (!bodyEditor) return false;
+        let current = bodyEditor;
+        for (let depth = 0; current && depth < 5; depth += 1, current = current.parentElement) {
+            if (current === element || current.contains(element)) return true;
+        }
+        return false;
+    };
+    const toolbarCandidates = Array.from(document.querySelectorAll(
+        'button, [role="button"], input[type="file"], [aria-label], [title]'
+    )).filter((element) => {
+        const semantic = [
+            element.getAttribute('aria-label'),
+            element.getAttribute('title'),
+            element.getAttribute('type'),
+        ].filter(Boolean).join(' ');
+        return /(图片|插图|上传|本地|image|photo|upload)/i.test(semantic);
+    });
+    const toolbar = toolbarCandidates.slice(0, 12).map((element) => ({
+        tag: element.tagName.toLowerCase(),
+        type: element.getAttribute('type') || '',
+        role: element.getAttribute('role') || '',
+        aria_label: compact(element.getAttribute('aria-label')),
+        title: compact(element.getAttribute('title')),
+        label_text: compact([
+            element.getAttribute('aria-label'),
+            element.getAttribute('title'),
+        ].filter(Boolean).join(' ')),
+        visible: visible(element),
+        near_body_editor: nearBodyEditor(element),
+    }));
     const inputs = Array.from(document.querySelectorAll('input[type="file"]'));
     return {
         inputs: inputs.map((element) => ({
@@ -122,6 +163,7 @@ DOM_PROBE_SCRIPT = r"""() => {
             in_body_editor: hasBodyEditor(element) && !hasCoverMarker(element),
             neighbor_labels: neighboringLabels(element),
         })),
+        toolbar_candidates: toolbar,
     };
 }"""
 
@@ -201,7 +243,29 @@ def sanitize_probe_payload(payload: Any) -> dict[str, Any]:
                     else [],
                 }
             )
-    return {"file_input_count": len(inputs), "inputs": inputs}
+    raw_toolbar = payload.get("toolbar_candidates", []) if isinstance(payload, dict) else []
+    toolbar: list[dict[str, Any]] = []
+    if isinstance(raw_toolbar, list):
+        for item in raw_toolbar:
+            if not isinstance(item, dict):
+                continue
+            toolbar.append(
+                {
+                    "tag": _redact_label(item.get("tag")),
+                    "type": _redact_label(item.get("type")),
+                    "role": _redact_label(item.get("role")),
+                    "aria_label": _redact_label(item.get("aria_label")),
+                    "title": _redact_label(item.get("title")),
+                    "label_text": _redact_label(item.get("label_text")),
+                    "visible": bool(item.get("visible")),
+                    "near_body_editor": bool(item.get("near_body_editor")),
+                }
+            )
+    return {
+        "file_input_count": len(inputs),
+        "inputs": inputs,
+        "toolbar_candidates": toolbar[:12],
+    }
 
 
 def classify_probe_payload(payload: dict[str, Any]) -> str:
@@ -219,6 +283,115 @@ def classify_probe_payload(payload: dict[str, Any]) -> str:
     return "NO_BODY_IMAGE_INPUT"
 
 
+def landing_status_for(payload: dict[str, Any]) -> str:
+    """将固定落地页的无控件结果转换为对外安全状态。"""
+
+    status = classify_probe_payload(payload)
+    if status == "NO_BODY_IMAGE_INPUT":
+        return "LANDING_NO_INPUT"
+    return status
+
+
+def safe_page_location(url: str) -> tuple[str, str]:
+    """只提取 origin/path，绝不返回 query、fragment 或凭据。"""
+
+    try:
+        parsed = urlsplit(str(url or ""))
+        hostname = parsed.hostname or ""
+        port = parsed.port
+    except ValueError:
+        return "", "/"
+    if not parsed.scheme or not hostname:
+        return "", parsed.path or "/"
+    host = hostname.lower()
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"
+    origin = f"{parsed.scheme.lower()}://{host}"
+    if port is not None:
+        origin = f"{origin}:{port}"
+    return origin, parsed.path or "/"
+
+
+def classify_handoff_location(origin: str, path: str) -> str:
+    """分类等待期间的安全终止位置。"""
+
+    normalized_path = str(path or "/").lower()
+    if any(marker in normalized_path for marker in _LOGIN_PATH_MARKERS):
+        return "LOGIN_REQUIRED"
+    if any(marker in normalized_path for marker in _CHALLENGE_PATH_MARKERS):
+        return "CHALLENGE"
+    if origin != CREATOR_ORIGIN:
+        return "UNEXPECTED_ORIGIN"
+    return ""
+
+
+def validate_manual_handoff_timeout(seconds: int) -> int:
+    """限制人工交接等待时间，避免无界驻留。"""
+
+    if (
+        isinstance(seconds, bool)
+        or not isinstance(seconds, int)
+        or seconds < 1
+        or seconds > MAX_MANUAL_HANDOFF_TIMEOUT_SECONDS
+    ):
+        raise ProbeError("HANDOFF_TIMEOUT_INVALID")
+    return seconds
+
+
+async def wait_for_manual_handoff(
+    page: Any,
+    *,
+    timeout_seconds: int = DEFAULT_MANUAL_HANDOFF_TIMEOUT_SECONDS,
+    sleep: Any = asyncio.sleep,
+    clock: Any = None,
+) -> str:
+    """在同一受控 page 上等待已有编辑器，不执行任何业务动作。"""
+
+    timeout = validate_manual_handoff_timeout(timeout_seconds)
+    now = clock or asyncio.get_running_loop().time
+    deadline = now() + timeout
+    while True:
+        try:
+            origin, path = safe_page_location(page.url)
+            location_status = classify_handoff_location(origin, path)
+            if location_status:
+                return location_status
+            if await page.locator(BODY_EDITOR_SELECTOR).count() > 0:
+                return "EDITOR_READY"
+        except ProbeError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            raise ProbeError("BROWSER_CONTEXT_CLOSED") from exc
+        remaining = deadline - now()
+        if remaining <= 0:
+            return "MANUAL_HANDOFF_TIMEOUT"
+        await sleep(min(MANUAL_HANDOFF_POLL_INTERVAL_SECONDS, remaining))
+
+
+_MANUAL_ACTION_REQUIRED_STATUSES = {
+    "LANDING_NO_INPUT",
+    "MANUAL_HANDOFF_TIMEOUT",
+    "LOGIN_REQUIRED",
+    "CHALLENGE",
+}
+
+
+def build_probe_result(
+    status: str,
+    payload: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """统一构造不含 URL/query/敏感 DOM 内容的结果。"""
+
+    safe_payload = sanitize_probe_payload(payload or {})
+    manual_action = manual_action_for(status)
+    return {
+        "status": status,
+        **safe_payload,
+        "manual_action_required": status in _MANUAL_ACTION_REQUIRED_STATUSES,
+        "manual_action": manual_action,
+    }
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="小红书发布页只读 DOM 探测")
     parser.add_argument(
@@ -226,18 +399,60 @@ def parse_args() -> argparse.Namespace:
         required=True,
         help="已存在且 session_status=VALID 的小红书账号 ID",
     )
-    return parser.parse_args()
+    parser.add_argument(
+        "--manual-handoff",
+        action="store_true",
+        help="在同一受控 page 上等待用户导航到已有草稿编辑器",
+    )
+    parser.add_argument(
+        "--handoff-timeout-seconds",
+        type=int,
+        default=DEFAULT_MANUAL_HANDOFF_TIMEOUT_SECONDS,
+        help="人工交接等待秒数（1-600，默认 300）",
+    )
+    args = parser.parse_args()
+    if not 1 <= args.handoff_timeout_seconds <= MAX_MANUAL_HANDOFF_TIMEOUT_SECONDS:
+        parser.error(
+            "handoff timeout must be between 1 and "
+            f"{MAX_MANUAL_HANDOFF_TIMEOUT_SECONDS} seconds"
+        )
+    return args
 
 
 def manual_action_for(status: str) -> str:
-    if status in {"NO_BODY_IMAGE_INPUT", "BODY_INPUT_WITHOUT_IMAGE_ACCEPT"}:
-        return "请用户手动打开已有草稿；工具不会自动创建新的创作"
+    if status in {"NO_BODY_IMAGE_INPUT", "LANDING_NO_INPUT"}:
+        return (
+            "当前仅探测了固定落地页；普通浏览器中的手动草稿不会传递。"
+            "需显式使用 --manual-handoff 在同一受控页面等待已有草稿；工具不会自动创建新的创作"
+        )
+    if status == "BODY_INPUT_WITHOUT_IMAGE_ACCEPT":
+        return "正文输入控件缺少 image accept；不冻结 selector，等待真实证据"
+    if status == "EDITOR_READY":
+        return (
+            "同一受控页面已进入已有编辑器；当前仅读取脱敏 DOM，"
+            "未点击图片工具栏或打开 file chooser"
+        )
+    if status == "MANUAL_HANDOFF_TIMEOUT":
+        return "同一受控页面未在超时内进入已有草稿；未创建、上传或保存"
+    if status == "LOGIN_REQUIRED":
+        return "已检测到登录状态；安全停止，不自动登录或重试"
+    if status == "CHALLENGE":
+        return "已检测到验证码或安全挑战；安全停止，不自动处理或重试"
+    if status == "UNEXPECTED_ORIGIN":
+        return "受控页面离开允许的创作者域名；安全停止，不跟随或重试"
     return ""
 
 
-async def run_probe(account_id: str) -> dict[str, Any]:
+async def run_probe(
+    account_id: str,
+    *,
+    manual_handoff: bool = False,
+    handoff_timeout_seconds: int = DEFAULT_MANUAL_HANDOFF_TIMEOUT_SECONDS,
+) -> dict[str, Any]:
     """复用现有 Profile 租约执行一次只读页面探测。"""
 
+    if manual_handoff:
+        validate_manual_handoff_timeout(handoff_timeout_seconds)
     account = _load_account(account_id)
     lease = AccountProfileLease(account, purpose="XHS_DOM_PROBE")
     platform = XiaohongshuPlatform(
@@ -254,16 +469,21 @@ async def run_probe(account_id: str) -> dict[str, Any]:
                 wait_until="domcontentloaded",
                 timeout=30000,
             )
+            origin, path = safe_page_location(platform.page.url)
+            location_status = classify_handoff_location(origin, path)
+            if location_status:
+                return build_probe_result(location_status)
+            if manual_handoff:
+                handoff_status = await wait_for_manual_handoff(
+                    platform.page,
+                    timeout_seconds=handoff_timeout_seconds,
+                )
+                if handoff_status != "EDITOR_READY":
+                    return build_probe_result(handoff_status)
             raw_payload = await platform.page.evaluate(DOM_PROBE_SCRIPT)
             payload = sanitize_probe_payload(raw_payload)
-            status = classify_probe_payload(payload)
-            manual_action = manual_action_for(status)
-            return {
-                "status": status,
-                **payload,
-                "manual_action_required": bool(manual_action),
-                "manual_action": manual_action,
-            }
+            status = "EDITOR_READY" if manual_handoff else landing_status_for(payload)
+            return build_probe_result(status, payload)
     finally:
         await platform.cleanup()
 
@@ -271,30 +491,28 @@ async def run_probe(account_id: str) -> dict[str, Any]:
 async def _main() -> int:
     args = parse_args()
     try:
-        result = await run_probe(args.account_id)
+        result = await run_probe(
+            args.account_id,
+            manual_handoff=args.manual_handoff,
+            handoff_timeout_seconds=args.handoff_timeout_seconds,
+        )
     except ProbeError as exc:
-        result = {
-            "status": exc.code,
-            "file_input_count": 0,
-            "inputs": [],
-            "manual_action_required": exc.code in {"LOGIN_REQUIRED", "NO_BODY_IMAGE_INPUT"},
-            "manual_action": manual_action_for(exc.code),
-        }
+        result = build_probe_result(exc.code)
     except Exception as exc:  # noqa: BLE001
         message = str(exc).upper()
         if "PROFILE_IN_USE" in message or "SINGLETON" in message:
             code = "PROFILE_IN_USE"
         elif "TIMEOUT" in message:
             code = "NAVIGATION_TIMEOUT"
+        elif "LOGIN" in message or "AUTH" in message:
+            code = "LOGIN_REQUIRED"
+        elif any(marker in message for marker in ("CAPTCHA", "CHALLENGE", "SECURITY")):
+            code = "CHALLENGE"
+        elif any(marker in message for marker in ("CLOSED", "TARGETCLOSED", "BROWSER")):
+            code = "BROWSER_CONTEXT_CLOSED"
         else:
             code = "PROBE_FAILED"
-        result = {
-            "status": code,
-            "file_input_count": 0,
-            "inputs": [],
-            "manual_action_required": False,
-            "manual_action": "",
-        }
+        result = build_probe_result(code)
     print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0
 

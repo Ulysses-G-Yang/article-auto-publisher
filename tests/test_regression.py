@@ -307,7 +307,10 @@ class RegressionTests(DatabaseTestCase):
                 )
                 self.assertEqual(gridstack_response.status_code, 200)
                 gridstack_response.close()
-                self.assertIn("/data-center/", client.get("/").get_data(as_text=True))
+                home_response = client.get("/")
+                self.assertEqual(home_response.status_code, 302)
+                self.assertEqual(home_response.headers.get("Location"), "/upload")
+                home_response.close()
 
                 dashboard_response = client.get("/data-center/api/dashboard")
                 self.assertEqual(dashboard_response.status_code, 200)

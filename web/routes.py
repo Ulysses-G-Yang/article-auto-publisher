@@ -1,25 +1,26 @@
 """Flask 路由 —— 上传、任务管理、账号管理 API"""
-import os
-import json
-import uuid
 import asyncio
+import json
+import os
 import threading
+import uuid
 from datetime import datetime
 
 from flask import (
-    Blueprint, render_template, request, jsonify, Response,
-    current_app, send_from_directory,
+    jsonify,
+    redirect,
+    render_template,
+    request,
 )
-from aiofiles import open as aio_open
 from loguru import logger
 
-from models.database import Database
+from config import get_config
 from core.docx_parser import DocxParser
 from core.nlp_analyzer import NLPAnalyzer
+from core.platform_guard import release as release_platform
+from core.platform_guard import try_acquire as try_acquire_platform
 from core.queue_manager import get_queue_manager
-from core.platform_guard import release as release_platform, try_acquire as try_acquire_platform
-from config import get_config
-
+from models.database import Database
 
 _LOGIN_LOCK = threading.RLock()
 _ACTIVE_LOGINS = {}
@@ -120,7 +121,8 @@ def register_routes(app):
 
     @app.route("/")
     def index():
-        return render_template("index.html")
+        # 统一单入口：legacy 队列首页重定向到创作与投递；任务详情仍保留。
+        return redirect("/upload", code=302)
 
     @app.route("/upload")
     def upload_page():
@@ -207,9 +209,8 @@ def register_routes(app):
                 )
 
                 # 保存图片记录
-                for i, block in enumerate(article.blocks):
+                for block in article.blocks:
                     if block.type == "image":
-                        image_idx = sum(1 for b in article.blocks[:i] if b.type == "image")
                         db.insert_image(
                             article_id=article_id,
                             filename=block.image_filename or "",
@@ -217,7 +218,11 @@ def register_routes(app):
                             position_index=block.position,
                             width=block.image_width or 0,
                             height=block.image_height or 0,
-                            file_size=os.path.getsize(block.image_path) if block.image_path and os.path.exists(block.image_path) else 0,
+                            file_size=(
+                                os.path.getsize(block.image_path)
+                                if block.image_path and os.path.exists(block.image_path)
+                                else 0
+                            ),
                         )
 
                 # 更新话题和标题
@@ -349,10 +354,15 @@ def register_routes(app):
                 return jsonify({
                     "status": "error",
                     "error_code": "SELECTION_REQUIRED",
-                    "message": f"{('小黑盒' if task['platform'] == 'xiaoheihe' else 'ZOL')}还需要填写：{'、'.join(missing)}",
+                    "message": (
+                        f"{('小黑盒' if task['platform'] == 'xiaoheihe' else 'ZOL')}"
+                        f"还需要填写：{'、'.join(missing)}"
+                    ),
                 }), 400
 
-        selection_status = "manual" if (community or topic) else task.get("selection_status", "pending")
+        selection_status = (
+            "manual" if (community or topic) else task.get("selection_status", "pending")
+        )
         selection = {"community": community, "topic": topic}
         db.update_task(
             task_id,
@@ -367,7 +377,12 @@ def register_routes(app):
         )
         db.add_task_log(task_id, "INFO", "任务已手动恢复，等待重新执行")
         get_queue_manager().enqueue(task_id)
-        logger.info("任务 {} 已恢复: platform={}, selection_status={}", task_id, task["platform"], selection_status)
+        logger.info(
+            "任务 {} 已恢复: platform={}, selection_status={}",
+            task_id,
+            task["platform"],
+            selection_status,
+        )
         return jsonify({
             "status": "queued",
             "task_id": task_id,
@@ -451,7 +466,10 @@ def register_routes(app):
         _reconcile_stale_login_states(db)
         attempt_id = _claim_login(db, platform)
         if not attempt_id:
-            return jsonify({"status": "already_logging_in", "message": "正在登录中，请在浏览器中完成操作"}), 409
+            return jsonify({
+                "status": "already_logging_in",
+                "message": "正在登录中，请在浏览器中完成操作",
+            }), 409
 
         # 在新线程中运行异步登录流程
         thread = threading.Thread(
@@ -558,8 +576,8 @@ def _run_login_in_thread(platform: str, attempt_id: str = None):
 
     async def _do_login():
         # 创建独立的平台实例，不与队列 worker 共享
-        from platforms.zol import ZOLPlatform
         from platforms.xiaoheihe import XiaoheihePlatform
+        from platforms.zol import ZOLPlatform
 
         plat = ZOLPlatform() if platform == "zol" else XiaoheihePlatform()
         stage = "initialize"
@@ -620,7 +638,10 @@ def _run_login_in_thread(platform: str, attempt_id: str = None):
                 pass
             error_code = getattr(e, "error_code", None)
             error_text = str(e)
-            if getattr(plat, "last_login_error", "") and getattr(plat, "last_login_error") not in error_text:
+            if (
+                getattr(plat, "last_login_error", "")
+                and plat.last_login_error not in error_text
+            ):
                 error_text = f"{error_text}; {plat.last_login_error}"
             if error_code:
                 error_text = f"{error_code}: {error_text}"
@@ -630,7 +651,8 @@ def _run_login_in_thread(platform: str, attempt_id: str = None):
                 "login_error": error_text,
             }
             logger.error(
-                "登录失败: platform={}, stage={}, url={}, login_selector_count={}, error_code={}, error={}",
+                "登录失败: platform={}, stage={}, url={}, "
+                "login_selector_count={}, error_code={}, error={}",
                 platform,
                 stage,
                 current_url,

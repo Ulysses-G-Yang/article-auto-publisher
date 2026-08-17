@@ -78,7 +78,10 @@ def test_block_editor_has_drag_keyboard_and_mobile_alternatives() -> None:
     assert "reorderByDrop" in script
     assert "is-drop-target" in script
     assert "dataTransfer?.types" in script
-    assert "file.type.startsWith('image/')" in script
+    assert "startsWith('image/')" in script
+    assert "endsWith('.docx')" in script
+    assert "importDocx(docx)" in script
+    assert "drop-overlay" in template
     assert "move-up" in script
     assert "move-down" in script
     assert "delete-block" in script

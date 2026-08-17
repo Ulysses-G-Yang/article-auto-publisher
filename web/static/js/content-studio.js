@@ -870,25 +870,35 @@
         byId('content-blocks').addEventListener('input', event => { const block = state.draft.blocks.find(item => item.block_id === event.target.dataset.blockId); if (!block) return; if (event.target.dataset.action === 'text-input') block.text = event.target.value; if (event.target.dataset.action === 'image-alt') block.alt = event.target.value; markDirty(); });
         byId('content-blocks').addEventListener('click', event => { const button = event.target.closest('button[data-action]'); if (!button) return; if (button.dataset.action === 'move-up') moveBlock(button.dataset.blockId, -1); if (button.dataset.action === 'move-down') moveBlock(button.dataset.blockId, 1); if (button.dataset.action === 'delete-block') { state.draft.blocks = state.draft.blocks.filter(block => block.block_id !== button.dataset.blockId); renderBlocks(); markDirty(); } });
         byId('asset-upload').addEventListener('change', event => { uploadAssets(Array.from(event.target.files || [])); event.target.value = ''; });
-        // 拖拽图片到正文区直接插入（增强 E1）
+        // 拖拽导入：Word(.docx) → 导入并预览；图片 → 插入图片块
         const blocksDrop = byId('content-blocks');
+        const dropOverlay = byId('drop-overlay');
+        function showDropOverlay(visible) {
+            blocksDrop.classList.toggle('is-drop-target', visible);
+            dropOverlay?.classList.toggle('d-none', !visible);
+        }
         ['dragenter', 'dragover'].forEach(type => blocksDrop.addEventListener(type, event => {
             if (Array.from(event.dataTransfer?.types || []).includes('Files')) {
                 event.preventDefault();
-                blocksDrop.classList.add('is-drop-target');
+                showDropOverlay(true);
             }
         }));
         ['dragleave', 'drop'].forEach(type => blocksDrop.addEventListener(type, event => {
             if (type === 'dragleave' && blocksDrop.contains(event.relatedTarget)) return;
-            blocksDrop.classList.remove('is-drop-target');
+            showDropOverlay(false);
         }));
         blocksDrop.addEventListener('drop', event => {
-            const images = Array.from(event.dataTransfer?.files || [])
-                .filter(file => file.type.startsWith('image/'));
-            if (images.length) {
-                event.preventDefault();
-                uploadAssets(images);
-            }
+            const files = Array.from(event.dataTransfer?.files || []);
+            if (!files.length) return;
+            event.preventDefault();
+            setMessage('content-error', '');
+            const docx = files.find(file =>
+                file.name.toLowerCase().endsWith('.docx')
+                || (file.type || '').includes('wordprocessingml'));
+            if (docx) { importDocx(docx); return; }
+            const images = files.filter(file => (file.type || '').startsWith('image/'));
+            if (images.length) { uploadAssets(images); return; }
+            setMessage('content-error', '支持拖入 Word 文档(.docx) 或图片文件。');
         });
         byId('create-plan').addEventListener('click', createPlan);
         byId('save-draft-now').addEventListener('click', () => saveDraftNow());

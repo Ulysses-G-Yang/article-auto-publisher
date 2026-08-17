@@ -243,3 +243,11 @@
 
 /* 图片拖拽插入（E1） */
 .content-blocks.is-drop-target { outline: 2px dashed var(--cui-primary, #0d6efd); outline-offset: 4px; border-radius: .5rem; }
+
+/* 拖拽导入覆盖层：Word/图片 */
+.content-blocks { position: relative; }
+.drop-overlay { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; background: rgba(13,110,253,.06); border: 2px dashed var(--cui-primary, #0d6efd); border-radius: .5rem; z-index: 5; pointer-events: none; }
+.drop-overlay > div { text-align: center; color: var(--cui-primary, #0d6efd); padding: 1rem; }
+.drop-overlay i { display: block; font-size: 1.75rem; margin-bottom: .4rem; }
+.drop-overlay strong { display: block; font-size: 1rem; }
+.drop-overlay small { display: block; color: var(--cui-secondary-color, #6c757d); margin-top: .25rem; }

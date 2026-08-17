@@ -354,7 +354,17 @@
         container.replaceChildren(...state.draft.blocks.map(blockElement));
         byId('blocks-empty').classList.toggle('d-none', state.draft.blocks.length > 0);
         byId('block-count').textContent = `${state.draft.blocks.length} 个块`;
+        const clearButton = byId('clear-blocks');
+        if (clearButton) clearButton.disabled = state.draft.blocks.length === 0;
         updateDraftMeta();
+    }
+
+    function clearAllBlocks() {
+        if (!state.draft || state.draft.blocks.length === 0) return;
+        if (!window.confirm('确定清空正文全部内容吗？清空后可重新拖入 Word 文档或添加图文块。')) return;
+        state.draft.blocks = [];
+        renderBlocks();
+        markDirty();
     }
 
     function addTextBlock(text = '') {
@@ -869,6 +879,7 @@
         byId('blocks-empty').addEventListener('click', event => { if (event.target.closest('[data-action="empty-add-text"]')) addTextBlock(); });
         byId('content-blocks').addEventListener('input', event => { const block = state.draft.blocks.find(item => item.block_id === event.target.dataset.blockId); if (!block) return; if (event.target.dataset.action === 'text-input') block.text = event.target.value; if (event.target.dataset.action === 'image-alt') block.alt = event.target.value; markDirty(); });
         byId('content-blocks').addEventListener('click', event => { const button = event.target.closest('button[data-action]'); if (!button) return; if (button.dataset.action === 'move-up') moveBlock(button.dataset.blockId, -1); if (button.dataset.action === 'move-down') moveBlock(button.dataset.blockId, 1); if (button.dataset.action === 'delete-block') { state.draft.blocks = state.draft.blocks.filter(block => block.block_id !== button.dataset.blockId); renderBlocks(); markDirty(); } });
+        byId('clear-blocks').addEventListener('click', clearAllBlocks);
         byId('asset-upload').addEventListener('change', event => { uploadAssets(Array.from(event.target.files || [])); event.target.value = ''; });
         // 拖拽导入：Word(.docx) → 导入并预览；图片 → 插入图片块
         const blocksDrop = byId('content-blocks');

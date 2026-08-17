@@ -22,6 +22,12 @@ from account_sessions.permissions import (
 )
 from account_sessions.platform_catalog import public_platform_catalog
 from account_sessions.runtime import AccountRuntime
+from account_sessions.session_health import (
+    HeartbeatPolicy,
+    HeartbeatScheduler,
+    HeartbeatService,
+    is_heartbeat_enabled_from_env,
+)
 
 LOGGER = logging.getLogger(__name__)
 
@@ -42,6 +48,10 @@ class AccountSessionRuntimeState:
         release_legacy_guard=None,
         allowed_profile_roots=None,
         delivery_event_sink=None,
+        heartbeat_enabled: bool | None = None,
+        heartbeat_policy: HeartbeatPolicy | None = None,
+        heartbeat_service: HeartbeatService | None = None,
+        heartbeat_scheduler: HeartbeatScheduler | None = None,
     ) -> None:
         self.database = AccountDatabase(database_url)
         self.accounts = AccountSessionService(
@@ -51,6 +61,22 @@ class AccountSessionRuntimeState:
             seed_legacy_profiles=seed_legacy_profiles,
             platform_factory=platform_factory,
             allowed_profile_roots=allowed_profile_roots,
+        )
+        resolved_heartbeat_enabled = (
+            is_heartbeat_enabled_from_env()
+            if heartbeat_enabled is None
+            else bool(heartbeat_enabled)
+        )
+        self.heartbeat = heartbeat_service or HeartbeatService(
+            self.database,
+            self.accounts.verify_account,
+            policy=heartbeat_policy,
+            enabled=resolved_heartbeat_enabled,
+        )
+        self.heartbeat_scheduler = heartbeat_scheduler or HeartbeatScheduler(
+            self.heartbeat,
+            enabled=resolved_heartbeat_enabled,
+            policy=heartbeat_policy,
         )
         self.delivery = DeliveryService(
             self.accounts,
@@ -87,6 +113,8 @@ class AccountSessionRuntimeState:
             if not self._initialized:
                 self._runtime.run(self.accounts.initialize())
                 self._runtime.run(self.delivery.reconcile_interrupted_operations())
+                if self.heartbeat_scheduler.enabled:
+                    self._runtime.run(self.heartbeat_scheduler.start())
                 self._initialized = True
             return self._runtime
 
@@ -97,7 +125,12 @@ class AccountSessionRuntimeState:
             self._runtime = None
             self._initialized = False
         if runtime is not None and owns_runtime:
-            runtime.close(self.database.dispose())
+            try:
+                runtime.run(self.heartbeat_scheduler.stop(), timeout=10)
+            finally:
+                runtime.close(self.database.dispose())
+        elif runtime is not None:
+            runtime.run(self.heartbeat_scheduler.stop(), timeout=10)
 
 
 def create_account_session_blueprint(
@@ -110,6 +143,10 @@ def create_account_session_blueprint(
     public_publish_enabled: bool | None = None,
     allowed_profile_roots=None,
     delivery_event_sink=None,
+    heartbeat_enabled: bool | None = None,
+    heartbeat_policy: HeartbeatPolicy | None = None,
+    heartbeat_service: HeartbeatService | None = None,
+    heartbeat_scheduler: HeartbeatScheduler | None = None,
 ) -> Blueprint:
     """创建可挂载到现役 5000 端口的账号会话 Blueprint。"""
 
@@ -133,6 +170,10 @@ def create_account_session_blueprint(
         release_legacy_guard=release_platform,
         allowed_profile_roots=allowed_profile_roots,
         delivery_event_sink=delivery_event_sink,
+        heartbeat_enabled=heartbeat_enabled,
+        heartbeat_policy=heartbeat_policy,
+        heartbeat_service=heartbeat_service,
+        heartbeat_scheduler=heartbeat_scheduler,
     )
 
     @blueprint.record_once
@@ -169,6 +210,12 @@ def create_account_session_blueprint(
         """供数据中心独立读取账号状态；不耦合文章与采集数据库。"""
 
         return jsonify(state.run(state.accounts.get_account_summary(LOCAL_WEB_CONTEXT)))
+
+    @blueprint.get("/api/account-sessions/health")
+    def account_session_health():
+        """只读汇总，不返回账号级标识或本机 Profile 信息。"""
+
+        return jsonify(state.run(state.heartbeat.get_health_summary(LOCAL_WEB_CONTEXT)))
 
     @blueprint.post("/api/platforms/<platform>/accounts/login")
     def create_account_login(platform: str):

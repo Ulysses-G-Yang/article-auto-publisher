@@ -260,13 +260,36 @@ class AccountSessionService:
                     await platform.login()
                     valid = await _check_login(platform, read_only=False)
                 if not valid:
-                    raise AccountIdentityError("登录态已失效，需要重新登录")
+                    raise AccountIdentityError(
+                        "登录态已失效，需要重新登录",
+                        error_code="LOGIN_REQUIRED",
+                    )
                 identity = await extract_identity(platform)
-        except BaseException as exc:
+        except Exception as exc:
+            # 清理只负责释放浏览器资源，不能遮盖验证阶段的稳定错误。
+            # 尤其是 Profile 被占用时，必须把原始 AccountBusyError 留给
+            # 心跳分类器处理，而不是被 cleanup 的异常替换。
+            try:
+                await platform.cleanup()
+            except Exception:
+                logging.warning("账号 %s 验证失败后的平台清理失败", account_id)
             await self._mark_verification_failure(account_id, access, exc)
             raise
-        finally:
-            await platform.cleanup()
+        except BaseException:
+            # 取消、KeyboardInterrupt 和 SystemExit 不能被当作业务失败；仍
+            # 尝试普通资源清理，但让原始控制流异常继续向上传播。
+            try:
+                await platform.cleanup()
+            except Exception:
+                logging.warning("账号 %s 取消验证后的平台清理失败", account_id)
+            raise
+        else:
+            # 验证和身份提取已经成功；清理失败不应把一次成功验证降级为
+            # 失败，也不应覆盖已写入的 VALID/last_verified_at 状态。
+            try:
+                await platform.cleanup()
+            except Exception:
+                logging.warning("账号 %s 验证成功后的平台清理失败", account_id)
 
         async with self.database.session() as session:
             stored = await session.get(PlatformAccount, account_id)
@@ -399,18 +422,38 @@ class AccountSessionService:
             account = await session.get(PlatformAccount, account_id)
             if account is None:
                 return
-            account.session_status = (
-                "LOGIN_REQUIRED"
-                if "登录" in str(exc) or "LOGIN" in str(exc).upper()
-                else "ERROR"
+            # 这里与心跳服务共享稳定错误码分类；不要用模糊错误文本把
+            # Profile 忙、选择器缺失等可恢复错误误标为 LOGIN_REQUIRED。
+            from account_sessions.session_health import classify_verification_failure
+
+            classification = classify_verification_failure(exc)
+            if classification.category == "LOGIN_REQUIRED":
+                account.session_status = "LOGIN_REQUIRED"
+                account.last_verified_at = None
+            elif classification.preserve_session and account.session_status == "VERIFYING":
+                account.session_status = "VALID" if account.last_verified_at else "UNVERIFIED"
+            elif classification.category == "ERROR" and account.session_status != "VALID":
+                account.session_status = "ERROR"
+            message = (
+                f"会话验证失败（{classification.error_code}）"
+                if access.source == "SYSTEM"
+                else safe_error_message(exc)
             )
             session.add(
                 activity_for(
                     account,
                     access,
-                    action="SESSION_VERIFY_FAILED",
-                    level="ERROR",
-                    message=safe_error_message(exc),
+                    action=(
+                        "SESSION_VERIFY_DEFERRED"
+                        if access.source == "SYSTEM" and classification.category == "BUSY"
+                        else "SESSION_VERIFY_FAILED"
+                    ),
+                    level=(
+                        "WARNING"
+                        if access.source == "SYSTEM" and classification.category == "BUSY"
+                        else "ERROR"
+                    ),
+                    message=message,
                 )
             )
 

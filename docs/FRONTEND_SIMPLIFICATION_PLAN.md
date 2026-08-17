@@ -51,3 +51,56 @@
 ## 七、执行顺序
 
 **A1 → A2 → A3**（每项一提交一推送）→ 用户验收风格 → B 逐项确认 → C 评估后拍板
+
+> 阶段 A 已完成（2026-08-14）：A1 删 delivery（`c193d78`）、A2 data-center 导航对齐（`3533acb`）、A3 首页入口去重（`9ef1139`）。
+
+---
+
+## 八、阶段 D：账号页清理 + 目标选择器滑块化（用户新需求，本次执行）
+
+### 背景
+- `/accounts` 页面存在新旧两套账号界面并存：上面是 legacy 硬编码板块（仅 ZOL/小黑盒，用旧接口 `/api/accounts`），下面是新「多账号会话」模块（全平台动态）。**以新模块为准**，上面是冗余。
+- `/upload` 投递目标选择器交互繁琐（逐个「平台 → 账号 → 添加目标」），用户要求改造成 **iOS 风格滑块**：竖排一列，先滑动平台开关启用，再勾选该平台一个或多个账号。
+- 投递模式（平台草稿 / 公开发布）也要滑块化选择。
+- `/upload` 编辑器目前只有自动保存（无显式保存按钮），需补「保存」按钮；图片插入需增强（后续）。
+
+### D1 删除 accounts legacy 板块
+| 改动 | 文件 |
+|---|---|
+| 删 ZOL/小黑盒 硬编码账号卡、legacy `reloginModal`、legacy toast 容器、内嵌 Alpine `accounts` 脚本、内嵌 legacy 样式 | `web/templates/accounts.html` |
+| 页面头部容器去 Alpine 化（`x-data="accounts"` → 普通容器） | 同上 |
+| 更新前端契约测试：accounts 不再依赖 legacy `/api/accounts` | `tests/frontend/test_frontend_contracts.py` |
+
+### D2 投递目标选择器滑块化（竖排 + 平台开关 + 账号多选 + 模式滑块）
+| 改动 | 文件 |
+|---|---|
+| 竖排一列平台行：logo + 平台名 + 平台开关（Bootstrap `form-switch`） | `web/templates/upload.html` |
+| 开关开 → 行内展开该平台账号多选（checkbox，可勾选一个或多个） | `web/static/js/content-studio.js` |
+| 每个勾选目标显示模式滑块（平台草稿/公开发布，二段 switch） | 同上 |
+| 勾选变化实时更新 targets（PUT 批量）；校验保留（至少一目标、账号 VALID、不重复、`delivery_enabled` 才可投递） | 同上 |
+| 后端契约不变（仍是 `platform + account_id + mode` targets 数组） | — |
+| 更新目标构建器前端测试 | `tests/frontend/test_content_studio_contracts.py` |
+
+### D3 编辑器显式保存按钮
+| 改动 | 文件 |
+|---|---|
+| 编辑区加「保存」按钮（触发 `saveDraftNow()` 手动同步），自动保存保留 | `web/templates/upload.html` + `content-studio.js` |
+
+## 九、阶段 E：后续增强（待逐项拍板）
+
+| # | 改动 | 对标 |
+|---|---|---|
+| E1 | 图片插入增强（工具栏插入 / 拖拽插图） | 行业编辑器 |
+| E2 | 首页 legacy 队列 → 302 `/upload`（`/task/{id}` 保留） | 统一单入口 |
+| E3 | `task_detail.html` 随 E2 决定保留/下线 | — |
+
+## 十、风格基线（阶段 D/E 沿用）
+
+- 只用现有组件类：Bootstrap `form-switch`、`btn`、`badge`、`card`、CoreUI Modal；不引入新样式库
+- 自定义样式进现有 css 文件（content-studio.css），不新增文件
+- 不动后端契约、不碰 `uv.lock`、不真实发布
+- 每轮：ruff → tests/frontend + 全量 pytest → 页面 200 → focused commit → push → 给出浏览器人工核对清单
+
+## 十一、执行顺序（阶段 D）
+
+**D1（删 legacy 板块）→ D2（目标选择器滑块化）→ D3（保存按钮）**，每项一提交一推送，完成后用户浏览器验收。

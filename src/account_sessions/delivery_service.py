@@ -309,6 +309,40 @@ class DeliveryService:
         access.require("logs.read", account.account_id)
         return operation_payload(operation, account)
 
+    async def list_recent_operations(
+        self,
+        access: AccessContext,
+        *,
+        limit: int = 20,
+    ) -> list[dict]:
+        """返回最近投递执行记录（脱敏：仅公开快照字段，不暴露账号细节）。"""
+
+        async with self.database.session() as session:
+            statement = (
+                select(DeliveryOperation)
+                .order_by(
+                    DeliveryOperation.created_at.desc(),
+                    DeliveryOperation.operation_id.desc(),
+                )
+                .limit(min(max(limit, 1), 50))
+            )
+            rows = list((await session.scalars(statement)).all())
+        return [
+            {
+                "operation_id": operation.operation_id,
+                "platform": operation.platform,
+                "account_display_name": operation.account_display_name_snapshot,
+                "mode": operation.mode,
+                "status": operation.status,
+                "draft_url": operation.draft_url,
+                "error_code": operation.error_code,
+                "error_message": operation.error_message,
+                "created_at": _iso(operation.created_at),
+                "completed_at": _iso(operation.completed_at),
+            }
+            for operation in rows
+        ]
+
     async def reconcile_interrupted_operations(self) -> None:
         """启动恢复：QUEUED 可续跑，RUNNING 标为结果未知，绝不自动重放。"""
 

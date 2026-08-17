@@ -243,6 +243,16 @@ def create_account_session_blueprint(
         rows = state.run(state.accounts.list_activity(account_id, LOCAL_WEB_CONTEXT))
         return jsonify({"account_id": account_id, "activities": rows})
 
+    @blueprint.get("/api/delivery-operations")
+    def list_delivery_operations():
+        """最近投递执行记录（脱敏快照），供发布概览展示。"""
+
+        limit = request.args.get("limit", default=20, type=int)
+        operations = state.run(
+            state.delivery.list_recent_operations(LOCAL_WEB_CONTEXT, limit=limit)
+        )
+        return jsonify({"operations": operations})
+
     @blueprint.post("/api/delivery-operations")
     def create_delivery_operation():
         payload = DeliveryRequest.model_validate(request.get_json(silent=True) or {})

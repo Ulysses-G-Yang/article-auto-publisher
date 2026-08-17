@@ -113,6 +113,57 @@
         </div>
     </div>
 
+    <!-- 最近投递（新架构 delivery_operations） -->
+    <div class="card mt-4">
+        <div class="card-header d-flex justify-content-between align-items-center">
+            <h5 class="mb-0">最近投递</h5>
+            <button class="btn btn-sm btn-outline-secondary" @click="loadDeliveries">
+                <i class="cil-reload me-1"></i>刷新
+            </button>
+        </div>
+        <div class="table-responsive">
+            <table class="table table-hover mb-0">
+                <thead>
+                    <tr>
+                        <th>平台</th>
+                        <th>账号</th>
+                        <th>模式</th>
+                        <th>状态</th>
+                        <th>时间</th>
+                        <th>操作</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <template x-if="deliveries.length === 0">
+                        <tr>
+                            <td colspan="6" class="empty-state">
+                                <i class="cil-paper-plane fs-3 d-block mb-2"></i>
+                                暂无投递记录，去 <a href="/upload">创作与投递</a>
+                            </td>
+                        </tr>
+                    </template>
+                    <template x-for="op in deliveries" :key="op.operation_id">
+                        <tr>
+                            <td><span class="badge bg-info" x-text="platformLabel(op.platform)"></span></td>
+                            <td x-text="op.account_display_name || '-'"></td>
+                            <td><span class="badge text-bg-secondary" x-text="op.mode === 'PUBLISH' ? '公开发布' : '平台草稿'"></span></td>
+                            <td>
+                                <span class="badge" :class="deliveryClass(op.status)" x-text="deliveryLabel(op.status)"></span>
+                                <small class="d-block text-danger" x-show="op.error_code" x-text="op.error_code"></small>
+                            </td>
+                            <td><small class="text-muted" x-text="formatTime(op.created_at)"></small></td>
+                            <td>
+                                <a x-show="op.draft_url" :href="op.draft_url" target="_blank" rel="noopener noreferrer" class="btn btn-sm btn-outline-primary">
+                                    <i class="cil-external-link"></i> 草稿箱
+                                </a>
+                            </td>
+                        </tr>
+                    </template>
+                </tbody>
+            </table>
+        </div>
+    </div>
+
     <!-- 自动刷新 -->
     <div class="text-muted text-center mt-3">
         <small>每 5 秒自动刷新</small>
@@ -123,6 +174,7 @@
 document.addEventListener('alpine:init', () => {
     Alpine.data('dashboard', () => ({
         tasks: [],
+        deliveries: [],
         status: { queue_size: 0, running: false },
         timer: null,
 
@@ -135,10 +187,42 @@ document.addEventListener('alpine:init', () => {
                 this.tasks = await taskRes.json();
                 this.status = await statusRes.json();
             } catch (e) {}
+            await this.loadDeliveries();
+        },
+
+        async loadDeliveries() {
+            try {
+                const res = await fetch('/api/delivery-operations?limit=20');
+                const payload = await res.json();
+                this.deliveries = Array.isArray(payload.operations) ? payload.operations : [];
+            } catch (e) {}
         },
 
         platformLabel(p) {
-            return { zol: '中关村在线', xiaoheihe: '小黑盒' }[p] || p;
+            const m = {
+                zol: '中关村在线', xiaoheihe: '小黑盒', zhihu: '知乎', weibo: '微博',
+                smzdm: '什么值得买', baijiahao: '百家号', xiaohongshu: '小红书',
+                douyin: '抖音', toutiao: '头条号',
+            };
+            return m[p] || p;
+        },
+
+        deliveryLabel(s) {
+            const m = {
+                QUEUED: '已排队', RUNNING: '执行中', DRAFT_SAVED: '草稿已保存',
+                PUBLISHED: '已发布', FAILED: '失败', RESULT_UNKNOWN: '结果未知',
+                CONFIRMATION_REQUIRED: '待公开确认', BLOCKED: '已拦截',
+            };
+            return m[s] || s;
+        },
+
+        deliveryClass(s) {
+            const m = {
+                DRAFT_SAVED: 'bg-success', PUBLISHED: 'bg-success',
+                FAILED: 'bg-danger', RESULT_UNKNOWN: 'bg-warning text-dark',
+                BLOCKED: 'bg-danger',
+            };
+            return m[s] || 'bg-light text-dark';
         },
 
         statusLabel(s) {

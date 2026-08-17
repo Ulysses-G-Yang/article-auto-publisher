@@ -50,7 +50,52 @@ class AccountDatabase:
     async def initialize(self) -> None:
         async with self.engine.begin() as connection:
             await connection.run_sync(Base.metadata.create_all)
+            await connection.run_sync(self._upgrade_platform_account_schema)
             await connection.run_sync(self._upgrade_delivery_operation_schema)
+
+    @staticmethod
+    def _upgrade_platform_account_schema(connection) -> None:
+        """为既有账号数据库幂等补充会话健康字段。"""
+
+        columns = {
+            row[1]
+            for row in connection.exec_driver_sql(
+                "PRAGMA table_info(platform_accounts)"
+            ).fetchall()
+        }
+        additions = (
+            (
+                "heartbeat_enabled",
+                "ALTER TABLE platform_accounts "
+                "ADD COLUMN heartbeat_enabled BOOLEAN NOT NULL DEFAULT 1",
+            ),
+            (
+                "next_heartbeat_at",
+                "ALTER TABLE platform_accounts ADD COLUMN next_heartbeat_at DATETIME",
+            ),
+            (
+                "last_heartbeat_at",
+                "ALTER TABLE platform_accounts ADD COLUMN last_heartbeat_at DATETIME",
+            ),
+            (
+                "heartbeat_failures",
+                "ALTER TABLE platform_accounts "
+                "ADD COLUMN heartbeat_failures INTEGER NOT NULL DEFAULT 0",
+            ),
+            (
+                "last_heartbeat_error_code",
+                "ALTER TABLE platform_accounts "
+                "ADD COLUMN last_heartbeat_error_code VARCHAR(64)",
+            ),
+        )
+        for column_name, statement in additions:
+            if column_name not in columns:
+                connection.exec_driver_sql(statement)
+        connection.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_account_heartbeat_due "
+            "ON platform_accounts(status, heartbeat_enabled, next_heartbeat_at)"
+        )
+
 
     @staticmethod
     def _upgrade_delivery_operation_schema(connection) -> None:

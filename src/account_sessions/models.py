@@ -11,6 +11,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
@@ -33,6 +34,7 @@ class PlatformAccount(Base):
         ),
         UniqueConstraint("profile_path", name="uq_account_profile_path"),
         Index("ix_account_platform_status", "platform", "status", "session_status"),
+        Index("ix_account_heartbeat_due", "status", "heartbeat_enabled", "next_heartbeat_at"),
     )
 
     account_id: Mapped[str] = mapped_column(String(36), primary_key=True)
@@ -44,6 +46,21 @@ class PlatformAccount(Base):
     status: Mapped[str] = mapped_column(String(16), default="ACTIVE", nullable=False)
     session_status: Mapped[str] = mapped_column(String(24), default="UNVERIFIED", nullable=False)
     persist_login: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    heartbeat_enabled: Mapped[bool] = mapped_column(
+        Boolean, default=True, server_default=text("1"), nullable=False
+    )
+    next_heartbeat_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    last_heartbeat_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    heartbeat_failures: Mapped[int] = mapped_column(
+        Integer, default=0, server_default=text("0"), nullable=False
+    )
+    last_heartbeat_error_code: Mapped[str | None] = mapped_column(
+        String(64), nullable=True
+    )
     last_verified_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )

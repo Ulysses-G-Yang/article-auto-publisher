@@ -18,7 +18,7 @@ SRC_ROOT = PROJECT_ROOT / "src"
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
-from account_sessions.account_service import AccountSessionService
+from account_sessions.account_service import AccountSessionService, public_account
 from account_sessions.contracts import DeliveryRequest
 from account_sessions.database import AccountDatabase
 from account_sessions.delivery_service import DeliveryService
@@ -123,6 +123,130 @@ def test_database_schema_pragmas_and_idempotent_initialization(tmp_path: Path) -
         assert connection.execute("PRAGMA busy_timeout").fetchone()[0] == 5000
         connection.execute("PRAGMA foreign_keys=ON")
         assert connection.execute("PRAGMA foreign_keys").fetchone()[0] == 1
+
+
+def test_heartbeat_schema_fields_defaults_and_index_are_idempotent(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "accounts.db"
+    database = AccountDatabase(sqlite_database_url(tmp_path))
+    run(database.initialize())
+    run(database.initialize())
+    run(database.dispose())
+
+    with sqlite3.connect(database_path) as connection:
+        columns = {
+            row[1]: row
+            for row in connection.execute("PRAGMA table_info(platform_accounts)")
+        }
+        assert {
+            "heartbeat_enabled",
+            "next_heartbeat_at",
+            "last_heartbeat_at",
+            "heartbeat_failures",
+            "last_heartbeat_error_code",
+        }.issubset(columns)
+        assert columns["heartbeat_enabled"][3] == 1
+        assert columns["heartbeat_enabled"][4] == "1"
+        assert columns["heartbeat_failures"][3] == 1
+        assert columns["heartbeat_failures"][4] == "0"
+
+        indexes = {
+            row[1]: row
+            for row in connection.execute("PRAGMA index_list(platform_accounts)")
+        }
+        assert "ix_account_heartbeat_due" in indexes
+        index_columns = [
+            row[2]
+            for row in connection.execute(
+                "PRAGMA index_info(ix_account_heartbeat_due)"
+            )
+        ]
+        assert index_columns == ["status", "heartbeat_enabled", "next_heartbeat_at"]
+
+
+def test_heartbeat_schema_upgrade_is_idempotent_and_backfills_old_rows(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "accounts.db"
+    with sqlite3.connect(database_path) as connection:
+        connection.executescript(
+            """
+            CREATE TABLE platform_accounts (
+                account_id VARCHAR(36) PRIMARY KEY,
+                platform VARCHAR(32) NOT NULL,
+                platform_user_id VARCHAR(255),
+                display_name VARCHAR(255) NOT NULL,
+                profile_path VARCHAR(2048) NOT NULL,
+                is_legacy_profile BOOLEAN NOT NULL DEFAULT 0,
+                status VARCHAR(16) NOT NULL DEFAULT 'ACTIVE',
+                session_status VARCHAR(24) NOT NULL DEFAULT 'UNVERIFIED',
+                persist_login BOOLEAN NOT NULL DEFAULT 1,
+                last_verified_at DATETIME,
+                created_at DATETIME NOT NULL,
+                updated_at DATETIME NOT NULL
+            );
+            INSERT INTO platform_accounts (
+                account_id, platform, display_name, profile_path,
+                created_at, updated_at
+            ) VALUES (
+                'old-account', 'xiaoheihe', '旧账号', '/tmp/old-profile',
+                CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+            );
+            """
+        )
+
+    database = AccountDatabase(sqlite_database_url(tmp_path))
+    run(database.initialize())
+    run(database.initialize())
+
+    async def read_old_row() -> PlatformAccount:
+        async with database.session() as session:
+            row = await session.get(PlatformAccount, "old-account")
+            assert row is not None
+            return row
+
+    row = run(read_old_row())
+    assert row.heartbeat_enabled is True
+    assert row.heartbeat_failures == 0
+    assert row.next_heartbeat_at is None
+    assert row.last_heartbeat_at is None
+    assert row.last_heartbeat_error_code is None
+    run(database.dispose())
+
+
+def test_public_account_is_a_safe_health_projection_whitelist(tmp_path: Path) -> None:
+    account = PlatformAccount(
+        account_id="safe-account",
+        platform="xiaoheihe",
+        platform_user_id="raw-platform-id",
+        display_name="公开昵称",
+        profile_path=str(tmp_path / "secret-profile"),
+        heartbeat_enabled=True,
+        heartbeat_failures=2,
+        last_heartbeat_error_code="RATE_LIMITED",
+    )
+
+    projection = public_account(account)
+    assert set(projection) == {
+        "account_id",
+        "display_name",
+        "masked_platform_user_id",
+        "status",
+        "session_status",
+        "persist_login",
+        "heartbeat_enabled",
+        "next_heartbeat_at",
+        "last_heartbeat_at",
+        "heartbeat_failures",
+        "last_heartbeat_error_code",
+        "last_verified_at",
+    }
+    assert projection["masked_platform_user_id"] != "raw-platform-id"
+    assert "profile_path" not in projection
+    assert "platform_user_id" not in projection
+    assert "cookie" not in {key.lower() for key in projection}
+    assert "token" not in {key.lower() for key in projection}
 
 
 def test_platform_filter_is_dynamic_and_never_leaks_sensitive_fields(
@@ -619,6 +743,11 @@ def test_blueprint_matches_frontend_contract_and_injects_article(tmp_path: Path)
             "status": "ACTIVE",
             "session_status": "VALID",
             "persist_login": True,
+            "heartbeat_enabled": True,
+            "next_heartbeat_at": None,
+            "last_heartbeat_at": None,
+            "heartbeat_failures": 0,
+            "last_heartbeat_error_code": None,
             "last_verified_at": None,
         }
     ]

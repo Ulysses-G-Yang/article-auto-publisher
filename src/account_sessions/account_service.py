@@ -464,6 +464,11 @@ def public_account(account: PlatformAccount) -> dict:
         "status": account.status,
         "session_status": account.session_status,
         "persist_login": account.persist_login,
+        "heartbeat_enabled": account.heartbeat_enabled,
+        "next_heartbeat_at": _iso(account.next_heartbeat_at),
+        "last_heartbeat_at": _iso(account.last_heartbeat_at),
+        "heartbeat_failures": account.heartbeat_failures,
+        "last_heartbeat_error_code": account.last_heartbeat_error_code,
         "last_verified_at": _iso(account.last_verified_at),
     }
 

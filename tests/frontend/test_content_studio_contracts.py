@@ -68,24 +68,27 @@ def test_autosave_and_conflict_paths_are_explicit() -> None:
     assert "已恢复本地未同步内容" in script
 
 
-def test_block_editor_has_drag_keyboard_and_mobile_alternatives() -> None:
+def test_rich_editor_has_continuous_editing_and_drag_import() -> None:
     template = read("web/templates/upload.html")
     script = read("web/static/js/content-studio.js")
     styles = read("web/static/css/content-studio.css")
 
     assert 'id="asset-upload"' in template
-    assert "article.draggable = true" in script
-    assert "reorderByDrop" in script
+    assert 'id="rich-editor"' in template
+    assert 'contenteditable="true"' in template
+    assert "function blocksToHtml(blocks)" in script
+    assert "function parseEditorToBlocks()" in script
+    assert "handleEditorInput" in script
+    assert "insertImageIntoEditor" in script
+    assert "document.execCommand('insertText'" in script
     assert "is-drop-target" in script
     assert "dataTransfer?.types" in script
     assert "startsWith('image/')" in script
     assert "endsWith('.docx')" in script
     assert "importDocx(docx)" in script
     assert "drop-overlay" in template
-    assert "move-up" in script
-    assert "move-down" in script
-    assert "delete-block" in script
-    assert "image-alt" in script
+    assert ".rich-editor" in styles
+    assert ".rich-image" in styles
     assert "@media (max-width: 575.98px)" in styles
 
 

@@ -297,66 +297,85 @@
         return Number.isNaN(date.valueOf()) ? value : new Intl.DateTimeFormat('zh-CN', { dateStyle: 'medium', timeStyle: 'short' }).format(date);
     }
 
-    function iconButton(iconClass, label, action, blockId, disabled = false) {
-        const button = document.createElement('button');
-        button.type = 'button';
-        button.className = 'btn btn-ghost-secondary btn-sm';
-        button.dataset.action = action;
-        button.dataset.blockId = blockId;
-        button.disabled = disabled;
-        button.setAttribute('aria-label', label);
-        const icon = document.createElement('i');
-        icon.className = iconClass;
-        icon.setAttribute('aria-hidden', 'true');
-        button.appendChild(icon);
-        return button;
+    function escapeHtml(value) {
+        return String(value || '').replace(/[&<>"']/g, ch => (
+            { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]
+        ));
     }
 
-    function blockElement(block, index) {
-        const article = document.createElement('article');
-        article.className = 'content-block';
-        article.dataset.blockId = block.block_id;
-        article.draggable = true;
-        article.addEventListener('dragstart', () => { state.draggedBlockId = block.block_id; article.classList.add('is-dragging'); });
-        article.addEventListener('dragend', () => { state.draggedBlockId = null; article.classList.remove('is-dragging'); document.querySelectorAll('.drag-over').forEach(item => item.classList.remove('drag-over')); });
-        article.addEventListener('dragover', event => { event.preventDefault(); if (state.draggedBlockId !== block.block_id) article.classList.add('drag-over'); });
-        article.addEventListener('dragleave', () => article.classList.remove('drag-over'));
-        article.addEventListener('drop', event => { event.preventDefault(); reorderByDrop(state.draggedBlockId, block.block_id); });
-
-        const handle = document.createElement('button');
-        handle.type = 'button'; handle.className = 'block-handle'; handle.setAttribute('aria-label', '拖动调整图文块顺序');
-        const handleIcon = document.createElement('i'); handleIcon.className = 'cil-cursor-move'; handleIcon.setAttribute('aria-hidden', 'true'); handle.appendChild(handleIcon);
-        const content = document.createElement('div'); content.className = 'block-content';
-        if (block.type === 'image') {
-            const preview = document.createElement('div'); preview.className = 'block-image-preview';
-            const image = document.createElement('img'); image.src = block.asset_url || `/api/content-assets/${encodeURIComponent(block.asset_id)}`; image.alt = block.alt || '文章图片'; image.loading = 'lazy';
-            const meta = document.createElement('div'); meta.className = 'block-image-meta';
-            const type = document.createElement('span'); type.textContent = '图片块';
-            const alt = document.createElement('input'); alt.type = 'text'; alt.className = 'form-control form-control-sm'; alt.placeholder = '图片替代文本（可选）'; alt.value = block.alt || ''; alt.dataset.action = 'image-alt'; alt.dataset.blockId = block.block_id; alt.setAttribute('aria-label', '图片替代文本');
-            meta.append(type, alt); preview.append(image, meta); content.appendChild(preview);
-        } else {
-            const label = document.createElement('label'); label.className = 'visually-hidden'; label.htmlFor = `block-${block.block_id}`; label.textContent = `正文文字块 ${index + 1}`;
-            const textarea = document.createElement('textarea'); textarea.id = `block-${block.block_id}`; textarea.className = 'form-control'; textarea.placeholder = '输入正文内容…'; textarea.value = block.text || ''; textarea.dataset.action = 'text-input'; textarea.dataset.blockId = block.block_id;
-            content.append(label, textarea);
-        }
-        const actions = document.createElement('div'); actions.className = 'block-actions';
-        actions.append(
-            iconButton('cil-arrow-top', '上移该图文块', 'move-up', block.block_id, index === 0),
-            iconButton('cil-arrow-bottom', '下移该图文块', 'move-down', block.block_id, index === state.draft.blocks.length - 1),
-            iconButton('cil-trash', '删除该图文块', 'delete-block', block.block_id),
-        );
-        article.append(handle, content, actions);
-        return article;
+    function blocksToHtml(blocks) {
+        return (blocks || []).map(block => {
+            if (block.type === 'image') {
+                const src = block.asset_url
+                    || `/api/content-assets/${encodeURIComponent(block.asset_id)}`;
+                return `<figure class="rich-image" data-asset-id="${encodeURIComponent(block.asset_id)}">`
+                    + `<img src="${src}" alt="${escapeHtml(block.alt || '')}" `
+                    + `data-asset-id="${encodeURIComponent(block.asset_id)}" loading="lazy">`
+                    + `<figcaption>${escapeHtml(block.alt || '')}</figcaption></figure>`;
+            }
+            return `<p>${escapeHtml(block.text || '')}</p>`;
+        }).join('');
     }
 
     function renderBlocks() {
-        const container = byId('content-blocks');
-        container.replaceChildren(...state.draft.blocks.map(blockElement));
-        byId('blocks-empty').classList.toggle('d-none', state.draft.blocks.length > 0);
-        byId('block-count').textContent = `${state.draft.blocks.length} 个块`;
+        const editor = byId('rich-editor');
+        if (editor) editor.innerHTML = blocksToHtml(state.draft.blocks);
+        syncBlocksMeta();
+    }
+
+    function syncBlocksMeta() {
+        const count = state.draft ? state.draft.blocks.length : 0;
+        byId('blocks-empty').classList.toggle('d-none', count > 0);
+        byId('block-count').textContent = `${count} 个块`;
         const clearButton = byId('clear-blocks');
-        if (clearButton) clearButton.disabled = state.draft.blocks.length === 0;
+        if (clearButton) clearButton.disabled = count === 0;
         updateDraftMeta();
+    }
+
+    function parseEditorToBlocks() {
+        const editor = byId('rich-editor');
+        if (!editor) return [];
+        const blocks = [];
+        let position = 0;
+        for (const node of editor.childNodes) {
+            if (node.nodeType === Node.TEXT_NODE) {
+                const text = (node.textContent || '').replace(/\n+$/g, '');
+                if (text.trim()) blocks.push({ block_id: uid(), type: 'text', text, position: position++ });
+                continue;
+            }
+            if (node.nodeType !== Node.ELEMENT_NODE) continue;
+            const img = node.tagName === 'IMG' ? node : node.querySelector('img');
+            if (img && img.dataset.assetId) {
+                blocks.push({
+                    block_id: uid(), type: 'image',
+                    asset_id: img.dataset.assetId, alt: img.alt || '文档图片',
+                    position: position++,
+                });
+                continue;
+            }
+            const text = (node.innerText || '').replace(/\n+$/g, '');
+            if (text.trim()) blocks.push({ block_id: uid(), type: 'text', text, position: position++ });
+        }
+        return blocks;
+    }
+
+    let editorParseTimer = null;
+    function handleEditorInput() {
+        clearTimeout(editorParseTimer);
+        editorParseTimer = setTimeout(() => {
+            if (!state.draft) return;
+            const blocks = parseEditorToBlocks();
+            const current = state.draft.blocks;
+            const same = current.length === blocks.length && current.every((block, index) =>
+                block.type === blocks[index].type
+                && (block.type === 'image'
+                    ? block.asset_id === blocks[index].asset_id
+                    : block.text === blocks[index].text));
+            if (same) return;
+            state.draft.blocks = blocks;
+            syncBlocksMeta();
+            markDirty();
+        }, 600);
     }
 
     function clearAllBlocks() {
@@ -367,31 +386,42 @@
         markDirty();
     }
 
-    function addTextBlock(text = '') {
-        state.draft.blocks.push({ block_id: uid(), type: 'text', text, position: state.draft.blocks.length });
-        renderBlocks();
-        markDirty();
-        requestAnimationFrame(() => byId(`block-${state.draft.blocks.at(-1).block_id}`)?.focus());
+    function addTextBlock() {
+        const editor = byId('rich-editor');
+        if (!editor) return;
+        const paragraph = document.createElement('p');
+        editor.appendChild(paragraph);
+        const range = document.createRange();
+        range.selectNodeContents(paragraph);
+        range.collapse(false);
+        const selection = window.getSelection();
+        selection.removeAllRanges();
+        selection.addRange(range);
+        paragraph.focus();
     }
 
-    function moveBlock(blockId, delta) {
-        const index = state.draft.blocks.findIndex(block => block.block_id === blockId);
-        const target = index + delta;
-        if (index < 0 || target < 0 || target >= state.draft.blocks.length) return;
-        [state.draft.blocks[index], state.draft.blocks[target]] = [state.draft.blocks[target], state.draft.blocks[index]];
-        state.draft.blocks.forEach((block, position) => { block.position = position; });
-        renderBlocks(); markDirty();
-    }
-
-    function reorderByDrop(sourceId, targetId) {
-        if (!sourceId || sourceId === targetId) return;
-        const sourceIndex = state.draft.blocks.findIndex(block => block.block_id === sourceId);
-        const targetIndex = state.draft.blocks.findIndex(block => block.block_id === targetId);
-        if (sourceIndex < 0 || targetIndex < 0) return;
-        const [moved] = state.draft.blocks.splice(sourceIndex, 1);
-        state.draft.blocks.splice(targetIndex, 0, moved);
-        state.draft.blocks.forEach((block, position) => { block.position = position; });
-        renderBlocks(); markDirty();
+    function insertImageIntoEditor(asset) {
+        const editor = byId('rich-editor');
+        const figure = document.createElement('figure');
+        figure.className = 'rich-image';
+        const img = document.createElement('img');
+        img.src = asset.asset_url || `/api/content-assets/${encodeURIComponent(asset.asset_id)}`;
+        img.alt = '';
+        img.dataset.assetId = asset.asset_id;
+        img.loading = 'lazy';
+        figure.appendChild(img);
+        const selection = window.getSelection();
+        if (selection && selection.rangeCount && editor.contains(selection.anchorNode)) {
+            const range = selection.getRangeAt(0);
+            range.deleteContents();
+            range.insertNode(figure);
+            range.setStartAfter(figure);
+            range.collapse(true);
+            selection.removeAllRanges();
+            selection.addRange(range);
+        } else {
+            editor.appendChild(figure);
+        }
     }
 
     async function uploadAssets(files) {
@@ -403,9 +433,12 @@
                 const form = new FormData(); form.append('file', file);
                 const response = await fetch(endpoint(root.dataset.assetsUrlTemplate, 'draft_id', state.draft.draft_id), { method: 'POST', body: form, headers: { Accept: 'application/json' } });
                 const asset = await jsonResponse(response);
-                state.draft.blocks.push({ block_id: uid(), type: 'image', asset_id: asset.asset_id, asset_url: asset.asset_url, alt: '', position: state.draft.blocks.length });
+                insertImageIntoEditor(asset);
             }
-            renderBlocks(); await markDirty();
+            // 图片已插入编辑器 DOM，立即解析同步（不等防抖）
+            state.draft.blocks = parseEditorToBlocks();
+            syncBlocksMeta();
+            await markDirty();
         } catch (error) {
             setMessage('content-error', error.message || '图片上传失败');
             setSaveState('error', '图片上传失败');
@@ -877,8 +910,13 @@
         byId('draft-title').addEventListener('input', event => { state.draft.title = event.target.value; byId('side-draft-title').textContent = event.target.value || '未命名草稿'; markDirty(); });
         byId('add-text-block').addEventListener('click', () => addTextBlock());
         byId('blocks-empty').addEventListener('click', event => { if (event.target.closest('[data-action="empty-add-text"]')) addTextBlock(); });
-        byId('content-blocks').addEventListener('input', event => { const block = state.draft.blocks.find(item => item.block_id === event.target.dataset.blockId); if (!block) return; if (event.target.dataset.action === 'text-input') block.text = event.target.value; if (event.target.dataset.action === 'image-alt') block.alt = event.target.value; markDirty(); });
-        byId('content-blocks').addEventListener('click', event => { const button = event.target.closest('button[data-action]'); if (!button) return; if (button.dataset.action === 'move-up') moveBlock(button.dataset.blockId, -1); if (button.dataset.action === 'move-down') moveBlock(button.dataset.blockId, 1); if (button.dataset.action === 'delete-block') { state.draft.blocks = state.draft.blocks.filter(block => block.block_id !== button.dataset.blockId); renderBlocks(); markDirty(); } });
+        // 知乎式连续编辑区：输入防抖同步，粘贴仅保留纯文本
+        byId('rich-editor').addEventListener('input', handleEditorInput);
+        byId('rich-editor').addEventListener('paste', event => {
+            event.preventDefault();
+            const text = (event.clipboardData || window.clipboardData).getData('text/plain');
+            document.execCommand('insertText', false, text);
+        });
         byId('clear-blocks').addEventListener('click', clearAllBlocks);
         byId('asset-upload').addEventListener('change', event => { uploadAssets(Array.from(event.target.files || [])); event.target.value = ''; });
         // 拖拽导入：Word(.docx) → 导入并预览；图片 → 插入图片块

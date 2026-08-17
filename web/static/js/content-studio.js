@@ -22,6 +22,13 @@
         selectedAccountId: null,
         accountRequestController: null,
         accountRequestSequence: 0,
+        // iOS 风格目标选择器（竖排滑块）：平台开关 → 账号多选 → 每平台模式
+        switcherToggles: {},
+        switcherAccounts: {},
+        switcherSelected: {},
+        switcherModes: {},
+        switcherController: null,
+        switcherSequence: 0,
         saveTimer: null,
         saving: false,
         dirty: false,
@@ -216,12 +223,23 @@
             blocks: Array.isArray(payload.blocks) ? payload.blocks.map((block, position) => ({ ...block, position })) : [],
             targets: Array.isArray(payload.targets) ? payload.targets : [],
         };
+        // 回填滑块状态：已有目标 → 平台开关/账号勾选/模式
+        state.switcherToggles = {};
+        state.switcherSelected = {};
+        state.switcherModes = {};
+        for (const target of state.draft.targets) {
+            state.switcherToggles[target.platform] = true;
+            state.switcherModes[target.platform] = target.mode;
+            const selected = state.switcherSelected[target.platform] || (state.switcherSelected[target.platform] = []);
+            if (!selected.includes(target.account_id)) selected.push(target.account_id);
+        }
         state.dirty = false;
         state.conflictServerDraft = null;
         invalidatePlan();
         if (render) {
             byId('draft-title').value = state.draft.title;
             renderBlocks();
+            renderTargetSwitcher();
             renderTargets();
             updateDraftMeta();
         }
@@ -384,147 +402,232 @@
         }
     }
 
-    function resetAccountPicker(message = '请先选择平台') {
-        state.accountRequestController?.abort();
-        state.accountRequestController = null;
-        state.accounts = [];
-        state.selectedAccountId = null;
-        const select = byId('target-account');
-        select.disabled = true;
-        select.replaceChildren(new Option(message, ''));
-        const policy = byId('target-persist-login');
-        policy.disabled = true;
-        policy.checked = false;
-    }
-
     async function fetchPlatforms() {
         const loading = byId('platform-grid-loading');
-        const grid = byId('platform-selector-grid');
+        const list = byId('target-switcher-list');
         try {
             const response = await fetch(root.dataset.platformsUrl, { headers: { Accept: 'application/json' } });
             const data = await jsonResponse(response);
             state.platforms = (Array.isArray(data) ? data : (data.platforms || []))
                 .filter(platform => platform && typeof platform.id === 'string')
                 .sort((left, right) => Number(left.sort_order || 0) - Number(right.sort_order || 0));
-            renderPlatformGrid();
+            renderTargetSwitcher();
         } catch (error) {
             setMessage('target-builder-error', `平台目录加载失败：${error.message || '未知错误'}`);
         } finally {
             loading?.classList.add('d-none');
-            grid?.classList.remove('d-none');
+            list?.classList.remove('d-none');
         }
-    }
-
-    function renderPlatformGrid() {
-        const grid = byId('platform-selector-grid');
-        if (!grid) return;
-        grid.replaceChildren(...state.platforms.map(platform => {
-            const selectable = Boolean(platform.account_enabled || platform.delivery_enabled);
-            const card = document.createElement('button');
-            card.type = 'button';
-            card.className = `platform-card${state.selectedPlatform === platform.id ? ' is-active' : ''}`;
-            card.dataset.platformId = platform.id;
-            card.disabled = !selectable;
-            card.setAttribute('aria-pressed', state.selectedPlatform === platform.id ? 'true' : 'false');
-            card.setAttribute('aria-label', `${platform.display_name}${selectable ? '' : '，即将接入'}`);
-
-            const icon = document.createElement('span');
-            icon.className = 'platform-icon';
-            const img = document.createElement('img');
-            img.src = platform.logo_url || '';
-            img.alt = '';
-            img.setAttribute('aria-hidden', 'true');
-            img.addEventListener('error', () => {
-                img.remove();
-                const fallback = document.createElement('span');
-                fallback.className = 'platform-icon-fallback';
-                fallback.textContent = (platform.display_name || platform.id).slice(0, 2);
-                icon.appendChild(fallback);
-            }, { once: true });
-            icon.appendChild(img);
-
-            const name = document.createElement('span');
-            name.className = 'platform-name';
-            name.textContent = platform.display_name || platform.id;
-            const status = document.createElement('span');
-            status.className = 'platform-status';
-            status.textContent = platform.delivery_enabled ? '可投递' : (platform.account_enabled ? '账号管理' : '即将接入');
-
-            card.addEventListener('click', async () => {
-                if (!selectable) return;
-                state.selectedPlatform = platform.id;
-                resetAccountPicker(platform.delivery_enabled ? '正在读取账号…' : '该平台暂不支持投递');
-                renderPlatformGrid();
-                setMessage('target-builder-error', '');
-                if (!platform.delivery_enabled) {
-                    const alert = byId('target-builder-error');
-                    setMessage('target-builder-error', `${platform.display_name}目前仅支持账号管理。`);
-                    const link = document.createElement('a');
-                    link.className = 'alert-link ms-1';
-                    link.href = `/accounts?platform=${encodeURIComponent(platform.id)}`;
-                    link.textContent = '前往平台账号页';
-                    alert.appendChild(link);
-                    return;
-                }
-                await loadAccounts(platform.id);
-            });
-
-            card.append(icon, name, status);
-            return card;
-        }));
     }
 
     function platformLabel(id) {
         const platform = state.platforms.find(item => item.id === id);
         return platform ? platform.display_name : id;
     }
-    async function loadAccounts(platform) {
-        const sequence = ++state.accountRequestSequence;
 
-        state.accountRequestController?.abort();
-        state.accountRequestController = new AbortController();
-        state.accounts = []; state.selectedAccountId = null;
-        const select = byId('target-account');
-        select.disabled = true; select.replaceChildren(new Option(`正在读取${platformLabel(platform)}账号…`, ''));
-        byId('target-persist-login').disabled = true;
-        setMessage('target-builder-error', '');
+    // ===== iOS 风格目标选择器：竖排滑块 =====
+
+    function switcherMode(platformId) {
+        return state.switcherModes[platformId] || 'DRAFT';
+    }
+
+    function switcherPlatformIcon(platform) {
+        const icon = document.createElement('span');
+        icon.className = 'target-platform-icon';
+        const img = document.createElement('img');
+        img.src = platform.logo_url || '';
+        img.alt = '';
+        img.setAttribute('aria-hidden', 'true');
+        img.addEventListener('error', () => {
+            img.remove();
+            const fallback = document.createElement('span');
+            fallback.className = 'platform-icon-fallback';
+            fallback.textContent = (platform.display_name || platform.id).slice(0, 2);
+            icon.appendChild(fallback);
+        }, { once: true });
+        icon.appendChild(img);
+        return icon;
+    }
+
+    function renderTargetSwitcher() {
+        const list = byId('target-switcher-list');
+        if (!list) return;
+        list.replaceChildren(...state.platforms
+            .filter(platform => platform.delivery_enabled)
+            .map(platform => switcherRow(platform)));
+        byId('targets-empty').classList.toggle('d-none', (state.draft?.targets || []).length > 0);
+    }
+
+    function switcherRow(platform) {
+        const on = Boolean(state.switcherToggles[platform.id]);
+        const row = document.createElement('div');
+        row.className = `target-platform-row${on ? ' is-on' : ''}`;
+        row.dataset.platformId = platform.id;
+
+        // 头部：图标 + 名称 + 模式滑块（草稿/公开）+ 平台开关
+        const head = document.createElement('div');
+        head.className = 'target-platform-head';
+        head.append(switcherPlatformIcon(platform));
+        const name = document.createElement('strong');
+        name.className = 'target-platform-name';
+        name.textContent = platform.display_name;
+        head.appendChild(name);
+
+        const mode = document.createElement('div');
+        mode.className = 'target-mode-switch';
+        mode.setAttribute('role', 'group');
+        mode.setAttribute('aria-label', `${platform.display_name} 投递模式`);
+        const modeDraft = document.createElement('button');
+        modeDraft.type = 'button';
+        modeDraft.className = `mode-seg${switcherMode(platform.id) === 'DRAFT' ? ' is-active' : ''}`;
+        modeDraft.textContent = '平台草稿';
+        modeDraft.dataset.mode = 'DRAFT';
+        const modePublish = document.createElement('button');
+        modePublish.type = 'button';
+        modePublish.className = `mode-seg${switcherMode(platform.id) === 'PUBLISH' ? ' is-active' : ''}`;
+        modePublish.textContent = '公开发布';
+        modePublish.dataset.mode = 'PUBLISH';
+        modeDraft.addEventListener('click', () => setSwitcherMode(platform.id, 'DRAFT'));
+        modePublish.addEventListener('click', () => setSwitcherMode(platform.id, 'PUBLISH'));
+        mode.append(modeDraft, modePublish);
+        head.appendChild(mode);
+
+        const switchWrap = document.createElement('div');
+        switchWrap.className = 'form-check form-switch target-platform-switch m-0';
+        const toggle = document.createElement('input');
+        toggle.type = 'checkbox';
+        toggle.className = 'form-check-input';
+        toggle.role = 'switch';
+        toggle.checked = on;
+        toggle.setAttribute('aria-label', `启用${platform.display_name}投递`);
+        toggle.addEventListener('change', () => togglePlatform(platform.id, toggle.checked));
+        switchWrap.appendChild(toggle);
+        head.appendChild(switchWrap);
+        row.appendChild(head);
+
+        // 展开区：账号多选
+        const body = document.createElement('div');
+        body.className = 'target-platform-body';
+        if (on) {
+            if (state.switcherAccounts[platform.id] === undefined) {
+                body.appendChild(switcherBodyMessage('正在读取账号…'));
+                loadSwitcherAccounts(platform.id);
+            } else {
+                body.append(...switcherAccountChecks(platform.id));
+            }
+        }
+        row.appendChild(body);
+        return row;
+    }
+
+    function switcherBodyMessage(text) {
+        const el = document.createElement('div');
+        el.className = 'target-accounts-loading';
+        el.textContent = text;
+        return el;
+    }
+
+    function switcherAccountChecks(platformId) {
+        const accounts = state.switcherAccounts[platformId] || [];
+        const selected = state.switcherSelected[platformId] || [];
+        if (accounts.length === 0) {
+            const empty = document.createElement('div');
+            empty.className = 'target-accounts-empty';
+            empty.textContent = '该平台暂无可用账号（需要 VALID 登录态）。';
+            return [empty];
+        }
+        return accounts.map(account => {
+            const wrap = document.createElement('label');
+            wrap.className = 'form-check target-account-check';
+            const box = document.createElement('input');
+            box.type = 'checkbox';
+            box.className = 'form-check-input';
+            box.checked = selected.includes(account.account_id);
+            box.setAttribute('aria-label', `选择账号 ${account.display_name}`);
+            box.addEventListener('change', () => toggleSwitcherAccount(platformId, account.account_id, box.checked));
+            const text = document.createElement('span');
+            text.className = 'form-check-label';
+            text.textContent = `${account.display_name || '未命名账号'}${account.masked_platform_user_id ? ` · ${account.masked_platform_user_id}` : ''}`;
+            wrap.append(box, text);
+            return wrap;
+        });
+    }
+
+    async function loadSwitcherAccounts(platformId) {
+        const sequence = ++state.switcherSequence;
+        state.switcherController?.abort();
+        state.switcherController = new AbortController();
         try {
-            const url = endpoint(root.dataset.accountsUrlTemplate, 'platform', platform);
-            const payload = await jsonResponse(await fetch(url, { signal: state.accountRequestController.signal, headers: { Accept: 'application/json' } }));
-            if (sequence !== state.accountRequestSequence || platform !== state.selectedPlatform) return;
-            if (payload.platform && payload.platform !== platform) throw new Error('账号响应与所选平台不匹配');
-            state.accounts = (Array.isArray(payload.accounts) ? payload.accounts : []).filter(account => account.session_status === 'VALID');
-            select.replaceChildren(new Option(state.accounts.length ? '请选择账号（不会自动选中）' : '当前平台没有可用账号', ''));
-            state.accounts.forEach(account => {
-                const masked = account.masked_platform_user_id ? ` · ${account.masked_platform_user_id}` : '';
-                select.appendChild(new Option(`${account.display_name || '未命名账号'}${masked}`, account.account_id));
-            });
-            select.disabled = state.accounts.length === 0;
+            const url = endpoint(root.dataset.accountsUrlTemplate, 'platform', platformId);
+            const payload = await jsonResponse(await fetch(url, { signal: state.switcherController.signal, headers: { Accept: 'application/json' } }));
+            if (sequence !== state.switcherSequence) return;
+            if (payload.platform && payload.platform !== platformId) throw new Error('账号响应与所选平台不匹配');
+            state.switcherAccounts[platformId] = (Array.isArray(payload.accounts) ? payload.accounts : []).filter(account => account.session_status === 'VALID');
+            state.switcherSelected[platformId] = state.switcherSelected[platformId] || [];
+            reRenderSwitcherRow(platformId);
         } catch (error) {
-            if (error.name === 'AbortError' || sequence !== state.accountRequestSequence) return;
-            select.replaceChildren(new Option('账号加载失败', ''));
-            setMessage('target-builder-error', error.message || '账号加载失败');
+            if (error.name === 'AbortError' || sequence !== state.switcherSequence) return;
+            state.switcherAccounts[platformId] = [];
+            setMessage('target-builder-error', `加载${platformLabel(platformId)}账号失败：${error.message || '未知错误'}`);
+            reRenderSwitcherRow(platformId);
         }
     }
 
-    function selectedAccount() {
-        return state.accounts.find(account => account.account_id === state.selectedAccountId) || null;
+    function reRenderSwitcherRow(platformId) {
+        const list = byId('target-switcher-list');
+        if (!list) return;
+        const row = list.querySelector(`.target-platform-row[data-platform-id="${platformId}"]`);
+        const platform = state.platforms.find(item => item.id === platformId);
+        if (row && platform) row.replaceWith(switcherRow(platform));
     }
 
-    async function updateSessionPolicy(checked) {
-        const account = selectedAccount();
-        const input = byId('target-persist-login');
-        if (!account) return;
-        const previous = Boolean(account.persist_login);
-        input.disabled = true;
-        try {
-            const url = endpoint(root.dataset.sessionPolicyUrlTemplate, 'account_id', account.account_id);
-            const updated = await jsonResponse(await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json', Accept: 'application/json' }, body: JSON.stringify({ persist_login: checked }) }));
-            if (updated.account_id !== account.account_id) throw new Error('会话策略响应与所选账号不匹配');
-            Object.assign(account, updated); input.checked = Boolean(account.persist_login);
-        } catch (error) {
-            input.checked = previous; setMessage('target-builder-error', error.message || '会话策略更新失败');
-        } finally { input.disabled = false; }
+    function togglePlatform(platformId, checked) {
+        state.switcherToggles[platformId] = checked;
+        if (checked) {
+            if (state.switcherAccounts[platformId] === undefined) loadSwitcherAccounts(platformId);
+        } else {
+            state.switcherSelected[platformId] = [];
+        }
+        reRenderSwitcherRow(platformId);
+        rebuildTargets();
+    }
+
+    function toggleSwitcherAccount(platformId, accountId, checked) {
+        const selected = state.switcherSelected[platformId] || (state.switcherSelected[platformId] = []);
+        if (checked) {
+            if (!selected.includes(accountId)) selected.push(accountId);
+        } else {
+            const index = selected.indexOf(accountId);
+            if (index >= 0) selected.splice(index, 1);
+        }
+        rebuildTargets();
+    }
+
+    function setSwitcherMode(platformId, mode) {
+        state.switcherModes[platformId] = mode;
+        reRenderSwitcherRow(platformId);
+        rebuildTargets();
+    }
+
+    function rebuildTargets() {
+        if (!state.draft) return;
+        const targets = [];
+        for (const platform of state.platforms) {
+            if (!platform.delivery_enabled || !state.switcherToggles[platform.id]) continue;
+            const mode = switcherMode(platform.id);
+            const accounts = state.switcherAccounts[platform.id] || [];
+            for (const accountId of state.switcherSelected[platform.id] || []) {
+                const account = accounts.find(item => item.account_id === accountId);
+                if (!account) continue;
+                targets.push({ platform: platform.id, account_id: accountId, mode, persist_login: Boolean(account.persist_login) });
+            }
+        }
+        const current = state.draft.targets || [];
+        const same = current.length === targets.length && current.every((target, index) =>
+            target.platform === targets[index].platform
+            && target.account_id === targets[index].account_id
+            && target.mode === targets[index].mode);
+        if (!same) saveTargets(targets);
     }
 
     async function saveTargets(targets) {
@@ -542,20 +645,10 @@
             state.draft.targets = payload.targets || [];
             state.draft.revision = payload.revision;
             state.draft.updated_at = payload.updated_at;
-            invalidatePlan(); renderTargets(); updateDraftMeta(); await localDraftPut(false); setSaveState('synced', '已同步'); return true;
+            invalidatePlan(); renderTargets(); updateDraftMeta(); await localDraftPut(false); setSaveState('synced', '已同步');
+            byId('targets-empty').classList.toggle('d-none', state.draft.targets.length > 0);
+            return true;
         } catch (error) { setMessage('target-builder-error', error.message || '投递目标保存失败'); return false; }
-    }
-
-    async function addTarget() {
-        const account = selectedAccount();
-        const mode = document.querySelector('input[name="target-mode"]:checked')?.value || 'DRAFT';
-        if (!state.selectedPlatform) { setMessage('target-builder-error', '请先选择平台。'); byId('platform-selector-grid').focus(); return; }
-        const selected = state.platforms.find(item => item.id === state.selectedPlatform);
-        if (!selected?.delivery_enabled) { setMessage('target-builder-error', '该平台未开放投递，不能添加为投递目标。'); return; }
-        if (!account) { setMessage('target-builder-error', '请选择一个状态有效的账号。'); byId('target-account').focus(); return; }
-        if (state.draft.targets.some(target => target.account_id === account.account_id)) { setMessage('target-builder-error', '同一草稿不能重复添加同一账号。'); return; }
-        setMessage('target-builder-error', '');
-        await saveTargets([...state.draft.targets, { platform: state.selectedPlatform, account_id: account.account_id, mode, persist_login: Boolean(account.persist_login) }]);
     }
 
     function renderTargets() {
@@ -566,7 +659,14 @@
             const account = document.createElement('div'); const accountStrong = document.createElement('strong'); accountStrong.textContent = target.account_display_name || '平台账号'; const accountSmall = document.createElement('small'); accountSmall.textContent = target.account_id ? `账号 ${target.account_id.slice(0, 8)}…` : '账号'; account.append(accountStrong, accountSmall);
             const mode = document.createElement('div'); const modeBadge = document.createElement('span'); modeBadge.className = `badge ${target.mode === 'PUBLISH' ? 'text-bg-danger' : 'text-bg-info'}`; modeBadge.textContent = target.mode === 'PUBLISH' ? '公开发布' : '平台草稿'; mode.appendChild(modeBadge);
             const policy = document.createElement('div'); const policyStrong = document.createElement('strong'); policyStrong.textContent = target.persist_login ? '保持登录态' : '不持久会话'; const policySmall = document.createElement('small'); policySmall.textContent = '会话策略'; policy.append(policyStrong, policySmall);
-            const remove = document.createElement('button'); remove.type = 'button'; remove.className = 'btn btn-outline-danger btn-sm'; remove.textContent = '移除'; remove.addEventListener('click', () => saveTargets(state.draft.targets.filter(item => item.account_id !== target.account_id)));
+            const remove = document.createElement('button'); remove.type = 'button'; remove.className = 'btn btn-outline-danger btn-sm'; remove.textContent = '移除'; remove.addEventListener('click', () => {
+                // 从滑块状态移除该账号勾选，重建 targets（与滑块同源）
+                const selected = state.switcherSelected[target.platform] || (state.switcherSelected[target.platform] = []);
+                const index = selected.indexOf(target.account_id);
+                if (index >= 0) selected.splice(index, 1);
+                reRenderSwitcherRow(target.platform);
+                rebuildTargets();
+            });
             row.append(platform, account, mode, policy, remove); return row;
         }));
         byId('targets-empty').classList.toggle('d-none', state.draft.targets.length > 0);
@@ -578,7 +678,7 @@
         const issues = [];
         if (!state.draft.title.trim()) issues.push({ message: '填写文章标题', focus: 'draft-title' });
         if (publicBlocks().length === 0) issues.push({ message: '至少添加一个非空文字块或图片块', focus: 'add-text-block' });
-        if (state.draft.targets.length === 0) issues.push({ message: '至少添加一个投递目标', focus: 'platform-selector-grid' });
+        if (state.draft.targets.length === 0) issues.push({ message: '至少选择一个投递目标', focus: 'target-switcher-list' });
         return issues;
     }
 
@@ -770,9 +870,6 @@
         byId('content-blocks').addEventListener('input', event => { const block = state.draft.blocks.find(item => item.block_id === event.target.dataset.blockId); if (!block) return; if (event.target.dataset.action === 'text-input') block.text = event.target.value; if (event.target.dataset.action === 'image-alt') block.alt = event.target.value; markDirty(); });
         byId('content-blocks').addEventListener('click', event => { const button = event.target.closest('button[data-action]'); if (!button) return; if (button.dataset.action === 'move-up') moveBlock(button.dataset.blockId, -1); if (button.dataset.action === 'move-down') moveBlock(button.dataset.blockId, 1); if (button.dataset.action === 'delete-block') { state.draft.blocks = state.draft.blocks.filter(block => block.block_id !== button.dataset.blockId); renderBlocks(); markDirty(); } });
         byId('asset-upload').addEventListener('change', event => { uploadAssets(Array.from(event.target.files || [])); event.target.value = ''; });
-        byId('target-account').addEventListener('change', event => { state.selectedAccountId = event.target.value || null; const account = selectedAccount(); const control = byId('target-persist-login'); control.disabled = !account; control.checked = Boolean(account?.persist_login); });
-        byId('target-persist-login').addEventListener('change', event => updateSessionPolicy(event.target.checked));
-        byId('add-target').addEventListener('click', addTarget);
         byId('create-plan').addEventListener('click', createPlan);
         byId('execute-plan').addEventListener('click', () => { const hasDraft = state.plan.targets.some(target => target.mode === 'DRAFT'); if (hasDraft && !byId('draft-batch-confirmed').checked) { setMessage('plan-review-error', '请先勾选平台草稿批量摘要确认。'); byId('draft-batch-confirmed').focus(); return; } executePlan({ draft_batch_confirmed: !hasDraft || byId('draft-batch-confirmed').checked, confirmations: {} }, { fromReview: true }); });
         byId('confirm-publish-target').addEventListener('click', confirmPublishTarget);

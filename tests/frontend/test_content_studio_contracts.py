@@ -96,36 +96,38 @@ def test_mobile_studio_does_not_hide_or_clip_overflow() -> None:
     assert ".block-actions { grid-column: 1 / -1; justify-content: flex-end; }" in studio_styles
 
 
-def test_accounts_load_after_platform_without_auto_selection() -> None:
+def test_target_switcher_loads_accounts_without_auto_selection() -> None:
     template = read("web/templates/upload.html")
     script = read("web/static/js/content-studio.js")
 
     assert "/api/platforms/{platform}/accounts?usable=true" in template
-    assert "state.accountRequestController?.abort()" in script
-    assert "const sequence = ++state.accountRequestSequence" in script
+    assert "state.switcherController?.abort()" in script
+    assert "const sequence = ++state.switcherSequence" in script
     assert "account.session_status === 'VALID'" in script
-    assert "不会自动选中" in script
+    assert "系统不会自动选择账号" in template
     assert "loadAccounts('xiaoheihe')" not in script
     assert "loadAccounts('zol')" not in script
-    assert 'role="switch"' in template
-    assert "不代表当前已登录" in template
+    assert "loadSwitcherAccounts" in script
+    assert "function togglePlatform(platformId, checked)" in script
 
 
-def test_platform_matrix_is_dynamic_and_does_not_keep_legacy_radios() -> None:
+def test_target_switcher_is_dynamic_vertical_rows_without_legacy_radios() -> None:
     template = read("web/templates/upload.html")
     script = read("web/static/js/content-studio.js")
     stylesheet = read("web/static/css/content-studio.css")
 
     assert 'data-platforms-url="/api/platforms"' in template
-    assert 'id="platform-selector-grid"' in template
+    assert 'id="target-switcher-list"' in template
     assert 'id="platform-grid-loading"' in template
     assert "fetch(root.dataset.platformsUrl" in script
-    assert "card.dataset.platformId = platform.id" in script
+    assert "row.dataset.platformId = platform.id" in script
     assert "function loadPlatforms()" not in script
     assert "platformLabels" not in script
     assert 'input[name="target-platform"]' not in script
-    assert "overflow-x: auto" in stylesheet
-    assert ".platform-card:disabled" in stylesheet
+    assert 'id="platform-selector-grid"' not in template
+    assert "target-platform-row" in stylesheet
+    assert ".target-mode-switch" in stylesheet
+    assert "target-platform-switch" in stylesheet
 
 
 def test_studio_initialization_refreshes_drafts_and_always_terminates() -> None:
@@ -142,7 +144,8 @@ def test_multi_target_and_confirmation_contracts_are_separate() -> None:
     script = read("web/static/js/content-studio.js")
 
     assert "/api/content-drafts/{draft_id}/targets" in template
-    assert "state.draft.targets.some(target => target.account_id === account.account_id)" in script
+    assert "function rebuildTargets()" in script
+    assert "saveTargets(targets)" in script
     assert "draft_batch_confirmed" in script
     assert "confirmation_token" in script
     assert 'id="draft-batch-confirmed"' in template
@@ -150,6 +153,7 @@ def test_multi_target_and_confirmation_contracts_are_separate() -> None:
     assert "逐条确认公开发布" in template
     assert "submitDelivery" not in script
     assert "/api/delivery-operations" not in template + script
+    assert "addTarget" not in script
 
 
 def test_delivery_statuses_are_explicit_and_never_auto_retry_publish() -> None:
@@ -176,4 +180,4 @@ def test_primary_action_reports_and_focuses_missing_fields() -> None:
     assert "showValidation(issues)" in script
     assert "issues[0].focus" in script
     assert "填写文章标题" in script
-    assert "至少添加一个投递目标" in script
+    assert "至少选择一个投递目标" in script

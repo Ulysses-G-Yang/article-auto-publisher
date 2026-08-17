@@ -70,24 +70,14 @@
             <section class="card studio-card" aria-labelledby="targets-heading">
                 <header class="card-header studio-card-header"><div><span class="section-kicker">DESTINATIONS</span><h2 id="targets-heading">投递目标</h2></div><span id="target-count" class="badge text-bg-primary">0 个目标</span></header>
                 <div class="card-body">
-                    <p class="section-intro">先选平台，再选择该平台返回的真实账号昵称。系统不会自动选择账号。</p>
+                    <p class="section-intro">滑动开关启用平台，再勾选该平台的账号；每个平台可分别选「平台草稿 / 公开发布」。系统不会自动选择账号。</p>
                     <div class="target-builder">
-                        <fieldset class="target-builder-field platform-field">
-                            <legend>平台</legend>
-                            <div class="platform-matrix-container">
-                                <div id="platform-grid-loading" class="platform-grid-loading" role="status"><span class="spinner-border spinner-border-sm" aria-hidden="true"></span><span>正在读取平台目录…</span></div>
-                                <div id="platform-selector-grid" class="platform-grid d-none" role="group" aria-label="目标平台" tabindex="-1"></div>
-                            </div>
-                            <small>彩色平台可使用；仅账号管理平台（如头条/抖音）点击后跳转账号页，不会创建投递目标；即将接入平台仅展示。</small>
-                        </fieldset>
-                        <div class="target-builder-field account-field"><label for="target-account">账号</label><select id="target-account" class="form-select" disabled><option value="">请先选择平台</option></select><small id="target-account-help">仅有 VALID 登录态可用</small></div>
-                        <fieldset class="target-builder-field mode-field"><legend>投递模式</legend><div class="mode-segment" role="radiogroup" aria-label="投递模式"><input class="btn-check" type="radio" name="target-mode" id="target-mode-draft" value="DRAFT" checked><label class="btn" for="target-mode-draft">平台草稿</label><input class="btn-check" type="radio" name="target-mode" id="target-mode-publish" value="PUBLISH"><label class="btn" for="target-mode-publish">公开发布</label></div></fieldset>
-                        <div class="target-builder-field policy-field"><span class="field-label">会话策略</span><div class="session-switch"><div><strong>保持登录态</strong><small>不代表当前已登录</small></div><div class="form-check form-switch m-0"><input id="target-persist-login" class="form-check-input" type="checkbox" role="switch" disabled aria-label="保持所选账号登录态"></div></div></div>
-                        <button id="add-target" class="btn btn-primary target-add" type="button"><i class="cil-plus me-1" aria-hidden="true"></i>添加目标</button>
+                        <div id="platform-grid-loading" class="platform-grid-loading" role="status"><span class="spinner-border spinner-border-sm" aria-hidden="true"></span><span>正在读取平台目录…</span></div>
+                        <div id="target-switcher-list" class="target-switcher-list d-none" role="group" aria-label="投递目标滑块"></div>
+                        <div id="target-builder-error" class="alert alert-danger d-none mt-3" role="alert"></div>
+                        <div id="targets-list" class="targets-list"></div>
+                        <div id="targets-empty" class="studio-empty compact"><i class="cil-paper-plane" aria-hidden="true"></i><strong>尚未选择投递目标</strong><span>打开平台开关并勾选账号后，目标会自动生成。</span></div>
                     </div>
-                    <div id="target-builder-error" class="alert alert-danger d-none mt-3" role="alert"></div>
-                    <div id="targets-list" class="targets-list"></div>
-                    <div id="targets-empty" class="studio-empty compact"><i class="cil-paper-plane" aria-hidden="true"></i><strong>尚未添加投递目标</strong><span>同一份内容可添加多个“平台 + 账号 + 模式”目标。</span></div>
                 </div>
             </section>
 

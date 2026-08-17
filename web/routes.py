@@ -8,7 +8,6 @@ from datetime import datetime
 
 from flask import (
     jsonify,
-    redirect,
     render_template,
     request,
 )
@@ -121,8 +120,8 @@ def register_routes(app):
 
     @app.route("/")
     def index():
-        # 统一单入口：legacy 队列首页重定向到创作与投递；任务详情仍保留。
-        return redirect("/upload", code=302)
+        # 发布概况（任务队列）保留为独立入口；创作走 /upload。
+        return render_template("index.html")
 
     @app.route("/upload")
     def upload_page():

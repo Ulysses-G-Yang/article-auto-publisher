@@ -960,10 +960,21 @@
             showDropOverlay(false);
         }));
         blocksDrop.addEventListener('drop', event => {
-            const files = Array.from(event.dataTransfer?.files || []);
-            if (!files.length) return;
             event.preventDefault();
+            const files = Array.from(event.dataTransfer?.files || []);
             setMessage('content-error', '');
+            if (!files.length) {
+                // 从应用内（如企业微信客户端/网页）拖入时，浏览器可能拿不到 File 对象，
+                // 只有文本/链接；无法自动读取文件内容，给出明确引导。
+                const uriList = (event.dataTransfer?.getData('text/uri-list') || '');
+                const html = (event.dataTransfer?.getData('text/html') || '');
+                const looksLikeDoc = /\.docx?(?:\s|$)/i.test(uriList + ' ' + html);
+                setMessage('content-error',
+                    looksLikeDoc
+                        ? '从应用内拖入的 Word 文档浏览器无法直接读取，请用「更换内容源 → 导入 DOCX」选择文件，或从文件管理器把 .docx 文件拖到此处。'
+                        : '浏览器无法读取拖入的内容，请拖入本地文件，或用「更换内容源 → 导入 DOCX」。');
+                return;
+            }
             const docx = files.find(file =>
                 file.name.toLowerCase().endsWith('.docx')
                 || (file.type || '').includes('wordprocessingml'));

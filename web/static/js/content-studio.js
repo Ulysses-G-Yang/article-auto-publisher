@@ -285,7 +285,9 @@
         if (sideTitle) {
             sideTitle.textContent = state.draft.title || '未命名草稿';
             byId('side-draft-source').textContent = source;
-            byId('side-block-count').textContent = String(state.draft.blocks.length);
+            const sideParagraphs = state.draft.blocks.filter(block => block.type === 'text').length;
+            const sideImages = state.draft.blocks.filter(block => block.type === 'image').length;
+            byId('side-block-count').textContent = `${sideParagraphs} 段 · ${sideImages} 图`;
             byId('side-target-count').textContent = String(state.draft.targets.length);
             byId('side-revision').textContent = String(state.draft.revision);
         }
@@ -324,11 +326,13 @@
     }
 
     function syncBlocksMeta() {
-        const count = state.draft ? state.draft.blocks.length : 0;
-        byId('blocks-empty').classList.toggle('d-none', count > 0);
-        byId('block-count').textContent = `${count} 个块`;
+        const blocks = state.draft ? state.draft.blocks : [];
+        const paragraphs = blocks.filter(block => block.type === 'text').length;
+        const images = blocks.filter(block => block.type === 'image').length;
+        byId('blocks-empty').classList.toggle('d-none', blocks.length > 0);
+        byId('block-count').textContent = `${paragraphs} 段 · ${images} 图`;
         const clearButton = byId('clear-blocks');
-        if (clearButton) clearButton.disabled = count === 0;
+        if (clearButton) clearButton.disabled = blocks.length === 0;
         updateDraftMeta();
     }
 
@@ -384,20 +388,6 @@
         state.draft.blocks = [];
         renderBlocks();
         markDirty();
-    }
-
-    function addTextBlock() {
-        const editor = byId('rich-editor');
-        if (!editor) return;
-        const paragraph = document.createElement('p');
-        editor.appendChild(paragraph);
-        const range = document.createRange();
-        range.selectNodeContents(paragraph);
-        range.collapse(false);
-        const selection = window.getSelection();
-        selection.removeAllRanges();
-        selection.addRange(range);
-        paragraph.focus();
     }
 
     function insertImageIntoEditor(asset) {
@@ -720,7 +710,7 @@
     function validateStudio() {
         const issues = [];
         if (!state.draft.title.trim()) issues.push({ message: '填写文章标题', focus: 'draft-title' });
-        if (publicBlocks().length === 0) issues.push({ message: '至少添加一个非空文字块或图片块', focus: 'add-text-block' });
+        if (publicBlocks().length === 0) issues.push({ message: '正文还不能为空，输入文字或插入图片', focus: 'rich-editor' });
         if (state.draft.targets.length === 0) issues.push({ message: '至少选择一个投递目标', focus: 'target-switcher-list' });
         return issues;
     }
@@ -934,8 +924,6 @@
 
     function bindEvents() {
         byId('draft-title').addEventListener('input', event => { state.draft.title = event.target.value; byId('side-draft-title').textContent = event.target.value || '未命名草稿'; markDirty(); });
-        byId('add-text-block').addEventListener('click', () => addTextBlock());
-        byId('blocks-empty').addEventListener('click', event => { if (event.target.closest('[data-action="empty-add-text"]')) addTextBlock(); });
         // 知乎式连续编辑区：输入防抖同步，粘贴仅保留纯文本
         byId('rich-editor').addEventListener('input', handleEditorInput);
         byId('rich-editor').addEventListener('paste', event => {

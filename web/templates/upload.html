@@ -45,8 +45,7 @@
                     <div class="d-flex flex-wrap gap-2">
                         <button id="save-draft-now" class="btn btn-outline-secondary btn-sm" type="button"><i class="cil-save me-1" aria-hidden="true"></i>保存</button>
                         <button id="open-source-library" class="btn btn-outline-secondary btn-sm" type="button" data-coreui-toggle="modal" data-coreui-target="#source-library-modal"><i class="cil-folder-open me-1" aria-hidden="true"></i>更换内容源</button>
-                        <button id="add-text-block" class="btn btn-outline-primary btn-sm" type="button"><i class="cil-paragraph me-1" aria-hidden="true"></i>文字块</button>
-                        <label class="btn btn-outline-primary btn-sm mb-0" for="asset-upload"><i class="cil-image-plus me-1" aria-hidden="true"></i>图片</label>
+                        <label class="btn btn-outline-primary btn-sm mb-0" for="asset-upload"><i class="cil-image-plus me-1" aria-hidden="true"></i>插入图片</label>
                         <input id="asset-upload" class="visually-hidden" type="file" accept="image/png,image/jpeg,image/gif,image/webp" multiple>
                     </div>
                 </header>
@@ -61,12 +60,12 @@
                         <input id="draft-title" class="form-control form-control-lg" type="text" maxlength="200" autocomplete="off" placeholder="输入一个清晰的文章标题">
                         <div id="draft-title-error" class="invalid-feedback"></div>
                     </div>
-                    <div class="blocks-heading"><div><strong>正文内容（预览）</strong><small>拖入 Word 文档(.docx) 或图片即可导入；导入后在此预览标题、小标题与图片</small></div><span class="d-flex align-items-center gap-2"><button id="clear-blocks" class="btn btn-outline-danger btn-sm" type="button" disabled><i class="cil-trash me-1" aria-hidden="true"></i>清空</button><span id="block-count" class="badge text-bg-light border">0 个块</span></span></div>
+                    <div class="blocks-heading"><div><strong>正文内容</strong><small>直接输入正文（Enter 分段）；光标处可插入图片；也可拖入 Word 文档(.docx) 一键导入</small></div><span class="d-flex align-items-center gap-2"><button id="clear-blocks" class="btn btn-outline-danger btn-sm" type="button" disabled><i class="cil-trash me-1" aria-hidden="true"></i>清空</button><span id="block-count" class="badge text-bg-light border">0 段 · 0 图</span></span></div>
                     <div id="content-blocks" class="content-blocks" aria-live="polite">
                         <div id="rich-editor" class="rich-editor" contenteditable="true" role="textbox" aria-multiline="true" aria-label="正文编辑区" data-placeholder="在此输入正文，或拖入 Word 文档/图片导入"></div>
-                        <div id="drop-overlay" class="drop-overlay d-none" aria-hidden="true"><div><i class="cil-cloud-download" aria-hidden="true"></i><strong>松开导入文件</strong><small>支持 Word 文档(.docx) 或图片，导入后自动生成图文块预览</small></div></div>
+                        <div id="drop-overlay" class="drop-overlay d-none" aria-hidden="true"><div><i class="cil-cloud-download" aria-hidden="true"></i><strong>松开导入文件</strong><small>支持 Word 文档(.docx) 或图片，导入后自动生成正文预览</small></div></div>
                     </div>
-                    <div id="blocks-empty" class="studio-empty d-none"><i class="cil-notes" aria-hidden="true"></i><strong>正文还是空的</strong><span>直接拖入 <strong>Word 文档(.docx)</strong> 即可导入标题、小标题与图片并预览；也可手动添加文字或图片块。</span><button class="btn btn-sm btn-primary" type="button" data-action="empty-add-text">添加第一个文字块</button></div>
+                    <div id="blocks-empty" class="studio-empty d-none"><i class="cil-notes" aria-hidden="true"></i><strong>正文还是空的</strong><span>直接在上方输入文字，或拖入 <strong>Word 文档(.docx)</strong> / 图片导入。</span></div>
                     <div id="content-error" class="alert alert-danger d-none mt-3 mb-0" role="alert"></div>
                 </div>
             </section>

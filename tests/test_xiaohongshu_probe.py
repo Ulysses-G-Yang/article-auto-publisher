@@ -3,6 +3,7 @@ from __future__ import annotations
 from article_mvp.tools.probe_xiaohongshu_editor import (
     DOM_PROBE_SCRIPT,
     classify_probe_payload,
+    manual_action_for,
     sanitize_probe_payload,
 )
 
@@ -83,3 +84,8 @@ def test_dom_probe_script_has_no_business_actions_or_sensitive_reads() -> None:
     assert ".value" not in lowered
     assert "cookie" not in lowered
     assert "response" not in lowered
+
+
+def test_no_body_input_reports_manual_existing_draft_action() -> None:
+    assert manual_action_for("NO_BODY_IMAGE_INPUT")
+    assert "不会自动创建" in manual_action_for("NO_BODY_IMAGE_INPUT")

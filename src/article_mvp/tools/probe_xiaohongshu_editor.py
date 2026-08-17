@@ -229,6 +229,12 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def manual_action_for(status: str) -> str:
+    if status in {"NO_BODY_IMAGE_INPUT", "BODY_INPUT_WITHOUT_IMAGE_ACCEPT"}:
+        return "请用户手动打开已有草稿；工具不会自动创建新的创作"
+    return ""
+
+
 async def run_probe(account_id: str) -> dict[str, Any]:
     """复用现有 Profile 租约执行一次只读页面探测。"""
 
@@ -250,11 +256,13 @@ async def run_probe(account_id: str) -> dict[str, Any]:
             )
             raw_payload = await platform.page.evaluate(DOM_PROBE_SCRIPT)
             payload = sanitize_probe_payload(raw_payload)
+            status = classify_probe_payload(payload)
+            manual_action = manual_action_for(status)
             return {
-                "status": classify_probe_payload(payload),
+                "status": status,
                 **payload,
-                "manual_action_required": classify_probe_payload(payload)
-                == "NO_BODY_IMAGE_INPUT",
+                "manual_action_required": bool(manual_action),
+                "manual_action": manual_action,
             }
     finally:
         await platform.cleanup()
@@ -270,6 +278,7 @@ async def _main() -> int:
             "file_input_count": 0,
             "inputs": [],
             "manual_action_required": exc.code in {"LOGIN_REQUIRED", "NO_BODY_IMAGE_INPUT"},
+            "manual_action": manual_action_for(exc.code),
         }
     except Exception as exc:  # noqa: BLE001
         message = str(exc).upper()
@@ -284,6 +293,7 @@ async def _main() -> int:
             "file_input_count": 0,
             "inputs": [],
             "manual_action_required": False,
+            "manual_action": "",
         }
     print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0

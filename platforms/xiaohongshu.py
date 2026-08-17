@@ -4,8 +4,8 @@
 ``docs/XIAOHONGSHU_RISK_CONTROL.md``，并遵守其中的硬性纪律。
 
 登录态与身份验证链路（真实扫码 → 会话 cookie → 身份捕获），
-内容投递能力尚未接入：所有投递方法显式拒绝，避免把未经真实编辑器
-验证的逻辑伪装成可用能力。
+文字草稿链路已验收；图片上传待真实验收，未获得正文控件证据时必须
+fail closed；公开发布始终关闭。
 
 真实登录页（https://creator.xiaohongshu.com/login）：
 - 「APP扫一扫登录」为默认 Tab，二维码为约 160x160 的 base64 PNG。
@@ -17,6 +17,8 @@
 from __future__ import annotations
 
 import asyncio
+import re
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 from loguru import logger
@@ -36,6 +38,32 @@ LOGIN_URL = "https://creator.xiaohongshu.com/login"
 IDENTITY_NAME_KEYS = {"nickname", "user_name", "screen_name", "name"}
 IDENTITY_UID_KEYS = {"user_id", "sec_uid", "uid"}
 
+# Current read-only probe found no body image input; do not guess a selector.
+# Replace only after a new approved probe provides explicit evidence.
+VERIFIED_BODY_IMAGE_INPUT_SELECTOR: str | None = None
+
+
+def choose_verified_body_image_index(
+    inputs: Sequence[Mapping[str, object]],
+) -> int | None:
+    """Choose the unique body image input from sanitized probe evidence."""
+
+    candidates: list[int] = []
+    for index, item in enumerate(inputs):
+        if str(item.get("type") or "").lower() != "file":
+            continue
+        if not bool(item.get("in_body_editor")):
+            continue
+        if "image" not in str(item.get("accept") or "").lower():
+            continue
+        labels = item.get("neighbor_labels", [])
+        if isinstance(labels, Sequence) and not isinstance(labels, (str, bytes)):
+            label_text = " ".join(str(label) for label in labels)
+            if re.search(r"(?:\u5c01\u9762|\bcover\b)", label_text, flags=re.IGNORECASE):
+                continue
+        candidates.append(index)
+    return candidates[0] if len(candidates) == 1 else None
+
 
 class PlatformNotImplementedError(PlatformAutomationError):
     """平台能力尚未实现。"""
@@ -44,7 +72,7 @@ class PlatformNotImplementedError(PlatformAutomationError):
 
 
 class XiaohongshuPlatform(BasePlatform):
-    """小红书创作服务平台账号会话适配器；内容投递能力保持关闭。"""
+    """小红书账号会话适配器；图片控件证据不足时保持 fail closed。"""
 
     platform_name = "xiaohongshu"
     # 2026-08 真实验证：小红书已不再下发 web_session，现行会话 cookie 为
@@ -546,52 +574,74 @@ class XiaohongshuPlatform(BasePlatform):
         }
 
     async def _upload_image(self, image_path: str) -> dict:
-        """通过长文编辑器的文件控件上传图片；以编辑器内图片数量增加为成功判据。
+        """Upload only through a body input backed by real probe evidence.
 
-        2026-08-17 用户反馈：小红书图片上传应可用，失败疑似自动化节奏
-        过快触发风控。优先选择 accept 含 image 的控件（避免封面/其他
-        上传控件），上传后等待放宽到 15 秒轮询，节奏放缓。
+        The current read-only probe found zero file inputs on the landing page.
+        Until a user-approved probe of an existing draft freezes an explicit
+        selector, this method fails closed and never chooses a cover input.
         """
 
         self._require_page_alive("小红书上传图片")
+        target_input = await self._get_verified_body_image_input()
+        if target_input is None:
+            return {
+                "success": False,
+                "error_code": "XHS_BODY_IMAGE_INPUT_UNVERIFIED",
+                "error": "小红书正文图片控件尚未通过真实探测，已安全停止",
+            }
         try:
-            file_inputs = self.page.locator("input[type=file]")
-            count = await file_inputs.count()
-            if count == 0:
-                return {"success": False, "error": "小红书图片上传控件未找到"}
-            target_input = None
-            for i in range(count):
-                accept = (await file_inputs.nth(i).get_attribute("accept")) or ""
-                if "image" in accept.lower():
-                    target_input = file_inputs.nth(i)
-                    break
-            if target_input is None:
-                target_input = file_inputs.first
-            before = await self.page.evaluate(
-                """() => document.querySelectorAll(
-                    '.tiptap img, .ProseMirror img'
-                ).length"""
-            )
+            before = await self._editor_image_count()
             await target_input.set_input_files(str(image_path), timeout=20000)
-            after = before
+            observed = before
             for _ in range(15):
                 await asyncio.sleep(1)
-                after = await self.page.evaluate(
-                    """() => document.querySelectorAll(
-                        '.tiptap img, .ProseMirror img'
-                    ).length"""
-                )
-                if after > before:
-                    break
-            if after <= before:
-                return {"success": False, "error": "上传后编辑器图片数量未增加"}
-            return {"success": True, "error": ""}
+                observed = await self._editor_image_count()
+                if observed <= before:
+                    continue
+                await asyncio.sleep(1)
+                stable = await self._editor_image_count()
+                if stable >= observed:
+                    return {"success": True, "error": ""}
+            return {
+                "success": False,
+                "error_code": "XHS_EDITOR_IMAGE_COUNT_UNCHANGED",
+                "error": "上传后正文编辑器图片数量未稳定增加",
+            }
         except Exception as exc:
             if self._exception_means_browser_closed(exc):
                 raise BrowserLifecycleError(
                     "BROWSER_CONTEXT_CLOSED: 小红书上传图片时页面已关闭"
                 ) from exc
-            return {"success": False, "error": str(exc)}
+            return {
+                "success": False,
+                "error_code": "XHS_IMAGE_UPLOAD_FAILED",
+                "error": safe_media_error(exc, fallback="小红书图片上传失败"),
+            }
+
+    async def _get_verified_body_image_input(self):
+        """Return only a selector frozen by real DOM evidence."""
+
+        selector = VERIFIED_BODY_IMAGE_INPUT_SELECTOR
+        if not selector:
+            return None
+        try:
+            base = self.page.locator(selector)
+            if await base.count() != 1:
+                return None
+            return base.first
+        except Exception:
+            return None
+
+    async def _editor_image_count(self) -> int:
+        """Count images inside TipTap body only; cover images do not qualify."""
+
+        return int(
+            await self.page.evaluate(
+                """() => document.querySelectorAll(
+                    'div.tiptap.ProseMirror img'
+                ).length"""
+            )
+        )
 
     async def select_topic(
         self,

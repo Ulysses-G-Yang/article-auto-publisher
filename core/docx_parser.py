@@ -4,8 +4,14 @@ import json
 import os
 import re
 from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
+from urllib.parse import urlsplit
 
 from docx import Document
+from docx.oxml.ns import qn
+from docx.text.paragraph import Paragraph
+from docx.text.run import Run
 from PIL import Image
 
 from config import get_config
@@ -18,6 +24,11 @@ W_TAB = f"{{{W_NS}}}tab"
 W_BREAK = f"{{{W_NS}}}br"
 W_CARRIAGE_RETURN = f"{{{W_NS}}}cr"
 A_BLIP = f"{{{A_NS}}}blip"
+WP_NS = "http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"
+WP_INLINE = f"{{{WP_NS}}}inline"
+WP_ANCHOR = f"{{{WP_NS}}}anchor"
+WP_DOC_PR = f"{{{WP_NS}}}docPr"
+PIC_CNV_PR = "{http://schemas.openxmlformats.org/drawingml/2006/picture}cNvPr"
 
 
 @dataclass
@@ -45,6 +56,22 @@ class ParsedArticle:
     image_count: int = 0
     char_count: int = 0
     document_title: str | None = None
+
+
+@dataclass
+class ParsedDocumentV2:
+    """富结构解析的内部结果。
+
+    ``document_v2`` 里的 ``__source_path`` 只在解析临时目录中存在，
+    由 ``DocxImportAdapter.parse_v2`` 在校验前替换为受控 asset UUID。
+    该 dataclass 不用于数据库、HTTP 或日志输出。
+    """
+
+    filename: str
+    title: str
+    v1_blocks: list[ContentBlock]
+    document_v2: dict[str, Any]
+    image_paths: list[Path] = field(default_factory=list)
 
 
 class DocxParser:
@@ -147,6 +174,578 @@ class DocxParser:
 
         article.plain_text = "\n".join(text_parts)
         return article
+
+    def parse_document_v2(self, filepath: str) -> ParsedDocumentV2:
+        """解析 DOCX 为富结构 v2 草稿的内部表示。
+
+        这是独立于历史 ``parse()`` 的 rich path。图片节点暂时携带
+        ``__source_path``，仅供 Content Studio 导入适配器在临时目录内读取；
+        调用方不得把该内部结果直接写入数据库或响应。
+        """
+
+        filename = os.path.basename(filepath)
+        doc = Document(filepath)
+        article_images_dir = Path(self.images_dir) / Path(filename).stem
+        article_images_dir.mkdir(parents=True, exist_ok=True)
+
+        # 只把可读取的内嵌图片关系加入映射。外部图片关系没有可控的
+        # ``target_part``，不能把 URL 当作本地图片继续处理；遇到这种关系时
+        # ``_rich_image`` 会 fail closed，而不是静默丢失正文图片。
+        image_parts: dict[str, Any] = {}
+        for rel in doc.part.rels.values():
+            if "image" not in rel.reltype:
+                continue
+            try:
+                target_part = rel.target_part
+            except (AttributeError, KeyError, ValueError):
+                continue
+            if target_part is not None and hasattr(target_part, "blob"):
+                image_parts[rel.rId] = target_part
+        block_counter = [0]
+        image_counter = [0]
+        image_paths: list[Path] = []
+        rich_blocks: list[dict[str, Any]] = []
+        current_list_key: tuple[bool, int] | None = None
+
+        for child in doc.element.body:
+            if child.tag == qn("w:p"):
+                paragraph = Paragraph(child, doc)
+                block = self._rich_paragraph(
+                    paragraph,
+                    doc,
+                    image_parts,
+                    article_images_dir,
+                    image_counter,
+                    image_paths,
+                    block_counter,
+                )
+                list_info = self._list_info(paragraph, doc)
+                if list_info is not None:
+                    ordered, level = list_info
+                    list_key = (ordered, level)
+                    if current_list_key == list_key and rich_blocks:
+                        rich_blocks[-1]["items"].append({"blocks": [block]})
+                    else:
+                        list_block = {
+                            "kind": "list",
+                            "block_id": self._next_block_id(block_counter),
+                            "ordered": ordered,
+                            "level": level,
+                            "items": [{"blocks": [block]}],
+                        }
+                        rich_blocks.append(list_block)
+                        current_list_key = list_key
+                else:
+                    rich_blocks.append(block)
+                    current_list_key = None
+            elif child.tag == qn("w:tbl"):
+                rich_blocks.append(
+                    self._rich_table(
+                        child,
+                        doc,
+                        image_parts,
+                        article_images_dir,
+                        image_counter,
+                        image_paths,
+                        block_counter,
+                    )
+                )
+                current_list_key = None
+
+        # Word 通常把图片说明保存为紧邻图片段落的 ``Caption`` 段落。
+        # 只有“Caption + 紧邻的纯图片段落”这一无歧义关系才折叠到 ImageNode；
+        # 其它 Caption 段落保留为普通段落，避免误吞正文。
+        rich_blocks = self._attach_safe_captions(rich_blocks)
+
+        core_title = self._normalize_title(doc.core_properties.title)
+        title = core_title or self._title_from_rich_blocks(rich_blocks, filename)
+        title_block_id = self._find_title_block_id(rich_blocks, title)
+        document_v2: dict[str, Any] = {
+            "schema_version": 2,
+            "title": title,
+            "blocks": rich_blocks,
+            "source_fidelity": "NATIVE",
+        }
+        if title_block_id is not None:
+            document_v2["title_block_id"] = title_block_id
+
+        return ParsedDocumentV2(
+            filename=filename,
+            title=title,
+            v1_blocks=self._legacy_blocks_from_rich(rich_blocks),
+            document_v2=document_v2,
+            image_paths=image_paths,
+        )
+
+    # The short alias is useful to callers that already name import paths parse_v2.
+    parse_v2 = parse_document_v2
+
+    @staticmethod
+    def _next_block_id(counter: list[int]) -> str:
+        counter[0] += 1
+        return f"doc-block-{counter[0]:06d}"
+
+    def _rich_paragraph(
+        self,
+        paragraph: Paragraph,
+        doc,
+        image_parts: dict[str, Any],
+        image_dir: Path,
+        image_counter: list[int],
+        image_paths: list[Path],
+        block_counter: list[int],
+        *,
+        hyperlink_target: str | None = None,
+    ) -> dict[str, Any]:
+        style_name = paragraph.style.name if paragraph.style else None
+        level = self._heading_level(style_name)
+        block: dict[str, Any] = {
+            "kind": "heading" if level is not None else "paragraph",
+            "block_id": self._next_block_id(block_counter),
+            "children": [],
+        }
+        if style_name:
+            block["style_name"] = style_name
+        if level is not None:
+            block["level"] = level
+
+        for child in paragraph._p:
+            if child.tag == qn("w:r"):
+                block["children"].extend(
+                    self._rich_run_children(
+                        child,
+                        paragraph,
+                        image_parts,
+                        image_dir,
+                        image_counter,
+                        image_paths,
+                        hyperlink_target,
+                    )
+                )
+            elif child.tag == qn("w:hyperlink"):
+                target, link_title = self._hyperlink_target(doc, child)
+                for run_element in child.iter(qn("w:r")):
+                    block["children"].extend(
+                        self._rich_run_children(
+                            run_element,
+                            paragraph,
+                            image_parts,
+                            image_dir,
+                            image_counter,
+                            image_paths,
+                            target,
+                            link_title,
+                        )
+                    )
+        return block
+
+    def _rich_run_children(
+        self,
+        run_element,
+        parent,
+        image_parts: dict[str, Any],
+        image_dir: Path,
+        image_counter: list[int],
+        image_paths: list[Path],
+        hyperlink_target: str | None = None,
+        hyperlink_title: str | None = None,
+    ) -> list[dict[str, Any]]:
+        run = Run(run_element, parent)
+        marks = self._run_marks(run)
+        children: list[dict[str, Any]] = []
+        for node in run_element.iter():
+            if node.tag == W_TEXT:
+                text = node.text or ""
+                if text:
+                    text_node: dict[str, Any] = {"kind": "text", "text": text}
+                    if marks:
+                        text_node["marks"] = list(marks)
+                    if hyperlink_target is not None:
+                        text_node["link"] = {"href": hyperlink_target}
+                        if hyperlink_title:
+                            text_node["link"]["title"] = hyperlink_title
+                    children.append(text_node)
+            elif node.tag == W_TAB:
+                children.append({"kind": "text", "text": "\t"})
+            elif node.tag in {W_BREAK, W_CARRIAGE_RETURN}:
+                children.append({"kind": "text", "text": "\n"})
+            elif node.tag == A_BLIP:
+                image = self._rich_image(
+                    node,
+                    run_element,
+                    image_parts,
+                    image_dir,
+                    image_counter,
+                    image_paths,
+                )
+                if image is not None:
+                    children.append(image)
+        return children
+
+    def _rich_image(
+        self,
+        blip,
+        run_element,
+        image_parts: dict[str, Any],
+        image_dir: Path,
+        image_counter: list[int],
+        image_paths: list[Path],
+    ) -> dict[str, Any] | None:
+        rel_id = blip.get(f"{{{R_NS}}}embed") or blip.get(f"{{{R_NS}}}link")
+        image_part = image_parts.get(rel_id)
+        if image_part is None:
+            raise ValueError("DOCX 图片不是可控的内嵌资源")
+        image_counter[0] += 1
+        suffix = Path(str(image_part.partname)).suffix.lower() or ".img"
+        image_path = image_dir / f"image-{image_counter[0]:04d}{suffix}"
+        image_path.write_bytes(image_part.blob)
+        image_paths.append(image_path)
+        width, height = self._get_image_size(str(image_path))
+        image: dict[str, Any] = {
+            "kind": "image",
+            "__source_path": str(image_path),
+            "__original_filename": image_path.name,
+            "anchor": {"kind": self._image_anchor_kind(run_element)},
+        }
+        alt = self._image_alt(run_element)
+        image["alt"] = alt or image_path.name
+        if width > 0:
+            image["width"] = width
+        if height > 0:
+            image["height"] = height
+        return image
+
+    def _attach_safe_captions(self, blocks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """在明确相邻时把 Caption 段落绑定到前一个图片节点。
+
+        该方法递归处理列表和表格单元格，但不会跨容器寻找图片。未满足
+        “Caption 样式 + 紧邻纯图片段落”条件的说明段落原样保留。
+        """
+
+        normalized: list[dict[str, Any]] = []
+        index = 0
+        while index < len(blocks):
+            block = blocks[index]
+            kind = block.get("kind")
+            if kind == "list":
+                block = dict(block)
+                block["items"] = [
+                    {
+                        **item,
+                        "blocks": self._attach_safe_captions(item.get("blocks", [])),
+                    }
+                    for item in block.get("items", [])
+                ]
+            elif kind == "table":
+                block = dict(block)
+                block["rows"] = [
+                    {
+                        **row,
+                        "cells": [
+                            {
+                                **cell,
+                                "blocks": self._attach_safe_captions(cell.get("blocks", [])),
+                            }
+                            for cell in row.get("cells", [])
+                        ],
+                    }
+                    for row in block.get("rows", [])
+                ]
+
+            is_caption = (
+                kind in {"paragraph", "heading"}
+                and str(block.get("style_name") or "").strip().casefold() == "caption"
+            )
+            caption_text = self._rich_block_text(block).strip() if is_caption else ""
+            previous = normalized[-1] if normalized else None
+            image_node = self._pure_image_node(previous)
+            if caption_text and image_node is not None:
+                image_node = dict(image_node)
+                image_node["caption"] = caption_text
+                previous = dict(previous)
+                previous["children"] = [image_node]
+                normalized[-1] = previous
+                index += 1
+                continue
+
+            normalized.append(block)
+            index += 1
+        return normalized
+
+    @staticmethod
+    def _pure_image_node(block: dict[str, Any] | None) -> dict[str, Any] | None:
+        if not block or block.get("kind") not in {"paragraph", "heading"}:
+            return None
+        children = block.get("children")
+        if not isinstance(children, list) or len(children) != 1:
+            return None
+        child = children[0]
+        return child if child.get("kind") == "image" else None
+
+    @staticmethod
+    def _image_anchor_kind(run_element) -> str:
+        if any(node.tag == WP_ANCHOR for node in run_element.iter()):
+            return "floating"
+        return "inline"
+
+    @staticmethod
+    def _image_alt(run_element) -> str | None:
+        for node in run_element.iter():
+            if node.tag in {WP_DOC_PR, PIC_CNV_PR}:
+                for attribute in ("descr", "title"):
+                    value = node.get(attribute)
+                    if value and value.strip():
+                        return value.strip()
+        return None
+
+    @staticmethod
+    def _run_marks(run: Run) -> tuple[str, ...]:
+        marks: list[str] = []
+        if run.bold:
+            marks.append("bold")
+        if run.italic:
+            marks.append("italic")
+        if run.underline:
+            marks.append("underline")
+        if run.font.strike:
+            marks.append("strike")
+        style_name = run.style.name if run.style else ""
+        if "code" in " ".join(str(style_name).split()).casefold():
+            marks.append("code")
+        return tuple(marks)
+
+    @staticmethod
+    def _heading_level(style_name: str | None) -> int | None:
+        normalized = " ".join(str(style_name or "").split()).casefold()
+        if normalized == "title":
+            return 1
+        match = re.fullmatch(r"heading\s*([1-6])", normalized)
+        return int(match.group(1)) if match else None
+
+    def _list_info(self, paragraph: Paragraph, doc) -> tuple[bool, int] | None:
+        style_name = " ".join(
+            str(paragraph.style.name if paragraph.style else "").split()
+        ).casefold()
+        match = re.fullmatch(r"list\s*(bullet|number)\s*([0-9]*)", style_name)
+        if match:
+            level = max(int(match.group(2) or "1") - 1, 0)
+            return match.group(1) == "number", level
+
+        num_pr = paragraph._p.pPr.find(qn("w:numPr")) if paragraph._p.pPr is not None else None
+        if num_pr is None:
+            return None
+        num_id = num_pr.find(qn("w:numId"))
+        ilvl = num_pr.find(qn("w:ilvl"))
+        if num_id is None or ilvl is None:
+            return None
+        try:
+            num_id_value = int(num_id.get(qn("w:val")))
+            level = int(ilvl.get(qn("w:val")))
+        except (TypeError, ValueError):
+            return None
+        ordered = self._numbering_is_ordered(doc, num_id_value, level)
+        return ordered, max(level, 0)
+
+    @staticmethod
+    def _numbering_is_ordered(doc, num_id: int, level: int) -> bool:
+        numbering_part = getattr(doc.part, "numbering_part", None)
+        if numbering_part is None:
+            return True
+        root = numbering_part.element
+        num_element = next(
+            (item for item in root.findall(qn("w:num")) if item.get(qn("w:numId")) == str(num_id)),
+            None,
+        )
+        if num_element is None:
+            return True
+        abstract_id = num_element.find(qn("w:abstractNumId"))
+        if abstract_id is None:
+            return True
+        abstract = next(
+            (
+                item
+                for item in root.findall(qn("w:abstractNum"))
+                if item.get(qn("w:abstractNumId")) == abstract_id.get(qn("w:val"))
+            ),
+            None,
+        )
+        if abstract is None:
+            return True
+        level_element = next(
+            (
+                item
+                for item in abstract.findall(qn("w:lvl"))
+                if item.get(qn("w:ilvl")) == str(level)
+            ),
+            None,
+        )
+        num_format = level_element.find(qn("w:numFmt")) if level_element is not None else None
+        return num_format is None or num_format.get(qn("w:val")) != "bullet"
+
+    def _rich_table(
+        self,
+        table_element,
+        doc,
+        image_parts: dict[str, Any],
+        image_dir: Path,
+        image_counter: list[int],
+        image_paths: list[Path],
+        block_counter: list[int],
+    ) -> dict[str, Any]:
+        rows: list[dict[str, Any]] = []
+        for row_element in table_element.findall(qn("w:tr")):
+            cells: list[dict[str, Any]] = []
+            for cell_element in row_element.findall(qn("w:tc")):
+                cell_blocks: list[dict[str, Any]] = []
+                for child in cell_element:
+                    if child.tag == qn("w:p"):
+                        cell_blocks.append(
+                            self._rich_paragraph(
+                                Paragraph(child, doc),
+                                doc,
+                                image_parts,
+                                image_dir,
+                                image_counter,
+                                image_paths,
+                                block_counter,
+                            )
+                        )
+                    elif child.tag == qn("w:tbl"):
+                        cell_blocks.append(
+                            self._rich_table(
+                                child,
+                                doc,
+                                image_parts,
+                                image_dir,
+                                image_counter,
+                                image_paths,
+                                block_counter,
+                            )
+                        )
+                cell: dict[str, Any] = {"blocks": cell_blocks}
+                cell_properties = cell_element.find(qn("w:tcPr"))
+                grid_span = (
+                    cell_properties.find(qn("w:gridSpan")) if cell_properties is not None else None
+                )
+                if grid_span is not None:
+                    try:
+                        span = int(grid_span.get(qn("w:val")))
+                    except (TypeError, ValueError):
+                        span = 1
+                    if span > 1:
+                        cell["colspan"] = span
+                cells.append(cell)
+            rows.append({"cells": cells})
+        return {
+            "kind": "table",
+            "block_id": self._next_block_id(block_counter),
+            "rows": rows,
+        }
+
+    @staticmethod
+    def _hyperlink_target(doc, hyperlink) -> tuple[str, str | None]:
+        rel_id = hyperlink.get(qn("r:id"))
+        relationship = doc.part.rels.get(rel_id) if rel_id else None
+        target = getattr(relationship, "target_ref", None)
+        if not target or not DocxParser._is_safe_http_url(target):
+            raise ValueError("DOCX 超链接不是安全的 HTTP(S) 地址")
+        tooltip = hyperlink.get(qn("w:tooltip"))
+        return target, tooltip.strip() if tooltip and tooltip.strip() else None
+
+    @staticmethod
+    def _is_safe_http_url(value: str) -> bool:
+        if any(ord(char) < 0x20 for char in value) or "\\" in value:
+            return False
+        parsed = urlsplit(value)
+        return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
+
+    def _title_from_rich_blocks(self, blocks: list[dict[str, Any]], filename: str) -> str:
+        for block in blocks:
+            if block.get("kind") == "heading" and block.get("level") == 1:
+                text = self._rich_block_text(block)
+                if text.strip():
+                    return self._normalize_title(text)
+        for block in blocks:
+            text = self._rich_block_text(block)
+            if text.strip():
+                return self._normalize_title(text)
+        return Path(filename).stem
+
+    def _find_title_block_id(self, blocks: list[dict[str, Any]], title: str) -> str | None:
+        normalized_title = self._normalize_title(title)
+        if not normalized_title:
+            return None
+        for block in blocks:
+            if block.get("kind") not in {"paragraph", "heading"}:
+                continue
+            if self._normalize_title(self._rich_block_text(block)) == normalized_title:
+                return block.get("block_id")
+        return None
+
+    @staticmethod
+    def _rich_block_text(block: dict[str, Any]) -> str:
+        if block.get("kind") in {"paragraph", "heading"}:
+            return "".join(
+                child.get("text", "")
+                for child in block.get("children", [])
+                if child.get("kind") == "text"
+            )
+        if block.get("kind") == "list":
+            return "".join(
+                DocxParser._rich_block_text(nested)
+                for item in block.get("items", [])
+                for nested in item.get("blocks", [])
+            )
+        if block.get("kind") == "table":
+            return "".join(
+                DocxParser._rich_block_text(nested)
+                for row in block.get("rows", [])
+                for cell in row.get("cells", [])
+                for nested in cell.get("blocks", [])
+            )
+        return ""
+
+    def _legacy_blocks_from_rich(self, blocks: list[dict[str, Any]]) -> list[ContentBlock]:
+        result: list[ContentBlock] = []
+
+        def visit(block: dict[str, Any]) -> None:
+            kind = block.get("kind")
+            if kind in {"paragraph", "heading"}:
+                for child in block.get("children", []):
+                    if child.get("kind") == "text":
+                        result.append(
+                            ContentBlock(
+                                type="heading" if kind == "heading" else "text",
+                                text=child.get("text"),
+                                style_name=block.get("style_name"),
+                                position=len(result),
+                            )
+                        )
+                    elif child.get("kind") == "image":
+                        path = child.get("__source_path")
+                        result.append(
+                            ContentBlock(
+                                type="image",
+                                image_filename=child.get("__original_filename"),
+                                image_path=path,
+                                image_width=child.get("width"),
+                                image_height=child.get("height"),
+                                position=len(result),
+                            )
+                        )
+            elif kind == "list":
+                for item in block.get("items", []):
+                    for nested in item.get("blocks", []):
+                        visit(nested)
+            elif kind == "table":
+                for row in block.get("rows", []):
+                    for cell in row.get("cells", []):
+                        for nested in cell.get("blocks", []):
+                            visit(nested)
+
+        for block in blocks:
+            visit(block)
+        return result
 
     def _find_paragraph(self, doc, element):
         """根据 XML 元素查找对应的 python-docx Paragraph 对象"""

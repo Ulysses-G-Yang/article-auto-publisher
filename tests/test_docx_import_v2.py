@@ -1,0 +1,195 @@
+"""DOCX v2 富结构导入的离线回归测试。
+
+测试只在临时目录生成和读取 DOCX；不接触真实账号、浏览器 Profile 或平台接口。
+"""
+
+import asyncio
+import io
+import json
+from pathlib import Path
+
+import pytest
+from docx import Document
+from docx.opc.constants import RELATIONSHIP_TYPE as RT
+from docx.oxml import OxmlElement
+from docx.oxml.ns import qn
+from docx.shared import Inches
+from PIL import Image
+
+from content_studio.assets import AssetStore
+from content_studio.errors import ContentAssetError
+from content_studio.importers import DocxImportAdapter
+from core.docx_parser import DocxParser
+
+
+def _image_path(tmp_path: Path, name: str = "source.png") -> Path:
+    path = tmp_path / name
+    Image.new("RGB", (32, 24), "#2d6cdf").save(path, format="PNG")
+    return path
+
+
+def _add_hyperlink(paragraph, text: str, target: str) -> None:
+    relationship_id = paragraph.part.relate_to(target, RT.HYPERLINK, is_external=True)
+    hyperlink = OxmlElement("w:hyperlink")
+    hyperlink.set(qn("r:id"), relationship_id)
+    run = OxmlElement("w:r")
+    run_properties = OxmlElement("w:rPr")
+    bold = OxmlElement("w:b")
+    run_properties.append(bold)
+    run.append(run_properties)
+    text_node = OxmlElement("w:t")
+    text_node.text = text
+    run.append(text_node)
+    hyperlink.append(run)
+    paragraph._p.append(hyperlink)
+
+
+def _make_rich_doc(tmp_path: Path, *, unsafe_link: str | None = None) -> bytes:
+    document = Document()
+    document.core_properties.title = "核心标题"
+
+    title = document.add_paragraph("核心标题")
+    title.runs[0].bold = True
+
+    marked = document.add_paragraph()
+    marked.add_run("粗体").bold = True
+    marked.add_run("斜体").italic = True
+    marked.add_run("下划线").underline = True
+    marked.add_run("删除线").font.strike = True
+    _add_hyperlink(marked, "安全链接", unsafe_link or "https://example.test/reference")
+
+    mixed = document.add_paragraph()
+    mixed.add_run("图片前")
+    image_run = mixed.add_run()
+    image_run.add_picture(str(_image_path(tmp_path)), width=Inches(0.3))
+    doc_pr = image_run._r.xpath(".//wp:docPr")[0]
+    doc_pr.set("descr", "正文示意图")
+    mixed.add_run("图片后")
+
+    captioned = document.add_paragraph()
+    captioned_image_run = captioned.add_run()
+    captioned_image_run.add_picture(str(_image_path(tmp_path, "captioned.png")), width=Inches(0.25))
+    captioned_doc_pr = captioned_image_run._r.xpath(".//wp:docPr")[0]
+    captioned_doc_pr.set("descr", "带说明图片")
+    document.add_paragraph("正文示意图说明", style="Caption")
+
+    heading = document.add_heading("二级章节", level=2)
+    heading.runs[0].font.italic = True
+
+    document.add_paragraph("第一项", style="List Number")
+    document.add_paragraph("第二项", style="List Number")
+
+    table = document.add_table(rows=1, cols=2)
+    table.cell(0, 0).paragraphs[0].add_run("单元格文字")
+    table_image_run = table.cell(0, 1).paragraphs[0].add_run()
+    table_image_run.add_picture(str(_image_path(tmp_path, "table.png")), width=Inches(0.2))
+
+    output = io.BytesIO()
+    document.save(output)
+    return output.getvalue()
+
+
+def _make_floating_image_doc(tmp_path: Path) -> bytes:
+    document = Document()
+    paragraph = document.add_paragraph()
+    run = paragraph.add_run()
+    run.add_picture(str(_image_path(tmp_path)))
+    inline = run._r.xpath(".//wp:inline")[0]
+    inline.tag = qn("wp:anchor")
+    output = io.BytesIO()
+    document.save(output)
+    return output.getvalue()
+
+
+def _run(coro):
+    return asyncio.run(coro)
+
+
+def test_parser_v2_preserves_rich_order_marks_anchor_and_caption(tmp_path: Path) -> None:
+    source = tmp_path / "rich.docx"
+    source.write_bytes(_make_rich_doc(tmp_path))
+    parsed = DocxParser(images_dir=str(tmp_path / "parser-images")).parse_document_v2(str(source))
+    document = parsed.document_v2
+
+    assert document["schema_version"] == 2
+    assert document["title"] == "核心标题"
+    assert document["title_block_id"] == document["blocks"][0]["block_id"]
+
+    marked_children = document["blocks"][1]["children"]
+    assert marked_children[0]["marks"] == ["bold"]
+    assert marked_children[1]["marks"] == ["italic"]
+    assert marked_children[2]["marks"] == ["underline"]
+    assert marked_children[3]["marks"] == ["strike"]
+    assert marked_children[4]["link"]["href"] == "https://example.test/reference"
+
+    mixed_children = document["blocks"][2]["children"]
+    assert [child["kind"] for child in mixed_children] == ["text", "image", "text"]
+    assert mixed_children[1]["alt"] == "正文示意图"
+    captioned_image = document["blocks"][3]["children"][0]
+    assert captioned_image["alt"] == "带说明图片"
+    assert captioned_image["caption"] == "正文示意图说明"
+
+    assert any(block["kind"] == "heading" and block["level"] == 2 for block in document["blocks"])
+    list_block = next(block for block in document["blocks"] if block["kind"] == "list")
+    assert list_block["ordered"] is True
+    assert len(list_block["items"]) == 2
+    table_block = next(block for block in document["blocks"] if block["kind"] == "table")
+    assert table_block["rows"][0]["cells"][1]["blocks"][0]["children"][0]["kind"] == "image"
+
+
+def test_parser_v2_marks_floating_image(tmp_path: Path) -> None:
+    source = tmp_path / "floating.docx"
+    source.write_bytes(_make_floating_image_doc(tmp_path))
+    parsed = DocxParser(images_dir=str(tmp_path / "parser-images")).parse_document_v2(str(source))
+    image = parsed.document_v2["blocks"][0]["children"][0]
+    assert image["kind"] == "image"
+    assert image["anchor"] == {"kind": "floating"}
+
+
+def test_importer_resolves_assets_before_validation_and_projects_order(tmp_path: Path) -> None:
+    data = _make_rich_doc(tmp_path)
+    adapter = DocxImportAdapter(
+        AssetStore(tmp_path / "assets"),
+        work_root=tmp_path / "work",
+    )
+    title, blocks, assets, document = _run(adapter.parse_v2(data, "rich.docx"))
+
+    assert title == "核心标题"
+    assert len(assets) == 3
+    assert document["source_fidelity"] == "NATIVE"
+    assert all(len(asset.asset_id) == 36 for asset in assets)
+    assert all(
+        "asset_id" in child
+        for block in document["blocks"]
+        if block.get("children")
+        for child in block["children"]
+        if child["kind"] == "image"
+    )
+    public_json = json.dumps(document, ensure_ascii=False)
+    assert "__source_path" not in public_json
+    assert "storage_path" not in public_json
+    assert [block["position"] for block in blocks] == list(range(len(blocks)))
+    assert [block["type"] for block in blocks[1:4]] == ["text", "image", "text"]
+    assert blocks[0]["text"] == "粗体斜体下划线删除线安全链接"
+
+
+def test_importer_rejects_unsafe_hyperlink_and_removes_assets(tmp_path: Path) -> None:
+    data = _make_rich_doc(tmp_path, unsafe_link="javascript:alert(1)")
+    asset_root = tmp_path / "assets"
+    adapter = DocxImportAdapter(AssetStore(asset_root), work_root=tmp_path / "work")
+
+    with pytest.raises(ContentAssetError, match="安全|解析"):
+        _run(adapter.parse_v2(data, "unsafe.docx"))
+    assert not list(asset_root.rglob("*"))
+
+
+def test_importer_keeps_unassociated_caption_paragraph(tmp_path: Path) -> None:
+    document = Document()
+    document.add_paragraph("Caption 文本", style="Caption")
+    source = io.BytesIO()
+    document.save(source)
+    adapter = DocxImportAdapter(AssetStore(tmp_path / "assets"), work_root=tmp_path / "work")
+
+    _title, _blocks, _assets, rich = _run(adapter.parse_v2(source.getvalue(), "caption.docx"))
+    caption_blocks = [block for block in rich["blocks"] if block.get("style_name") == "Caption"]
+    assert len(caption_blocks) == 1

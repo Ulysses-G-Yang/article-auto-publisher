@@ -15,6 +15,11 @@ from pathlib import Path
 from typing import Protocol
 
 from content_studio.assets import AssetStore, StoredAsset
+from content_studio.content_document import (
+    ContentDocumentValidationError,
+    project_to_v1,
+    validate_document,
+)
 from content_studio.errors import ContentAssetError, DraftNotFoundError
 from content_studio.runtime_paths import default_work_root
 
@@ -134,6 +139,24 @@ class DocxImportAdapter:
     async def parse(self, data: bytes, filename: str) -> tuple[str, list[dict], list[StoredAsset]]:
         return await asyncio.to_thread(self._parse_sync, data, filename)
 
+    async def parse_v2(
+        self,
+        data: bytes,
+        filename: str,
+    ) -> tuple[str, list[dict], list[StoredAsset], dict]:
+        """导入 DOCX 富结构；旧 ``parse`` 契约保持不变。"""
+
+        return await asyncio.to_thread(self._parse_v2_sync, data, filename)
+
+    async def parse_document_v2(
+        self,
+        data: bytes,
+        filename: str,
+    ) -> tuple[str, list[dict], list[StoredAsset], dict]:
+        """``parse_v2`` 的语义化别名，便于工作台按文档命名调用。"""
+
+        return await self.parse_v2(data, filename)
+
     def _parse_sync(
         self,
         data: bytes,
@@ -215,6 +238,137 @@ class DocxImportAdapter:
             except Exception:
                 _remove_stored_assets(self.asset_store, stored_assets)
                 raise
+
+    def _parse_v2_sync(
+        self,
+        data: bytes,
+        filename: str,
+    ) -> tuple[str, list[dict], list[StoredAsset], dict]:
+        self._validate_docx_payload(data, filename)
+        with tempfile.TemporaryDirectory(prefix="docx-v2-", dir=self.work_root) as temp_dir:
+            temp_root = Path(temp_dir).resolve()
+            upload = temp_root / "source.docx"
+            upload.write_bytes(data)
+            try:
+                parser = self.parser_factory(images_dir=str(temp_root / "images"))
+            except TypeError:
+                parser = self.parser_factory()
+                parser.images_dir = str(temp_root / "images")
+
+            stored_assets: list[StoredAsset] = []
+            try:
+                parsed = parser.parse_document_v2(str(upload))
+                document = self._resolve_v2_assets(
+                    parsed.document_v2,
+                    temp_root,
+                    stored_assets,
+                )
+                try:
+                    document = validate_document(document)
+                except ContentDocumentValidationError as exc:
+                    raise ContentAssetError(f"DOCX 富结构校验失败: {exc}") from exc
+                projection = project_to_v1(document, omit_title_block=True)
+                return document["title"], projection.blocks, stored_assets, document
+            except ContentAssetError:
+                _remove_stored_assets(self.asset_store, stored_assets)
+                raise
+            except Exception as exc:
+                # 解析器、关系读取或受控 asset 转换的任何普通失败都必须
+                # 进入统一的 fail-closed 错误边界，并先删除本批已落盘资产。
+                # 不捕获 BaseException，避免吞掉取消、退出和中断信号。
+                _remove_stored_assets(self.asset_store, stored_assets)
+                raise ContentAssetError(f"DOCX 富结构解析失败: {exc}") from exc
+
+    @staticmethod
+    def _validate_docx_payload(data: bytes, filename: str) -> None:
+        if not data:
+            raise ContentAssetError("DOCX 文件为空")
+        if len(data) > MAX_DOCX_BYTES:
+            raise ContentAssetError("DOCX 文件不能超过 50MB")
+        if not filename.lower().endswith(".docx"):
+            raise ContentAssetError("仅支持 .docx 文件")
+        try:
+            with zipfile.ZipFile(io.BytesIO(data)) as archive:
+                entries = archive.infolist()
+                if len(entries) > MAX_DOCX_ARCHIVE_ENTRIES:
+                    raise ContentAssetError("DOCX 内部文件数量超过安全限制")
+                if sum(item.file_size for item in entries) > MAX_DOCX_UNCOMPRESSED_BYTES:
+                    raise ContentAssetError("DOCX 解压后内容超过 250MB 安全限制")
+        except zipfile.BadZipFile as exc:
+            raise ContentAssetError("文件不是有效的 DOCX 文档") from exc
+
+    def _resolve_v2_assets(
+        self,
+        document: dict,
+        temp_root: Path,
+        stored_assets: list[StoredAsset],
+    ) -> dict:
+        """将解析器内部图片引用替换为受控 UUID，绝不外泄临时路径。"""
+
+        def resolve_inline(node: dict) -> dict:
+            if node.get("kind") == "text":
+                return dict(node)
+            if node.get("kind") != "image":
+                raise ContentAssetError("DOCX 富结构包含未知 inline 节点")
+            source_value = node.get("__source_path")
+            if not isinstance(source_value, str) or not source_value:
+                raise ContentAssetError("DOCX 图片缺少解析引用")
+            image_path = Path(source_value).expanduser().resolve(strict=True)
+            if not _is_within(image_path, temp_root):
+                raise ContentAssetError("DOCX 解析器返回了工作目录之外的图片")
+            filename = str(node.get("__original_filename") or image_path.name)
+            stored = self.asset_store.save_image(image_path.read_bytes(), filename)
+            stored_assets.append(stored)
+            result = {
+                "kind": "image",
+                "asset_id": stored.asset_id,
+                "width": stored.width,
+                "height": stored.height,
+            }
+            for field in ("alt", "caption", "anchor"):
+                if node.get(field) is not None:
+                    result[field] = node[field]
+            return result
+
+        def resolve_block(block: dict) -> dict:
+            kind = block.get("kind")
+            if kind in {"paragraph", "heading"}:
+                result = {key: value for key, value in block.items() if not key.startswith("__")}
+                result["children"] = [resolve_inline(child) for child in block.get("children", [])]
+                return result
+            if kind == "list":
+                result = {key: value for key, value in block.items() if not key.startswith("__")}
+                result["items"] = [
+                    {"blocks": [resolve_block(nested) for nested in item.get("blocks", [])]}
+                    for item in block.get("items", [])
+                ]
+                return result
+            if kind == "table":
+                result = {key: value for key, value in block.items() if not key.startswith("__")}
+                result["rows"] = [
+                    {
+                        "cells": [
+                            {
+                                **{
+                                    key: value
+                                    for key, value in cell.items()
+                                    if key != "blocks" and not key.startswith("__")
+                                },
+                                "blocks": [
+                                    resolve_block(nested) for nested in cell.get("blocks", [])
+                                ],
+                            }
+                            for cell in row.get("cells", [])
+                        ]
+                    }
+                    for row in block.get("rows", [])
+                ]
+                return result
+            raise ContentAssetError("DOCX 富结构包含未知 block")
+
+        result = {key: value for key, value in document.items() if not key.startswith("__")}
+        result["blocks"] = [resolve_block(block) for block in document.get("blocks", [])]
+        return result
 
 
 async def copy_legacy_article(

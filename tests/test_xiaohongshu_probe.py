@@ -7,14 +7,20 @@ import pytest
 from article_mvp.tools.probe_xiaohongshu_editor import (
     BODY_EDITOR_SELECTOR,
     DOM_PROBE_SCRIPT,
+    DRAFT_LIST_ENTRY_SCRIPT,
+    DRAFT_LIST_PROBE_SCRIPT,
     ProbeError,
+    build_draft_list_result,
     build_probe_result,
+    classify_draft_entry_payload,
     classify_handoff_location,
     classify_probe_payload,
     landing_status_for,
     manual_action_for,
     safe_page_location,
+    sanitize_draft_list_payload,
     sanitize_probe_payload,
+    wait_for_draft_list,
     wait_for_manual_handoff,
 )
 
@@ -190,6 +196,226 @@ def test_toolbar_payload_is_whitelisted_and_redacted() -> None:
     assert "data:image" not in serialized
     assert "user-content" not in serialized
     assert "<redacted>" in serialized
+
+
+def test_draft_list_entry_script_clicks_only_one_exact_visible_entry() -> None:
+    lowered = DRAFT_LIST_ENTRY_SCRIPT.lower()
+
+    assert "^草稿箱(?:\\(\\d+\\))?$" in DRAFT_LIST_ENTRY_SCRIPT
+    assert ".click()" in lowered
+    assert lowered.count(".click()") == 1
+    assert "href" not in lowered
+    assert "src" not in lowered
+    assert ".value" not in lowered
+    assert "classname" not in lowered
+    assert "style" not in lowered
+    assert "新的创作" not in DRAFT_LIST_ENTRY_SCRIPT
+
+
+@pytest.mark.parametrize(
+    ("payload", "expected"),
+    [
+        ({"status": "DRAFT_LIST_ENTRY_CLICKED", "entry_count": 1}, "DRAFT_LIST_ENTRY_CLICKED"),
+        ({"status": "DRAFT_LIST_ENTRY_CLICKED", "entry_count": 2}, "DRAFT_LIST_ENTRY_AMBIGUOUS"),
+        ({"status": "DRAFT_LIST_ENTRY_MISSING", "entry_count": 0}, "DRAFT_LIST_ENTRY_MISSING"),
+        ({}, "DRAFT_LIST_ENTRY_MISSING"),
+    ],
+)
+def test_draft_list_entry_classification_fails_closed(payload: dict, expected: str) -> None:
+    assert classify_draft_entry_payload(payload) == expected
+
+
+def test_draft_list_payload_is_short_whitelisted_and_redacted() -> None:
+    payload = sanitize_draft_list_payload(
+        {
+            "items": [
+                {
+                    "tag": "article",
+                    "role": "listitem",
+                    "label": "显示器评测 token=abcdefghijklmnop",
+                    "button_texts": ["继续编辑", r"C:\\private\\draft.png"],
+                    "unique_edit_entry": True,
+                    "href": "https://example.invalid/private",
+                    "src": "data:image/png;base64,secret",
+                    "style": "background: secret",
+                    "class": "user-content",
+                    "value": "正文内容",
+                }
+            ],
+            "body": "正文内容不应输出",
+        }
+    )
+    item = payload["draft_items"][0]
+    assert payload["draft_item_count"] == 1
+    assert payload["unique_edit_entry_count"] == 1
+    assert set(item) == {
+        "tag",
+        "role",
+        "label_present",
+        "label_length",
+        "button_texts",
+        "unique_edit_entry",
+    }
+    assert item["label_present"] is True
+    assert item["label_length"] == 0
+    serialized = json.dumps(payload, ensure_ascii=False)
+    assert "abcdefghijklmnop" not in serialized
+    assert "private" not in serialized
+    assert "data:image" not in serialized
+    assert "正文内容" not in serialized
+    assert "href" not in serialized
+    assert "[redacted]" in serialized
+
+
+def test_draft_list_probe_script_reads_only_whitelisted_item_structure() -> None:
+    lowered = DRAFT_LIST_PROBE_SCRIPT.lower()
+
+    assert "draft_item_count" not in lowered
+    assert "label_present" in DRAFT_LIST_PROBE_SCRIPT
+    assert "label_length" in DRAFT_LIST_PROBE_SCRIPT
+    assert "button_texts" in DRAFT_LIST_PROBE_SCRIPT
+    assert "unique_edit_entry" in DRAFT_LIST_PROBE_SCRIPT
+    assert ".filter((item) => item.unique_edit_entry)" in DRAFT_LIST_PROBE_SCRIPT
+    assert "href" not in lowered
+    assert "src" not in lowered
+    assert "classname" not in lowered
+    assert ".value" not in lowered
+    assert "style" not in lowered
+    assert "cookie" not in lowered
+    assert "正文" not in DRAFT_LIST_PROBE_SCRIPT
+    assert ".click(" not in lowered
+
+
+class _FakeDraftListPage:
+    def __init__(self, payloads: list[dict], urls: list[str] | None = None) -> None:
+        self._payloads = iter(payloads)
+        self._urls = iter(urls or ["https://creator.xiaohongshu.com/publish/publish"])
+        self._current_url = "https://creator.xiaohongshu.com/publish/publish"
+        self.evaluate_calls = 0
+
+    @property
+    def url(self) -> str:
+        try:
+            self._current_url = next(self._urls)
+        except StopIteration:
+            pass
+        return self._current_url
+
+    async def evaluate(self, _script: str) -> dict:
+        self.evaluate_calls += 1
+        try:
+            return next(self._payloads)
+        except StopIteration:
+            return {"status": "DRAFT_LIST_NOT_READY", "items": []}
+
+
+@pytest.mark.asyncio
+async def test_wait_for_draft_list_requires_two_stable_read_only_snapshots() -> None:
+    clock = _FakeClock()
+    page = _FakeDraftListPage(
+        [
+            {
+                "status": "DRAFT_LIST_CANDIDATES",
+                "items": [{"tag": "li", "unique_edit_entry": True}],
+            },
+            {
+                "status": "DRAFT_LIST_CANDIDATES",
+                "items": [{"tag": "li", "unique_edit_entry": True}],
+            },
+        ]
+    )
+    status, payload = await wait_for_draft_list(
+        page,
+        timeout_seconds=5,
+        sleep=clock.sleep,
+        clock=clock,
+    )
+    assert status == "DRAFT_LIST_READY"
+    assert payload["items"]
+    assert page.evaluate_calls == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("payload", "expected"),
+    [
+        ({"status": "DRAFT_LIST_NOT_READY", "items": []}, "DRAFT_LIST_NOT_READY"),
+        (
+            {"status": "DRAFT_LIST_UNRECOGNIZED", "items": []},
+            "DRAFT_LIST_UNRECOGNIZED",
+        ),
+    ],
+)
+async def test_wait_for_draft_list_zero_items_never_reports_ready(
+    payload: dict,
+    expected: str,
+) -> None:
+    clock = _FakeClock()
+    page = _FakeDraftListPage([payload, payload])
+    status, result = await wait_for_draft_list(
+        page,
+        timeout_seconds=1,
+        sleep=clock.sleep,
+        clock=clock,
+    )
+    assert status == expected
+    assert result["items"] == []
+
+
+@pytest.mark.asyncio
+async def test_stable_sidebar_items_without_edit_entry_never_report_ready() -> None:
+    clock = _FakeClock()
+    sidebar_payload = {
+        "status": "DRAFT_LIST_CANDIDATES",
+        "list_container_count": 1,
+        "items": [{"tag": "li", "unique_edit_entry": False}],
+    }
+    page = _FakeDraftListPage([sidebar_payload, sidebar_payload])
+    status, payload = await wait_for_draft_list(
+        page,
+        timeout_seconds=1,
+        sleep=clock.sleep,
+        clock=clock,
+    )
+    assert status == "DRAFT_LIST_UNRECOGNIZED"
+    assert payload["items"]
+    result = build_draft_list_result("DRAFT_LIST_READY", payload)
+    assert result["status"] == "DRAFT_LIST_UNRECOGNIZED"
+    assert result["draft_item_count"] == 0
+
+
+@pytest.mark.asyncio
+async def test_wait_for_draft_list_rejects_path_change_after_entry_click() -> None:
+    clock = _FakeClock()
+    page = _FakeDraftListPage(
+        [{"status": "DRAFT_LIST_CANDIDATES", "items": [{"tag": "li"}]}],
+        urls=["https://creator.xiaohongshu.com/publish/drafts"],
+    )
+    status, payload = await wait_for_draft_list(
+        page,
+        timeout_seconds=1,
+        sleep=clock.sleep,
+        clock=clock,
+    )
+    assert status == "UNEXPECTED_ORIGIN"
+    assert payload == {}
+
+
+def test_draft_list_result_statuses_and_manual_action_are_explicit() -> None:
+    ready = build_draft_list_result(
+        "DRAFT_LIST_READY",
+        {"items": [{"tag": "article", "unique_edit_entry": True}]},
+    )
+    missing = build_draft_list_result("DRAFT_LIST_ENTRY_MISSING")
+    ambiguous = build_draft_list_result("DRAFT_LIST_ENTRY_AMBIGUOUS")
+
+    assert ready["status"] == "DRAFT_LIST_READY"
+    assert ready["manual_action_required"] is False
+    assert ready["draft_item_count"] == 1
+    assert missing["manual_action_required"] is True
+    assert ambiguous["manual_action_required"] is True
+    assert "安全停止" in manual_action_for("DRAFT_LIST_ENTRY_MISSING")
+    assert "安全停止" in manual_action_for("DRAFT_LIST_ENTRY_AMBIGUOUS")
 
 
 def test_safe_location_drops_query_and_fragment() -> None:

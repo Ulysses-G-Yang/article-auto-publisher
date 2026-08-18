@@ -2,11 +2,11 @@
 import asyncio
 import json
 from pathlib import Path
+
 from loguru import logger
 
 from platforms.base import BasePlatform, BrowserLifecycleError, SelectorError
 from platforms.content_validation import (
-    ContentValidationError,
     ensure_valid_content,
     safe_media_error,
 )
@@ -384,22 +384,14 @@ class XiaoheihePlatform(BasePlatform):
     async def fill_content(self, content_blocks: list, images: list):
         """填写正文（真实字段：.article__edit-content--inner 内的 contenteditable ProseMirror）"""
         self._raise_if_page_closed("小黑盒填写正文")
-        editor = self.page.locator(self.BODY_FIELD).first
-        try:
-            if await editor.count() == 0 or not await editor.is_visible():
-                raise RuntimeError("正文编辑器不可见")
-        except Exception as e:
-            if self._exception_means_browser_closed(e):
-                raise BrowserLifecycleError("BROWSER_CONTEXT_CLOSED: 小黑盒定位正文编辑器时页面已关闭") from e
-            logger.error("小黑盒正文编辑区定位失败: {}", e)
-            raise SelectorError("小黑盒正文编辑区未找到") from e
-
+        editor = await self._current_body_editor()
         await editor.click()
         await editor.fill("")
         await self.simulator.random_delay(0.3, 0.8)
 
-        # 先完整写入文字，再处理图片。图片弹窗会让 ProseMirror 重新渲染，
-        # 交错处理会丢掉前面已经输入的文字。
+        # 保持已经真实验收过的布局：先完整写入文字，再按内容块中的
+        # position 顺序上传图片。图片弹窗会重建 ProseMirror，未经真实 DOM
+        # 证据不能擅自改成逐块交错插入。
         first_text = True
         for block in content_blocks:
             btype = block.get("type")
@@ -407,6 +399,8 @@ class XiaoheihePlatform(BasePlatform):
                 text = block["text"].strip()
                 if not text:
                     continue
+                editor = await self._current_body_editor()
+                await editor.click()
                 if not first_text:
                     await self.page.keyboard.press("Enter")
                     await self.page.keyboard.press("Enter")
@@ -418,8 +412,10 @@ class XiaoheihePlatform(BasePlatform):
                         await self.page.keyboard.press("Enter")
                 first_text = False
 
+        editor = await self._current_body_editor()
         await editor.evaluate(
-            "el => el.dispatchEvent(new InputEvent('input', {bubbles: true, inputType: 'insertText'}))"
+            "el => el.dispatchEvent(new InputEvent('input', {bubbles: true, "
+            "inputType: 'insertText'}))"
         )
 
         actual_text = await editor.inner_text()
@@ -437,8 +433,8 @@ class XiaoheihePlatform(BasePlatform):
         uploaded_images = 0
         failed_images = []
 
-        # 文字验证通过后再上传图片；图片失败不抹掉正文，但必须返回结构化结果，
-        # 让上层把任务标记为 completed_with_warnings，而不是普通 completed。
+        # 图片失败不抹掉正文，但必须返回结构化结果，让上层标记
+        # completed_with_warnings；图片处理后的正文校验仍然是硬失败。
         for block in content_blocks:
             if block.get("type") == "image":
                 img_path = block.get("local_path")
@@ -470,24 +466,15 @@ class XiaoheihePlatform(BasePlatform):
                         "error": "文章图片块没有对应本地文件",
                     })
 
-        # 图片操作可能触发编辑器重渲染，重新定位正文并做最终校验。
-        # 文字完整性已在「输入后」阶段验证；插图会重排正文（平台行为），
-        # 图片插入导致顺序校验不匹配时降级为警告，不阻断投递。
-        editor = self.page.locator(self.BODY_FIELD).first
+        editor = await self._current_body_editor()
         actual_text = await editor.inner_text()
-        try:
-            ensure_valid_content(
-                content_blocks,
-                actual_text,
-                platform="小黑盒",
-                phase="图片处理后",
-            )
-            logger.info("小黑盒正文输入并最终验证成功: {} 个文本段落", expected_count)
-        except ContentValidationError:
-            logger.warning(
-                "小黑盒插图后正文顺序校验未完全匹配（图片插入重排，"
-                "文字已在上一步验证，不阻断投递）"
-            )
+        expected_count = ensure_valid_content(
+            content_blocks,
+            actual_text,
+            platform="小黑盒",
+            phase="图片处理后",
+        )
+        logger.info("小黑盒正文输入并最终验证成功: {} 个文本段落", expected_count)
 
         if expected_images == 0:
             media_status = "not_required"
@@ -517,6 +504,15 @@ class XiaoheihePlatform(BasePlatform):
             "media_status": media_status,
             "media_error": media_error,
         }
+
+    async def _current_body_editor(self):
+        """每次操作都重新获取可见正文节点，避免使用重渲染前的旧节点。"""
+
+        self._raise_if_page_closed("定位小黑盒当前正文编辑器")
+        editor = await self._first_visible(self.BODY_FIELD)
+        if editor is None:
+            raise SelectorError("小黑盒正文编辑区未找到或当前不可见")
+        return editor
 
     async def _find_file_input(self, timeout_ms: int = 3000):
         """查找页面或 iframe 中已挂载的文件控件。"""

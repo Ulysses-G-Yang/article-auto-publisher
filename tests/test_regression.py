@@ -15,7 +15,12 @@ from platforms.baijiahao import (
 from platforms.baijiahao import (
     PlatformNotImplementedError as BaijiahaoNotImplementedError,
 )
-from platforms.base import BasePlatform, BrowserLifecycleError, PlatformAccessError
+from platforms.base import (
+    BasePlatform,
+    BrowserLifecycleError,
+    PlatformAccessError,
+    SelectorError,
+)
 from platforms.content_validation import ContentValidationError
 from platforms.douyin import DouyinPlatform, PlatformNotImplementedError
 from platforms.smzdm import PlatformNotImplementedError as SmzdmNotImplementedError
@@ -63,7 +68,8 @@ class FakeKeyboard:
 
 class FakeLocator:
     def __init__(self, page=None, tag="div", value="", text="", count=1,
-                 visible=True, handle=None):
+                 visible=True, handle=None, editable=True, attributes=None,
+                 click_error=None):
         self.page = page
         self.tag = tag
         self.value = value
@@ -71,8 +77,12 @@ class FakeLocator:
         self._count = count
         self.visible = visible
         self.handle = handle
+        self.editable = editable
+        self.attributes = dict(attributes or {})
+        self.click_error = click_error
         self.selected_all = False
         self.clicked = False
+        self.focused = False
 
     @property
     def first(self):
@@ -88,9 +98,17 @@ class FakeLocator:
         return self.visible
 
     async def evaluate(self, script, *_args):
+        if "document.activeElement" in script:
+            return bool(self.page and self.page.active is self)
         if "tagName" in script:
             return self.tag
         return None
+
+    async def get_attribute(self, name):
+        return self.attributes.get(name)
+
+    async def is_editable(self):
+        return self.editable
 
     async def fill(self, value):
         self.value = value
@@ -108,7 +126,14 @@ class FakeLocator:
         return self.text or self.value
 
     async def click(self, **_kwargs):
+        if self.click_error is not None:
+            raise self.click_error
         self.clicked = True
+        if self.page:
+            self.page.active = self
+
+    async def focus(self):
+        self.focused = True
         if self.page:
             self.page.active = self
 
@@ -124,6 +149,25 @@ class FakeLocator:
 
     def locator(self, _selector):
         return FakeLocator(self.page, tag="option", text=self.text, value=self.value)
+
+
+class FakeLocatorCollection:
+    """极简 Locator 集合，用于验证 first 之外的可见候选选择。"""
+
+    def __init__(self, candidates):
+        self.candidates = list(candidates)
+
+    @property
+    def first(self):
+        return self.nth(0)
+
+    def nth(self, index):
+        if 0 <= index < len(self.candidates):
+            return self.candidates[index]
+        return FakeLocator(count=0)
+
+    async def count(self):
+        return len(self.candidates)
 
 
 class FakeFrame:
@@ -899,24 +943,28 @@ class RegressionTests(DatabaseTestCase):
         self.assertEqual(result["media_status"], "not_required")
 
     def test_xiaoheihe_revalidates_body_after_image_rerender(self):
-        # 2026 修复：插图后编辑器重排导致顺序校验不匹配时降级为警告，
-        # 不再抛 CONTENT_VALIDATION_ERROR 阻断投递（文字完整性已在输入阶段验证）。
+        # 图片处理会重建编辑器；最终必须从新节点读取并在正文缺失时硬失败。
         platform = XiaoheihePlatform()
         platform.page = FakeXiaoPage()
         platform.simulator.random_delay = AsyncMock()
+        replacement = {}
 
         async def remove_body_after_upload(_path):
-            platform.page.body.text = "第一段"
-            platform.page.body.value = "第一段"
+            replacement["body"] = FakeLocator(
+                page=platform.page,
+                tag="div",
+                text="第一段",
+            )
+            platform.page.body = replacement["body"]
             return {"success": True, "filename": "image.png"}
 
         platform._upload_image = AsyncMock(side_effect=remove_body_after_upload)
-        result = asyncio.run(platform.fill_content([
-            {"type": "text", "text": "第一段\n第二段"},
-            {"type": "image", "position": 1, "local_path": "D:/test/image.png"},
-        ], []))
-        self.assertTrue(result["text_ok"])
-        self.assertEqual(result["media_status"], "completed")
+        with self.assertRaises(ContentValidationError):
+            asyncio.run(platform.fill_content([
+                {"type": "text", "text": "第一段\n第二段"},
+                {"type": "image", "position": 1, "local_path": "D:/test/image.png"},
+            ], []))
+        self.assertIs(platform.page.body, replacement["body"])
 
     def test_zol_three_editor_read_strategies_are_explicit(self):
         for kind, expected_kind in (
@@ -961,6 +1009,79 @@ class RegressionTests(DatabaseTestCase):
         editor, editor_kind = asyncio.run(platform._resolve_content_editor())
         self.assertIs(editor, page.target)
         self.assertEqual(editor_kind, "textarea")
+
+    def test_zol_skips_hidden_old_body_and_uses_current_visible_body(self):
+        platform = ZOLPlatform()
+        page = FakePage("iframe")
+        old_body = FakeLocator(page=page, tag="body", visible=False)
+        current_body = FakeLocator(page=page, tag="body", text="当前正文")
+        old_frame = FakeFrame(page, old_body)
+        current_frame = FakeFrame(page, current_body)
+        old_iframe = FakeLocator(page=page, tag="iframe")
+        current_iframe = FakeLocator(page=page, tag="iframe")
+        old_iframe.content_frame = AsyncMock(return_value=old_frame)
+        current_iframe.content_frame = AsyncMock(return_value=current_frame)
+        iframe_candidates = FakeLocatorCollection([old_iframe, current_iframe])
+        original_locator = page.locator
+
+        def locator(selector):
+            if selector == ".tox-edit-area iframe":
+                return iframe_candidates
+            if "iframe" in selector:
+                return FakeLocator(count=0)
+            return original_locator(selector)
+
+        page.locator = locator
+        platform.page = page
+        editor, editor_kind = asyncio.run(platform._resolve_content_editor())
+        self.assertIs(editor, current_body)
+        self.assertEqual(editor_kind, "iframe")
+
+    def test_zol_re_resolves_after_iframe_rebuild_before_safe_focus(self):
+        platform = ZOLPlatform()
+        page = FakePage("iframe")
+        old_body = page.frame_body
+        old_body.click_error = RuntimeError("stale iframe body")
+        replacement_body = FakeLocator(page=page, tag="body", text="当前正文")
+        old_frame = FakeFrame(page, old_body)
+        replacement_frame = FakeFrame(page, replacement_body)
+        page.iframe_handle.content_frame = AsyncMock(
+            side_effect=[old_frame, replacement_frame]
+        )
+        platform.page = page
+        editor, editor_kind = asyncio.run(platform._click_editor(old_body))
+        self.assertIs(editor, replacement_body)
+        self.assertEqual(editor_kind, "iframe")
+        self.assertTrue(replacement_body.clicked)
+
+    def test_zol_noninteractive_editor_fails_closed(self):
+        platform = ZOLPlatform()
+        page = FakePage("contenteditable")
+        page.target.editable = False
+        platform.page = page
+        with self.assertRaises(SelectorError):
+            asyncio.run(platform._resolve_content_editor())
+
+    def test_zol_overlay_click_uses_verified_current_focus_only(self):
+        platform = ZOLPlatform()
+        page = FakePage("iframe")
+        page.frame_body.click_error = RuntimeError("pointer intercepted by overlay")
+        platform.page = page
+        editor, editor_kind = asyncio.run(platform._click_editor(page.frame_body))
+        self.assertIs(editor, page.frame_body)
+        self.assertEqual(editor_kind, "iframe")
+        self.assertTrue(page.frame_body.focused)
+
+    def test_zol_browser_closed_during_editor_click_is_not_swallowed(self):
+        platform = ZOLPlatform()
+        page = FakePage("iframe")
+        page.frame_body.click_error = RuntimeError(
+            "Target page, context or browser has been closed"
+        )
+        platform.page = page
+        with self.assertRaises(BrowserLifecycleError):
+            asyncio.run(platform._click_editor(page.frame_body))
+
     def test_zol_revalidates_replaced_iframe_after_image_upload(self):
         platform = ZOLPlatform()
         page = FakePage("iframe")

@@ -5,6 +5,7 @@ import re
 import time
 from pathlib import Path
 from urllib.parse import urlparse
+
 from loguru import logger
 
 from platforms.base import (
@@ -514,8 +515,77 @@ class ZOLPlatform(BasePlatform):
 
         raise SelectorError("ZOL_TITLE_SELECTOR_ERROR: ZOL 标题输入框未找到或输入后校验失败")
 
+    async def _is_visible_locator(self, locator) -> bool:
+        """只接受当前可见节点，避免把旧 iframe/body 当成编辑器。"""
+
+        try:
+            if await locator.count() == 0 or not await locator.is_visible():
+                return False
+            aria_hidden = await locator.get_attribute("aria-hidden")
+            return aria_hidden != "true"
+        except AttributeError:
+            # 兼容极简测试替身；真实 Playwright Locator 始终支持这些方法。
+            try:
+                return await locator.count() > 0 and await locator.is_visible()
+            except Exception:
+                return False
+
+    async def _is_visible_editable(self, locator, *, iframe_body: bool = False) -> bool:
+        """验证节点可见且可编辑；验证失败不得以 focus/DOM click 绕过。"""
+
+        if not await self._is_visible_locator(locator):
+            return False
+        try:
+            disabled = await locator.get_attribute("disabled")
+            readonly = await locator.get_attribute("readonly")
+            contenteditable = await locator.get_attribute("contenteditable")
+            if disabled is not None or readonly is not None:
+                return False
+            if contenteditable is not None and contenteditable.lower() == "false":
+                return False
+        except AttributeError:
+            contenteditable = None
+
+        is_editable = getattr(locator, "is_editable", None)
+        if callable(is_editable):
+            try:
+                return bool(await is_editable())
+            except Exception as exc:
+                if self._exception_means_browser_closed(exc):
+                    raise BrowserLifecycleError(
+                        "BROWSER_CONTEXT_CLOSED: ZOL 验证正文编辑器时页面已关闭"
+                    ) from exc
+                return False
+
+        try:
+            tag_name = await locator.evaluate("el => el.tagName.toLowerCase()")
+        except Exception as exc:
+            if self._exception_means_browser_closed(exc):
+                raise BrowserLifecycleError(
+                    "BROWSER_CONTEXT_CLOSED: ZOL 读取正文节点时页面已关闭"
+                ) from exc
+            return False
+        if contenteditable is not None:
+            return contenteditable.lower() in {"", "true"}
+        # Playwright 的真实 Locator 会走 is_editable()；以下仅兼容没有
+        # is_editable/get_attribute 的极简替身，不改变真实页面的 fail-closed。
+        return tag_name in {"input", "textarea", "div"} or (
+            iframe_body and tag_name == "body"
+        )
+
+    async def _first_visible_editable(self, locator, *, iframe_body: bool = False):
+        """从所有候选中选择第一个当前可见、可编辑节点，而非盲取 first。"""
+
+        count = await locator.count()
+        for index in range(min(count, 30)):
+            candidate = locator.nth(index)
+            if await self._is_visible_editable(candidate, iframe_body=iframe_body):
+                return candidate
+        return None
+
     async def _resolve_content_editor(self):
-        """定位编辑器，并显式返回 iframe/textarea/contenteditable 读取策略。"""
+        """定位当前可编辑正文，并显式返回 iframe/textarea/contenteditable 策略。"""
+
         self._require_page_alive("ZOL 定位正文编辑器")
         iframe_selectors = [
             ".tox-edit-area iframe",
@@ -527,17 +597,25 @@ class ZOLPlatform(BasePlatform):
             "iframe[id*='content']",
         ]
         for selector in iframe_selectors:
-            locator = self.page.locator(selector).first
+            locator = self.page.locator(selector)
             try:
-                if await locator.count() == 0 or not await locator.is_visible():
-                    continue
-                handle = await locator.element_handle()
-                if handle:
+                count = await locator.count()
+                for index in range(min(count, 30)):
+                    iframe = locator.nth(index)
+                    if not await self._is_visible_locator(iframe):
+                        continue
+                    handle = await iframe.element_handle()
+                    if not handle:
+                        continue
                     editor_frame = await handle.content_frame()
-                    if editor_frame:
-                        editor = editor_frame.locator("body").first
-                        if await editor.count() > 0 and await editor.is_visible():
-                            return editor, "iframe"
+                    if not editor_frame:
+                        continue
+                    editor = await self._first_visible_editable(
+                        editor_frame.locator("body"),
+                        iframe_body=True,
+                    )
+                    if editor is not None:
+                        return editor, "iframe"
             except Exception as exc:
                 if self._exception_means_browser_closed(exc):
                     raise BrowserLifecycleError(
@@ -560,12 +638,13 @@ class ZOLPlatform(BasePlatform):
             "[contenteditable='true']",
         ]
         for selector in editor_selectors:
-            locator = self.page.locator(selector).first
+            locator = self.page.locator(selector)
             try:
-                if await locator.count() == 0 or not await locator.is_visible():
+                editor = await self._first_visible_editable(locator)
+                if editor is None:
                     continue
-                tag_name = await locator.evaluate("el => el.tagName.toLowerCase()")
-                return locator, "textarea" if tag_name == "textarea" else "contenteditable"
+                tag_name = await editor.evaluate("el => el.tagName.toLowerCase()")
+                return editor, "textarea" if tag_name == "textarea" else "contenteditable"
             except Exception as exc:
                 if self._exception_means_browser_closed(exc):
                     raise BrowserLifecycleError(
@@ -629,15 +708,59 @@ class ZOLPlatform(BasePlatform):
         except Exception as exc:  # noqa: BLE001
             logger.debug("ZOL 悬浮层收拢失败（继续尝试点击）: {}", exc)
 
-    async def _click_editor(self, editor) -> None:
-        """先收拢拦截点击的悬浮层，再点击编辑器；失败时回退到 focus。"""
+    async def _click_editor(self, editor=None):
+        """点击当前编辑器；旧 iframe/body 或遮罩拦截时只允许安全回退。"""
 
         await self._dismiss_editor_overlays()
+        current, editor_kind = await self._resolve_content_editor()
         try:
-            await editor.click(timeout=45000)
-        except Exception:
-            await editor.evaluate("(el) => el.focus()")
-            await self.simulator.random_delay(0.3, 0.8)
+            await current.click(timeout=5000)
+            return current, editor_kind
+        except Exception as first_error:
+            if self._exception_means_browser_closed(first_error):
+                raise BrowserLifecycleError(
+                    "BROWSER_CONTEXT_CLOSED: ZOL 点击正文编辑器时页面已关闭"
+                ) from first_error
+
+            # 图片弹窗可能刚刚重建 TinyMCE iframe；重新解析一次，禁止把
+            # 传入的旧 locator 当作当前正文节点继续 focus。
+            fresh, fresh_kind = await self._resolve_content_editor()
+            try:
+                await fresh.click(timeout=5000)
+                return fresh, fresh_kind
+            except Exception as second_error:
+                if self._exception_means_browser_closed(second_error):
+                    raise BrowserLifecycleError(
+                        "BROWSER_CONTEXT_CLOSED: ZOL 点击正文编辑器时页面已关闭"
+                    ) from second_error
+
+                # 已通过 visible + editable + 当前 frame/body 校验后，才允许
+                # 用 focus 作为遮罩场景的有限回退；必须确认 activeElement，
+                # 否则按不可交互失败，绝不吞掉点击校验。
+                try:
+                    await fresh.focus()
+                    active = await fresh.evaluate(
+                        "el => document.activeElement === el"
+                    )
+                except Exception as focus_error:
+                    if self._exception_means_browser_closed(focus_error):
+                        raise BrowserLifecycleError(
+                            "BROWSER_CONTEXT_CLOSED: ZOL 聚焦正文编辑器时页面已关闭"
+                        ) from focus_error
+                    raise SelectorError(
+                        "ZOL_CONTENT_EDITOR_NOT_INTERACTABLE: 当前正文节点无法聚焦"
+                    ) from second_error
+                if not active:
+                    raise SelectorError(
+                        "ZOL_CONTENT_EDITOR_NOT_INTERACTABLE: 当前正文节点未获得焦点"
+                    ) from second_error
+                logger.debug(
+                    "ZOL 正文 click 被遮罩拦截，已在当前可编辑节点安全 focus: "
+                    "first_error_type={}, second_error_type={}",
+                    type(first_error).__name__,
+                    type(second_error).__name__,
+                )
+                return fresh, fresh_kind
 
     async def fill_content(self, content_blocks: list, images: list):
         """填写正文、插入图片，并验证文字和图片数量。"""
@@ -662,7 +785,7 @@ class ZOLPlatform(BasePlatform):
             await self._dismiss_editor_overlays()
             await editor.fill(expected_value)
         else:
-            await self._click_editor(editor)
+            editor, editor_kind = await self._click_editor(editor)
             await self.page.keyboard.press("Control+A")
             await self.page.keyboard.press("Backspace")
             previous_kind = None
@@ -670,7 +793,7 @@ class ZOLPlatform(BasePlatform):
                 btype = block.get("type")
                 block_text = (block.get("text") or "").strip()
                 if btype in ("text", "heading") and block_text:
-                    await self._click_editor(editor)
+                    editor, editor_kind = await self._click_editor(editor)
                     await self.page.keyboard.press("Control+End")
                     if previous_kind == "text":
                         await self.page.keyboard.press("Enter")
@@ -685,7 +808,7 @@ class ZOLPlatform(BasePlatform):
                             await self.page.keyboard.press("Enter")
                     previous_kind = "text"
                 elif btype == "image":
-                    await self._click_editor(editor)
+                    editor, editor_kind = await self._click_editor(editor)
                     await self.page.keyboard.press("Control+End")
                     image_file = next(
                         (
@@ -720,6 +843,7 @@ class ZOLPlatform(BasePlatform):
                     previous_kind = "image"
                 # 块与块之间放慢节奏，降低风控敏感度
                 await self.simulator.random_delay(1.5, 3.0)
+            editor, editor_kind = await self._resolve_content_editor()
             await editor.evaluate(
                 "el => el.dispatchEvent(new InputEvent('input', {bubbles: true, inputType: 'insertText'}))"
             )

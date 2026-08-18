@@ -8,6 +8,7 @@ import hashlib
 import hmac
 import logging
 import os
+import re
 import secrets
 import uuid
 from collections.abc import Awaitable, Callable
@@ -44,6 +45,16 @@ from account_sessions.security import (
 )
 
 SESSION_INVALIDATING_ERROR_CODES = frozenset({"LOGIN_REQUIRED", "SESSION_EXPIRED"})
+ARTICLE_MAPPING_SUCCESS_STATUSES = frozenset(
+    {"DRAFT_SAVED", "DRAFT_SAVED_WITH_WARNINGS", "PUBLISHED", "PUBLISHED_WITH_WARNINGS"}
+)
+ARTICLE_MAPPING_PENDING_STATUSES = frozenset({"PENDING", "FAILED"})
+ARTICLE_MAPPING_NOT_PENDING = "NOT_PENDING"
+ARTICLE_MAPPING_PENDING = "PENDING"
+ARTICLE_MAPPING_SUCCEEDED = "SUCCEEDED"
+ARTICLE_MAPPING_FAILED = "FAILED"
+ARTICLE_MAPPING_FAILED_CODE = "ARTICLE_MAPPING_FAILED"
+_STABLE_MAPPING_CODE = re.compile(r"^[A-Z][A-Z0-9_]{0,63}$")
 
 
 class BufferedPlatformLog:
@@ -151,6 +162,7 @@ class DeliveryService:
             ),
             account_display_name_snapshot=account.display_name,
             status="QUEUED",
+            article_mapping_status=ARTICLE_MAPPING_NOT_PENDING,
             confirmation_used=request.mode == "PUBLISH",
         )
         try:
@@ -262,13 +274,23 @@ class DeliveryService:
                 buffered_log.entries,
             )
         except BaseException as exc:
-            await self._mark_failed(
-                operation_id,
-                account,
-                access,
-                exc,
-                buffered_log.entries,
-            )
+            # 完成事务已经提交后，桥接取消/异常不能把真实成功降级为 FAILED；
+            # 启动 recovery 会重试仍为 PENDING/FAILED 的映射。
+            try:
+                current_operation, _ = await self._load_operation(operation_id)
+            except Exception:
+                current_operation = None
+            if (
+                current_operation is None
+                or current_operation.status not in ARTICLE_MAPPING_SUCCESS_STATUSES
+            ):
+                await self._mark_failed(
+                    operation_id,
+                    account,
+                    access,
+                    exc,
+                    buffered_log.entries,
+                )
             raise
         finally:
             if (
@@ -345,6 +367,13 @@ class DeliveryService:
                 "mode": operation.mode,
                 "status": operation.status,
                 "draft_url": operation.draft_url,
+                "platform_article_id": operation.platform_article_id,
+                "article_mapping_status": operation.article_mapping_status,
+                "article_mapping_attempts": operation.article_mapping_attempts,
+                "article_mapping_error_code": operation.article_mapping_error_code,
+                "article_mapping_last_attempt_at": _iso(
+                    operation.article_mapping_last_attempt_at
+                ),
                 "error_code": operation.error_code,
                 "error_message": operation.error_message,
                 "created_at": _iso(operation.created_at),
@@ -540,6 +569,8 @@ class DeliveryService:
         result: dict,
         logs: list[tuple[str, str]],
     ) -> dict:
+        now = datetime.now(timezone.utc)
+        platform_article_id = _extract_platform_article_id(result)
         async with self.database.session() as session:
             operation = await session.get(DeliveryOperation, operation_id)
             if operation is None:
@@ -547,7 +578,15 @@ class DeliveryService:
             operation.status = "DRAFT_SAVED" if operation.mode == "DRAFT" else "PUBLISHED"
             operation.draft_url = result.get("draft_url")
             operation.platform_url = result.get("post_url") or None
-            operation.completed_at = datetime.now(timezone.utc)
+            operation.platform_article_id = platform_article_id
+            operation.article_mapping_status = (
+                ARTICLE_MAPPING_PENDING
+                if self.delivery_event_sink is not None
+                else ARTICLE_MAPPING_NOT_PENDING
+            )
+            operation.article_mapping_error_code = None
+            operation.article_mapping_last_attempt_at = None
+            operation.completed_at = now
             _append_buffered_logs(session, operation, account, access, logs)
             session.add(
                 activity_for(
@@ -563,25 +602,10 @@ class DeliveryService:
                 )
             )
             await session.flush()
-            # best-effort 桥接：投递结果映射到 PlatformArticle（失败不影响执行单）
-            if self.delivery_event_sink is not None:
-                try:
-                    await self.delivery_event_sink(
-                        operation_id=operation_id,
-                        platform=account.platform,
-                        mode=operation.mode,
-                        title=operation.title,
-                        draft_url=operation.draft_url,
-                        platform_url=operation.platform_url,
-                        completed_at=operation.completed_at,
-                        content_reference=operation.content_reference,
-                    )
-                except BaseException as exc:  # noqa: BLE001
-                    logging.getLogger(__name__).warning(
-                        "投递结果桥接失败（执行单仍为成功）: %s",
-                        safe_error_message(exc),
-                    )
-            return operation_payload(operation, account)
+        # 事务已退出并提交；跨库 sink 绝不能持有账号库写事务。
+        await self._dispatch_article_mapping(operation_id)
+        operation, current_account = await self._load_operation(operation_id)
+        return operation_payload(operation, current_account)
 
     async def _mark_completed_with_warnings(
         self,
@@ -596,6 +620,8 @@ class DeliveryService:
         图片失败信息写入 error_message（业务可读，不伪装成功）；PlatformArticle
         桥接照常执行（草稿确实存在），status 由桥接侧记录为 UNMAPPED 草稿。
         """
+        now = datetime.now(timezone.utc)
+        platform_article_id = _extract_platform_article_id(result)
         async with self.database.session() as session:
             operation = await session.get(DeliveryOperation, operation_id)
             if operation is None:
@@ -604,6 +630,14 @@ class DeliveryService:
             operation.status = f"{base}_WITH_WARNINGS"
             operation.draft_url = result.get("draft_url")
             operation.platform_url = result.get("post_url") or None
+            operation.platform_article_id = platform_article_id
+            operation.article_mapping_status = (
+                ARTICLE_MAPPING_PENDING
+                if self.delivery_event_sink is not None
+                else ARTICLE_MAPPING_NOT_PENDING
+            )
+            operation.article_mapping_error_code = None
+            operation.article_mapping_last_attempt_at = None
             operation.error_code = result.get("media_error_code") or "PLATFORM_MEDIA_INCOMPLETE"
             operation.error_message = (
                 result.get("media_error")
@@ -613,7 +647,7 @@ class DeliveryService:
                     f"/{result.get('expected_images', 0)}）"
                 )
             )
-            operation.completed_at = datetime.now(timezone.utc)
+            operation.completed_at = now
             _append_buffered_logs(session, operation, account, access, logs)
             session.add(
                 activity_for(
@@ -628,25 +662,172 @@ class DeliveryService:
                 )
             )
             await session.flush()
-            # 桥接照常执行：草稿真实存在，映射为 UNMAPPED 草稿记录
-            if self.delivery_event_sink is not None:
-                try:
-                    await self.delivery_event_sink(
-                        operation_id=operation_id,
-                        platform=account.platform,
-                        mode=operation.mode,
-                        title=operation.title,
-                        draft_url=operation.draft_url,
-                        platform_url=operation.platform_url,
-                        completed_at=operation.completed_at,
-                        content_reference=operation.content_reference,
+        await self._dispatch_article_mapping(operation_id)
+        operation, current_account = await self._load_operation(operation_id)
+        return operation_payload(operation, current_account)
+
+    async def _dispatch_article_mapping(self, operation_id: str) -> str:
+        """提交后的单次桥接尝试；跨库 sink 始终在事务外调用。"""
+
+        if self.delivery_event_sink is None:
+            return "NOT_CONFIGURED"
+        async with self.database.session() as session:
+            operation = await session.get(DeliveryOperation, operation_id)
+            if operation is None:
+                return "NOT_FOUND"
+            if operation.article_mapping_status not in ARTICLE_MAPPING_PENDING_STATUSES:
+                return operation.article_mapping_status
+            details = {
+                "operation_id": operation.operation_id,
+                "platform": operation.platform,
+                "mode": operation.mode,
+                "title": operation.title,
+                "draft_url": operation.draft_url,
+                "platform_url": operation.platform_url,
+                "platform_article_id": operation.platform_article_id,
+                "completed_at": operation.completed_at,
+                "content_reference": operation.content_reference,
+            }
+            attempts = operation.article_mapping_attempts or 0
+
+        if details["completed_at"] is None:
+            return "SKIPPED"
+        expected_attempt = await self._claim_article_mapping_attempt(
+            operation_id,
+            attempts=attempts,
+        )
+        if expected_attempt is None:
+            return "SKIPPED"
+
+        # 不捕获 CancelledError/SystemExit/KeyboardInterrupt：账号库中的成功状态
+        # 与 PENDING mapping 已经提交，启动 reconcile 会负责补偿。
+        try:
+            result = self.delivery_event_sink(**details)
+            if hasattr(result, "__await__"):
+                await result
+        except Exception as exc:  # noqa: BLE001
+            code = _stable_article_mapping_error_code(exc)
+            updated = await self._set_article_mapping_state(
+                operation_id,
+                status=ARTICLE_MAPPING_FAILED,
+                error_code=code,
+                expected_attempt=expected_attempt,
+            )
+            if not updated:
+                return "STALE"
+            logging.getLogger(__name__).warning(
+                "投递结果桥接失败（执行单仍为成功，稳定码=%s）",
+                code,
+            )
+            return ARTICLE_MAPPING_FAILED
+        try:
+            updated = await self._set_article_mapping_state(
+                operation_id,
+                status=ARTICLE_MAPPING_SUCCEEDED,
+                error_code=None,
+                expected_attempt=expected_attempt,
+            )
+            if not updated:
+                return "STALE"
+        except Exception:
+            logging.getLogger(__name__).warning(
+                "投递结果桥接状态写回失败（执行单仍为成功）"
+            )
+            return ARTICLE_MAPPING_PENDING
+        return ARTICLE_MAPPING_SUCCEEDED
+
+    async def _claim_article_mapping_attempt(
+        self,
+        operation_id: str,
+        *,
+        attempts: int,
+    ) -> int | None:
+        now = datetime.now(timezone.utc)
+        async with self.database.session() as session:
+            result = await session.execute(
+                update(DeliveryOperation)
+                .where(
+                    DeliveryOperation.operation_id == operation_id,
+                    DeliveryOperation.status.in_(ARTICLE_MAPPING_SUCCESS_STATUSES),
+                    DeliveryOperation.article_mapping_status.in_(
+                        ARTICLE_MAPPING_PENDING_STATUSES
+                    ),
+                    DeliveryOperation.article_mapping_attempts == attempts,
+                )
+                .values(
+                    article_mapping_attempts=attempts + 1,
+                    article_mapping_last_attempt_at=now,
+                    article_mapping_error_code=None,
+                )
+                .execution_options(synchronize_session=False)
+            )
+            return attempts + 1 if result.rowcount == 1 else None
+
+    async def _set_article_mapping_state(
+        self,
+        operation_id: str,
+        *,
+        status: str,
+        error_code: str | None,
+        expected_attempt: int,
+    ) -> bool:
+        async with self.database.session() as session:
+            result = await session.execute(
+                update(DeliveryOperation)
+                .where(
+                    DeliveryOperation.operation_id == operation_id,
+                    DeliveryOperation.status.in_(ARTICLE_MAPPING_SUCCESS_STATUSES),
+                    DeliveryOperation.article_mapping_attempts == expected_attempt,
+                    DeliveryOperation.article_mapping_status.in_(
+                        ARTICLE_MAPPING_PENDING_STATUSES
+                    ),
+                )
+                .values(
+                    article_mapping_status=status,
+                    article_mapping_error_code=error_code,
+                )
+                .execution_options(synchronize_session=False)
+            )
+            return result.rowcount == 1
+
+    async def reconcile_pending_article_mappings(
+        self,
+        *,
+        limit: int = 20,
+    ) -> dict[str, int]:
+        """在启动时有限重试已成功投递但未完成文章映射的执行单。"""
+
+        if self.delivery_event_sink is None:
+            return {"processed": 0, "succeeded": 0, "failed": 0, "skipped": 0}
+        bounded = min(max(limit, 1), 50)
+        async with self.database.session() as session:
+            operation_ids = list(
+                (
+                    await session.scalars(
+                        select(DeliveryOperation.operation_id)
+                        .where(
+                            DeliveryOperation.status.in_(ARTICLE_MAPPING_SUCCESS_STATUSES),
+                            DeliveryOperation.article_mapping_status.in_(
+                                ARTICLE_MAPPING_PENDING_STATUSES
+                            ),
+                        )
+                        .order_by(DeliveryOperation.created_at, DeliveryOperation.operation_id)
+                        .limit(bounded)
                     )
-                except BaseException as exc:  # noqa: BLE001
-                    logging.getLogger(__name__).warning(
-                        "投递结果桥接失败（执行单仍为成功）: %s",
-                        safe_error_message(exc),
-                    )
-            return operation_payload(operation, account)
+                ).all()
+            )
+        counts = {"processed": 0, "succeeded": 0, "failed": 0, "skipped": 0}
+        for operation_id in operation_ids:
+            outcome = await self._dispatch_article_mapping(operation_id)
+            if outcome in {"STALE", "SKIPPED"}:
+                counts["skipped"] += 1
+                continue
+            counts["processed"] += 1
+            if outcome == ARTICLE_MAPPING_SUCCEEDED:
+                counts["succeeded"] += 1
+            elif outcome == ARTICLE_MAPPING_FAILED:
+                counts["failed"] += 1
+        return counts
 
     async def _mark_failed(
         self,
@@ -730,6 +911,13 @@ def operation_payload(
         "status": operation.status,
         "draft_url": operation.draft_url,
         "platform_url": operation.platform_url,
+        "platform_article_id": operation.platform_article_id,
+        "article_mapping_status": operation.article_mapping_status,
+        "article_mapping_attempts": operation.article_mapping_attempts,
+        "article_mapping_error_code": operation.article_mapping_error_code,
+        "article_mapping_last_attempt_at": _iso(
+            operation.article_mapping_last_attempt_at
+        ),
         "error_code": operation.error_code,
         "error_message": operation.error_message,
         "created_at": _iso(operation.created_at),
@@ -786,6 +974,30 @@ def _token_hash(token: str) -> str:
 
 def _env_flag(name: str) -> bool:
     return os.getenv(name, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _extract_platform_article_id(result: Any) -> str | None:
+    """仅从平台结果的显式白名单字段提取文章 ID，不序列化任意对象。"""
+
+    if not isinstance(result, dict):
+        return None
+    for key in ("platform_article_id", "post_id", "article_id"):
+        value = result.get(key)
+        if isinstance(value, bool) or not isinstance(value, (str, int)):
+            continue
+        normalized = str(value).strip()
+        if normalized and len(normalized) <= 255:
+            return normalized
+    return None
+
+
+def _stable_article_mapping_error_code(exc: BaseException) -> str:
+    raw = getattr(exc, "error_code", None)
+    if isinstance(raw, str):
+        code = raw.strip().upper()
+        if _STABLE_MAPPING_CODE.fullmatch(code):
+            return code
+    return ARTICLE_MAPPING_FAILED_CODE
 
 
 def _iso(value: datetime | None) -> str | None:

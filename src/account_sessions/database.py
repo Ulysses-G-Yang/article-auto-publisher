@@ -138,9 +138,33 @@ class AccountDatabase:
             connection.exec_driver_sql(
                 "ALTER TABLE delivery_operations ADD COLUMN persist_login_snapshot BOOLEAN"
             )
+        if "article_mapping_status" not in columns:
+            connection.exec_driver_sql(
+                "ALTER TABLE delivery_operations "
+                "ADD COLUMN article_mapping_status VARCHAR(16) NOT NULL DEFAULT 'NOT_PENDING'"
+            )
+        if "article_mapping_attempts" not in columns:
+            connection.exec_driver_sql(
+                "ALTER TABLE delivery_operations "
+                "ADD COLUMN article_mapping_attempts INTEGER NOT NULL DEFAULT 0"
+            )
+        if "article_mapping_error_code" not in columns:
+            connection.exec_driver_sql(
+                "ALTER TABLE delivery_operations "
+                "ADD COLUMN article_mapping_error_code VARCHAR(64)"
+            )
+        if "article_mapping_last_attempt_at" not in columns:
+            connection.exec_driver_sql(
+                "ALTER TABLE delivery_operations "
+                "ADD COLUMN article_mapping_last_attempt_at DATETIME"
+            )
         connection.exec_driver_sql(
             "CREATE UNIQUE INDEX IF NOT EXISTS ux_delivery_operations_request_key "
             "ON delivery_operations(request_key) WHERE request_key IS NOT NULL"
+        )
+        connection.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_delivery_article_mapping_status "
+            "ON delivery_operations(article_mapping_status, article_mapping_last_attempt_at)"
         )
 
     @asynccontextmanager

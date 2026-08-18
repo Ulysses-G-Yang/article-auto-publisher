@@ -66,3 +66,26 @@ ZOL 不桥接 Cookie；但 Chromium 本身仍可能更新缓存或时间戳。
 平台旧流水线的同步日志写入内存缓冲，执行结束后落到对应账号和执行单的
 `account_activity`；不会使用 `task_id=0` 写入旧 `task_logs`。日志保存账号昵称
 快照、actor/source/action 和脱敏错误摘要，不保存凭据值。
+
+## 投递结果到数据中心的桥接
+
+账号域提交 `DeliveryOperation` 成功后，才调用注入的
+`DeliveryBridge.record`；桥接调用发生在账号库写事务之外。桥接失败只把
+`article_mapping_status` 置为 `FAILED`，不会把已经成功的投递改回失败。进程在
+启动时对成功但仍为 `PENDING`/`FAILED` 的有限执行单做一次补偿；每次尝试使用
+`article_mapping_attempts` 作为 fencing token，旧的慢尝试不能覆盖较新的结果。
+取消、进程中断等非普通异常会保留 `PENDING`，交给下一次启动补偿，不能被
+`BaseException` 吞掉。
+
+`DeliveryOperation` 的映射状态为 `NOT_PENDING`、`PENDING`、`SUCCEEDED` 或
+`FAILED`；没有配置 sink 时保持 `NOT_PENDING`，不伪造成功。错误只保存稳定错误
+码，不保存原始异常、Cookie、Token 或 Profile 信息。
+
+桥接使用稳定的负 63-bit `task_id`，与旧非负任务空间隔离，并优先按发布事件 ID
+或平台外部 ID 查找旧记录。`PUBLISH` 只有显式 `platform_article_id`，或可证明的
+HTTP(S) URL 最后纯数字路径段，才标记 `MAPPED`；无法证明时使用
+`unmapped:{operation_id}` 并保持 `UNMAPPED`，不猜 query 参数、slug 或伪造 ID。
+`DRAFT` 始终为 `UNMAPPED`，外部键为 `draft:{operation_id}`，其
+`published_at` 必须为空；完成时间只写入 `extra_data.delivery_completed_at`。
+同事件、同外部 ID 或同任务发生不一致时 fail closed，抛出映射冲突，不静默复用
+另一执行单的文章。

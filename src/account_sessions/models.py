@@ -93,6 +93,11 @@ class DeliveryOperation(Base):
     __table_args__ = (
         Index("ix_delivery_account_created", "account_id", "created_at"),
         Index("ix_delivery_status_created", "status", "created_at"),
+        Index(
+            "ix_delivery_article_mapping_status",
+            "article_mapping_status",
+            "article_mapping_last_attempt_at",
+        ),
     )
 
     operation_id: Mapped[str] = mapped_column(String(36), primary_key=True)
@@ -116,6 +121,24 @@ class DeliveryOperation(Base):
     platform_url: Mapped[str | None] = mapped_column(String(2048), nullable=True)
     error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    article_mapping_status: Mapped[str] = mapped_column(
+        String(16),
+        default="NOT_PENDING",
+        server_default="NOT_PENDING",
+        nullable=False,
+    )
+    article_mapping_attempts: Mapped[int] = mapped_column(
+        Integer,
+        default=0,
+        server_default=text("0"),
+        nullable=False,
+    )
+    article_mapping_error_code: Mapped[str | None] = mapped_column(
+        String(64), nullable=True
+    )
+    article_mapping_last_attempt_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     confirmation_used: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utc_now, nullable=False

@@ -144,6 +144,23 @@ def test_target_switcher_is_dynamic_vertical_rows_without_legacy_radios() -> Non
     assert "target-platform-switch" in stylesheet
 
 
+def test_target_switcher_uses_full_width_single_column_layout() -> None:
+    stylesheet = read("web/static/css/content-studio.css")
+
+    assert (
+        ".target-builder { display: grid; "
+        "grid-template-columns: minmax(0,1fr); align-items: stretch;"
+    ) in stylesheet
+    assert ".target-switcher-list { display: flex; width: 100%; min-width: 0;" in stylesheet
+    assert ".target-platform-row { width: 100%; min-width: 0;" in stylesheet
+    assert ".target-platform-head { display: flex; min-width: 0;" in stylesheet
+    assert ".target-platform-name { min-width: 0; flex: 1 1 auto;" in stylesheet
+    assert "    .target-builder { grid-template-columns: repeat(2,minmax(0,1fr)); }" not in stylesheet
+    assert "    .target-builder, .studio-side, .source-actions" not in stylesheet
+    assert ".target-platform-head { flex-wrap: wrap; }" in stylesheet
+    assert ".target-mode-switch { order: 5; width: 100%; }" in stylesheet
+
+
 def test_studio_initialization_refreshes_drafts_and_always_terminates() -> None:
     script = read("web/static/js/content-studio.js")
 

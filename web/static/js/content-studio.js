@@ -10,7 +10,11 @@
         READY: '待执行', CREATING: '正在创建执行单', QUEUED: '已排队', RUNNING: '执行中', SUCCESS: '已完成',
         PARTIAL_FAIL: '部分失败', FATAL: '执行失败', CONFIRMATION_REQUIRED: '待公开确认',
         DRAFT_SAVED: '平台草稿已保存', PUBLISHED: '已公开发布', BLOCKED: '已拦截', FAILED: '失败',
-        RESULT_UNKNOWN: '结果未知，需人工核对',
+        RESULT_UNKNOWN: '结果未知，需人工核对', FORMAT_REVIEW_REQUIRED: '待格式复核',
+    };
+    const formatErrorLabels = {
+        CONTENT_FORMAT_UNSUPPORTED: '当前内容格式超出平台已验证能力',
+        PLATFORM_FORMAT_CAPABILITIES_UNDECLARED: '平台格式能力尚未声明',
     };
     const state = {
         platforms: [],
@@ -41,6 +45,8 @@
         pollTimer: null,
         draggedBlockId: null,
         localDb: null,
+        coverAutoSelectionDismissed: false,
+        coverAutoNoteVisible: false,
     };
 
     function endpoint(template, key, value) {
@@ -189,6 +195,7 @@
             document: isV2Draft() ? cloneValue(state.draft.document) : null,
             blocks: isV2Draft() ? [] : cloneValue(state.draft.blocks),
             cover: cloneValue(normalizedCover(state.draft.cover)),
+            cover_auto_selection_dismissed: Boolean(state.coverAutoSelectionDismissed),
             targets: cloneValue(state.draft.targets || []),
             dirty,
             saved_at: new Date().toISOString(),
@@ -288,6 +295,7 @@
             } else if (!changedDuringRequest && !requestIsV2) {
                 state.draft.cover = normalizedCover(payload.cover);
             }
+            renderCover();
             state.dirty = changedDuringRequest;
             await localDraftPut(changedDuringRequest);
             updateDraftMeta();
@@ -329,10 +337,13 @@
         }
         state.dirty = false;
         state.conflictServerDraft = null;
+        state.coverAutoSelectionDismissed = false;
+        state.coverAutoNoteVisible = false;
         invalidatePlan();
         if (render) {
             byId('draft-title').value = state.draft.title;
             renderBlocks();
+            renderCover();
             renderTargetSwitcher();
             renderTargets();
             updateDraftMeta();
@@ -350,6 +361,9 @@
             ? Number(local?.content_schema_version) === 2
             : Number(local?.content_schema_version || 1) !== 2;
         const localSameRevision = Boolean(local?.dirty && local.revision === payload.revision);
+        if (local && local.revision === payload.revision && local.cover_auto_selection_dismissed !== undefined) {
+            state.coverAutoSelectionDismissed = Boolean(local.cover_auto_selection_dismissed);
+        }
         if (localSameRevision && !localMatchesSchema) {
             setSaveState('error', '恢复副本版本不一致');
             setMessage('content-error', '本地恢复副本与服务端内容版本不一致，已保留本地副本且未静默降级。请确认后再编辑或另存。');
@@ -369,6 +383,7 @@
             state.dirty = true;
             byId('draft-title').value = state.draft.title;
             renderBlocks();
+            renderCover();
             updateDraftMeta();
             setSaveState('local', '已恢复本地未同步内容');
             clearTimeout(state.saveTimer);
@@ -705,6 +720,140 @@
         }
         if (!rendered) editor.appendChild(v2Placeholder('正文暂无可预览内容。', true));
         return counts;
+    }
+
+    function collectV2ImageCandidates(documentValue) {
+        const candidates = [];
+        const seen = new Set();
+        const titleBlockId = typeof documentValue?.title_block_id === 'string'
+            ? documentValue.title_block_id : null;
+        const addImage = image => {
+            if (!image || image.kind !== 'image' || typeof image.asset_id !== 'string') return;
+            const source = assetUrl(image.asset_id);
+            if (!source || seen.has(image.asset_id)) return;
+            seen.add(image.asset_id);
+            candidates.push({
+                asset_id: image.asset_id,
+                asset_url: source,
+                alt: typeof image.alt === 'string' ? image.alt : '',
+                caption: typeof image.caption === 'string' ? image.caption : '',
+                width: image.width,
+                height: image.height,
+            });
+        };
+        const visitBlock = block => {
+            if (!block || typeof block !== 'object' || block.block_id === titleBlockId) return;
+            if (block.kind === 'paragraph' || block.kind === 'heading') {
+                for (const child of block.children || []) addImage(child);
+                return;
+            }
+            if (block.kind === 'list') {
+                for (const item of block.items || []) for (const nested of item?.blocks || []) visitBlock(nested);
+                return;
+            }
+            if (block.kind === 'table') {
+                for (const row of block.rows || []) for (const cell of row?.cells || []) {
+                    for (const nested of cell?.blocks || []) visitBlock(nested);
+                }
+            }
+        };
+        if (Array.isArray(documentValue?.blocks)) {
+            for (const block of documentValue.blocks) visitBlock(block);
+        }
+        return candidates;
+    }
+
+    function contentImageCandidates() {
+        if (!state.draft) return [];
+        if (isV2Draft()) return collectV2ImageCandidates(state.draft.document);
+        const seen = new Set();
+        return state.draft.blocks
+            .filter(block => block.type === 'image' && typeof block.asset_id === 'string')
+            .filter(block => {
+                if (seen.has(block.asset_id) || !assetUrl(block.asset_id)) return false;
+                seen.add(block.asset_id);
+                return true;
+            })
+            .map(block => ({
+                asset_id: block.asset_id,
+                asset_url: assetUrl(block.asset_id),
+                alt: block.alt || '',
+                caption: block.alt || '',
+            }));
+    }
+
+    function renderCover() {
+        const panel = byId('cover-panel');
+        if (!panel || !state.draft) return;
+        const candidates = contentImageCandidates();
+        const cover = normalizedCover(state.draft.cover);
+        const selectedId = cover.strategy === 'EXPLICIT'
+            ? cover.asset_id
+            : cover.strategy === 'FIRST_BODY_IMAGE' ? candidates[0]?.asset_id : null;
+        const radioValues = {
+            NONE: byId('cover-none'),
+            FIRST_BODY_IMAGE: byId('cover-first-body-image'),
+            EXPLICIT: byId('cover-explicit'),
+        };
+        for (const [strategy, radio] of Object.entries(radioValues)) {
+            if (!radio) continue;
+            radio.checked = cover.strategy === strategy;
+            radio.disabled = strategy !== 'NONE' && candidates.length === 0;
+        }
+        const list = byId('cover-assets-list');
+        list?.replaceChildren(...candidates.map(candidate => {
+            const card = document.createElement('button');
+            card.type = 'button';
+            card.className = `cover-asset-card${selectedId === candidate.asset_id ? ' is-selected' : ''}`;
+            card.dataset.assetId = candidate.asset_id;
+            card.setAttribute('aria-pressed', String(selectedId === candidate.asset_id));
+            card.setAttribute('aria-label', `指定${candidate.alt || candidate.caption || '正文图片'}为封面`);
+            const image = document.createElement('img');
+            image.src = assetUrl(candidate.asset_id);
+            image.alt = candidate.alt || candidate.caption || '正文图片';
+            image.loading = 'lazy';
+            image.decoding = 'async';
+            const label = document.createElement('span');
+            label.textContent = candidate.caption || candidate.alt || '正文图片';
+            card.append(image, label);
+            card.addEventListener('click', () => setCoverStrategy('EXPLICIT', candidate.asset_id));
+            return card;
+        }));
+        byId('cover-empty')?.classList.toggle('d-none', candidates.length > 0);
+        const sourceNote = byId('cover-source-note');
+        if (sourceNote) sourceNote.textContent = isV2Draft() ? '来自 Word 富文档图片' : '来自正文图片块';
+        byId('cover-auto-note')?.classList.toggle('d-none', !state.coverAutoNoteVisible);
+    }
+
+    function setCoverStrategy(strategy, assetId = null, { automatic = false } = {}) {
+        if (!state.draft || !['NONE', 'FIRST_BODY_IMAGE', 'EXPLICIT'].includes(strategy)) return false;
+        const candidates = contentImageCandidates();
+        const firstId = candidates[0]?.asset_id || null;
+        const currentCover = normalizedCover(state.draft.cover);
+        const currentExplicitId = currentCover.strategy === 'EXPLICIT' ? currentCover.asset_id : null;
+        const resolvedId = strategy === 'EXPLICIT'
+            ? assetId || currentExplicitId || firstId
+            : strategy === 'FIRST_BODY_IMAGE' ? firstId : null;
+        if (strategy !== 'NONE' && !resolvedId) return false;
+        if (resolvedId && !candidates.some(candidate => candidate.asset_id === resolvedId)) return false;
+        const previous = JSON.stringify(currentCover);
+        const dismissedBefore = state.coverAutoSelectionDismissed;
+        state.draft.cover = normalizedCover({ strategy, asset_id: resolvedId });
+        state.coverAutoSelectionDismissed = automatic ? false : strategy === 'NONE';
+        state.coverAutoNoteVisible = automatic;
+        const changed = previous !== JSON.stringify(state.draft.cover)
+            || dismissedBefore !== state.coverAutoSelectionDismissed;
+        renderCover();
+        if (changed) markDirty();
+        return changed;
+    }
+
+    async function maybeAutoSelectImportedCover() {
+        if (!state.draft || state.draft.source_type !== 'DOCX' || !isV2Draft()) return;
+        if (normalizedCover(state.draft.cover).strategy !== 'NONE' || state.coverAutoSelectionDismissed) return;
+        const candidates = contentImageCandidates();
+        if (!candidates.length) return;
+        setCoverStrategy('FIRST_BODY_IMAGE', candidates[0].asset_id, { automatic: true });
     }
 
     function v2ReadonlyMessage() {
@@ -1161,6 +1310,28 @@
         return issues;
     }
 
+    function isFormatBlockedTarget(target) {
+        return target?.status === 'FORMAT_REVIEW_REQUIRED'
+            || Object.prototype.hasOwnProperty.call(formatErrorLabels, target?.error_code);
+    }
+
+    function isExecutableTarget(target) {
+        return Boolean(target) && !isFormatBlockedTarget(target);
+    }
+
+    function executablePlanTargets(plan = state.plan) {
+        return (plan?.targets || []).filter(isExecutableTarget);
+    }
+
+    function formatTargetReason(target) {
+        const label = formatErrorLabels[target?.error_code] || '平台格式能力待复核';
+        const features = Array.isArray(target?.required_features) && target.required_features.length
+            ? `需要能力：${target.required_features.join('、')}` : '';
+        const detail = typeof target?.error_message === 'string' && target.error_message
+            ? target.error_message : '';
+        return `${label}，此目标暂不执行。${features}${detail ? `（${detail}）` : ''}`;
+    }
+
     function showValidation(issues) {
         const container = byId('validation-summary'); const list = byId('validation-list');
         list.replaceChildren(...issues.map(issue => { const item = document.createElement('li'); const button = document.createElement('button'); button.type = 'button'; button.className = 'btn btn-link btn-sm p-0 align-baseline'; button.textContent = issue.message; button.addEventListener('click', () => byId(issue.focus)?.focus()); item.appendChild(button); return item; }));
@@ -1184,21 +1355,35 @@
     function renderPlanReview() {
         const summary = byId('plan-review-summary');
         summary.replaceChildren(...state.plan.targets.map(target => {
-            const card = document.createElement('article'); card.className = 'plan-review-card';
+            const blocked = isFormatBlockedTarget(target);
+            const card = document.createElement('article'); card.className = `plan-review-card${blocked ? ' is-format-review' : ''}`;
             const strong = document.createElement('strong'); strong.textContent = `${platformLabel(target.platform)} · ${target.account_display_name || '平台账号'}`;
-            const detail = document.createElement('div'); detail.className = 'small text-body-secondary'; detail.textContent = target.mode === 'PUBLISH' ? '公开发布（还需逐条二次确认）' : '保存到平台草稿箱';
+            const detail = document.createElement('div'); detail.className = 'small text-body-secondary'; detail.textContent = blocked
+                ? formatTargetReason(target)
+                : target.mode === 'PUBLISH' ? '公开发布（还需逐条二次确认）' : '保存到平台草稿箱';
             card.append(strong, detail); return card;
         }));
-        const hasDraft = state.plan.targets.some(target => target.mode === 'DRAFT');
+        const blockedTargets = state.plan.targets.filter(isFormatBlockedTarget);
+        const executableTargets = executablePlanTargets();
+        const hasDraft = executableTargets.some(target => target.mode === 'DRAFT');
         byId('draft-confirmation-row').classList.toggle('d-none', !hasDraft);
         byId('draft-batch-confirmed').checked = false;
+        const executeButton = byId('execute-plan');
+        executeButton.disabled = executableTargets.length === 0;
+        executeButton.setAttribute('aria-disabled', String(executableTargets.length === 0));
+        setMessage('plan-format-warning', blockedTargets.length
+            ? blockedTargets.length === state.plan.targets.length
+                ? '当前计划的全部目标均待格式复核，已阻止执行；请先调整内容或完成对应平台格式能力验收。'
+                : `${blockedTargets.length} 个目标待格式复核，将不会创建执行单；其余可执行目标仍可继续。`
+            : '');
         setMessage('plan-review-error', '');
     }
 
-    function planBadge(status) {
+    function planBadge(status, target = null) {
+        if (isFormatBlockedTarget(target)) return 'text-bg-warning';
         if (['SUCCESS', 'DRAFT_SAVED', 'PUBLISHED'].includes(status)) return 'text-bg-success';
         if (['BLOCKED', 'FAILED', 'FATAL'].includes(status)) return 'text-bg-danger';
-        if (['PARTIAL_FAIL', 'CONFIRMATION_REQUIRED', 'RESULT_UNKNOWN'].includes(status)) return 'text-bg-warning';
+        if (['PARTIAL_FAIL', 'CONFIRMATION_REQUIRED', 'RESULT_UNKNOWN', 'FORMAT_REVIEW_REQUIRED'].includes(status)) return 'text-bg-warning';
         return 'text-bg-info';
     }
 
@@ -1216,6 +1401,7 @@
     }
 
     function planTargetDetail(target) {
+        if (isFormatBlockedTarget(target)) return formatTargetReason(target);
         if (target.status === 'RESULT_UNKNOWN') {
             return '结果未知，请先到平台人工核对；系统不会自动重试。';
         }
@@ -1241,9 +1427,9 @@
         byId('plan-status').className = `badge ${planBadge(state.plan.status)}`;
         byId('plan-status').textContent = planStatusLabels[state.plan.status] || state.plan.status;
         byId('plan-targets').replaceChildren(...state.plan.targets.map(target => {
-            const row = document.createElement('article'); row.className = 'plan-target';
+            const row = document.createElement('article'); row.className = `plan-target${isFormatBlockedTarget(target) ? ' is-format-review' : ''}`;
             const copy = document.createElement('div'); copy.className = 'plan-target-copy'; const strong = document.createElement('strong'); strong.textContent = `${platformLabel(target.platform)} · ${target.account_display_name || '平台账号'}`; const small = document.createElement('small'); small.textContent = planTargetDetail(target); copy.append(strong, small);
-            const actions = document.createElement('div'); actions.className = 'plan-target-actions'; const badge = document.createElement('span'); badge.className = `badge ${planBadge(target.status)}`; badge.textContent = planStatusLabels[target.status] || target.status; actions.appendChild(badge);
+            const actions = document.createElement('div'); actions.className = 'plan-target-actions'; const badge = document.createElement('span'); badge.className = `badge ${planBadge(target.status, target)}`; badge.textContent = planStatusLabels[target.status] || target.status; actions.appendChild(badge);
             if (target.status === 'DRAFT_SAVED') {
                 const draftBoxUrl = platformDraftBoxUrl(target.platform);
                 if (draftBoxUrl) {
@@ -1263,9 +1449,22 @@
 
     async function executePlan(payload, { fromReview = false } = {}) {
         if (!state.plan || state.planBusy) return;
+        const executable = executablePlanTargets();
+        if (!executable.length) {
+            setMessage(fromReview ? 'plan-review-error' : 'publish-confirm-error', '当前没有可执行目标：所有目标均待格式复核，系统不会调用执行接口。');
+            return false;
+        }
+        const executableIds = new Set(executable.map(target => target.target_id));
+        const requestedIds = Array.isArray(payload.target_ids) ? payload.target_ids : [...executableIds];
+        const safeTargetIds = requestedIds.filter(targetId => executableIds.has(targetId));
+        if (!safeTargetIds.length) {
+            setMessage(fromReview ? 'plan-review-error' : 'publish-confirm-error', '所选目标当前不可执行，系统不会调用执行接口。');
+            return false;
+        }
+        const safePayload = { ...payload, target_ids: safeTargetIds };
         state.planBusy = true; setMessage(fromReview ? 'plan-review-error' : 'publish-confirm-error', '');
         try {
-            const response = await fetch(endpoint(root.dataset.planExecuteUrlTemplate, 'plan_id', state.plan.plan_id), { method: 'POST', headers: { 'Content-Type': 'application/json', Accept: 'application/json' }, body: JSON.stringify(payload) });
+            const response = await fetch(endpoint(root.dataset.planExecuteUrlTemplate, 'plan_id', state.plan.plan_id), { method: 'POST', headers: { 'Content-Type': 'application/json', Accept: 'application/json' }, body: JSON.stringify(safePayload) });
             const result = await response.json().catch(() => ({}));
             if (!response.ok && response.status !== 428) throw new Error(result.message || '投递计划执行失败');
             state.plan = result; renderPlan();
@@ -1276,8 +1475,9 @@
             } else if (hasInFlightTarget(result)) {
                 schedulePlanPoll();
             }
-        } catch (error) { setMessage(fromReview ? 'plan-review-error' : 'publish-confirm-error', error.message || '投递计划执行失败'); }
+        } catch (error) { setMessage(fromReview ? 'plan-review-error' : 'publish-confirm-error', error.message || '投递计划执行失败'); return false; }
         finally { state.planBusy = false; }
+        return true;
     }
 
     function showNextPublishConfirmation() {
@@ -1355,7 +1555,7 @@
         if (!file) return;
         setSaveState('saving', '正在导入 DOCX');
         const form = new FormData(); form.append('file', file);
-        try { await saveDraftNow(); const draft = await jsonResponse(await fetch(root.dataset.docxUrl, { method: 'POST', body: form, headers: { Accept: 'application/json' } })); await refreshDrafts(); await openDraft(draft); coreModal('source-library-modal').hide(); }
+        try { await saveDraftNow(); const draft = await jsonResponse(await fetch(root.dataset.docxUrl, { method: 'POST', body: form, headers: { Accept: 'application/json' } })); await refreshDrafts(); await openDraft(draft); await maybeAutoSelectImportedCover(); coreModal('source-library-modal').hide(); }
         catch (error) { setMessage('studio-fatal', error.message || 'DOCX 导入失败'); setSaveState('error', 'DOCX 导入失败'); }
     }
 
@@ -1420,6 +1620,9 @@
         });
         byId('clear-blocks').addEventListener('click', clearAllBlocks);
         byId('asset-upload').addEventListener('change', event => { uploadAssets(Array.from(event.target.files || [])); event.target.value = ''; });
+        ['cover-none', 'cover-first-body-image', 'cover-explicit'].forEach(id => {
+            byId(id)?.addEventListener('change', event => setCoverStrategy(event.target.value));
+        });
         // 拖拽导入：Word(.docx) → 导入并预览；图片 → 插入图片块
         const blocksDrop = byId('content-blocks');
         const dropOverlay = byId('drop-overlay');
@@ -1472,7 +1675,24 @@
         });
         byId('create-plan').addEventListener('click', createPlan);
         byId('save-draft-now').addEventListener('click', () => saveDraftNow());
-        byId('execute-plan').addEventListener('click', () => { const hasDraft = state.plan.targets.some(target => target.mode === 'DRAFT'); if (hasDraft && !byId('draft-batch-confirmed').checked) { setMessage('plan-review-error', '请先勾选平台草稿批量摘要确认。'); byId('draft-batch-confirmed').focus(); return; } executePlan({ draft_batch_confirmed: !hasDraft || byId('draft-batch-confirmed').checked, confirmations: {} }, { fromReview: true }); });
+        byId('execute-plan').addEventListener('click', () => {
+            const executable = executablePlanTargets();
+            if (!executable.length) {
+                setMessage('plan-review-error', '当前没有可执行目标：所有目标均待格式复核。');
+                return;
+            }
+            const hasDraft = executable.some(target => target.mode === 'DRAFT');
+            if (hasDraft && !byId('draft-batch-confirmed').checked) {
+                setMessage('plan-review-error', '请先勾选平台草稿批量摘要确认。');
+                byId('draft-batch-confirmed').focus();
+                return;
+            }
+            executePlan({
+                target_ids: executable.map(target => target.target_id),
+                draft_batch_confirmed: !hasDraft || byId('draft-batch-confirmed').checked,
+                confirmations: {},
+            }, { fromReview: true });
+        });
         byId('confirm-publish-target').addEventListener('click', confirmPublishTarget);
         byId('new-blank-draft').addEventListener('click', createBlankDraft);
         byId('docx-import').addEventListener('change', event => { importDocx(event.target.files?.[0]); event.target.value = ''; });

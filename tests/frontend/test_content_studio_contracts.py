@@ -177,7 +177,10 @@ def test_delivery_statuses_are_explicit_and_never_auto_retry_publish() -> None:
     assert "CREATING: '正在创建执行单'" in script
     assert "PARTIAL_FAIL: '部分失败'" in script
     assert "RESULT_UNKNOWN: '结果未知，需人工核对'" in script
-    assert "['PARTIAL_FAIL', 'CONFIRMATION_REQUIRED', 'RESULT_UNKNOWN']" in script
+    assert (
+        "'PARTIAL_FAIL', 'CONFIRMATION_REQUIRED', 'RESULT_UNKNOWN', "
+        "'FORMAT_REVIEW_REQUIRED'"
+    ) in script
     assert "['CREATING', 'QUEUED', 'RUNNING']" in script
     assert "系统不会自动重试" in script
     assert "platformDraftBoxUrl" in script
@@ -287,3 +290,62 @@ def test_v2_controls_have_explicit_readonly_semantics_without_changing_v1_markup
     assert "clearButton.setAttribute('aria-disabled', String(readonly));" in script
     assert "notice?.classList.toggle('d-none', !readonly);" in script
     assert "editor.contentEditable = readonly ? 'false' : 'true';" in script
+
+
+def test_cover_ui_uses_controlled_assets_and_preserves_request_contract() -> None:
+    template = read("web/templates/upload.html")
+    script = read("web/static/js/content-studio.js")
+    styles = read("web/static/css/content-studio.css")
+
+    assert 'id="cover-panel"' in template
+    assert 'id="cover-none"' in template
+    assert 'id="cover-first-body-image"' in template
+    assert 'id="cover-explicit"' in template
+    assert 'id="cover-assets-list"' in template
+    assert 'id="cover-auto-note"' in template
+    assert "function collectV2ImageCandidates(documentValue)" in script
+    assert "function contentImageCandidates()" in script
+    assert "function renderCover()" in script
+    assert "image.src = assetUrl(candidate.asset_id);" in script
+    assert "function setCoverStrategy(strategy, assetId = null" in script
+    assert "const currentExplicitId" in script
+    assert "asset_id: value.strategy === 'EXPLICIT' ? value.asset_id : null" in script
+    assert "coverAutoSelectionDismissed" in script
+    assert "cover_auto_selection_dismissed" in script
+    assert ".cover-asset-card" in styles
+
+
+def test_docx_auto_cover_is_import_only_and_can_be_dismissed() -> None:
+    script = read("web/static/js/content-studio.js")
+
+    assert "async function maybeAutoSelectImportedCover()" in script
+    assert "state.draft.source_type !== 'DOCX'" in script
+    assert "normalizedCover(state.draft.cover).strategy !== 'NONE'" in script
+    assert "state.coverAutoSelectionDismissed" in script
+    assert (
+        "setCoverStrategy('FIRST_BODY_IMAGE', candidates[0].asset_id, "
+        "{ automatic: true })"
+    ) in script
+    assert "await maybeAutoSelectImportedCover();" in script
+    assert "state.coverAutoSelectionDismissed = automatic ? false : strategy === 'NONE';" in script
+    assert (
+        "state.coverAutoSelectionDismissed = "
+        "Boolean(local.cover_auto_selection_dismissed);"
+    ) in script
+
+
+def test_format_review_targets_are_warning_only_and_never_execute() -> None:
+    template = read("web/templates/upload.html")
+    script = read("web/static/js/content-studio.js")
+    styles = read("web/static/css/content-studio.css")
+
+    assert "FORMAT_REVIEW_REQUIRED: '待格式复核'" in script
+    assert "CONTENT_FORMAT_UNSUPPORTED" in script
+    assert "PLATFORM_FORMAT_CAPABILITIES_UNDECLARED" in script
+    assert "function isFormatBlockedTarget(target)" in script
+    assert "function executablePlanTargets(plan = state.plan)" in script
+    assert 'id="plan-format-warning"' in template
+    assert "target_ids: executable.map(target => target.target_id)" in script
+    assert "系统不会调用执行接口" in script
+    assert ".plan-review-card.is-format-review" in styles
+    assert "draft-confirmation-row" in script

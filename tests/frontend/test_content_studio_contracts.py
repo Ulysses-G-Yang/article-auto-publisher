@@ -246,3 +246,44 @@ def test_v1_patch_keeps_legacy_blocks_and_cover_contract() -> None:
     assert "cover: requestCover" in script
     assert "content_schema_version: 2" in script
     assert "content_schema_version: 1" in script
+
+
+def test_v2_readonly_preview_uses_safe_dom_and_excludes_title_block() -> None:
+    template = read("web/templates/upload.html")
+    script = read("web/static/js/content-studio.js")
+    styles = read("web/static/css/content-studio.css")
+
+    assert 'id="v2-readonly-notice"' in template
+    assert "正文当前只读；重新导入可替换" in template
+    assert 'id="asset-upload-trigger"' in template
+    assert "function renderV2Document(editor, documentValue)" in script
+    assert "editor.replaceChildren();" in script
+    assert "document.createElement" in script
+    assert "document.createTextNode" in script
+    assert "title_block_id" in script
+    assert "function countV2Document(documentValue)" in script
+    assert "renderV2Document(editor, state.draft.document)" in script
+    assert "assetUrl(node?.asset_id)" in script
+    assert "safeHttpHref" in script
+    assert "noopener noreferrer" in script
+    assert "v2MarkTags" in script
+    assert "block.ordered ? 'ol' : 'ul'" in script
+    assert "className = 'rich-table-v2'" in script
+    renderer = script.split("function renderV2Document(editor, documentValue)", 1)[1].split(
+        "function v2ReadonlyMessage()", 1
+    )[0]
+    assert "innerHTML" not in renderer
+    assert ".rich-editor.is-v2-readonly" in styles
+    assert ".rich-image-v2" in styles
+    assert ".rich-unsupported-node" in styles
+
+
+def test_v2_controls_have_explicit_readonly_semantics_without_changing_v1_markup() -> None:
+    template = read("web/templates/upload.html")
+    script = read("web/static/js/content-studio.js")
+
+    assert 'contenteditable="true"' in template
+    assert "assetTrigger.setAttribute('aria-disabled', String(readonly));" in script
+    assert "clearButton.setAttribute('aria-disabled', String(readonly));" in script
+    assert "notice?.classList.toggle('d-none', !readonly);" in script
+    assert "editor.contentEditable = readonly ? 'false' : 'true';" in script

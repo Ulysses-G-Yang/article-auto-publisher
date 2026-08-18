@@ -397,9 +397,14 @@
         if (sideTitle) {
             sideTitle.textContent = state.draft.title || '未命名草稿';
             byId('side-draft-source').textContent = source;
-            const sideParagraphs = state.draft.blocks.filter(block => block.type === 'text').length;
-            const sideImages = state.draft.blocks.filter(block => block.type === 'image').length;
-            byId('side-block-count').textContent = `${sideParagraphs} 段 · ${sideImages} 图`;
+            const counts = isV2Draft()
+                ? countV2Document(state.draft.document)
+                : {
+                    paragraphs: state.draft.blocks.filter(block => block.type === 'text').length,
+                    headings: 0,
+                    images: state.draft.blocks.filter(block => block.type === 'image').length,
+                };
+            byId('side-block-count').textContent = `${counts.paragraphs + counts.headings} 段 · ${counts.images} 图`;
             byId('side-target-count').textContent = String(state.draft.targets.length);
             byId('side-revision').textContent = String(state.draft.revision);
         }
@@ -431,6 +436,277 @@
         }).join('');
     }
 
+    const v2MarkTags = Object.freeze({
+        bold: 'strong',
+        italic: 'em',
+        underline: 'u',
+        strike: 's',
+        code: 'code',
+    });
+
+    function v2Placeholder(message, block = false) {
+        const element = document.createElement(block ? 'div' : 'span');
+        element.className = 'rich-unsupported-node';
+        element.setAttribute('role', 'note');
+        element.textContent = message;
+        return element;
+    }
+
+    function safeHttpHref(value) {
+        if (typeof value !== 'string' || !/^https?:\/\//i.test(value)) return '';
+        try {
+            const parsed = new URL(value);
+            return ['http:', 'https:'].includes(parsed.protocol) && parsed.hostname ? parsed.href : '';
+        } catch (_) {
+            return '';
+        }
+    }
+
+    function safeDimension(value) {
+        const number = Number(value);
+        return Number.isInteger(number) && number > 0 && number <= 100000 ? number : null;
+    }
+
+    function appendV2Text(parent, node) {
+        if (!node || typeof node.text !== 'string') {
+            parent.appendChild(v2Placeholder('此文字内容暂无法预览'));
+            return false;
+        }
+        const marks = node.marks === undefined ? [] : node.marks;
+        if (!Array.isArray(marks) || marks.some(mark => typeof mark !== 'string' || !v2MarkTags[mark])) {
+            parent.appendChild(v2Placeholder('此文字格式暂无法预览'));
+            return false;
+        }
+        let content = document.createTextNode(node.text);
+        for (const mark of marks) {
+            const wrapper = document.createElement(v2MarkTags[mark]);
+            wrapper.appendChild(content);
+            content = wrapper;
+        }
+        if (node.link !== undefined && node.link !== null) {
+            const href = safeHttpHref(node.link.href);
+            if (!href) {
+                parent.appendChild(v2Placeholder('此链接暂无法安全预览'));
+                return false;
+            }
+            const link = document.createElement('a');
+            link.href = href;
+            link.target = '_blank';
+            link.rel = 'noopener noreferrer';
+            if (typeof node.link.title === 'string') link.title = node.link.title;
+            link.appendChild(content);
+            content = link;
+        }
+        parent.appendChild(content);
+        return true;
+    }
+
+    function appendV2Image(parent, node) {
+        const source = assetUrl(node?.asset_id);
+        if (!source) {
+            parent.appendChild(v2Placeholder('此图片缺少受控资产引用'));
+            return false;
+        }
+        if (node.anchor !== undefined && node.anchor !== null
+            && !['inline', 'floating'].includes(node.anchor.kind)) {
+            parent.appendChild(v2Placeholder('此图片定位方式暂无法预览'));
+            return false;
+        }
+        const width = node.width === undefined || node.width === null ? null : safeDimension(node.width);
+        const height = node.height === undefined || node.height === null ? null : safeDimension(node.height);
+        if ((node.width !== undefined && node.width !== null && width === null)
+            || (node.height !== undefined && node.height !== null && height === null)) {
+            parent.appendChild(v2Placeholder('此图片尺寸暂无法预览'));
+            return false;
+        }
+        if (node.alt !== undefined && node.alt !== null && typeof node.alt !== 'string') {
+            parent.appendChild(v2Placeholder('此图片说明暂无法预览'));
+            return false;
+        }
+        if (node.caption !== undefined && node.caption !== null && typeof node.caption !== 'string') {
+            parent.appendChild(v2Placeholder('此图片图注暂无法预览'));
+            return false;
+        }
+        const figure = document.createElement('figure');
+        figure.className = 'rich-image rich-image-v2';
+        figure.dataset.assetId = node.asset_id;
+        if (node.anchor?.kind) figure.dataset.anchorKind = node.anchor.kind;
+        const image = document.createElement('img');
+        image.src = source;
+        image.alt = node.alt || '';
+        image.loading = 'lazy';
+        image.decoding = 'async';
+        image.dataset.assetId = node.asset_id;
+        if (width !== null) image.setAttribute('width', String(width));
+        if (height !== null) image.setAttribute('height', String(height));
+        figure.appendChild(image);
+        if (node.caption) {
+            const caption = document.createElement('figcaption');
+            caption.textContent = node.caption;
+            figure.appendChild(caption);
+        }
+        parent.appendChild(figure);
+        return true;
+    }
+
+    function appendV2Inline(parent, node) {
+        if (!node || typeof node !== 'object') {
+            parent.appendChild(v2Placeholder('此内容节点暂无法预览'));
+            return false;
+        }
+        if (node.kind === 'text') return appendV2Text(parent, node);
+        if (node.kind === 'image') return appendV2Image(parent, node);
+        parent.appendChild(v2Placeholder('此内容节点类型暂不支持预览'));
+        return false;
+    }
+
+    function appendV2InlineChildren(parent, children) {
+        if (!Array.isArray(children)) {
+            parent.appendChild(v2Placeholder('此段落结构暂无法预览'));
+            return false;
+        }
+        let rendered = false;
+        for (const child of children) rendered = appendV2Inline(parent, child) || rendered;
+        return rendered;
+    }
+
+    function safeTableSpan(value) {
+        const number = Number(value === undefined || value === null ? 1 : value);
+        return Number.isInteger(number) && number >= 1 && number <= 100 ? number : null;
+    }
+
+    function appendV2Block(parent, block, titleBlockId) {
+        if (!block || typeof block !== 'object') {
+            parent.appendChild(v2Placeholder('此正文节点暂无法预览', true));
+            return true;
+        }
+        if (titleBlockId && block.block_id === titleBlockId) return false;
+        if (block.kind === 'paragraph' || block.kind === 'heading') {
+            const level = Number(block.level);
+            if (block.kind === 'heading' && (!Number.isInteger(level) || level < 1 || level > 6)) {
+                parent.appendChild(v2Placeholder('此标题层级暂无法预览', true));
+                return true;
+            }
+            const element = document.createElement(block.kind === 'heading' ? `h${level}` : 'p');
+            if (typeof block.style_name === 'string' && block.style_name) element.dataset.styleName = block.style_name;
+            appendV2InlineChildren(element, block.children);
+            parent.appendChild(element);
+            return true;
+        }
+        if (block.kind === 'list') {
+            if (typeof block.ordered !== 'boolean' || !Array.isArray(block.items)) {
+                parent.appendChild(v2Placeholder('此列表结构暂无法预览', true));
+                return true;
+            }
+            const list = document.createElement(block.ordered ? 'ol' : 'ul');
+            for (const item of block.items) {
+                const listItem = document.createElement('li');
+                if (!item || typeof item !== 'object' || !Array.isArray(item.blocks)) {
+                    listItem.appendChild(v2Placeholder('此列表项暂无法预览'));
+                } else {
+                    for (const nested of item.blocks) appendV2Block(listItem, nested, titleBlockId);
+                }
+                list.appendChild(listItem);
+            }
+            parent.appendChild(list);
+            return true;
+        }
+        if (block.kind === 'table') {
+            if (!Array.isArray(block.rows)) {
+                parent.appendChild(v2Placeholder('此表格结构暂无法预览', true));
+                return true;
+            }
+            const table = document.createElement('table');
+            table.className = 'rich-table-v2';
+            const body = document.createElement('tbody');
+            for (const row of block.rows) {
+                const tableRow = document.createElement('tr');
+                if (!row || typeof row !== 'object' || !Array.isArray(row.cells)) {
+                    const invalidCell = document.createElement('td');
+                    invalidCell.appendChild(v2Placeholder('此表格行暂无法预览'));
+                    tableRow.appendChild(invalidCell);
+                } else {
+                    for (const cell of row.cells) {
+                        const tableCell = document.createElement('td');
+                        const colspan = safeTableSpan(cell?.colspan);
+                        const rowspan = safeTableSpan(cell?.rowspan);
+                        if (!cell || typeof cell !== 'object' || !Array.isArray(cell.blocks)
+                            || colspan === null || rowspan === null) {
+                            tableCell.appendChild(v2Placeholder('此表格单元格暂无法预览'));
+                        } else {
+                            if (colspan > 1) tableCell.colSpan = colspan;
+                            if (rowspan > 1) tableCell.rowSpan = rowspan;
+                            for (const nested of cell.blocks) appendV2Block(tableCell, nested, titleBlockId);
+                        }
+                        tableRow.appendChild(tableCell);
+                    }
+                }
+                body.appendChild(tableRow);
+            }
+            table.appendChild(body);
+            parent.appendChild(table);
+            return true;
+        }
+        parent.appendChild(v2Placeholder('此正文节点类型暂不支持预览', true));
+        return true;
+    }
+
+    function countV2Document(documentValue) {
+        const counts = { blocks: 0, paragraphs: 0, headings: 0, images: 0 };
+        const titleBlockId = typeof documentValue?.title_block_id === 'string'
+            ? documentValue.title_block_id : null;
+        const countInline = children => {
+            if (!Array.isArray(children)) return;
+            for (const child of children) {
+                if (child?.kind === 'image') counts.images += 1;
+            }
+        };
+        const countBlock = block => {
+            if (!block || typeof block !== 'object' || block.block_id === titleBlockId) return;
+            if (block.kind === 'paragraph' || block.kind === 'heading') {
+                counts.blocks += 1;
+                if (block.kind === 'paragraph') counts.paragraphs += 1;
+                else counts.headings += 1;
+                countInline(block.children);
+                return;
+            }
+            if (block.kind === 'list') {
+                counts.blocks += 1;
+                for (const item of block.items || []) for (const nested of item?.blocks || []) countBlock(nested);
+                return;
+            }
+            if (block.kind === 'table') {
+                counts.blocks += 1;
+                for (const row of block.rows || []) for (const cell of row?.cells || []) {
+                    for (const nested of cell?.blocks || []) countBlock(nested);
+                }
+                return;
+            }
+            counts.blocks += 1;
+        };
+        if (Array.isArray(documentValue?.blocks)) {
+            for (const block of documentValue.blocks) countBlock(block);
+        }
+        return counts;
+    }
+
+    function renderV2Document(editor, documentValue) {
+        editor.replaceChildren();
+        const counts = countV2Document(documentValue);
+        if (!documentValue || typeof documentValue !== 'object' || !Array.isArray(documentValue.blocks)) {
+            editor.appendChild(v2Placeholder('v2 富文档暂无法预览，请重新导入 DOCX。', true));
+            return counts;
+        }
+        let rendered = false;
+        const titleBlockId = typeof documentValue.title_block_id === 'string'
+            ? documentValue.title_block_id : null;
+        for (const block of documentValue.blocks) {
+            rendered = appendV2Block(editor, block, titleBlockId) || rendered;
+        }
+        if (!rendered) editor.appendChild(v2Placeholder('正文暂无可预览内容。', true));
+        return counts;
+    }
+
     function v2ReadonlyMessage() {
         return 'Word 富文档受保护，当前正文只读；重新导入可替换';
     }
@@ -445,25 +721,47 @@
         }
         const assetUpload = byId('asset-upload');
         if (assetUpload) assetUpload.disabled = readonly;
+        const assetTrigger = byId('asset-upload-trigger');
+        if (assetTrigger) {
+            assetTrigger.classList.toggle('v2-readonly-control', readonly);
+            assetTrigger.setAttribute('aria-disabled', String(readonly));
+        }
         const clearButton = byId('clear-blocks');
-        if (clearButton) clearButton.disabled = readonly || !state.draft?.blocks?.length;
+        if (clearButton) {
+            clearButton.disabled = readonly || !state.draft?.blocks?.length;
+            clearButton.setAttribute('aria-disabled', String(readonly));
+        }
+        const notice = byId('v2-readonly-notice');
+        notice?.classList.toggle('d-none', !readonly);
     }
 
     function renderBlocks() {
         const editor = byId('rich-editor');
         syncEditorMode();
-        if (editor) editor.innerHTML = blocksToHtml(state.draft.blocks);
+        if (editor) {
+            if (isV2Draft()) renderV2Document(editor, state.draft.document);
+            else editor.innerHTML = blocksToHtml(state.draft.blocks);
+        }
         syncBlocksMeta();
     }
 
     function syncBlocksMeta() {
         const blocks = state.draft ? state.draft.blocks : [];
-        const paragraphs = blocks.filter(block => block.type === 'text').length;
-        const images = blocks.filter(block => block.type === 'image').length;
-        byId('blocks-empty').classList.toggle('d-none', blocks.length > 0);
-        byId('block-count').textContent = `${paragraphs} 段 · ${images} 图`;
+        const counts = isV2Draft()
+            ? countV2Document(state.draft.document)
+            : {
+                blocks: blocks.length,
+                paragraphs: blocks.filter(block => block.type === 'text').length,
+                headings: 0,
+                images: blocks.filter(block => block.type === 'image').length,
+            };
+        byId('blocks-empty').classList.toggle('d-none', counts.blocks > 0);
+        byId('block-count').textContent = `${counts.paragraphs + counts.headings} 段 · ${counts.images} 图`;
         const clearButton = byId('clear-blocks');
-        if (clearButton) clearButton.disabled = isV2Draft() || blocks.length === 0;
+        if (clearButton) {
+            clearButton.disabled = isV2Draft() || counts.blocks === 0;
+            clearButton.setAttribute('aria-disabled', String(isV2Draft()));
+        }
         updateDraftMeta();
     }
 

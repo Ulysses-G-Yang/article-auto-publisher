@@ -45,7 +45,7 @@
                     <div class="d-flex flex-wrap gap-2">
                         <button id="save-draft-now" class="btn btn-outline-secondary btn-sm" type="button"><i class="cil-save me-1" aria-hidden="true"></i>保存</button>
                         <button id="open-source-library" class="btn btn-outline-secondary btn-sm" type="button" data-coreui-toggle="modal" data-coreui-target="#source-library-modal"><i class="cil-folder-open me-1" aria-hidden="true"></i>更换内容源</button>
-                        <label class="btn btn-outline-primary btn-sm mb-0" for="asset-upload"><i class="cil-image-plus me-1" aria-hidden="true"></i>插入图片</label>
+                        <label id="asset-upload-trigger" class="btn btn-outline-primary btn-sm mb-0" for="asset-upload"><i class="cil-image-plus me-1" aria-hidden="true"></i>插入图片</label>
                         <input id="asset-upload" class="visually-hidden" type="file" accept="image/png,image/jpeg,image/gif,image/webp" multiple>
                     </div>
                 </header>
@@ -64,6 +64,10 @@
                     <div id="content-blocks" class="content-blocks" aria-live="polite">
                         <div id="rich-editor" class="rich-editor" contenteditable="true" role="textbox" aria-multiline="true" aria-label="正文编辑区" data-placeholder="在此输入正文，或拖入 Word 文档/图片导入"></div>
                         <div id="drop-overlay" class="drop-overlay d-none" aria-hidden="true"><div><i class="cil-cloud-download" aria-hidden="true"></i><strong>松开导入文件</strong><small>支持 Word 文档(.docx) 或图片，导入后自动生成正文预览</small></div></div>
+                    </div>
+                    <div id="v2-readonly-notice" class="v2-readonly-notice d-none mt-3" role="status" aria-live="polite">
+                        <strong>Word 富文档已保留原始结构</strong>
+                        <span>正文当前只读；重新导入可替换。当前仅提供阶段性保真预览。</span>
                     </div>
                     <div id="blocks-empty" class="studio-empty d-none"><i class="cil-notes" aria-hidden="true"></i><strong>正文还是空的</strong><span>直接在上方输入文字，或拖入 <strong>Word 文档(.docx)</strong> / 图片导入。</span></div>
                     <div id="content-error" class="alert alert-danger d-none mt-3 mb-0" role="alert"></div>

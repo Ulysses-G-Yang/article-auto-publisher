@@ -255,8 +255,22 @@
 /* 知乎式连续编辑区 */
 .rich-editor { min-height: 18rem; padding: 1rem 1.25rem; background: #fff; border: 1px solid rgba(33,37,41,.12); border-radius: .5rem; line-height: 1.8; white-space: pre-wrap; overflow-wrap: break-word; outline: none; }
 .rich-editor:focus { border-color: var(--cui-primary, #0d6efd); box-shadow: 0 0 0 .2rem rgba(13,110,253,.1); }
+.rich-editor.is-v2-readonly { background: var(--cui-tertiary-bg, #f8f9fa); cursor: default; }
+.rich-editor.is-v2-readonly:focus { border-color: rgba(33,37,41,.12); box-shadow: none; }
 .rich-editor p { margin: 0 0 .5rem; }
+.rich-editor h1, .rich-editor h2, .rich-editor h3, .rich-editor h4, .rich-editor h5, .rich-editor h6 { margin: 1rem 0 .55rem; line-height: 1.35; }
+.rich-editor ul, .rich-editor ol { margin: .5rem 0 .75rem; padding-left: 1.5rem; }
+.rich-editor li { margin: .25rem 0; }
+.rich-editor table { width: 100%; margin: .75rem 0; border-collapse: collapse; }
+.rich-editor th, .rich-editor td { padding: .5rem; border: 1px solid var(--cui-border-color); vertical-align: top; }
 .rich-editor:empty::before { content: attr(data-placeholder); color: var(--cui-secondary-color, #6c757d); pointer-events: none; }
 .rich-image { margin: .75rem 0; max-width: 100%; }
 .rich-image img { max-width: 100%; height: auto; border-radius: .375rem; display: block; }
 .rich-image figcaption { font-size: .8rem; color: var(--cui-secondary-color, #6c757d); margin-top: .25rem; }
+.rich-image-v2 { padding: .35rem; border: 1px solid var(--cui-border-color); border-radius: .5rem; background: var(--cui-body-bg); }
+.rich-image-v2[data-anchor-kind="floating"] { border-style: dashed; }
+.rich-image-v2 img { max-width: 100%; height: auto; object-fit: contain; }
+.rich-unsupported-node { display: block; margin: .5rem 0; padding: .55rem .7rem; border: 1px dashed var(--cui-warning-border-subtle); border-radius: .4rem; background: var(--cui-warning-bg-subtle); color: var(--cui-warning-text-emphasis); font-size: .78rem; }
+.v2-readonly-notice { display: flex; flex-wrap: wrap; gap: .35rem .65rem; align-items: baseline; padding: .75rem .9rem; border: 1px solid var(--cui-info-border-subtle); border-radius: .45rem; background: var(--cui-info-bg-subtle); color: var(--cui-info-text-emphasis); font-size: .78rem; }
+.v2-readonly-notice span { color: var(--cui-secondary-color); }
+.v2-readonly-control { cursor: not-allowed; opacity: .65; }

@@ -250,11 +250,12 @@ class BaijiahaoPlatform(BasePlatform):
         )
 
     async def navigate_to_editor(self):
-        """打开百家号图文编辑器（type=news），等待「存草稿」按钮出现。
+        """打开百家号图文编辑器（type=news），等待标题和正文都就绪。
 
         真实结构（2026-08 探测）：标题与正文均为 FeEditor contenteditable
         （标题占位「请输入标题（2 - 64字）」，正文占位「请输入正文」），
-        底部有「存草稿」按钮，编辑器自动保存。
+        底部有「存草稿」按钮，编辑器自动保存。存草稿按钮只能作为辅助
+        页面信号，不能单独证明 UEditor iframe 正文 body 已经可编辑。
         """
         self._require_page_alive("百家号打开编辑器")
         try:
@@ -263,21 +264,9 @@ class BaijiahaoPlatform(BasePlatform):
                 wait_until="domcontentloaded",
                 timeout=30000,
             )
-            # 等待编辑器就绪：存草稿按钮或 FeEditor contenteditable 任一出现即可。
-            # 多平台并发投递时页面加载变慢，放宽到 45s。
-            await self.page.wait_for_function(
-                """() => {
-                    const hasSave = Array.from(
-                        document.querySelectorAll('button, [role=button]')
-                    ).some((el) =>
-                        (el.innerText || '').replace(/\\s+/g, '').includes('存草稿'));
-                    const hasEditor = Array.from(document.querySelectorAll(
-                        "div[class*='FeEditorApp-'][contenteditable='true']"
-                    )).length >= 1;
-                    return hasSave || hasEditor;
-                }""",
-                timeout=45000,
-            )
+            # 多平台并发投递时页面加载变慢，保持 45 秒有界轮询；只有主页面
+            # 标题编辑器可见且当前 UEditor body 可见/可编辑时才允许返回。
+            await self._wait_for_editor_ready(timeout_seconds=45)
         except BrowserLifecycleError:
             raise
         except Exception as exc:
@@ -290,6 +279,47 @@ class BaijiahaoPlatform(BasePlatform):
     def _editors(self):
         return self.page.locator(
             "div[class*='FeEditorApp-'][contenteditable='true']:visible"
+        )
+
+    async def _title_editor_locator(self):
+        """返回当前主页面可见标题编辑器；不以保存按钮代替正文就绪。"""
+
+        editors = self._editors()
+        count = await editors.count()
+        for index in range(min(count, 30)):
+            editor = editors.nth(index)
+            if await editor.is_visible():
+                return editor
+        return None
+
+    async def _wait_for_editor_ready(self, *, timeout_seconds: float):
+        """有界等待标题编辑器和当前正文 iframe body 同时就绪。"""
+
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout_seconds
+        while loop.time() < deadline:
+            self._require_page_alive("百家号等待编辑器就绪")
+            try:
+                title_editor = await self._title_editor_locator()
+                body_editor = await self._body_editor_locator()
+                if title_editor is not None and body_editor is not None:
+                    return title_editor, body_editor
+            except BrowserLifecycleError:
+                raise
+            except Exception as exc:
+                if self._exception_means_browser_closed(exc):
+                    raise BrowserLifecycleError(
+                        "BROWSER_CONTEXT_CLOSED: 百家号等待编辑器时页面已关闭"
+                    ) from exc
+                logger.debug(
+                    "百家号编辑器仍未就绪: error_type={}",
+                    type(exc).__name__,
+                )
+            remaining = deadline - loop.time()
+            if remaining > 0:
+                await asyncio.sleep(min(0.5, remaining))
+        raise SelectorError(
+            f"百家号标题或正文编辑器在 {timeout_seconds:g} 秒内未就绪"
         )
 
     async def _focus_editor(self, editor, label: str):
@@ -340,7 +370,15 @@ class BaijiahaoPlatform(BasePlatform):
         百家号正文是 UEditor，可编辑区在 iframe（body.view.news-editor-pc）
         内；标题在主页面的 FeEditor。返回 Playwright Locator 或 None。
         """
-        for frame in self.page.frames:
+        try:
+            frames = list(self.page.frames)
+        except Exception as exc:
+            if self._exception_means_browser_closed(exc):
+                raise BrowserLifecycleError(
+                    "BROWSER_CONTEXT_CLOSED: 百家号读取正文 iframe 时页面已关闭"
+                ) from exc
+            return None
+        for frame in frames:
             try:
                 is_body = await frame.evaluate(
                     """() => {
@@ -351,9 +389,28 @@ class BaijiahaoPlatform(BasePlatform):
                         );
                     }"""
                 )
-                if is_body:
-                    return frame.locator("body")
-            except Exception:  # noqa: BLE001
+                if not is_body:
+                    continue
+                body = frame.locator("body")
+                if await body.count() == 0 or not await body.is_visible():
+                    continue
+                try:
+                    if not await body.is_editable():
+                        continue
+                except AttributeError:
+                    # 真实 Playwright Locator 支持 is_editable；极简替身由
+                    # frame.evaluate 的 isContentEditable 证据兜底。
+                    pass
+                return body
+            except Exception as exc:
+                if self._exception_means_browser_closed(exc):
+                    raise BrowserLifecycleError(
+                        "BROWSER_CONTEXT_CLOSED: 百家号读取正文 body 时页面已关闭"
+                    ) from exc
+                logger.debug(
+                    "百家号正文 iframe 尚未可用: error_type={}",
+                    type(exc).__name__,
+                )
                 continue
         return None
 
@@ -443,6 +500,11 @@ class BaijiahaoPlatform(BasePlatform):
                         {"filename": "", "error": "文章图片块没有对应本地文件"}
                     )
 
+        # 图片上传可能重建 UEditor iframe，必须重新解析当前 body；旧 iframe
+        # 的 inner_text 不能作为最终完整性证据。
+        editor = await self._body_editor_locator()
+        if editor is None:
+            raise SelectorError("百家号图片处理后正文编辑器未找到")
         actual_text = await editor.inner_text()
         ensure_valid_content(
             content_blocks,

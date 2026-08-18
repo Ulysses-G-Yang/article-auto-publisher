@@ -1813,12 +1813,13 @@ class RegressionTests(DatabaseTestCase):
             (),
             {
                 "goto": AsyncMock(),
-                "wait_for_function": AsyncMock(),
             },
         )()
         platform.page = page
+        platform._wait_for_editor_ready = AsyncMock()
         asyncio.run(platform.navigate_to_editor())
         self.assertIn("rc/edit", page.goto.await_args.args[0])
+        platform._wait_for_editor_ready.assert_awaited_once_with(timeout_seconds=45)
 
     def test_smzdm_cookie_check_accepts_sess(self):
         platform = SmzdmPlatform()

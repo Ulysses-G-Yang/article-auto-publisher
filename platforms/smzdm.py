@@ -610,7 +610,6 @@ class SmzdmPlatform(BasePlatform):
                     "save" in response.url.lower()
                     or "draft" in response.url.lower()
                     or "edit" in response.url.lower()
-                    or "article" in response.url.lower()
                 ):
                     captured["status"] = response.status
                     try:
@@ -655,8 +654,13 @@ class SmzdmPlatform(BasePlatform):
             except Exception:  # noqa: BLE001
                 pass
 
-        if not captured.get("status"):
-            logger.warning("smzdm 未捕获到保存请求（继续以草稿箱真值验证）")
+        status = captured.get("status")
+        if not isinstance(status, int) or not 200 <= status < 300:
+            logger.warning(
+                "smzdm 本次未捕获到成功保存响应: status={}",
+                status if isinstance(status, int) else "missing",
+            )
+            return ""
 
         # 平台真值：投稿页「我的草稿」区块出现标题关键字
         try:
@@ -684,13 +688,13 @@ class SmzdmPlatform(BasePlatform):
                 logger.error(
                     "smzdm 草稿箱未找到标题包含「{}」的草稿（保存请求={}）",
                     keyword,
-                    captured.get("status"),
+                    status,
                 )
                 return ""
             logger.info(
                 "smzdm 草稿验证成功: 草稿箱出现标题「{}」（保存请求={}）",
                 keyword,
-                captured.get("status"),
+                status,
             )
             return "https://post.smzdm.com/tougao/"
         except BrowserLifecycleError:

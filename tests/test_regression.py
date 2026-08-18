@@ -82,6 +82,7 @@ class FakeLocator:
         self.click_error = click_error
         self.selected_all = False
         self.clicked = False
+        self.click_count = 0
         self.focused = False
 
     @property
@@ -129,6 +130,7 @@ class FakeLocator:
         if self.click_error is not None:
             raise self.click_error
         self.clicked = True
+        self.click_count += 1
         if self.page:
             self.page.active = self
 
@@ -941,6 +943,27 @@ class RegressionTests(DatabaseTestCase):
         ], []))
         self.assertTrue(result["text_ok"])
         self.assertEqual(result["media_status"], "not_required")
+
+    def test_xiaoheihe_keeps_caret_for_multiple_text_blocks(self):
+        platform = XiaoheihePlatform()
+        platform.page = FakeXiaoPage()
+        platform.simulator.random_delay = AsyncMock()
+        blocks = [
+            {"type": "heading", "text": "第一标题"},
+            {"type": "text", "text": "第一段落"},
+            {"type": "heading", "text": "第二标题"},
+            {"type": "text", "text": "第二段落"},
+        ]
+
+        result = asyncio.run(platform.fill_content(blocks, []))
+
+        self.assertTrue(result["text_ok"])
+        self.assertEqual(result["media_status"], "not_required")
+        self.assertEqual(platform.page.body.click_count, 1)
+        actual = platform.page.body.text
+        self.assertLess(actual.index("第一标题"), actual.index("第一段落"))
+        self.assertLess(actual.index("第一段落"), actual.index("第二标题"))
+        self.assertLess(actual.index("第二标题"), actual.index("第二段落"))
 
     def test_xiaoheihe_revalidates_body_after_image_rerender(self):
         # 图片处理会重建编辑器；最终必须从新节点读取并在正文缺失时硬失败。

@@ -399,8 +399,6 @@ class XiaoheihePlatform(BasePlatform):
                 text = block["text"].strip()
                 if not text:
                     continue
-                editor = await self._current_body_editor()
-                await editor.click()
                 if not first_text:
                     await self.page.keyboard.press("Enter")
                     await self.page.keyboard.press("Enter")

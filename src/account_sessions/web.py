@@ -113,8 +113,9 @@ class AccountSessionRuntimeState:
             if not self._initialized:
                 self._runtime.run(self.accounts.initialize())
                 self._runtime.run(self.delivery.reconcile_interrupted_operations())
-                if self.heartbeat_scheduler.enabled:
-                    self._runtime.run(self.heartbeat_scheduler.start())
+                # start() 即使心跳开关关闭也会执行一次纯数据库 recovery，
+                # 但不会创建扫描 task 或打开浏览器。
+                self._runtime.run(self.heartbeat_scheduler.start())
                 self._initialized = True
             return self._runtime
 

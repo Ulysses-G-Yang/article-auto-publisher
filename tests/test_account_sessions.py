@@ -145,6 +145,9 @@ def test_heartbeat_schema_fields_defaults_and_index_are_idempotent(
             "last_heartbeat_at",
             "heartbeat_failures",
             "last_heartbeat_error_code",
+            "heartbeat_claim_owner",
+            "heartbeat_claimed_at",
+            "heartbeat_claim_expires_at",
         }.issubset(columns)
         assert columns["heartbeat_enabled"][3] == 1
         assert columns["heartbeat_enabled"][4] == "1"
@@ -156,6 +159,7 @@ def test_heartbeat_schema_fields_defaults_and_index_are_idempotent(
             for row in connection.execute("PRAGMA index_list(platform_accounts)")
         }
         assert "ix_account_heartbeat_due" in indexes
+        assert "ix_account_heartbeat_claim" in indexes
         index_columns = [
             row[2]
             for row in connection.execute(
@@ -163,6 +167,16 @@ def test_heartbeat_schema_fields_defaults_and_index_are_idempotent(
             )
         ]
         assert index_columns == ["status", "heartbeat_enabled", "next_heartbeat_at"]
+        claim_columns = [
+            row[2]
+            for row in connection.execute(
+                "PRAGMA index_info(ix_account_heartbeat_claim)"
+            )
+        ]
+        assert claim_columns == [
+            "heartbeat_claim_expires_at",
+            "heartbeat_claim_owner",
+        ]
 
 
 def test_heartbeat_schema_upgrade_is_idempotent_and_backfills_old_rows(
@@ -212,6 +226,9 @@ def test_heartbeat_schema_upgrade_is_idempotent_and_backfills_old_rows(
     assert row.next_heartbeat_at is None
     assert row.last_heartbeat_at is None
     assert row.last_heartbeat_error_code is None
+    assert row.heartbeat_claim_owner is None
+    assert row.heartbeat_claimed_at is None
+    assert row.heartbeat_claim_expires_at is None
     run(database.dispose())
 
 

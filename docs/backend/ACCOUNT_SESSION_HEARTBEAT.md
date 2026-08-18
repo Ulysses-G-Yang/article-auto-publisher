@@ -21,11 +21,16 @@ Flask 进程刚启动就立刻打开浏览器。HTTP 健康汇总始终是只读
 
 默认策略为成功 TTL 6 小时、扫描间隔 5 分钟、忙碌退避 30 秒、错误退避 5 分钟
 起步并上限 6 小时、登录失效退避 1 小时。每个账号和结果使用稳定 SHA-256
-jitter，重启后不会改变同一账号的抖动结果。策略字段有严格的正数/范围校验。
+jitter，重启后不会改变同一账号的抖动结果。每次只读验证使用数据库 claim/lease
+串行化，默认 claim TTL 为 10 分钟，允许范围为 30 秒到 1 小时；异步验证超时预算
+为 claim TTL 的 80%，避免旧 verifier 在租约被接管后继续写入心跳结果。策略字段有
+严格的正数/范围校验。
 
 只有 `status=ACTIVE`、`heartbeat_enabled=true` 且 `session_status` 不是
 `LOGIN_REQUIRED` 的账号会进入 due 查询；`next_heartbeat_at` 为空或已到期才会
-被扫描。账号会话状态的核心转移如下：
+被扫描。due 查询只是候选列表，真正访问 Profile 前还必须以单条条件 `UPDATE`
+成功抢到自己的 claim；未抢到租约的 worker 不会打开浏览器。账号会话状态的核心
+转移如下：
 
 ```text
 VALID/UNVERIFIED/ERROR --成功--> VALID
@@ -37,6 +42,21 @@ VALID --ACCOUNT_BUSY/PROFILE_IN_USE--> VALID + DEFERRED + 短退避
 忙碌只说明 Profile 当前被另一个流程占用，不是登录失效；它保留原有
 `VALID` 与 `last_verified_at`，只更新时间、错误码和下一次尝试时间。清理阶段的
 普通异常不能覆盖已成功的验证结果；取消、退出和键盘中断会继续向上传播。
+
+心跳结果写入带有 `heartbeat_claim_owner` fencing 条件：只有持有当前 claim 的
+worker 才能更新状态、写活动日志并清理租约。claim 丢失时返回稳定的
+`HEARTBEAT_CLAIM_LOST`，不覆盖其他 worker 的状态。验证入口仍可能在自己的
+内部流程中记录平台验证失败，因此 claim TTL 必须覆盖只读验证的实际最大耗时；
+当前服务对异步验证提供 TTL 80% 的超时预算，平台适配器或同步注入函数不得运行
+无界阻塞。
+
+进程启动时 scheduler 先执行一次纯数据库 recovery，再根据开关决定是否创建扫描
+task。recovery 只恢复带有明确且已过期 heartbeat claim 的 `VERIFYING`：有
+`last_verified_at` 恢复为 `VALID`，否则恢复为 `UNVERIFIED`，并把下一次检查设为
+当前时间；没有 claim 来源的遗留 `VERIFYING` 保持不变，仍在有效 claim 内的账号
+也保持不变。其余过期 claim 只清除三列，不杀 Chrome、不删除 Singleton、不触碰
+Profile。即使 `ACCOUNT_SESSION_HEARTBEAT_ENABLED=false`，启动初始化仍执行这次
+数据库清理，但绝不会启动扫描或打开浏览器。
 
 失败分类优先使用异常类型、稳定 `error_code` 和 `PROFILE_IN_USE:` 等稳定前缀，
 不会依据“包含登录”等模糊文本推断。活动日志只写
@@ -57,6 +77,7 @@ VALID --ACCOUNT_BUSY/PROFILE_IN_USE--> VALID + DEFERRED + 短退避
 | `ACCOUNT_SESSION_HEARTBEAT_ERROR_BACKOFF_BASE_SECONDS` | `300` |
 | `ACCOUNT_SESSION_HEARTBEAT_ERROR_BACKOFF_MAX_SECONDS` | `21600` |
 | `ACCOUNT_SESSION_HEARTBEAT_LOGIN_REQUIRED_BACKOFF_SECONDS` | `3600` |
+| `ACCOUNT_SESSION_HEARTBEAT_CLAIM_TTL_SECONDS` | `600`（范围 `30`–`3600`） |
 | `ACCOUNT_SESSION_HEARTBEAT_JITTER_RATIO` | `0.1` |
 
 ## 只读健康 API
@@ -71,7 +92,9 @@ VALID --ACCOUNT_BUSY/PROFILE_IN_USE--> VALID + DEFERRED + 短退避
 Web 和 MCP 必须分别通过各自的 `AccessContext`，只允许读取被授权账号的汇总；
 心跳内部使用 `SYSTEM` 验证上下文，不向外暴露其账号范围。心跳验证永远不调用
 交互式 `login()`，不扫码，不清 Cookie，不执行 ZOL Cookie bridge，也不触碰
-delivery/content bridge。真实启用前必须由人工确认：
+delivery/content bridge。心跳不是 Cookie 池、Cookie SDK、Cookie 续期器或跨平台
+凭据共享机制；它只验证现有隔离 Profile 的会话状态，原始 Cookie/Token 不进入
+心跳数据库、活动日志或健康 API。真实启用前必须由人工确认：
 
 1. 使用测试数据库和隔离测试 Profile 验证迁移、状态转移、退避、单批单账号、
    scheduler `start/stop` 与非重入行为。

@@ -87,6 +87,21 @@ class AccountDatabase:
                 "ALTER TABLE platform_accounts "
                 "ADD COLUMN last_heartbeat_error_code VARCHAR(64)",
             ),
+            (
+                "heartbeat_claim_owner",
+                "ALTER TABLE platform_accounts "
+                "ADD COLUMN heartbeat_claim_owner VARCHAR(64)",
+            ),
+            (
+                "heartbeat_claimed_at",
+                "ALTER TABLE platform_accounts "
+                "ADD COLUMN heartbeat_claimed_at DATETIME",
+            ),
+            (
+                "heartbeat_claim_expires_at",
+                "ALTER TABLE platform_accounts "
+                "ADD COLUMN heartbeat_claim_expires_at DATETIME",
+            ),
         )
         for column_name, statement in additions:
             if column_name not in columns:
@@ -94,6 +109,10 @@ class AccountDatabase:
         connection.exec_driver_sql(
             "CREATE INDEX IF NOT EXISTS ix_account_heartbeat_due "
             "ON platform_accounts(status, heartbeat_enabled, next_heartbeat_at)"
+        )
+        connection.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_account_heartbeat_claim "
+            "ON platform_accounts(heartbeat_claim_expires_at, heartbeat_claim_owner)"
         )
 
 

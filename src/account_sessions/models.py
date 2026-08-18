@@ -35,6 +35,11 @@ class PlatformAccount(Base):
         UniqueConstraint("profile_path", name="uq_account_profile_path"),
         Index("ix_account_platform_status", "platform", "status", "session_status"),
         Index("ix_account_heartbeat_due", "status", "heartbeat_enabled", "next_heartbeat_at"),
+        Index(
+            "ix_account_heartbeat_claim",
+            "heartbeat_claim_expires_at",
+            "heartbeat_claim_owner",
+        ),
     )
 
     account_id: Mapped[str] = mapped_column(String(36), primary_key=True)
@@ -60,6 +65,15 @@ class PlatformAccount(Base):
     )
     last_heartbeat_error_code: Mapped[str | None] = mapped_column(
         String(64), nullable=True
+    )
+    heartbeat_claim_owner: Mapped[str | None] = mapped_column(
+        String(64), nullable=True
+    )
+    heartbeat_claimed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    heartbeat_claim_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
     )
     last_verified_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True

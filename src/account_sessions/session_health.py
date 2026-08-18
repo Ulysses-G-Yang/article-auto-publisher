@@ -13,12 +13,13 @@ import logging
 import math
 import os
 import re
+import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any
 
-from sqlalchemy import or_, select
+from sqlalchemy import and_, or_, select, update
 
 from account_sessions.errors import AccountBusyError, AccountSessionError
 from account_sessions.models import PlatformAccount
@@ -37,8 +38,12 @@ HEARTBEAT_ACCESS_CONTEXT = AccessContext(
     capabilities=frozenset({"session.verify"}),
 )
 BUSY_ERROR_CODES = frozenset({"ACCOUNT_BUSY", "PLATFORM_BUSY", "PROFILE_IN_USE"})
+HEARTBEAT_CLAIM_NOT_ACQUIRED = "HEARTBEAT_CLAIM_NOT_ACQUIRED"
+HEARTBEAT_CLAIM_LOST = "HEARTBEAT_CLAIM_LOST"
 LOGGER = logging.getLogger(__name__)
 _SAFE_ERROR_CODE_RE = re.compile(r"[A-Z][A-Z0-9_]{0,63}\Z")
+HEARTBEAT_CLAIM_TTL_MIN = timedelta(seconds=30)
+HEARTBEAT_CLAIM_TTL_MAX = timedelta(hours=1)
 
 
 def utc_now() -> datetime:
@@ -91,6 +96,7 @@ class HeartbeatPolicy:
     error_backoff_base: timedelta | int | float = timedelta(minutes=5)
     error_backoff_max: timedelta | int | float = timedelta(hours=6)
     login_required_backoff: timedelta | int | float = timedelta(hours=1)
+    claim_ttl: timedelta | int | float = timedelta(minutes=10)
     jitter_ratio: float = 0.1
     jitter_seed: str = "account-session-heartbeat-v1"
 
@@ -101,6 +107,9 @@ class HeartbeatPolicy:
         error_base = _duration(self.error_backoff_base, "error_backoff_base")
         error_max = _duration(self.error_backoff_max, "error_backoff_max")
         login_backoff = _duration(self.login_required_backoff, "login_required_backoff")
+        claim_ttl = _duration(self.claim_ttl, "claim_ttl")
+        if not HEARTBEAT_CLAIM_TTL_MIN <= claim_ttl <= HEARTBEAT_CLAIM_TTL_MAX:
+            raise ValueError("claim_ttl 必须在 30 秒到 1 小时之间")
         if error_max < error_base:
             raise ValueError("error_backoff_max 必须大于等于 error_backoff_base")
         if not isinstance(self.max_per_scan, int) or isinstance(self.max_per_scan, bool):
@@ -120,6 +129,7 @@ class HeartbeatPolicy:
         object.__setattr__(self, "error_backoff_base", error_base)
         object.__setattr__(self, "error_backoff_max", error_max)
         object.__setattr__(self, "login_required_backoff", login_backoff)
+        object.__setattr__(self, "claim_ttl", claim_ttl)
         object.__setattr__(self, "jitter_ratio", float(jitter_ratio))
 
     @classmethod
@@ -154,6 +164,7 @@ class HeartbeatPolicy:
             login_required_backoff=seconds(
                 "ACCOUNT_SESSION_HEARTBEAT_LOGIN_REQUIRED_BACKOFF_SECONDS", 3600
             ),
+            claim_ttl=seconds("ACCOUNT_SESSION_HEARTBEAT_CLAIM_TTL_SECONDS", 600),
             jitter_ratio=seconds("ACCOUNT_SESSION_HEARTBEAT_JITTER_RATIO", 0.1),
         )
 
@@ -343,6 +354,7 @@ class HeartbeatService:
         access: AccessContext = HEARTBEAT_ACCESS_CONTEXT,
         clock: Callable[[], datetime] = utc_now,
         enabled: bool | None = None,
+        owner_id: str | None = None,
     ) -> None:
         self.database = database
         self.verify_callable = verify_callable
@@ -350,6 +362,14 @@ class HeartbeatService:
         self.access = access
         self.clock = clock
         self.busy_account_ids: set[str] = set()
+        if owner_id is not None and not isinstance(owner_id, str):
+            raise TypeError("owner_id 必须是字符串")
+        resolved_owner_id = (owner_id or str(uuid.uuid4())).strip()
+        if not resolved_owner_id:
+            raise ValueError("owner_id 不能为空")
+        if len(resolved_owner_id) > 64:
+            raise ValueError("owner_id 不能超过 64 个字符")
+        self.owner_id = resolved_owner_id
         self.enabled = (
             is_heartbeat_enabled_from_env() if enabled is None else bool(enabled)
         )
@@ -426,8 +446,135 @@ class HeartbeatService:
                 "login_required_backoff_seconds": (
                     self.policy.login_required_backoff.total_seconds()
                 ),
+                "claim_ttl_seconds": self.policy.claim_ttl.total_seconds(),
                 "jitter_ratio": self.policy.jitter_ratio,
             },
+        }
+
+    def _claim_available_clause(self, now: datetime):
+        """返回可抢占条件；异常的无过期时间 claim 按占用处理。"""
+
+        return or_(
+            PlatformAccount.heartbeat_claim_owner.is_(None),
+            and_(
+                PlatformAccount.heartbeat_claim_expires_at.is_not(None),
+                PlatformAccount.heartbeat_claim_expires_at <= now,
+            ),
+        )
+
+    async def _claim_account(self, account_id: str, now: datetime) -> bool:
+        """用单条条件 UPDATE 抢占账号，rowcount=1 才能访问 Profile。"""
+
+        next_at = or_(
+            PlatformAccount.next_heartbeat_at.is_(None),
+            PlatformAccount.next_heartbeat_at <= now,
+        )
+        statement = (
+            update(PlatformAccount)
+            .where(
+                PlatformAccount.account_id == account_id,
+                PlatformAccount.status == "ACTIVE",
+                PlatformAccount.heartbeat_enabled.is_(True),
+                PlatformAccount.session_status != "LOGIN_REQUIRED",
+                next_at,
+                self._claim_available_clause(now),
+            )
+            .values(
+                heartbeat_claim_owner=self.owner_id,
+                heartbeat_claimed_at=now,
+                heartbeat_claim_expires_at=now + self.policy.claim_ttl,
+            )
+        )
+        async with self.database.session() as session:
+            result = await session.execute(statement)
+            return result.rowcount == 1
+
+    async def _release_claim(self, account_id: str) -> bool:
+        """只释放当前 owner 的 claim；异常路径使用 best-effort。"""
+
+        statement = (
+            update(PlatformAccount)
+            .where(
+                PlatformAccount.account_id == account_id,
+                PlatformAccount.heartbeat_claim_owner == self.owner_id,
+            )
+            .values(
+                heartbeat_claim_owner=None,
+                heartbeat_claimed_at=None,
+                heartbeat_claim_expires_at=None,
+            )
+        )
+        async with self.database.session() as session:
+            result = await session.execute(statement)
+            return result.rowcount == 1
+
+    async def recover_stale_state(
+        self,
+        *,
+        now: datetime | None = None,
+    ) -> dict[str, int]:
+        """清理过期租约并恢复明确超时的 VERIFYING 状态。
+
+        恢复不会无条件覆盖人工登录流程：只有带有明确且已过期 heartbeat
+        claim 的 VERIFYING 账号才会恢复；没有 claim 来源的遗留 VERIFYING
+        保持不变。该方法只操作数据库，不打开浏览器、不杀进程、不删除锁文件。
+        """
+
+        current = as_utc(now) or as_utc(self.clock()) or utc_now()
+        async with self.database.session() as session:
+            expired_verifying = and_(
+                PlatformAccount.status == "ACTIVE",
+                PlatformAccount.session_status == "VERIFYING",
+                PlatformAccount.heartbeat_claim_expires_at.is_not(None),
+                PlatformAccount.heartbeat_claim_expires_at <= current,
+            )
+            recovered_valid = (
+                update(PlatformAccount)
+                .where(expired_verifying, PlatformAccount.last_verified_at.is_not(None))
+                .values(
+                    session_status="VALID",
+                    next_heartbeat_at=current,
+                    heartbeat_claim_owner=None,
+                    heartbeat_claimed_at=None,
+                    heartbeat_claim_expires_at=None,
+                    updated_at=current,
+                )
+            )
+            recovered_unverified = (
+                update(PlatformAccount)
+                .where(expired_verifying, PlatformAccount.last_verified_at.is_(None))
+                .values(
+                    session_status="UNVERIFIED",
+                    next_heartbeat_at=current,
+                    heartbeat_claim_owner=None,
+                    heartbeat_claimed_at=None,
+                    heartbeat_claim_expires_at=None,
+                    updated_at=current,
+                )
+            )
+            valid_result = await session.execute(recovered_valid)
+            unverified_result = await session.execute(recovered_unverified)
+            clear_expired = (
+                update(PlatformAccount)
+                .where(
+                    PlatformAccount.heartbeat_claim_expires_at.is_not(None),
+                    PlatformAccount.heartbeat_claim_expires_at <= current,
+                )
+                .values(
+                    heartbeat_claim_owner=None,
+                    heartbeat_claimed_at=None,
+                    heartbeat_claim_expires_at=None,
+                )
+            )
+            expired_result = await session.execute(clear_expired)
+        return {
+            "expired_claims": (expired_result.rowcount or 0)
+            + (valid_result.rowcount or 0)
+            + (unverified_result.rowcount or 0),
+            "recovered_valid": valid_result.rowcount or 0,
+            "recovered_unverified": unverified_result.rowcount or 0,
+            "recovered_verifying": (valid_result.rowcount or 0)
+            + (unverified_result.rowcount or 0),
         }
 
     async def due_account_ids(
@@ -455,6 +602,7 @@ class HeartbeatService:
                         PlatformAccount.next_heartbeat_at.is_(None),
                         PlatformAccount.next_heartbeat_at <= current,
                     ),
+                    self._claim_available_clause(current),
                 )
                 .order_by(PlatformAccount.next_heartbeat_at, PlatformAccount.account_id)
                 .limit(bounded)
@@ -493,26 +641,59 @@ class HeartbeatService:
                 return {"account_id": account_id, "outcome": "SKIPPED", "error_code": "NOT_FOUND"}
             if not self.policy.is_due(account, now=current):
                 return {"account_id": account_id, "outcome": "SKIPPED", "error_code": None}
-            original_status = account.session_status
-            original_verified = account.last_verified_at
+
+        if not await self._claim_account(account_id, current):
+            return {
+                "account_id": account_id,
+                "outcome": "SKIPPED",
+                "error_code": HEARTBEAT_CLAIM_NOT_ACQUIRED,
+            }
+
+        async with self.database.session() as session:
+            claimed_account = await session.scalar(
+                select(PlatformAccount).where(
+                    PlatformAccount.account_id == account_id,
+                    PlatformAccount.heartbeat_claim_owner == self.owner_id,
+                )
+            )
+            if claimed_account is None:
+                # 极端情况下 claim 可能在读取前被接管；不要访问 Profile。
+                return {
+                    "account_id": account_id,
+                    "outcome": "SKIPPED",
+                    "error_code": HEARTBEAT_CLAIM_LOST,
+                }
+            original_status = claimed_account.session_status
+            original_verified = claimed_account.last_verified_at
 
         self.busy_account_ids.add(account_id)
+        record_completed = False
         try:
-            result = await self._invoke_verify(account_id)
-            if result is False:
-                raise AccountSessionError("验证未通过", error_code="LOGIN_REQUIRED")
-        except Exception as exc:
-            classification = classify_verification_failure(exc)
-            return await self._record_failure(
-                account_id,
-                current,
-                classification,
-                original_status=original_status,
-                original_verified=original_verified,
-            )
+            try:
+                result = await self._invoke_verify(account_id)
+                if result is False:
+                    raise AccountSessionError("验证未通过", error_code="LOGIN_REQUIRED")
+            except Exception as exc:
+                classification = classify_verification_failure(exc)
+                recorded = await self._record_failure(
+                    account_id,
+                    current,
+                    classification,
+                    original_status=original_status,
+                    original_verified=original_verified,
+                )
+                record_completed = True
+                return recorded
+            recorded = await self._record_success(account_id, current)
+            record_completed = True
+            return recorded
         finally:
             self.busy_account_ids.discard(account_id)
-        return await self._record_success(account_id, current)
+            if not record_completed:
+                try:
+                    await self._release_claim(account_id)
+                except Exception:
+                    LOGGER.warning("账号会话心跳 claim 释放失败（仅记录稳定状态）")
 
     async def _invoke_verify(self, account_id: str) -> Any:
         """调用冻结的只读验证契约，不猜测其他签名。"""
@@ -523,21 +704,56 @@ class HeartbeatService:
             allow_interactive_login=False,
         )
         if hasattr(value, "__await__"):
-            return await value
+            # 让只读验证在 claim TTL 到期前结束，避免旧 verifier 在租约
+            # 被接管后继续把内部状态写回。同步注入函数仍须由调用方自行限时。
+            timeout = max(0.1, self.policy.claim_ttl.total_seconds() * 0.8)
+            try:
+                return await asyncio.wait_for(value, timeout=timeout)
+            except TimeoutError as exc:
+                raise AccountSessionError("会话验证超时", error_code="VERIFY_TIMEOUT") from exc
         return value
 
     async def _record_success(self, account_id: str, now: datetime) -> dict[str, Any]:
         next_at = self.policy.calculate_next(now, account_id, outcome="success")
         async with self.database.session() as session:
-            account = await session.get(PlatformAccount, account_id)
+            account = await session.scalar(
+                select(PlatformAccount).where(
+                    PlatformAccount.account_id == account_id,
+                    PlatformAccount.heartbeat_claim_owner == self.owner_id,
+                )
+            )
             if account is None:
-                return {"account_id": account_id, "outcome": "SKIPPED", "error_code": "NOT_FOUND"}
-            account.session_status = "VALID"
-            account.last_verified_at = now
-            account.last_heartbeat_at = now
-            account.heartbeat_failures = 0
-            account.last_heartbeat_error_code = None
-            account.next_heartbeat_at = next_at
+                return {
+                    "account_id": account_id,
+                    "outcome": "CLAIM_LOST",
+                    "error_code": HEARTBEAT_CLAIM_LOST,
+                }
+            statement = (
+                update(PlatformAccount)
+                .where(
+                    PlatformAccount.account_id == account_id,
+                    PlatformAccount.heartbeat_claim_owner == self.owner_id,
+                )
+                .values(
+                    session_status="VALID",
+                    last_verified_at=now,
+                    last_heartbeat_at=now,
+                    heartbeat_failures=0,
+                    last_heartbeat_error_code=None,
+                    next_heartbeat_at=next_at,
+                    heartbeat_claim_owner=None,
+                    heartbeat_claimed_at=None,
+                    heartbeat_claim_expires_at=None,
+                    updated_at=now,
+                )
+            )
+            result = await session.execute(statement)
+            if result.rowcount != 1:
+                return {
+                    "account_id": account_id,
+                    "outcome": "CLAIM_LOST",
+                    "error_code": HEARTBEAT_CLAIM_LOST,
+                }
             from account_sessions.account_service import activity_for
 
             session.add(
@@ -565,39 +781,77 @@ class HeartbeatService:
         original_verified: datetime | None,
     ) -> dict[str, Any]:
         async with self.database.session() as session:
-            account = await session.get(PlatformAccount, account_id)
+            account = await session.scalar(
+                select(PlatformAccount).where(
+                    PlatformAccount.account_id == account_id,
+                    PlatformAccount.heartbeat_claim_owner == self.owner_id,
+                )
+            )
             if account is None:
-                return {"account_id": account_id, "outcome": "SKIPPED", "error_code": "NOT_FOUND"}
-            account.next_heartbeat_at = self.policy.calculate_next(
+                return {
+                    "account_id": account_id,
+                    "outcome": "CLAIM_LOST",
+                    "error_code": HEARTBEAT_CLAIM_LOST,
+                }
+            next_at = self.policy.calculate_next(
                 now,
                 account_id,
                 outcome=classification.category,
-                failures=account.heartbeat_failures + 1,
+                failures=(account.heartbeat_failures or 0) + 1,
                 error_code=classification.error_code,
             )
-            account.last_heartbeat_at = now
-            account.last_heartbeat_error_code = classification.error_code
             if classification.category == "BUSY":
                 # 忙碌只表示本轮没有取得租约；不改变 VALID 或最近成功验证时间。
-                account.session_status = _restore_session_status(original_status, original_verified)
-                account.last_verified_at = original_verified
+                next_status = _restore_session_status(original_status, original_verified)
+                next_verified = original_verified
                 action = "HEARTBEAT_DEFERRED"
                 level = "WARNING"
                 outcome = "DEFERRED"
                 message = f"账号会话健康检查已延后（{classification.error_code}）"
+                next_failures = account.heartbeat_failures or 0
             else:
-                account.heartbeat_failures = account.heartbeat_failures + 1
+                next_failures = (account.heartbeat_failures or 0) + 1
                 if classification.category == "LOGIN_REQUIRED":
-                    account.session_status = "LOGIN_REQUIRED"
-                    account.last_verified_at = None
+                    next_status = "LOGIN_REQUIRED"
+                    next_verified = None
                 elif classification.preserve_session:
-                    account.session_status = _restore_session_status(
+                    next_status = _restore_session_status(
                         original_status, original_verified
                     )
+                    next_verified = original_verified
+                else:
+                    next_status = account.session_status
+                    next_verified = account.last_verified_at
                 action = "HEARTBEAT_FAILED"
                 level = "ERROR"
                 outcome = "FAILED"
                 message = f"账号会话健康检查失败（{classification.error_code}）"
+            statement = (
+                update(PlatformAccount)
+                .where(
+                    PlatformAccount.account_id == account_id,
+                    PlatformAccount.heartbeat_claim_owner == self.owner_id,
+                )
+                .values(
+                    session_status=next_status,
+                    last_verified_at=next_verified,
+                    next_heartbeat_at=next_at,
+                    last_heartbeat_at=now,
+                    last_heartbeat_error_code=classification.error_code,
+                    heartbeat_failures=next_failures,
+                    heartbeat_claim_owner=None,
+                    heartbeat_claimed_at=None,
+                    heartbeat_claim_expires_at=None,
+                    updated_at=now,
+                )
+            )
+            result = await session.execute(statement)
+            if result.rowcount != 1:
+                return {
+                    "account_id": account_id,
+                    "outcome": "CLAIM_LOST",
+                    "error_code": HEARTBEAT_CLAIM_LOST,
+                }
             from account_sessions.account_service import activity_for
 
             session.add(
@@ -609,7 +863,6 @@ class HeartbeatService:
                     message=message,
                 )
             )
-            next_at = account.next_heartbeat_at
         return {
             "account_id": account_id,
             "outcome": outcome,
@@ -648,9 +901,12 @@ class HeartbeatScheduler:
     async def start(self) -> bool:
         """启动一次后台 task；重复 start 不创建第二个 task。"""
 
-        if not self.enabled:
-            return False
         if self.running:
+            return False
+        recover = getattr(self.service, "recover_stale_state", None)
+        if recover is not None:
+            await recover()
+        if not self.enabled:
             return False
         self._stop_event = asyncio.Event()
         self._task = asyncio.create_task(self._run(), name="account-session-heartbeat")
@@ -717,6 +973,8 @@ __all__ = [
     "HeartbeatScheduler",
     "HeartbeatService",
     "BUSY_ERROR_CODES",
+    "HEARTBEAT_CLAIM_LOST",
+    "HEARTBEAT_CLAIM_NOT_ACQUIRED",
     "VerificationFailure",
     "as_utc",
     "classify_verification_failure",

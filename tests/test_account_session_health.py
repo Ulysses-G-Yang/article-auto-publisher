@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pytest
 from sqlalchemy import select
+from sqlalchemy import update
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 SRC_ROOT = PROJECT_ROOT / "src"
@@ -23,7 +24,9 @@ from account_sessions.models import AccountActivity, PlatformAccount
 from account_sessions.permissions import AccessContext
 from account_sessions.session_health import (
     HeartbeatPolicy,
+    HeartbeatScheduler,
     HeartbeatService,
+    HEARTBEAT_CLAIM_NOT_ACQUIRED,
     HEARTBEAT_ACCESS_CONTEXT,
     as_utc,
     classify_verification_failure,
@@ -63,6 +66,10 @@ async def add_account(
     last_heartbeat_at: datetime | None = None,
     heartbeat_failures: int = 0,
     last_heartbeat_error_code: str | None = None,
+    heartbeat_claim_owner: str | None = None,
+    heartbeat_claimed_at: datetime | None = None,
+    heartbeat_claim_expires_at: datetime | None = None,
+    updated_at: datetime | None = None,
     profile_path: str | Path | None = None,
 ) -> PlatformAccount:
     account_id = str(uuid.uuid4())
@@ -80,6 +87,10 @@ async def add_account(
         last_heartbeat_at=last_heartbeat_at,
         heartbeat_failures=heartbeat_failures,
         last_heartbeat_error_code=last_heartbeat_error_code,
+        heartbeat_claim_owner=heartbeat_claim_owner,
+        heartbeat_claimed_at=heartbeat_claimed_at,
+        heartbeat_claim_expires_at=heartbeat_claim_expires_at,
+        updated_at=updated_at or datetime.now(timezone.utc),
     )
     async with database.session() as session:
         session.add(account)
@@ -89,6 +100,7 @@ async def add_account(
 
 def test_policy_validates_ranges_and_uses_default_singleton_batch() -> None:
     assert HeartbeatPolicy().max_per_scan == 1
+    assert HeartbeatPolicy().claim_ttl == timedelta(minutes=10)
     with pytest.raises(ValueError):
         HeartbeatPolicy(success_ttl=0)
     with pytest.raises(ValueError):
@@ -101,6 +113,10 @@ def test_policy_validates_ranges_and_uses_default_singleton_batch() -> None:
         HeartbeatPolicy(error_backoff_base=10, error_backoff_max=9)
     with pytest.raises(ValueError):
         HeartbeatPolicy(jitter_ratio=1.1)
+    with pytest.raises(ValueError):
+        HeartbeatPolicy(claim_ttl=29)
+    with pytest.raises(ValueError):
+        HeartbeatPolicy(claim_ttl=timedelta(hours=1, seconds=1))
 
 
 def test_policy_due_stale_backoff_and_deterministic_jitter() -> None:
@@ -200,6 +216,312 @@ def test_scan_success_is_serial_and_limited_to_one(tmp_path: Path) -> None:
     assert as_utc(updated.next_heartbeat_at) == now + policy.success_ttl
     assert updated.heartbeat_failures == 0
     assert untouched.last_heartbeat_at is None
+    run(database.dispose())
+
+
+def test_two_heartbeat_services_only_one_verifies_due_account(tmp_path: Path) -> None:
+    now = datetime(2026, 8, 17, 12, tzinfo=timezone.utc)
+    first_database = AccountDatabase(database_url(tmp_path))
+    second_database = AccountDatabase(database_url(tmp_path))
+    calls: list[str] = []
+
+    async def verify(account_id, _access, *, allow_interactive_login=False):
+        assert allow_interactive_login is False
+        calls.append(account_id)
+        await asyncio.sleep(0.05)
+
+    async def scenario() -> tuple[dict, dict, str]:
+        await first_database.initialize()
+        await second_database.initialize()
+        account = await add_account(
+            first_database,
+            session_status="VALID",
+            next_heartbeat_at=now - timedelta(seconds=1),
+        )
+        policy = HeartbeatPolicy(
+            claim_ttl=timedelta(minutes=1),
+            max_per_scan=1,
+            jitter_ratio=0,
+        )
+        first = HeartbeatService(
+            first_database,
+            verify,
+            policy=policy,
+            owner_id="heartbeat-a",
+        )
+        second = HeartbeatService(
+            second_database,
+            verify,
+            policy=policy,
+            owner_id="heartbeat-b",
+        )
+        result_a, result_b = await asyncio.gather(
+            first.scan_once(now=now),
+            second.scan_once(now=now),
+        )
+        return result_a, result_b, account.account_id
+
+    result_a, result_b, account_id = run(scenario())
+    assert len(calls) == 1
+    assert result_a["succeeded"] + result_b["succeeded"] == 1
+    assert result_a["processed"] + result_b["processed"] == 2
+    skipped = [item for result in (result_a, result_b) for item in result["results"]]
+    assert sum(item["error_code"] == HEARTBEAT_CLAIM_NOT_ACQUIRED for item in skipped) == 1
+    stored = run(_get_account(first_database, account_id))
+    assert stored.heartbeat_claim_owner is None
+    assert stored.heartbeat_claim_expires_at is None
+    run(first_database.dispose())
+    run(second_database.dispose())
+
+
+def test_claim_cannot_be_taken_before_expiry_but_can_be_taken_after(
+    tmp_path: Path,
+) -> None:
+    now = datetime(2026, 8, 17, 12, tzinfo=timezone.utc)
+    first_database = AccountDatabase(database_url(tmp_path))
+    second_database = AccountDatabase(database_url(tmp_path))
+
+    async def scenario() -> None:
+        await first_database.initialize()
+        await second_database.initialize()
+        account = await add_account(
+            first_database,
+            next_heartbeat_at=now - timedelta(seconds=1),
+        )
+        policy = HeartbeatPolicy(claim_ttl=timedelta(minutes=1), jitter_ratio=0)
+        first = HeartbeatService(
+            first_database,
+            lambda *_args, **_kwargs: None,
+            policy=policy,
+            owner_id="heartbeat-a",
+        )
+        second = HeartbeatService(
+            second_database,
+            lambda *_args, **_kwargs: None,
+            policy=policy,
+            owner_id="heartbeat-b",
+        )
+        assert await first._claim_account(account.account_id, now) is True
+        assert (
+            await second._claim_account(account.account_id, now + timedelta(seconds=59))
+            is False
+        )
+        assert (
+            await second._claim_account(account.account_id, now + timedelta(minutes=1))
+            is True
+        )
+        assert await second._release_claim(account.account_id) is True
+
+    run(scenario())
+    run(first_database.dispose())
+    run(second_database.dispose())
+
+
+def test_recovery_only_resets_verifying_with_expired_heartbeat_claim(
+    tmp_path: Path,
+) -> None:
+    now = datetime(2026, 8, 17, 12, tzinfo=timezone.utc)
+    database = AccountDatabase(database_url(tmp_path))
+
+    async def scenario() -> tuple[
+        PlatformAccount,
+        PlatformAccount,
+        PlatformAccount,
+        PlatformAccount,
+        dict,
+    ]:
+        await database.initialize()
+        policy = HeartbeatPolicy(claim_ttl=timedelta(minutes=1), jitter_ratio=0)
+        expired = now - timedelta(seconds=1)
+        future = now + timedelta(minutes=1)
+        valid = await add_account(
+            database,
+            session_status="VERIFYING",
+            last_verified_at=now - timedelta(hours=1),
+            heartbeat_claim_owner="dead-heartbeat",
+            heartbeat_claimed_at=now - timedelta(minutes=2),
+            heartbeat_claim_expires_at=expired,
+        )
+        unverified = await add_account(
+            database,
+            session_status="VERIFYING",
+            heartbeat_claim_owner="dead-heartbeat-2",
+            heartbeat_claimed_at=now - timedelta(minutes=2),
+            heartbeat_claim_expires_at=expired,
+        )
+        no_claim = await add_account(
+            database,
+            session_status="VERIFYING",
+            updated_at=now - timedelta(hours=2),
+        )
+        active_claim = await add_account(
+            database,
+            session_status="VERIFYING",
+            last_verified_at=now - timedelta(hours=1),
+            heartbeat_claim_owner="live-heartbeat",
+            heartbeat_claimed_at=now - timedelta(seconds=1),
+            heartbeat_claim_expires_at=future,
+        )
+        service = HeartbeatService(
+            database,
+            lambda *_args, **_kwargs: None,
+            policy=policy,
+            owner_id="recovery-test",
+            enabled=False,
+        )
+        result = await service.recover_stale_state(now=now)
+        return (
+            await _get_account(database, valid.account_id),
+            await _get_account(database, unverified.account_id),
+            await _get_account(database, no_claim.account_id),
+            await _get_account(database, active_claim.account_id),
+            result,
+        )
+
+    valid, unverified, no_claim, active_claim, result = run(scenario())
+    assert valid.session_status == "VALID"
+    assert as_utc(valid.next_heartbeat_at) == now
+    assert valid.heartbeat_claim_owner is None
+    assert unverified.session_status == "UNVERIFIED"
+    assert as_utc(unverified.next_heartbeat_at) == now
+    assert no_claim.session_status == "VERIFYING"
+    assert no_claim.next_heartbeat_at is None
+    assert active_claim.session_status == "VERIFYING"
+    assert active_claim.heartbeat_claim_owner == "live-heartbeat"
+    assert result["recovered_valid"] == 1
+    assert result["recovered_unverified"] == 1
+    assert result["recovered_verifying"] == 2
+    run(database.dispose())
+
+
+def test_claim_fencing_never_overwrites_a_claim_taken_by_another_owner(
+    tmp_path: Path,
+) -> None:
+    now = datetime(2026, 8, 17, 12, tzinfo=timezone.utc)
+    first_database = AccountDatabase(database_url(tmp_path))
+    second_database = AccountDatabase(database_url(tmp_path))
+
+    async def scenario() -> tuple[dict, PlatformAccount]:
+        await first_database.initialize()
+        await second_database.initialize()
+        account = await add_account(
+            first_database,
+            session_status="VALID",
+            next_heartbeat_at=now - timedelta(seconds=1),
+        )
+        service = HeartbeatService(
+            first_database,
+            lambda *_args, **_kwargs: None,
+            policy=HeartbeatPolicy(claim_ttl=timedelta(minutes=1), jitter_ratio=0),
+            owner_id="heartbeat-a",
+        )
+        assert await service._claim_account(account.account_id, now) is True
+        async with second_database.session() as session:
+            await session.execute(
+                update(PlatformAccount)
+                .where(PlatformAccount.account_id == account.account_id)
+                .values(heartbeat_claim_owner="heartbeat-b")
+            )
+        result = await service._record_success(account.account_id, now)
+        return result, await _get_account(first_database, account.account_id)
+
+    result, stored = run(scenario())
+    assert result == {
+        "account_id": stored.account_id,
+        "outcome": "CLAIM_LOST",
+        "error_code": "HEARTBEAT_CLAIM_LOST",
+    }
+    assert stored.session_status == "VALID"
+    assert stored.last_heartbeat_at is None
+    assert stored.heartbeat_claim_owner == "heartbeat-b"
+    run(first_database.dispose())
+    run(second_database.dispose())
+
+
+def test_success_failure_and_cancellation_clear_only_their_claims(tmp_path: Path) -> None:
+    now = datetime(2026, 8, 17, 12, tzinfo=timezone.utc)
+    database = AccountDatabase(database_url(tmp_path))
+
+    async def scenario() -> list[PlatformAccount]:
+        await database.initialize()
+        accounts = [
+            await add_account(database, next_heartbeat_at=now - timedelta(seconds=1))
+            for _ in range(3)
+        ]
+        policy = HeartbeatPolicy(claim_ttl=timedelta(minutes=1), jitter_ratio=0)
+
+        async def success(*_args, **_kwargs):
+            return True
+
+        async def failure(*_args, **_kwargs):
+            raise LoginRequiredError("SESSION_EXPIRED")
+
+        async def cancelled(*_args, **_kwargs):
+            raise asyncio.CancelledError()
+
+        for verifier, account in zip(
+            (success, failure, cancelled), accounts, strict=True
+        ):
+            service = HeartbeatService(
+                database,
+                verifier,
+                policy=policy,
+                owner_id=f"owner-{account.account_id}",
+            )
+            if verifier is cancelled:
+                with pytest.raises(asyncio.CancelledError):
+                    await service.check_account(account.account_id, now=now)
+            else:
+                await service.check_account(account.account_id, now=now)
+        return [await _get_account(database, account.account_id) for account in accounts]
+
+    stored = run(scenario())
+    assert all(account.heartbeat_claim_owner is None for account in stored)
+    assert all(account.heartbeat_claimed_at is None for account in stored)
+    assert all(account.heartbeat_claim_expires_at is None for account in stored)
+    assert stored[0].session_status == "VALID"
+    assert stored[1].session_status == "LOGIN_REQUIRED"
+    assert stored[2].session_status == "VALID"
+    run(database.dispose())
+
+
+def test_disabled_scheduler_recovers_database_claims_without_verifying(
+    tmp_path: Path,
+) -> None:
+    now = datetime(2026, 8, 17, 12, tzinfo=timezone.utc)
+    database = AccountDatabase(database_url(tmp_path))
+    calls: list[str] = []
+
+    async def scenario() -> PlatformAccount:
+        await database.initialize()
+        account = await add_account(
+            database,
+            session_status="VERIFYING",
+            heartbeat_claim_owner="dead-heartbeat",
+            heartbeat_claimed_at=now - timedelta(minutes=2),
+            heartbeat_claim_expires_at=now - timedelta(seconds=1),
+        )
+
+        async def verify(account_id, *_args, **_kwargs):
+            calls.append(account_id)
+
+        policy = HeartbeatPolicy(claim_ttl=timedelta(minutes=1), jitter_ratio=0)
+        service = HeartbeatService(
+            database,
+            verify,
+            policy=policy,
+            enabled=False,
+            owner_id="disabled-scheduler",
+        )
+        scheduler = HeartbeatScheduler(service, enabled=False, policy=policy)
+        assert await scheduler.start() is False
+        assert scheduler.running is False
+        return await _get_account(database, account.account_id)
+
+    stored = run(scenario())
+    assert calls == []
+    assert stored.heartbeat_claim_owner is None
+    assert stored.session_status == "UNVERIFIED"
     run(database.dispose())
 
 
@@ -516,11 +838,18 @@ def test_health_endpoint_is_read_only_and_disabled_by_default(tmp_path: Path) ->
     database_url_value = database_url(tmp_path)
     database = AccountDatabase(database_url_value)
 
-    async def seed() -> None:
+    async def seed() -> str:
         await database.initialize()
-        await add_account(database, last_verified_at=None)
+        account = await add_account(
+            database,
+            session_status="VERIFYING",
+            heartbeat_claim_owner="dead-heartbeat",
+            heartbeat_claimed_at=datetime.now(timezone.utc) - timedelta(minutes=2),
+            heartbeat_claim_expires_at=datetime.now(timezone.utc) - timedelta(minutes=1),
+        )
+        return account.account_id
 
-    run(seed())
+    account_id = run(seed())
     run(database.dispose())
 
     def forbid_platform(*_args, **_kwargs):
@@ -544,6 +873,19 @@ def test_health_endpoint_is_read_only_and_disabled_by_default(tmp_path: Path) ->
     assert "accounts" not in payload
     assert "profile_path" not in str(payload)
     app.extensions["account_sessions"].close()
+
+    recovered_database = AccountDatabase(database_url_value)
+
+    async def read_recovered() -> PlatformAccount:
+        await recovered_database.initialize()
+        return await _get_account(recovered_database, account_id)
+
+    # The runtime call above performs recovery even though the scheduler is disabled;
+    # no platform factory call is needed for this database-only step.
+    recovered = run(read_recovered())
+    assert recovered.session_status == "UNVERIFIED"
+    assert recovered.heartbeat_claim_owner is None
+    run(recovered_database.dispose())
 
 
 class _ServiceFakePlatform:

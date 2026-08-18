@@ -33,6 +33,10 @@ class ContentDraft(Base):
     source_ref: Mapped[str | None] = mapped_column(String(512))
     title: Mapped[str] = mapped_column(String(200), default="", nullable=False)
     blocks_json: Mapped[list[dict]] = mapped_column(JSON, default=list, nullable=False)
+    content_schema_version: Mapped[int] = mapped_column(
+        Integer, default=1, server_default="1", nullable=False
+    )
+    document_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     cover_strategy: Mapped[str] = mapped_column(
         String(32), default="NONE", server_default="NONE", nullable=False
     )
@@ -122,6 +126,10 @@ class ContentVersion(Base):
     content_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     title: Mapped[str] = mapped_column(String(200), nullable=False)
     blocks_json: Mapped[list[dict]] = mapped_column(JSON, nullable=False)
+    content_schema_version: Mapped[int] = mapped_column(
+        Integer, default=1, server_default="1", nullable=False
+    )
+    document_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     cover_strategy: Mapped[str] = mapped_column(
         String(32), default="NONE", server_default="NONE", nullable=False
     )

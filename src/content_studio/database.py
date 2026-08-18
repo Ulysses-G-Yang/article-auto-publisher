@@ -51,6 +51,7 @@ class ContentDatabase:
         async with self.engine.begin() as connection:
             await connection.run_sync(Base.metadata.create_all)
             await connection.run_sync(self._upgrade_cover_schema)
+            await connection.run_sync(self._upgrade_document_schema)
             await connection.run_sync(self._upgrade_plan_target_schema)
 
     @staticmethod
@@ -71,6 +72,31 @@ class ContentDatabase:
                 connection.exec_driver_sql(
                     f"ALTER TABLE {table} ADD COLUMN cover_asset_id VARCHAR(36)"
                 )
+
+    @staticmethod
+    def _upgrade_document_schema(connection) -> None:
+        """幂等补充版本化文档列；旧行保留为 v1 投影。"""
+
+        tables = {
+            row[0]
+            for row in connection.exec_driver_sql(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            ).fetchall()
+        }
+        for table in ("content_drafts", "content_versions"):
+            if table not in tables:
+                continue
+            columns = {
+                row[1]
+                for row in connection.exec_driver_sql(f"PRAGMA table_info({table})").fetchall()
+            }
+            if "content_schema_version" not in columns:
+                connection.exec_driver_sql(
+                    f"ALTER TABLE {table} ADD COLUMN content_schema_version INTEGER "
+                    "NOT NULL DEFAULT 1"
+                )
+            if "document_json" not in columns:
+                connection.exec_driver_sql(f"ALTER TABLE {table} ADD COLUMN document_json JSON")
 
     @staticmethod
     def _upgrade_plan_target_schema(connection) -> None:

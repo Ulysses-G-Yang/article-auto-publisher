@@ -4,7 +4,7 @@
 永远不会进入这些模型。
 """
 
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -24,6 +24,7 @@ PlatformName = Literal[
 ]
 DeliveryMode = Literal["DRAFT", "PUBLISH"]
 CoverStrategy = Literal["NONE", "FIRST_BODY_IMAGE", "EXPLICIT"]
+ContentSchemaVersion = Literal[1, 2]
 
 
 class StrictModel(BaseModel):
@@ -80,15 +81,37 @@ class DraftTargetInput(StrictModel):
 
 class CreateDraftRequest(StrictModel):
     title: str = Field(default="", max_length=200)
-    blocks: list[ContentBlockInput] = Field(default_factory=list, max_length=2_000)
+    blocks: list[ContentBlockInput] | None = Field(default=None, max_length=2_000)
     cover: CoverInput = Field(default_factory=lambda: CoverInput(strategy="NONE"))
+    content_schema_version: ContentSchemaVersion = 1
+    document: dict[str, Any] | None = None
+
+    @model_validator(mode="after")
+    def validate_document_version(self) -> "CreateDraftRequest":
+        if self.content_schema_version == 2 and self.document is None:
+            raise ValueError("content_schema_version=2 必须提供 document")
+        if self.content_schema_version == 1 and self.document is not None:
+            raise ValueError("v1 草稿不能提供 document")
+        return self
 
 
 class PatchDraftRequest(StrictModel):
     revision: Annotated[int, Field(ge=1)]
     title: str = Field(max_length=200)
-    blocks: list[ContentBlockInput] = Field(max_length=2_000)
+    blocks: list[ContentBlockInput] | None = Field(default=None, max_length=2_000)
     cover: CoverInput | None = None
+    content_schema_version: ContentSchemaVersion | None = None
+    document: dict[str, Any] | None = None
+
+    @model_validator(mode="after")
+    def validate_document_version(self) -> "PatchDraftRequest":
+        # 省略 schema 是历史 v1 客户端语义；只有显式声明 2 才能提交 canonical
+        # v2 document，避免旧页面无意间把 v2 草稿降级覆盖。
+        if self.document is not None and self.content_schema_version != 2:
+            raise ValueError("提供 document 时必须显式声明 content_schema_version=2")
+        if self.content_schema_version == 2 and self.document is None:
+            raise ValueError("content_schema_version=2 必须提供 document")
+        return self
 
 
 class ReplaceTargetsRequest(StrictModel):

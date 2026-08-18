@@ -25,13 +25,15 @@ from content_studio.contracts import (
 )
 from content_studio.database import ContentDatabase, sqlite_url
 from content_studio.errors import (
+    ContentAssetError,
     DeliveryPlanStaleError,
     DraftBatchConfirmationRequiredError,
+    DraftContentSchemaConflictError,
     DraftRevisionConflictError,
     DraftTargetConflictError,
 )
 from content_studio.importers import DocxImportAdapter, LegacyDatabaseSource
-from content_studio.models import ContentDraft, ContentVersion
+from content_studio.models import ContentAsset, ContentDraft, ContentVersion
 from content_studio.service import SEED_KEY, SEED_TITLE, ContentStudioService
 from content_studio.web import create_content_studio_blueprint
 
@@ -233,6 +235,8 @@ def test_docx_import_uses_unified_blocks_and_controlled_assets(tmp_path: Path) -
         imported = await service.import_docx(docx_bytes(), "测试文档.docx")
         assert imported["source_type"] == "DOCX"
         assert imported["title"] == "导入标题"
+        assert imported["content_schema_version"] == 2
+        assert imported["document"]["schema_version"] == 2
         assert [block["type"] for block in imported["blocks"]] == [
             "text",
             "image",
@@ -242,8 +246,224 @@ def test_docx_import_uses_unified_blocks_and_controlled_assets(tmp_path: Path) -
         assert image["asset_url"].endswith(image["asset_id"])
         assert "local_path" not in json.dumps(imported, ensure_ascii=False)
         await service.database.dispose()
+        reopened = ContentStudioService(
+            ContentDatabase(sqlite_url(tmp_path / "content" / "content.db")),
+            asset_store=AssetStore(tmp_path / "content" / "assets"),
+            docx_importer=DocxImportAdapter(
+                AssetStore(tmp_path / "content" / "assets"),
+                work_root=tmp_path / "content" / "work",
+            ),
+        )
+        await reopened.initialize()
+        loaded = await reopened.get_draft(imported["draft_id"])
+        await reopened.database.dispose()
+        assert loaded["content_schema_version"] == 2
+        assert loaded["document"] == imported["document"]
+        return imported, loaded
 
-    run(scenario())
+    imported, loaded = run(scenario())
+    assert loaded["blocks"] == imported["blocks"]
+
+
+def test_v2_patch_is_canonical_and_old_client_cannot_downgrade(
+    tmp_path: Path,
+) -> None:
+    service = make_service(tmp_path)
+
+    async def scenario():
+        await service.initialize()
+        draft = await service.create_draft(
+            CreateDraftRequest(title="v1 草稿", blocks=[])
+        )
+        asset = await service.add_asset(draft["draft_id"], image_bytes(), "nested.png")
+        document = {
+            "schema_version": 2,
+            "title": "v2 标题",
+            "title_block_id": "title-block",
+            "source_fidelity": "NATIVE",
+            "blocks": [
+                {
+                    "kind": "heading",
+                    "block_id": "title-block",
+                    "level": 1,
+                    "children": [{"kind": "text", "text": "v2 标题"}],
+                },
+                {
+                    "kind": "table",
+                    "block_id": "table-block",
+                    "rows": [
+                        {
+                            "cells": [
+                                {
+                                    "blocks": [
+                                        {
+                                            "kind": "paragraph",
+                                            "block_id": "cell-block",
+                                            "children": [
+                                                {"kind": "text", "text": "表格前"},
+                                                {
+                                                    "kind": "image",
+                                                    "asset_id": asset["asset_id"],
+                                                    "alt": "嵌套图",
+                                                    "caption": "图注",
+                                                    "anchor": {"kind": "floating"},
+                                                },
+                                            ],
+                                        }
+                                    ]
+                                }
+                            ]
+                        }
+                    ],
+                },
+            ],
+        }
+        upgraded = await service.patch_draft(
+            draft["draft_id"],
+            PatchDraftRequest(
+                revision=draft["revision"],
+                title="v2 标题",
+                # v2 的 document 是唯一真值；故意提供错误 v1 blocks。
+                blocks=[{"type": "text", "text": "不会持久化", "position": 0}],
+                content_schema_version=2,
+                document=document,
+            ),
+        )
+        before = await service.get_draft(draft["draft_id"])
+        with pytest.raises(DraftContentSchemaConflictError) as conflict:
+            await service.patch_draft(
+                draft["draft_id"],
+                PatchDraftRequest(
+                    revision=upgraded["revision"],
+                    title="旧页面覆盖",
+                    blocks=[{"type": "text", "text": "旧正文", "position": 0}],
+                ),
+            )
+        after = await service.get_draft(draft["draft_id"])
+        assert conflict.value.error_code == "DRAFT_CONTENT_SCHEMA_CONFLICT"
+        for field in ("revision", "title", "blocks", "document", "cover", "targets"):
+            assert after[field] == before[field]
+        assert after["content_schema_version"] == 2
+        assert "storage_path" not in json.dumps(after, ensure_ascii=False)
+
+        changed_document = json.loads(json.dumps(document, ensure_ascii=False))
+        changed_document["blocks"][1]["rows"][0]["cells"][0]["blocks"][0]["children"][0][
+            "text"
+        ] = "表格已更新"
+        changed = await service.patch_draft(
+            draft["draft_id"],
+            PatchDraftRequest(
+                revision=after["revision"],
+                title="v2 标题",
+                blocks=[],
+                content_schema_version=2,
+                document=changed_document,
+            ),
+        )
+        await service.database.dispose()
+        return upgraded, changed
+
+    upgraded, changed = run(scenario())
+    assert upgraded["content_schema_version"] == 2
+    assert upgraded["blocks"][0]["type"] == "text"
+    assert changed["revision"] == upgraded["revision"] + 1
+    assert changed["document"]["blocks"][1]["rows"][0]["cells"][0]["blocks"][0][
+        "children"
+    ][0]["text"] == "表格已更新"
+
+
+def test_v2_nested_asset_must_belong_to_draft(tmp_path: Path) -> None:
+    service = make_service(tmp_path)
+
+    async def scenario():
+        await service.initialize()
+        draft = await service.create_draft(CreateDraftRequest(title="v2", blocks=[]))
+        foreign = await service.create_draft(CreateDraftRequest(title="other", blocks=[]))
+        foreign_asset = await service.add_asset(foreign["draft_id"], image_bytes(), "foreign.png")
+        document = {
+            "schema_version": 2,
+            "title": "v2",
+            "source_fidelity": "NATIVE",
+            "blocks": [
+                {
+                    "kind": "list",
+                    "block_id": "list",
+                    "ordered": False,
+                    "level": 0,
+                    "items": [
+                        {
+                            "blocks": [
+                                {
+                                    "kind": "paragraph",
+                                    "children": [
+                                        {"kind": "image", "asset_id": foreign_asset["asset_id"]}
+                                    ],
+                                }
+                            ]
+                        }
+                    ],
+                }
+            ],
+        }
+        with pytest.raises(ContentAssetError, match="当前草稿"):
+            await service.patch_draft(
+                draft["draft_id"],
+                PatchDraftRequest(
+                    revision=draft["revision"],
+                    title="v2",
+                    blocks=[],
+                    content_schema_version=2,
+                    document=document,
+                ),
+            )
+        unchanged = await service.get_draft(draft["draft_id"])
+        await service.database.dispose()
+        return unchanged
+
+    unchanged = run(scenario())
+    assert unchanged["content_schema_version"] == 1
+    assert unchanged["revision"] == 1
+
+
+def test_v2_missing_asset_file_rolls_back_patch_atomically(tmp_path: Path) -> None:
+    service = make_service(tmp_path)
+
+    async def scenario():
+        await service.initialize()
+        draft = await service.create_draft(CreateDraftRequest(title="文件回滚", blocks=[]))
+        asset = await service.add_asset(draft["draft_id"], image_bytes(), "missing.png")
+        async with service.database.session() as session:
+            stored = await session.get(ContentAsset, asset["asset_id"])
+            Path(stored.storage_path).unlink()
+        document = {
+            "schema_version": 2,
+            "title": "文件回滚",
+            "source_fidelity": "NATIVE",
+            "blocks": [
+                {
+                    "kind": "paragraph",
+                    "children": [{"kind": "image", "asset_id": asset["asset_id"]}],
+                }
+            ],
+        }
+        with pytest.raises(ContentAssetError, match="图片文件不存在"):
+            await service.patch_draft(
+                draft["draft_id"],
+                PatchDraftRequest(
+                    revision=draft["revision"],
+                    title="文件回滚",
+                    content_schema_version=2,
+                    document=document,
+                ),
+            )
+        unchanged = await service.get_draft(draft["draft_id"])
+        await service.database.dispose()
+        return unchanged
+
+    unchanged = run(scenario())
+    assert unchanged["content_schema_version"] == 1
+    assert unchanged["revision"] == 1
+    assert unchanged["blocks"] == []
 
 
 def test_target_duplicates_and_frozen_version_are_enforced(tmp_path: Path) -> None:
@@ -396,6 +616,44 @@ def test_http_contract_redirect_conflict_and_legacy_queue_gate(tmp_path: Path, m
     assert conflict.status_code == 409
     assert conflict.get_json()["error"] == "DRAFT_REVISION_CONFLICT"
     assert conflict.get_json()["server_draft"]["title"] == "保存成功"
+
+    v2_document = {
+        "schema_version": 2,
+        "title": "HTTP v2",
+        "source_fidelity": "NATIVE",
+        "blocks": [
+            {
+                "kind": "paragraph",
+                "block_id": "http-body",
+                "children": [{"kind": "text", "text": "富文本正文"}],
+            }
+        ],
+    }
+    v2_created = client.post(
+        "/api/content-drafts",
+        json={
+            "title": "HTTP v2",
+            "content_schema_version": 2,
+            "document": v2_document,
+        },
+    )
+    assert v2_created.status_code == 201
+    v2_payload = v2_created.get_json()
+    assert v2_payload["content_schema_version"] == 2
+    assert v2_payload["document"]["title"] == "HTTP v2"
+    v2_old_patch = client.patch(
+        f"/api/content-drafts/{v2_payload['draft_id']}",
+        json={
+            "revision": v2_payload["revision"],
+            "title": "旧页面",
+            "blocks": [{"type": "text", "text": "覆盖", "position": 0}],
+        },
+    )
+    assert v2_old_patch.status_code == 409
+    assert v2_old_patch.get_json()["error"] == "DRAFT_CONTENT_SCHEMA_CONFLICT"
+    v2_after = client.get(f"/api/content-drafts/{v2_payload['draft_id']}").get_json()
+    assert v2_after["revision"] == v2_payload["revision"]
+    assert v2_after["document"] == v2_payload["document"]
 
     content_state = app.extensions["content_studio"]
     content_state.close()

@@ -12,6 +12,11 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import selectinload
 
 from content_studio.assets import AssetStore, StoredAsset
+from content_studio.content_document import (
+    ContentDocumentValidationError,
+    project_to_v1,
+    validate_document,
+)
 from content_studio.contracts import (
     ContentBlockInput,
     CoverInput,
@@ -23,6 +28,7 @@ from content_studio.database import ContentDatabase
 from content_studio.errors import (
     ContentAssetError,
     DeliveryPlanNotFoundError,
+    DraftContentSchemaConflictError,
     DraftNotFoundError,
     DraftRevisionConflictError,
     DraftTargetConflictError,
@@ -159,7 +165,11 @@ class ContentStudioService:
         source_type: str = "BLANK",
         source_ref: str | None = None,
     ) -> dict:
-        blocks = _normalize_blocks(request.blocks)
+        document = None
+        if request.content_schema_version == 2:
+            document, blocks = _canonicalize_v2_document(request.document, request.title)
+        else:
+            blocks = _normalize_blocks(request.blocks or [])
         _validate_draft_content(request.title, blocks, allow_empty=True)
         async with self.database.session() as session:
             draft = ContentDraft(
@@ -168,6 +178,8 @@ class ContentStudioService:
                 source_ref=source_ref,
                 title=request.title,
                 blocks_json=blocks,
+                content_schema_version=request.content_schema_version,
+                document_json=document,
                 cover_strategy="NONE",
                 cover_asset_id=None,
                 status="ACTIVE",
@@ -184,13 +196,27 @@ class ContentStudioService:
             )
             draft.cover_strategy = cover_strategy
             draft.cover_asset_id = cover_asset_id
+            await self._validate_asset_files(
+                session,
+                draft.draft_id,
+                _document_asset_ids(document) | ({cover_asset_id} if cover_asset_id else set()),
+            )
             return await self._draft_payload(session, draft)
 
     async def patch_draft(self, draft_id: str, request: PatchDraftRequest) -> dict:
-        blocks = _normalize_blocks(request.blocks)
-        _validate_draft_content(request.title, blocks, allow_empty=True)
         async with self.database.session() as session:
             draft = await self._load_draft(session, draft_id)
+            requested_schema = request.content_schema_version or 1
+            if draft.content_schema_version == 2 and requested_schema != 2:
+                raise DraftContentSchemaConflictError(await self._draft_payload(session, draft))
+            document = None
+            if requested_schema == 2:
+                document, blocks = _canonicalize_v2_document(request.document, request.title)
+            else:
+                if request.blocks is None:
+                    raise DraftValidationError("v1 PATCH 必须提供 blocks")
+                blocks = _normalize_blocks(request.blocks)
+            _validate_draft_content(request.title, blocks, allow_empty=True)
             await self._validate_asset_references(session, draft_id, blocks)
             cover_strategy, cover_asset_id = await self._resolve_patch_cover(
                 session,
@@ -207,6 +233,8 @@ class ContentStudioService:
                 .values(
                     title=request.title,
                     blocks_json=blocks,
+                    content_schema_version=requested_schema,
+                    document_json=document,
                     cover_strategy=cover_strategy,
                     cover_asset_id=cover_asset_id,
                     revision=request.revision + 1,
@@ -217,14 +245,20 @@ class ContentStudioService:
             if result.rowcount != 1:
                 await session.refresh(draft)
                 raise DraftRevisionConflictError(await self._draft_payload(session, draft))
+            await self._validate_asset_files(
+                session,
+                draft_id,
+                _document_asset_ids(document) | ({cover_asset_id} if cover_asset_id else set()),
+            )
             await session.refresh(draft)
             return await self._draft_payload(session, draft)
 
     async def import_docx(self, data: bytes, filename: str) -> dict:
-        title, blocks, stored_assets = await self.docx_importer.parse(data, filename)
+        title, blocks, stored_assets, document = await self.docx_importer.parse_v2(data, filename)
         return await self._create_with_assets(
             title=title,
             blocks=blocks,
+            document=document,
             source_type="DOCX",
             source_ref=Path(filename).name[:255],
             assets=stored_assets,
@@ -688,11 +722,21 @@ class ContentStudioService:
         *,
         title: str,
         blocks: list[dict],
+        document: dict | None = None,
         source_type: str,
         source_ref: str,
         assets: list[StoredAsset],
     ) -> dict:
         draft_id = str(uuid.uuid4())
+        schema_version = 1
+        try:
+            if document is not None:
+                document, blocks = _canonicalize_v2_document(document, title)
+                schema_version = 2
+        except Exception:
+            for item in assets:
+                self.asset_store.remove_if_owned(item.storage_path)
+            raise
         first_cover_asset_id = _first_body_image_asset_id(blocks)
         try:
             async with self.database.session() as session:
@@ -702,6 +746,8 @@ class ContentStudioService:
                     source_ref=source_ref,
                     title=title[:200],
                     blocks_json=blocks,
+                    content_schema_version=schema_version,
+                    document_json=document,
                     cover_strategy=(
                         "FIRST_BODY_IMAGE" if first_cover_asset_id else "NONE"
                     ),
@@ -914,6 +960,7 @@ class ContentStudioService:
             self.asset_store.resolve(row.storage_path)
 
     async def _draft_payload(self, session, draft: ContentDraft) -> dict:
+        _validated_stored_content(draft)
         targets = list(
             (
                 await session.scalars(
@@ -985,6 +1032,12 @@ def public_draft(draft: ContentDraft, targets: list[DraftTarget]) -> dict:
         "source_type": draft.source_type,
         "source_ref": draft.source_ref,
         "title": draft.title,
+        "content_schema_version": getattr(draft, "content_schema_version", 1),
+        "document": (
+            draft.document_json
+            if getattr(draft, "content_schema_version", 1) == 2
+            else None
+        ),
         "blocks": blocks,
         "cover": public_cover(draft.cover_strategy, draft.cover_asset_id),
         "status": draft.status,
@@ -1035,6 +1088,76 @@ def public_plan_target(target: DeliveryPlanTarget) -> dict:
         "error_code": target.error_code,
         "error_message": target.error_message,
     }
+
+
+def _canonicalize_v2_document(
+    document: dict | None,
+    title: str,
+) -> tuple[dict, list[dict]]:
+    """校验 v2 canonical，并只从 document 派生旧版投影。
+
+    ``blocks`` 可能仍由旧客户端同时提交，但 v2 的唯一真值始终是
+    ``document``；调用方不能用另一份 blocks 覆盖或改变 canonical 内容。
+    """
+
+    if not isinstance(document, dict):
+        raise DraftValidationError("v2 草稿缺少 document")
+    try:
+        canonical = validate_document(document)
+    except ContentDocumentValidationError as exc:
+        raise DraftValidationError(f"v2 document 校验失败: {exc}") from exc
+    if canonical["title"] != title:
+        raise DraftValidationError("v2 document.title 必须与请求 title 一致")
+    projection = project_to_v1(canonical, omit_title_block=True)
+    return canonical, projection.blocks
+
+
+def _document_asset_ids(document: dict | None) -> set[str]:
+    """递归收集 v2 文档内所有受控图片资产引用。"""
+
+    if not document:
+        return set()
+    asset_ids: set[str] = set()
+
+    def visit_block(block: dict) -> None:
+        kind = block.get("kind")
+        if kind in {"paragraph", "heading"}:
+            for child in block.get("children", []):
+                if child.get("kind") == "image" and child.get("asset_id"):
+                    asset_ids.add(child["asset_id"])
+            return
+        if kind == "list":
+            for item in block.get("items", []):
+                for nested in item.get("blocks", []):
+                    visit_block(nested)
+            return
+        if kind == "table":
+            for row in block.get("rows", []):
+                for cell in row.get("cells", []):
+                    for nested in cell.get("blocks", []):
+                        visit_block(nested)
+
+    for block in document.get("blocks", []):
+        visit_block(block)
+    return asset_ids
+
+
+def _validated_stored_content(draft: ContentDraft) -> tuple[int, dict | None, list[dict]]:
+    """校验数据库中的草稿，不对损坏的 v2 数据自动修复。"""
+
+    schema_version = getattr(draft, "content_schema_version", 1)
+    if schema_version == 1:
+        if draft.document_json is not None:
+            raise DraftValidationError("v1 草稿不应包含 document")
+        return 1, None, draft.blocks_json
+    if schema_version != 2 or not isinstance(draft.document_json, dict):
+        raise DraftValidationError("v2 草稿缺少有效 document")
+    canonical, projection = _canonicalize_v2_document(draft.document_json, draft.title)
+    if canonical != draft.document_json:
+        raise DraftValidationError("v2 草稿 document 未保持 canonical 形式")
+    if projection != draft.blocks_json:
+        raise DraftValidationError("v2 草稿 blocks_json 与 document projection 不一致")
+    return 2, canonical, projection
 
 
 def _normalize_blocks(blocks: list[ContentBlockInput] | list[dict]) -> list[dict]:

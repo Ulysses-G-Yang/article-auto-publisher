@@ -25,6 +25,19 @@ class DraftRevisionConflictError(ContentStudioError):
         self.server_draft = server_draft
 
 
+class DraftContentSchemaConflictError(ContentStudioError):
+    """拒绝用 v1 客户端覆盖已保存的 v2 canonical 文档。"""
+
+    error_code = "DRAFT_CONTENT_SCHEMA_CONFLICT"
+    http_status = 409
+
+    def __init__(self, server_draft: dict | None = None) -> None:
+        super().__init__(
+            "当前草稿使用 v2 富文档，旧版编辑器不能保存；请使用支持 v2 的编辑器"
+        )
+        self.server_draft = server_draft
+
+
 class DraftValidationError(ContentStudioError):
     error_code = "DRAFT_VALIDATION_FAILED"
     http_status = 422

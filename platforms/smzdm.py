@@ -502,20 +502,34 @@ class SmzdmPlatform(BasePlatform):
 
         self._require_page_alive("smzdm 上传图片")
         try:
-            # 优先选择 accept 含 image 的文件控件，避免误选封面/视频控件
-            # （百家号 video 控件教训：file_inputs.first 可能选错）。
-            target_input = None
+            # 当前没有经过真实 DOM 探测的正文归属证据，只允许唯一的
+            # image accept 控件；多个候选时拒绝猜测，绝不回退到 first。
             file_inputs = self.page.locator("input[type=file]")
             count = await file_inputs.count()
             if count == 0:
-                return {"success": False, "error": "smzdm 图片上传控件未找到"}
+                return {
+                    "success": False,
+                    "error_code": "SMZDM_BODY_IMAGE_INPUT_NOT_FOUND",
+                    "error": "smzdm 正文图片控件未找到，已安全停止",
+                }
+            image_candidates = []
             for i in range(count):
                 accept = (await file_inputs.nth(i).get_attribute("accept")) or ""
                 if "image" in accept.lower():
-                    target_input = file_inputs.nth(i)
-                    break
-            if target_input is None:
-                target_input = file_inputs.first
+                    image_candidates.append(file_inputs.nth(i))
+            if not image_candidates:
+                return {
+                    "success": False,
+                    "error_code": "SMZDM_BODY_IMAGE_INPUT_NOT_FOUND",
+                    "error": "smzdm 未发现可证明属于正文的图片控件，已安全停止",
+                }
+            if len(image_candidates) != 1:
+                return {
+                    "success": False,
+                    "error_code": "SMZDM_BODY_IMAGE_INPUT_AMBIGUOUS",
+                    "error": "smzdm 正文图片控件候选不唯一，已安全停止",
+                }
+            target_input = image_candidates[0]
             before = await self.page.evaluate(
                 """() => document.querySelectorAll('.ProseMirror img').length"""
             )
@@ -523,20 +537,35 @@ class SmzdmPlatform(BasePlatform):
             after = before
             for _ in range(10):
                 await asyncio.sleep(1)
-                after = await self.page.evaluate(
+                observed = await self.page.evaluate(
                     """() => document.querySelectorAll('.ProseMirror img').length"""
                 )
-                if after > before:
+                if observed <= before:
+                    continue
+                await asyncio.sleep(1)
+                stable = await self.page.evaluate(
+                    """() => document.querySelectorAll('.ProseMirror img').length"""
+                )
+                if stable >= observed:
+                    after = stable
                     break
             if after <= before:
-                return {"success": False, "error": "上传后编辑器图片数量未增加"}
+                return {
+                    "success": False,
+                    "error_code": "SMZDM_EDITOR_IMAGE_COUNT_UNCHANGED",
+                    "error": "上传后正文编辑器图片数量未稳定增加",
+                }
             return {"success": True, "error": ""}
         except Exception as exc:
             if self._exception_means_browser_closed(exc):
                 raise BrowserLifecycleError(
                     "BROWSER_CONTEXT_CLOSED: smzdm 上传图片时页面已关闭"
                 ) from exc
-            return {"success": False, "error": str(exc)}
+            return {
+                "success": False,
+                "error_code": "SMZDM_IMAGE_UPLOAD_FAILED",
+                "error": safe_media_error(exc, fallback="smzdm 图片上传失败"),
+            }
 
     async def select_topic(
         self,

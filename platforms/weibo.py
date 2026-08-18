@@ -528,8 +528,8 @@ class WeiboPlatform(BasePlatform):
 
         2026-08-17 用户实测：**微博正文插图可以自动化上传**（图片随文章
         一起保存/发布成功）——编辑器存在 input[type=file] 控件。优先选择
-        accept 含 image 的控件，避免误选封面/其他上传控件（百家号 video
-        控件教训）；找不到 image 控件时退回第一个文件控件。
+        accept 含 image 的控件；当前没有经过真实 DOM 探测的正文归属证据，
+        只有唯一 image 控件时才允许继续，多个候选或无候选均安全停止。
         """
 
         self._require_page_alive("微博上传图片")
@@ -537,15 +537,29 @@ class WeiboPlatform(BasePlatform):
             file_inputs = self.page.locator("input[type=file]")
             count = await file_inputs.count()
             if count == 0:
-                return {"success": False, "error": "微博图片上传控件未找到"}
-            target_input = None
+                return {
+                    "success": False,
+                    "error_code": "WEIBO_BODY_IMAGE_INPUT_NOT_FOUND",
+                    "error": "微博正文图片控件未找到，已安全停止",
+                }
+            image_candidates = []
             for i in range(count):
                 accept = (await file_inputs.nth(i).get_attribute("accept")) or ""
                 if "image" in accept.lower():
-                    target_input = file_inputs.nth(i)
-                    break
-            if target_input is None:
-                target_input = file_inputs.first
+                    image_candidates.append(file_inputs.nth(i))
+            if not image_candidates:
+                return {
+                    "success": False,
+                    "error_code": "WEIBO_BODY_IMAGE_INPUT_NOT_FOUND",
+                    "error": "微博未发现可证明属于正文的图片控件，已安全停止",
+                }
+            if len(image_candidates) != 1:
+                return {
+                    "success": False,
+                    "error_code": "WEIBO_BODY_IMAGE_INPUT_AMBIGUOUS",
+                    "error": "微博正文图片控件候选不唯一，已安全停止",
+                }
+            target_input = image_candidates[0]
             before = await self.page.evaluate(
                 """() => document.querySelectorAll(
                     '.tiptap img, .ProseMirror img'
@@ -555,22 +569,39 @@ class WeiboPlatform(BasePlatform):
             after = before
             for _ in range(10):
                 await asyncio.sleep(1)
-                after = await self.page.evaluate(
+                observed = await self.page.evaluate(
                     """() => document.querySelectorAll(
                         '.tiptap img, .ProseMirror img'
                     ).length"""
                 )
-                if after > before:
+                if observed <= before:
+                    continue
+                await asyncio.sleep(1)
+                stable = await self.page.evaluate(
+                    """() => document.querySelectorAll(
+                        '.tiptap img, .ProseMirror img'
+                    ).length"""
+                )
+                if stable >= observed:
+                    after = stable
                     break
             if after <= before:
-                return {"success": False, "error": "上传后编辑器图片数量未增加"}
+                return {
+                    "success": False,
+                    "error_code": "WEIBO_EDITOR_IMAGE_COUNT_UNCHANGED",
+                    "error": "上传后正文编辑器图片数量未稳定增加",
+                }
             return {"success": True, "error": ""}
         except Exception as exc:
             if self._exception_means_browser_closed(exc):
                 raise BrowserLifecycleError(
                     "BROWSER_CONTEXT_CLOSED: 微博上传图片时页面已关闭"
                 ) from exc
-            return {"success": False, "error": str(exc)}
+            return {
+                "success": False,
+                "error_code": "WEIBO_IMAGE_UPLOAD_FAILED",
+                "error": safe_media_error(exc, fallback="微博图片上传失败"),
+            }
 
     async def set_cover(self) -> dict:
         """从正文图片中选择第一张设为文章封面（微博封面必须来自正文图）。

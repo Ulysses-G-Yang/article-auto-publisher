@@ -13,6 +13,7 @@ import json
 import re
 import sqlite3
 import sys
+import unicodedata
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote, urlsplit
@@ -46,6 +47,14 @@ _SENSITIVE_VALUE_RE = re.compile(
     r"(?:cookie|token|authorization|session)\s*[:=]\s*[^\s,;]+|"
     r"https?://[^\s,;]+)"
 )
+
+
+def normalize_draft_entry_text(value: Any) -> str:
+    """与浏览器入口脚本保持一致的文本规范化契约。"""
+
+    text = unicodedata.normalize("NFC", str(value or ""))
+    text = "".join(character for character in text if not character.isspace())
+    return text.translate(str.maketrans("（）", "()"))[:80]
 
 
 class ProbeError(RuntimeError):
@@ -175,20 +184,50 @@ DOM_PROBE_SCRIPT = r"""() => {
 # 入口脚本只读取可见文本和最小交互属性；唯一候选才允许一次 click()。
 # 刻意不读取 href/src/style/class/value，也不遍历草稿正文。
 DRAFT_LIST_ENTRY_SCRIPT = r"""() => {
-    const compact = (value) => String(value || '').replace(/\s+/g, ' ').trim().slice(0, 80);
-    const visible = (element) => element.getAttribute('aria-hidden') !== 'true'
-        && element.getClientRects().length > 0;
+    const normalizeEntryText = (value) => String(value || '')
+        .normalize('NFC')
+        .replace(/\p{White_Space}/gu, '')
+        .replace(/[（）]/g, (character) => character === '（' ? '(' : ')')
+        .slice(0, 80);
+    const visible = (element) => {
+        let current = element;
+        for (; current; current = current.parentElement) {
+            if (current.getAttribute('aria-hidden') === 'true') return false;
+        }
+        return element.getClientRects().length > 0;
+    };
     const entryPattern = /^草稿箱(?:\(\d+\))?$/;
-    const candidates = Array.from(document.querySelectorAll(
-        'a, button, [role="button"], [role="link"], [tabindex]'
-    )).filter((element) => visible(element) && entryPattern.test(compact(element.textContent)));
-    if (candidates.length !== 1) {
+    const interactiveSelector = 'a, button, [role="button"], [role="link"], [tabindex], [onclick]';
+    const walker = document.createTreeWalker(
+        document.body || document.documentElement,
+        NodeFilter.SHOW_TEXT,
+    );
+    const leafElements = [];
+    let textNode = walker.nextNode();
+    while (textNode) {
+        const parent = textNode.parentElement;
+        if (parent && visible(parent) && entryPattern.test(
+            normalizeEntryText(textNode.nodeValue)
+        )) {
+            leafElements.push(parent);
+        }
+        textNode = walker.nextNode();
+    }
+    const uniqueLeafElements = Array.from(new Set(leafElements));
+    const innermostElements = uniqueLeafElements.filter((element, index, all) => !all.some(
+        (other, otherIndex) => otherIndex !== index && element.contains(other)
+    ));
+    const targets = Array.from(new Set(innermostElements.map((element) => {
+        const interactive = element.closest(interactiveSelector);
+        return interactive && visible(interactive) ? interactive : element;
+    }))).filter(visible);
+    if (targets.length !== 1) {
         return {
-            status: candidates.length ? 'DRAFT_LIST_ENTRY_AMBIGUOUS' : 'DRAFT_LIST_ENTRY_MISSING',
-            entry_count: candidates.length,
+            status: targets.length ? 'DRAFT_LIST_ENTRY_AMBIGUOUS' : 'DRAFT_LIST_ENTRY_MISSING',
+            entry_count: targets.length,
         };
     }
-    candidates[0].click();
+    targets[0].click();
     return {status: 'DRAFT_LIST_ENTRY_CLICKED', entry_count: 1};
 }"""
 

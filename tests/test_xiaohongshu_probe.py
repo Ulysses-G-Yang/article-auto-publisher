@@ -17,6 +17,7 @@ from article_mvp.tools.probe_xiaohongshu_editor import (
     classify_probe_payload,
     landing_status_for,
     manual_action_for,
+    normalize_draft_entry_text,
     safe_page_location,
     sanitize_draft_list_payload,
     sanitize_probe_payload,
@@ -202,6 +203,15 @@ def test_draft_list_entry_script_clicks_only_one_exact_visible_entry() -> None:
     lowered = DRAFT_LIST_ENTRY_SCRIPT.lower()
 
     assert "^草稿箱(?:\\(\\d+\\))?$" in DRAFT_LIST_ENTRY_SCRIPT
+    assert "normalize('nfc')" in lowered
+    assert "\\p{white_space}" in lowered
+    assert "[（）]" in DRAFT_LIST_ENTRY_SCRIPT
+    assert "createTreeWalker" in DRAFT_LIST_ENTRY_SCRIPT
+    assert "NodeFilter.SHOW_TEXT" in DRAFT_LIST_ENTRY_SCRIPT
+    assert "element.contains(other)" in DRAFT_LIST_ENTRY_SCRIPT
+    assert ".closest(interactiveSelector)" in DRAFT_LIST_ENTRY_SCRIPT
+    assert "new Set" in DRAFT_LIST_ENTRY_SCRIPT
+    assert "[onclick]" in DRAFT_LIST_ENTRY_SCRIPT
     assert ".click()" in lowered
     assert lowered.count(".click()") == 1
     assert "href" not in lowered
@@ -209,7 +219,36 @@ def test_draft_list_entry_script_clicks_only_one_exact_visible_entry() -> None:
     assert ".value" not in lowered
     assert "classname" not in lowered
     assert "style" not in lowered
+    assert ".onclick" not in lowered
+    assert "getattribute('onclick')" not in lowered
     assert "新的创作" not in DRAFT_LIST_ENTRY_SCRIPT
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        (" 草稿\u00a0箱 （ 2 ） ", "草稿箱(2)"),
+        ("草稿箱（3）", "草稿箱(3)"),
+        ("\u2003草稿箱\u2003", "草稿箱"),
+    ],
+)
+def test_draft_entry_text_normalization_handles_unicode_space_and_parentheses(
+    raw: str,
+    expected: str,
+) -> None:
+    assert normalize_draft_entry_text(raw) == expected
+
+
+def test_draft_entry_script_contract_covers_nonsemantic_and_hidden_nodes() -> None:
+    lowered = DRAFT_LIST_ENTRY_SCRIPT.lower()
+
+    # The browser-side contract must inspect text nodes, not assume semantic tags.
+    assert "document.createtreewalker" in lowered
+    assert "queryselectorall" not in lowered
+    assert "getclientrects" in lowered
+    assert "aria-hidden" in lowered
+    assert "leafelements" in lowered
+    assert "innermostelements" in lowered
 
 
 @pytest.mark.parametrize(

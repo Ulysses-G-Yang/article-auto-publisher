@@ -50,7 +50,27 @@ class ContentDatabase:
     async def initialize(self) -> None:
         async with self.engine.begin() as connection:
             await connection.run_sync(Base.metadata.create_all)
+            await connection.run_sync(self._upgrade_cover_schema)
             await connection.run_sync(self._upgrade_plan_target_schema)
+
+    @staticmethod
+    def _upgrade_cover_schema(connection) -> None:
+        """幂等补充草稿/冻结版本的封面策略与解析资产。"""
+
+        for table in ("content_drafts", "content_versions"):
+            columns = {
+                row[1]
+                for row in connection.exec_driver_sql(f"PRAGMA table_info({table})").fetchall()
+            }
+            if "cover_strategy" not in columns:
+                connection.exec_driver_sql(
+                    f"ALTER TABLE {table} ADD COLUMN cover_strategy VARCHAR(32) "
+                    "NOT NULL DEFAULT 'NONE'"
+                )
+            if "cover_asset_id" not in columns:
+                connection.exec_driver_sql(
+                    f"ALTER TABLE {table} ADD COLUMN cover_asset_id VARCHAR(36)"
+                )
 
     @staticmethod
     def _upgrade_plan_target_schema(connection) -> None:

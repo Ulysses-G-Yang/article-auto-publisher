@@ -373,6 +373,7 @@ def test_http_contract_redirect_conflict_and_legacy_queue_gate(tmp_path: Path, m
     created = client.post("/api/content-drafts", json={"title": "", "blocks": []})
     assert created.status_code == 201
     draft = created.get_json()
+    assert draft["cover"] == {"strategy": "NONE", "asset_id": None, "asset_url": None}
     saved = client.patch(
         f"/api/content-drafts/{draft['draft_id']}",
         json={
@@ -383,6 +384,7 @@ def test_http_contract_redirect_conflict_and_legacy_queue_gate(tmp_path: Path, m
     )
     assert saved.status_code == 200
     assert saved.get_json()["blocks"][0]["text"] == "保留空格  文本"
+    assert saved.get_json()["cover"]["strategy"] == "NONE"
     conflict = client.patch(
         f"/api/content-drafts/{draft['draft_id']}",
         json={

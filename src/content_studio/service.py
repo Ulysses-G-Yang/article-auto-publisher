@@ -14,6 +14,7 @@ from sqlalchemy.orm import selectinload
 from content_studio.assets import AssetStore, StoredAsset
 from content_studio.contracts import (
     ContentBlockInput,
+    CoverInput,
     CreateDraftRequest,
     PatchDraftRequest,
     ReplaceTargetsRequest,
@@ -109,6 +110,8 @@ class ContentStudioService:
                             "position": 0,
                         }
                     ],
+                    cover_strategy="NONE",
+                    cover_asset_id=None,
                     status="ACTIVE",
                     revision=1,
                     created_at=now,
@@ -165,12 +168,22 @@ class ContentStudioService:
                 source_ref=source_ref,
                 title=request.title,
                 blocks_json=blocks,
+                cover_strategy="NONE",
+                cover_asset_id=None,
                 status="ACTIVE",
                 revision=1,
             )
             session.add(draft)
             await session.flush()
             await self._validate_asset_references(session, draft.draft_id, blocks)
+            cover_strategy, cover_asset_id = await self._resolve_requested_cover(
+                session,
+                draft.draft_id,
+                blocks,
+                request.cover,
+            )
+            draft.cover_strategy = cover_strategy
+            draft.cover_asset_id = cover_asset_id
             return await self._draft_payload(session, draft)
 
     async def patch_draft(self, draft_id: str, request: PatchDraftRequest) -> dict:
@@ -179,6 +192,12 @@ class ContentStudioService:
         async with self.database.session() as session:
             draft = await self._load_draft(session, draft_id)
             await self._validate_asset_references(session, draft_id, blocks)
+            cover_strategy, cover_asset_id = await self._resolve_patch_cover(
+                session,
+                draft,
+                blocks,
+                request,
+            )
             result = await session.execute(
                 update(ContentDraft)
                 .where(
@@ -188,6 +207,8 @@ class ContentStudioService:
                 .values(
                     title=request.title,
                     blocks_json=blocks,
+                    cover_strategy=cover_strategy,
+                    cover_asset_id=cover_asset_id,
                     revision=request.revision + 1,
                     updated_at=_utc_now(),
                 )
@@ -339,6 +360,17 @@ class ContentStudioService:
             if not targets:
                 raise DraftValidationError("请至少添加一个投递目标")
             await self._validate_asset_references(session, draft_id, draft.blocks_json)
+            cover_strategy, cover_asset_id = await self._validate_cover_state(session, draft)
+            await self._validate_asset_files(
+                session,
+                draft_id,
+                {
+                    block.get("asset_id")
+                    for block in draft.blocks_json
+                    if block.get("type") == "image" and block.get("asset_id")
+                }
+                | ({cover_asset_id} if cover_asset_id else set()),
+            )
             for target in targets:
                 account = await self.account_service.require_account(
                     target.account_id,
@@ -349,7 +381,12 @@ class ContentStudioService:
                 if account.status != "ACTIVE" or account.session_status != "VALID":
                     raise DraftValidationError(f"账号 {target.account_display_name} 已失效")
 
-            content_hash = _content_hash(draft.title, draft.blocks_json)
+            content_hash = _content_hash(
+                draft.title,
+                draft.blocks_json,
+                cover_strategy,
+                cover_asset_id,
+            )
             await session.execute(
                 sqlite_insert(ContentVersion)
                 .values(
@@ -359,6 +396,8 @@ class ContentStudioService:
                     content_hash=content_hash,
                     title=draft.title,
                     blocks_json=draft.blocks_json,
+                    cover_strategy=cover_strategy,
+                    cover_asset_id=cover_asset_id,
                     created_at=_utc_now(),
                 )
                 .on_conflict_do_nothing(index_elements=["draft_id", "content_hash"])
@@ -439,6 +478,7 @@ class ContentStudioService:
                 "draft_id": plan.draft_id,
                 "title": version.title,
                 "blocks": version.blocks_json,
+                "cover": public_cover(version.cover_strategy, version.cover_asset_id),
                 "content_hash": version.content_hash,
                 "version_id": version.version_id,
                 "status": plan.status,
@@ -653,6 +693,7 @@ class ContentStudioService:
         assets: list[StoredAsset],
     ) -> dict:
         draft_id = str(uuid.uuid4())
+        first_cover_asset_id = _first_body_image_asset_id(blocks)
         try:
             async with self.database.session() as session:
                 draft = ContentDraft(
@@ -661,12 +702,26 @@ class ContentStudioService:
                     source_ref=source_ref,
                     title=title[:200],
                     blocks_json=blocks,
+                    cover_strategy=(
+                        "FIRST_BODY_IMAGE" if first_cover_asset_id else "NONE"
+                    ),
+                    cover_asset_id=first_cover_asset_id,
                     status="ACTIVE",
                     revision=1,
                 )
                 session.add(draft)
                 session.add_all([_asset_model(item, draft_id) for item in assets])
                 await session.flush()
+                await self._validate_asset_references(session, draft_id, blocks)
+                await self._validate_asset_files(
+                    session,
+                    draft_id,
+                    {
+                        block.get("asset_id")
+                        for block in blocks
+                        if block.get("type") == "image" and block.get("asset_id")
+                    },
+                )
                 return await self._draft_payload(session, draft)
         except Exception:
             for item in assets:
@@ -727,13 +782,99 @@ class ContentStudioService:
                 .execution_options(synchronize_session=False)
             )
 
+    async def _resolve_requested_cover(
+        self,
+        session,
+        draft_id: str,
+        blocks: list[dict],
+        cover: CoverInput,
+    ) -> tuple[str, str | None]:
+        if cover.strategy == "NONE":
+            return "NONE", None
+        if cover.strategy == "FIRST_BODY_IMAGE":
+            asset_id = _first_body_image_asset_id(blocks)
+            if not asset_id:
+                raise DraftValidationError("FIRST_BODY_IMAGE 需要正文中至少有一张图片")
+            return "FIRST_BODY_IMAGE", asset_id
+        await self._require_owned_asset(session, draft_id, cover.asset_id)
+        return "EXPLICIT", cover.asset_id
+
+    async def _resolve_patch_cover(
+        self,
+        session,
+        draft: ContentDraft,
+        blocks: list[dict],
+        request: PatchDraftRequest,
+    ) -> tuple[str, str | None]:
+        if "cover" in request.model_fields_set:
+            if request.cover is None:
+                raise DraftValidationError("cover 不能为 null，请显式选择 NONE")
+            return await self._resolve_requested_cover(
+                session,
+                draft.draft_id,
+                blocks,
+                request.cover,
+            )
+        if draft.cover_strategy == "NONE":
+            return "NONE", None
+        if draft.cover_strategy == "FIRST_BODY_IMAGE":
+            asset_id = _first_body_image_asset_id(blocks)
+            if not asset_id:
+                raise DraftValidationError("FIRST_BODY_IMAGE 需要正文中至少有一张图片")
+            return "FIRST_BODY_IMAGE", asset_id
+        if draft.cover_strategy == "EXPLICIT":
+            await self._require_owned_asset(session, draft.draft_id, draft.cover_asset_id)
+            return "EXPLICIT", draft.cover_asset_id
+        raise DraftValidationError("草稿封面策略无效")
+
+    async def _validate_cover_state(
+        self,
+        session,
+        draft: ContentDraft,
+    ) -> tuple[str, str | None]:
+        strategy = draft.cover_strategy
+        asset_id = draft.cover_asset_id
+        if strategy == "NONE":
+            if asset_id:
+                raise DraftValidationError("NONE 封面不能引用图片资产")
+            return "NONE", None
+        if strategy == "FIRST_BODY_IMAGE":
+            first_asset_id = _first_body_image_asset_id(draft.blocks_json)
+            if not first_asset_id or asset_id != first_asset_id:
+                raise DraftValidationError(
+                    "FIRST_BODY_IMAGE 与当前正文首图不一致，请重新提交草稿"
+                )
+            await self._require_owned_asset(session, draft.draft_id, asset_id)
+            return "FIRST_BODY_IMAGE", asset_id
+        if strategy == "EXPLICIT":
+            await self._require_owned_asset(session, draft.draft_id, asset_id)
+            return "EXPLICIT", asset_id
+        raise DraftValidationError("草稿封面策略无效")
+
+    async def _require_owned_asset(
+        self,
+        session,
+        draft_id: str,
+        asset_id: str | None,
+    ) -> ContentAsset:
+        if not asset_id:
+            raise ContentAssetError("封面必须引用图片资产")
+        asset = await session.get(ContentAsset, asset_id)
+        if asset is None or asset.draft_id != draft_id:
+            raise ContentAssetError("封面图片资产不属于当前草稿")
+        return asset
+
     async def _validate_asset_references(
         self,
         session,
         draft_id: str,
         blocks: list[dict],
     ) -> None:
-        asset_ids = {block.get("asset_id") for block in blocks if block.get("type") == "image"}
+        asset_ids = {
+            block.get("asset_id")
+            for block in blocks
+            if block.get("type") == "image" and block.get("asset_id")
+        }
         if not asset_ids:
             return
         rows = list(
@@ -748,6 +889,29 @@ class ContentStudioService:
         )
         if {row.asset_id for row in rows} != asset_ids:
             raise ContentAssetError("图片块引用了不属于当前草稿的资产")
+
+    async def _validate_asset_files(
+        self,
+        session,
+        draft_id: str,
+        asset_ids: set[str],
+    ) -> None:
+        if not asset_ids:
+            return
+        rows = list(
+            (
+                await session.scalars(
+                    select(ContentAsset).where(
+                        ContentAsset.asset_id.in_(asset_ids),
+                        ContentAsset.draft_id == draft_id,
+                    )
+                )
+            ).all()
+        )
+        if {row.asset_id for row in rows} != asset_ids:
+            raise ContentAssetError("封面或图片块引用了不属于当前草稿的资产")
+        for row in rows:
+            self.asset_store.resolve(row.storage_path)
 
     async def _draft_payload(self, session, draft: ContentDraft) -> dict:
         targets = list(
@@ -789,6 +953,18 @@ def public_asset(asset: ContentAsset) -> dict:
     }
 
 
+def public_cover(strategy: str | None, asset_id: str | None) -> dict:
+    normalized_strategy = strategy or "NONE"
+    resolved_asset_id = asset_id if normalized_strategy != "NONE" else None
+    return {
+        "strategy": normalized_strategy,
+        "asset_id": resolved_asset_id,
+        "asset_url": (
+            f"/api/content-assets/{resolved_asset_id}" if resolved_asset_id else None
+        ),
+    }
+
+
 def public_draft(draft: ContentDraft, targets: list[DraftTarget]) -> dict:
     blocks = []
     for raw in sorted(draft.blocks_json or [], key=lambda item: item.get("position", 0)):
@@ -810,6 +986,7 @@ def public_draft(draft: ContentDraft, targets: list[DraftTarget]) -> dict:
         "source_ref": draft.source_ref,
         "title": draft.title,
         "blocks": blocks,
+        "cover": public_cover(draft.cover_strategy, draft.cover_asset_id),
         "status": draft.status,
         "revision": draft.revision,
         "targets": [public_target(target) for target in targets],
@@ -836,6 +1013,7 @@ def public_plan(plan, version, targets) -> dict:
         "draft_id": plan.draft_id,
         "content_version": version.content_hash,
         "draft_revision": plan.draft_revision,
+        "cover": public_cover(version.cover_strategy, version.cover_asset_id),
         "status": plan.status,
         "targets": [public_plan_target(target) for target in targets],
         "created_at": _iso(plan.created_at),
@@ -885,6 +1063,13 @@ def _normalize_blocks(blocks: list[ContentBlockInput] | list[dict]) -> list[dict
     return normalized
 
 
+def _first_body_image_asset_id(blocks: list[dict]) -> str | None:
+    for block in sorted(blocks, key=lambda item: item.get("position", 0)):
+        if block.get("type") == "image" and block.get("asset_id"):
+            return str(block["asset_id"])
+    return None
+
+
 def _validate_draft_content(title: str, blocks: list[dict], *, allow_empty: bool) -> None:
     if allow_empty:
         return
@@ -919,9 +1104,21 @@ def _asset_model(stored: StoredAsset, draft_id: str) -> ContentAsset:
     )
 
 
-def _content_hash(title: str, blocks: list[dict]) -> str:
+def _content_hash(
+    title: str,
+    blocks: list[dict],
+    cover_strategy: str = "NONE",
+    cover_asset_id: str | None = None,
+) -> str:
     payload = json.dumps(
-        {"title": title, "blocks": blocks},
+        {
+            "title": title,
+            "blocks": blocks,
+            "cover": {
+                "strategy": cover_strategy,
+                "asset_id": cover_asset_id,
+            },
+        },
         ensure_ascii=False,
         sort_keys=True,
         separators=(",", ":"),

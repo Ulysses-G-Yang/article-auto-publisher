@@ -23,6 +23,7 @@ PlatformName = Literal[
     "toutiao",
 ]
 DeliveryMode = Literal["DRAFT", "PUBLISH"]
+CoverStrategy = Literal["NONE", "FIRST_BODY_IMAGE", "EXPLICIT"]
 
 
 class StrictModel(BaseModel):
@@ -52,6 +53,21 @@ class ContentBlockInput(StrictModel):
         return self
 
 
+class CoverInput(StrictModel):
+    """封面策略；EXPLICIT 必须引用当前草稿的受控图片资产。"""
+
+    strategy: CoverStrategy
+    asset_id: str | None = Field(default=None, min_length=36, max_length=36)
+
+    @model_validator(mode="after")
+    def validate_strategy(self) -> "CoverInput":
+        if self.strategy == "EXPLICIT" and not self.asset_id:
+            raise ValueError("EXPLICIT 封面必须引用 asset_id")
+        if self.strategy != "EXPLICIT" and self.asset_id is not None:
+            raise ValueError("只有 EXPLICIT 封面可以引用 asset_id")
+        return self
+
+
 class DraftTargetInput(StrictModel):
     """一个平台账号对应一个投递目标。"""
 
@@ -65,12 +81,14 @@ class DraftTargetInput(StrictModel):
 class CreateDraftRequest(StrictModel):
     title: str = Field(default="", max_length=200)
     blocks: list[ContentBlockInput] = Field(default_factory=list, max_length=2_000)
+    cover: CoverInput = Field(default_factory=lambda: CoverInput(strategy="NONE"))
 
 
 class PatchDraftRequest(StrictModel):
     revision: Annotated[int, Field(ge=1)]
     title: str = Field(max_length=200)
     blocks: list[ContentBlockInput] = Field(max_length=2_000)
+    cover: CoverInput | None = None
 
 
 class ReplaceTargetsRequest(StrictModel):

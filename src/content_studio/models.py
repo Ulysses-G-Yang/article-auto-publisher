@@ -33,6 +33,10 @@ class ContentDraft(Base):
     source_ref: Mapped[str | None] = mapped_column(String(512))
     title: Mapped[str] = mapped_column(String(200), default="", nullable=False)
     blocks_json: Mapped[list[dict]] = mapped_column(JSON, default=list, nullable=False)
+    cover_strategy: Mapped[str] = mapped_column(
+        String(32), default="NONE", server_default="NONE", nullable=False
+    )
+    cover_asset_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     status: Mapped[str] = mapped_column(String(16), default="ACTIVE", nullable=False)
     revision: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
@@ -118,6 +122,10 @@ class ContentVersion(Base):
     content_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     title: Mapped[str] = mapped_column(String(200), nullable=False)
     blocks_json: Mapped[list[dict]] = mapped_column(JSON, nullable=False)
+    cover_strategy: Mapped[str] = mapped_column(
+        String(32), default="NONE", server_default="NONE", nullable=False
+    )
+    cover_asset_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utc_now, nullable=False
     )

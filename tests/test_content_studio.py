@@ -1,10 +1,12 @@
 """统一创作与投递后端验收测试。"""
 
 import asyncio
+import hashlib
 import io
 import json
 import sqlite3
 import uuid
+from copy import deepcopy
 from pathlib import Path
 
 import pytest
@@ -19,6 +21,7 @@ from account_sessions.permissions import LOCAL_WEB_CONTEXT
 from account_sessions.web import AccountSessionRuntimeState
 from content_studio.assets import AssetStore
 from content_studio.contracts import (
+    CoverInput,
     CreateDraftRequest,
     PatchDraftRequest,
     ReplaceTargetsRequest,
@@ -31,10 +34,16 @@ from content_studio.errors import (
     DraftContentSchemaConflictError,
     DraftRevisionConflictError,
     DraftTargetConflictError,
+    DraftValidationError,
 )
 from content_studio.importers import DocxImportAdapter, LegacyDatabaseSource
 from content_studio.models import ContentAsset, ContentDraft, ContentVersion
-from content_studio.service import SEED_KEY, SEED_TITLE, ContentStudioService
+from content_studio.service import (
+    SEED_KEY,
+    SEED_TITLE,
+    ContentStudioService,
+    _content_hash,
+)
 from content_studio.web import create_content_studio_blueprint
 
 
@@ -128,6 +137,47 @@ def make_service(tmp_path: Path, *, account_service=None) -> ContentStudioServic
         ),
         account_service=account_service,
     )
+
+
+def rich_v2_document(
+    title: str,
+    asset_id: str,
+    *,
+    marks: list[str] | None = None,
+    style_name: str | None = None,
+    link: dict[str, str] | None = None,
+    caption: str | None = None,
+    anchor_kind: str | None = None,
+) -> dict:
+    """构造覆盖 v2 canonical 字段的最小富文档 fixture。"""
+
+    text_node = {"kind": "text", "text": "开头"}
+    if marks:
+        text_node["marks"] = marks
+    if link:
+        text_node["link"] = link
+    image_node = {"kind": "image", "asset_id": asset_id}
+    if caption is not None:
+        image_node["caption"] = caption
+    if anchor_kind is not None:
+        image_node["anchor"] = {"kind": anchor_kind}
+    paragraph = {
+        "kind": "paragraph",
+        "block_id": "rich-body",
+        "children": [
+            text_node,
+            image_node,
+            {"kind": "text", "text": "结尾"},
+        ],
+    }
+    if style_name is not None:
+        paragraph["style_name"] = style_name
+    return {
+        "schema_version": 2,
+        "title": title,
+        "source_fidelity": "NATIVE",
+        "blocks": [paragraph],
+    }
 
 
 def test_seed_is_idempotent_and_database_pragmas(tmp_path: Path) -> None:
@@ -544,6 +594,321 @@ def test_target_duplicates_and_frozen_version_are_enforced(tmp_path: Path) -> No
         async with service.database.session() as session:
             versions = await session.scalar(select(func.count(ContentVersion.version_id)))
             assert versions == 1
+        await service.database.dispose()
+        await account_db.dispose()
+
+    run(scenario())
+
+
+def test_v1_content_hash_remains_backward_compatible() -> None:
+    title = "旧版 hash"
+    blocks = [{"type": "text", "text": "正文", "position": 0}]
+    cover_strategy = "EXPLICIT"
+    cover_asset_id = "asset-legacy"
+    legacy_payload = json.dumps(
+        {
+            "title": title,
+            "blocks": blocks,
+            "cover": {
+                "strategy": cover_strategy,
+                "asset_id": cover_asset_id,
+            },
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    expected = hashlib.sha256(legacy_payload.encode("utf-8")).hexdigest()
+
+    assert _content_hash(title, blocks, cover_strategy, cover_asset_id) == expected
+    assert (
+        _content_hash(
+            title,
+            blocks,
+            cover_strategy,
+            cover_asset_id,
+            content_schema_version=1,
+        )
+        == expected
+    )
+
+
+def test_v2_plan_freezes_document_and_hash_is_semantic_and_idempotent(tmp_path: Path) -> None:
+    account_db = AccountDatabase(sqlite_url(tmp_path / "accounts.db"))
+    accounts = AccountSessionService(account_db, seed_legacy_profiles=False)
+    service = make_service(tmp_path, account_service=accounts)
+
+    async def scenario():
+        await accounts.initialize()
+        account = PlatformAccount(
+            account_id=str(uuid.uuid4()),
+            platform="xiaoheihe",
+            platform_user_id="v2-plan-user",
+            display_name="v2计划账号",
+            profile_path=str(tmp_path / "profile"),
+            status="ACTIVE",
+            session_status="VALID",
+            persist_login=True,
+        )
+        async with account_db.session() as session:
+            session.add(account)
+        await service.initialize()
+
+        draft = await service.create_draft(
+            CreateDraftRequest(title="富文档", blocks=[])
+        )
+        body_asset = await service.add_asset(draft["draft_id"], image_bytes(), "正文.png")
+        cover_asset = await service.add_asset(
+            draft["draft_id"], image_bytes("JPEG"), "封面.jpg"
+        )
+        document = rich_v2_document("富文档", body_asset["asset_id"])
+        current = await service.patch_draft(
+            draft["draft_id"],
+            PatchDraftRequest(
+                revision=draft["revision"],
+                title="富文档",
+                content_schema_version=2,
+                document=document,
+            ),
+        )
+        current = await service.replace_targets(
+            draft["draft_id"],
+            ReplaceTargetsRequest(
+                revision=current["revision"],
+                targets=[
+                    {
+                        "platform": "xiaoheihe",
+                        "account_id": account.account_id,
+                        "mode": "DRAFT",
+                    }
+                ],
+            ),
+            LOCAL_WEB_CONTEXT,
+        )
+
+        base_plan = await service.create_delivery_plan(
+            draft["draft_id"], current["revision"], LOCAL_WEB_CONTEXT
+        )
+        repeated_plan = await service.create_delivery_plan(
+            draft["draft_id"], current["revision"], LOCAL_WEB_CONTEXT
+        )
+        assert repeated_plan["content_version"] == base_plan["content_version"]
+        assert base_plan["content_schema_version"] == 2
+        assert base_plan["document"] == current["document"]
+        assert "storage_path" not in json.dumps(base_plan, ensure_ascii=False)
+
+        base_context, _ = await service.get_plan_execution_context(
+            base_plan["plan_id"], LOCAL_WEB_CONTEXT
+        )
+        assert base_context["content_schema_version"] == 2
+        assert base_context["document"] == current["document"]
+        base_resolved = await service.resolve_delivery_payload(
+            await _version_id_for_hash(service, base_plan["content_version"])
+        )
+
+        variants = [
+            rich_v2_document("富文档", body_asset["asset_id"], marks=["bold"]),
+            rich_v2_document("富文档", body_asset["asset_id"], style_name="Quote"),
+            rich_v2_document(
+                "富文档",
+                body_asset["asset_id"],
+                link={"href": "https://example.com", "title": "链接"},
+            ),
+            rich_v2_document("富文档", body_asset["asset_id"], caption="正文说明"),
+            rich_v2_document("富文档", body_asset["asset_id"], anchor_kind="floating"),
+        ]
+        hashes = {base_plan["content_version"]}
+        for variant in variants:
+            current = await service.patch_draft(
+                draft["draft_id"],
+                PatchDraftRequest(
+                    revision=current["revision"],
+                    title="富文档",
+                    content_schema_version=2,
+                    document=variant,
+                ),
+            )
+            variant_plan = await service.create_delivery_plan(
+                draft["draft_id"], current["revision"], LOCAL_WEB_CONTEXT
+            )
+            hashes.add(variant_plan["content_version"])
+
+        cover_document = rich_v2_document("富文档", body_asset["asset_id"])
+        current = await service.patch_draft(
+            draft["draft_id"],
+            PatchDraftRequest(
+                revision=current["revision"],
+                title="富文档",
+                content_schema_version=2,
+                document=cover_document,
+                cover=CoverInput(
+                    strategy="EXPLICIT",
+                    asset_id=cover_asset["asset_id"],
+                ),
+            ),
+        )
+        cover_plan = await service.create_delivery_plan(
+            draft["draft_id"], current["revision"], LOCAL_WEB_CONTEXT
+        )
+        hashes.add(cover_plan["content_version"])
+
+        titled_document = rich_v2_document("富文档改名", body_asset["asset_id"])
+        current = await service.patch_draft(
+            draft["draft_id"],
+            PatchDraftRequest(
+                revision=current["revision"],
+                title="富文档改名",
+                content_schema_version=2,
+                document=titled_document,
+            ),
+        )
+        title_plan = await service.create_delivery_plan(
+            draft["draft_id"], current["revision"], LOCAL_WEB_CONTEXT
+        )
+        hashes.add(title_plan["content_version"])
+
+        assert len(hashes) == 8
+        async with service.database.session() as session:
+            versions = list(
+                (
+                    await session.scalars(
+                        select(ContentVersion).where(
+                            ContentVersion.draft_id == draft["draft_id"]
+                        )
+                    )
+                ).all()
+            )
+            assert len(versions) == 8
+            base_version = next(
+                item for item in versions if item.content_hash == base_plan["content_version"]
+            )
+            assert base_version.content_schema_version == 2
+            assert base_version.document_json == document
+            assert base_version.blocks_json == base_context["blocks"]
+            frozen_document = base_version.document_json
+            frozen_projection = base_version.blocks_json
+
+        # 活动草稿已经多次更新，旧 ContentVersion 和其解析结果仍保持不变。
+        frozen_resolved = await service.resolve_delivery_payload(base_version.version_id)
+        assert frozen_resolved == base_resolved
+        async with service.database.session() as session:
+            base_version = await session.get(ContentVersion, base_version.version_id)
+            assert base_version.document_json == frozen_document
+            assert base_version.blocks_json == frozen_projection
+        await service.database.dispose()
+        await account_db.dispose()
+
+    run(scenario())
+
+
+async def _version_id_for_hash(service: ContentStudioService, content_hash: str) -> str:
+    async def lookup() -> str:
+        async with service.database.session() as session:
+            version = await session.scalar(
+                select(ContentVersion).where(ContentVersion.content_hash == content_hash)
+            )
+            assert version is not None
+            return version.version_id
+
+    return await lookup()
+
+
+def test_v2_corruption_fails_closed_before_plan_and_operation(tmp_path: Path) -> None:
+    account_db = AccountDatabase(sqlite_url(tmp_path / "accounts.db"))
+    accounts = AccountSessionService(account_db, seed_legacy_profiles=False)
+    service = make_service(tmp_path, account_service=accounts)
+
+    async def scenario():
+        await accounts.initialize()
+        account = PlatformAccount(
+            account_id=str(uuid.uuid4()),
+            platform="xiaoheihe",
+            platform_user_id="corrupt-v2-user",
+            display_name="损坏测试账号",
+            profile_path=str(tmp_path / "profile"),
+            status="ACTIVE",
+            session_status="VALID",
+            persist_login=True,
+        )
+        async with account_db.session() as session:
+            session.add(account)
+        await service.initialize()
+        draft = await service.create_draft(
+            CreateDraftRequest(title="损坏检查", blocks=[])
+        )
+        asset = await service.add_asset(draft["draft_id"], image_bytes(), "正文.png")
+        document = rich_v2_document("损坏检查", asset["asset_id"])
+        current = await service.patch_draft(
+            draft["draft_id"],
+            PatchDraftRequest(
+                revision=draft["revision"],
+                title="损坏检查",
+                content_schema_version=2,
+                document=document,
+            ),
+        )
+        current = await service.replace_targets(
+            draft["draft_id"],
+            ReplaceTargetsRequest(
+                revision=current["revision"],
+                targets=[
+                    {
+                        "platform": "xiaoheihe",
+                        "account_id": account.account_id,
+                        "mode": "DRAFT",
+                    }
+                ],
+            ),
+            LOCAL_WEB_CONTEXT,
+        )
+        async with service.database.session() as session:
+            stored_draft = await session.get(ContentDraft, draft["draft_id"])
+            storage_original = deepcopy(stored_draft.blocks_json)
+
+        async with service.database.session() as session:
+            row = await session.get(ContentDraft, draft["draft_id"])
+            row.document_json = None
+        with pytest.raises(DraftValidationError, match="缺少有效 document"):
+            await service.create_delivery_plan(
+                draft["draft_id"], current["revision"], LOCAL_WEB_CONTEXT
+            )
+
+        async with service.database.session() as session:
+            row = await session.get(ContentDraft, draft["draft_id"])
+            row.document_json = document
+            row.blocks_json = [
+                *storage_original,
+                {"type": "text", "text": "漂移", "position": 99},
+            ]
+        with pytest.raises(DraftValidationError, match="projection"):
+            await service.create_delivery_plan(
+                draft["draft_id"], current["revision"], LOCAL_WEB_CONTEXT
+            )
+        async with service.database.session() as session:
+            assert await session.scalar(select(func.count(ContentVersion.version_id))) == 0
+            row = await session.get(ContentDraft, draft["draft_id"])
+            row.blocks_json = deepcopy(storage_original)
+
+        plan = await service.create_delivery_plan(
+            draft["draft_id"], current["revision"], LOCAL_WEB_CONTEXT
+        )
+        async with service.database.session() as session:
+            version = await session.scalar(
+                select(ContentVersion).where(
+                    ContentVersion.content_hash == plan["content_version"]
+                )
+            )
+            assert version is not None
+            version_id = version.version_id
+            version.document_json = None
+
+        with pytest.raises(DraftValidationError, match="缺少有效 document"):
+            await service.get_delivery_plan(plan["plan_id"], LOCAL_WEB_CONTEXT)
+        with pytest.raises(DraftValidationError, match="缺少有效 document"):
+            await service.get_plan_execution_context(plan["plan_id"], LOCAL_WEB_CONTEXT)
+        with pytest.raises(DraftValidationError, match="缺少有效 document"):
+            await service.resolve_delivery_payload(version_id)
+
         await service.database.dispose()
         await account_db.dispose()
 

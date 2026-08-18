@@ -14,6 +14,8 @@ from sqlalchemy.orm import selectinload
 from content_studio.assets import AssetStore, StoredAsset
 from content_studio.content_document import (
     ContentDocumentValidationError,
+    canonical_document_json,
+    document_hash,
     project_to_v1,
     validate_document,
 )
@@ -381,7 +383,8 @@ class ContentStudioService:
         async with self.database.session() as session:
             draft = await self._load_draft(session, draft_id)
             await self._assert_revision(session, draft, revision)
-            _validate_draft_content(draft.title, draft.blocks_json, allow_empty=False)
+            schema_version, canonical_document, projection = _validated_stored_content(draft)
+            _validate_draft_content(draft.title, projection, allow_empty=False)
             targets = list(
                 (
                     await session.scalars(
@@ -393,17 +396,19 @@ class ContentStudioService:
             )
             if not targets:
                 raise DraftValidationError("请至少添加一个投递目标")
-            await self._validate_asset_references(session, draft_id, draft.blocks_json)
+            await self._validate_asset_references(session, draft_id, projection)
             cover_strategy, cover_asset_id = await self._validate_cover_state(session, draft)
+            asset_ids = _content_asset_ids(
+                schema_version,
+                canonical_document,
+                projection,
+            )
+            if cover_asset_id:
+                asset_ids.add(cover_asset_id)
             await self._validate_asset_files(
                 session,
                 draft_id,
-                {
-                    block.get("asset_id")
-                    for block in draft.blocks_json
-                    if block.get("type") == "image" and block.get("asset_id")
-                }
-                | ({cover_asset_id} if cover_asset_id else set()),
+                asset_ids,
             )
             for target in targets:
                 account = await self.account_service.require_account(
@@ -417,9 +422,11 @@ class ContentStudioService:
 
             content_hash = _content_hash(
                 draft.title,
-                draft.blocks_json,
+                projection,
                 cover_strategy,
                 cover_asset_id,
+                content_schema_version=schema_version,
+                document=canonical_document,
             )
             await session.execute(
                 sqlite_insert(ContentVersion)
@@ -429,7 +436,9 @@ class ContentStudioService:
                     source_revision=draft.revision,
                     content_hash=content_hash,
                     title=draft.title,
-                    blocks_json=draft.blocks_json,
+                    blocks_json=projection,
+                    content_schema_version=schema_version,
+                    document_json=canonical_document,
                     cover_strategy=cover_strategy,
                     cover_asset_id=cover_asset_id,
                     created_at=_utc_now(),
@@ -444,6 +453,7 @@ class ContentStudioService:
             )
             if version is None:
                 raise RuntimeError("内容版本冻结失败")
+            _validated_stored_version(version)
 
             plan = DeliveryPlan(
                 plan_id=str(uuid.uuid4()),
@@ -492,6 +502,9 @@ class ContentStudioService:
 
                 raise DeliveryPlanStaleError("草稿内容或投递目标已更新，请重新生成投递计划")
             version = await session.get(ContentVersion, plan.version_id)
+            if version is None:
+                raise DraftValidationError("投递计划引用的内容版本不存在")
+            schema_version, canonical_document, projection = _validated_stored_version(version)
             targets = list(
                 (
                     await session.scalars(
@@ -511,7 +524,9 @@ class ContentStudioService:
                 "plan_id": plan.plan_id,
                 "draft_id": plan.draft_id,
                 "title": version.title,
-                "blocks": version.blocks_json,
+                "blocks": projection,
+                "content_schema_version": schema_version,
+                "document": canonical_document,
                 "cover": public_cover(version.cover_strategy, version.cover_asset_id),
                 "content_hash": version.content_hash,
                 "version_id": version.version_id,
@@ -671,12 +686,12 @@ class ContentStudioService:
             version = await session.get(ContentVersion, version_id)
             if version is None:
                 raise DraftValidationError("投递执行单引用的内容版本不存在")
+            _schema_version, _document, projection = _validated_stored_version(version)
             draft_id = version.draft_id
             title = version.title
-            blocks = version.blocks_json
         _body, platform_blocks, images = await self.build_platform_content(
             draft_id,
-            blocks,
+            projection,
         )
         return title, platform_blocks, images
 
@@ -974,6 +989,9 @@ class ContentStudioService:
 
     async def _plan_payload(self, session, plan: DeliveryPlan) -> dict:
         version = await session.get(ContentVersion, plan.version_id)
+        if version is None:
+            raise DraftValidationError("投递计划引用的内容版本不存在")
+        _validated_stored_version(version)
         targets = list(
             (
                 await session.scalars(
@@ -1061,10 +1079,13 @@ def public_target(target: DraftTarget) -> dict:
 
 
 def public_plan(plan, version, targets) -> dict:
+    schema_version, canonical_document, _projection = _validated_stored_version(version)
     return {
         "plan_id": plan.plan_id,
         "draft_id": plan.draft_id,
         "content_version": version.content_hash,
+        "content_schema_version": schema_version,
+        "document": canonical_document,
         "draft_revision": plan.draft_revision,
         "cover": public_cover(version.cover_strategy, version.cover_asset_id),
         "status": plan.status,
@@ -1142,6 +1163,22 @@ def _document_asset_ids(document: dict | None) -> set[str]:
     return asset_ids
 
 
+def _content_asset_ids(
+    schema_version: int,
+    document: dict | None,
+    projection: list[dict],
+) -> set[str]:
+    """收集 draft 当前 schema 的全部正文图片资产引用。"""
+
+    if schema_version == 2:
+        return _document_asset_ids(document)
+    return {
+        block.get("asset_id")
+        for block in projection
+        if block.get("type") == "image" and block.get("asset_id")
+    }
+
+
 def _validated_stored_content(draft: ContentDraft) -> tuple[int, dict | None, list[dict]]:
     """校验数据库中的草稿，不对损坏的 v2 数据自动修复。"""
 
@@ -1157,6 +1194,32 @@ def _validated_stored_content(draft: ContentDraft) -> tuple[int, dict | None, li
         raise DraftValidationError("v2 草稿 document 未保持 canonical 形式")
     if projection != draft.blocks_json:
         raise DraftValidationError("v2 草稿 blocks_json 与 document projection 不一致")
+    return 2, canonical, projection
+
+
+def _validated_stored_version(
+    version: ContentVersion,
+) -> tuple[int, dict | None, list[dict]]:
+    """校验不可变版本并返回其安全的 projection。
+
+    v2 版本必须同时保存 canonical document 和由它派生的 v1 projection；任一
+    缺失、非 canonical 或漂移都视为数据损坏，绝不从活动草稿自动修复。
+    """
+
+    schema_version = getattr(version, "content_schema_version", 1)
+    if schema_version == 1:
+        if version.document_json is not None:
+            raise DraftValidationError("v1 内容版本不应包含 document")
+        if not isinstance(version.blocks_json, list):
+            raise DraftValidationError("v1 内容版本 blocks projection 无效")
+        return 1, None, version.blocks_json
+    if schema_version != 2 or not isinstance(version.document_json, dict):
+        raise DraftValidationError("v2 内容版本缺少有效 document")
+    canonical, projection = _canonicalize_v2_document(version.document_json, version.title)
+    if canonical != version.document_json:
+        raise DraftValidationError("v2 内容版本 document 未保持 canonical 形式")
+    if projection != version.blocks_json:
+        raise DraftValidationError("v2 内容版本 blocks projection 与 document 不一致")
     return 2, canonical, projection
 
 
@@ -1232,16 +1295,36 @@ def _content_hash(
     blocks: list[dict],
     cover_strategy: str = "NONE",
     cover_asset_id: str | None = None,
+    *,
+    content_schema_version: int = 1,
+    document: dict | None = None,
 ) -> str:
-    payload = json.dumps(
-        {
+    if content_schema_version == 1:
+        # 保留 v1 既有 hash 输入结构，确保旧草稿重建 plan 时完全兼容。
+        hash_payload = {
             "title": title,
             "blocks": blocks,
             "cover": {
                 "strategy": cover_strategy,
                 "asset_id": cover_asset_id,
             },
-        },
+        }
+    elif content_schema_version == 2:
+        if not isinstance(document, dict):
+            raise DraftValidationError("v2 内容版本缺少 document，无法计算 hash")
+        hash_payload = {
+            "content_schema_version": 2,
+            "document_json": canonical_document_json(document),
+            "document_hash": document_hash(document),
+            "cover": {
+                "strategy": cover_strategy,
+                "asset_id": cover_asset_id,
+            },
+        }
+    else:
+        raise DraftValidationError("内容版本 schema 不受支持")
+    payload = json.dumps(
+        hash_payload,
         ensure_ascii=False,
         sort_keys=True,
         separators=(",", ":"),

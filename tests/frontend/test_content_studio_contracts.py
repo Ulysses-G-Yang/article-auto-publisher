@@ -198,3 +198,51 @@ def test_primary_action_reports_and_focuses_missing_fields() -> None:
     assert "issues[0].focus" in script
     assert "填写文章标题" in script
     assert "至少选择一个投递目标" in script
+
+
+def test_v2_draft_state_and_patch_never_silently_downgrade() -> None:
+    script = read("web/static/js/content-studio.js")
+
+    assert "function isV2Draft(draft = state.draft)" in script
+    assert "content_schema_version: 2" in script
+    assert "document: cloneValue(state.draft.document)" in script
+    assert "cover: cloneValue(normalizedCover(state.draft.cover))" in script
+    assert "const requestIsV2 = isV2Draft()" in script
+    assert "const requestBlocks = requestIsV2 ? null : publicBlocks();" in script
+    assert "const requestDocument = requestIsV2 ? cloneValue(state.draft.document) : null;" in script
+    assert "const requestBody = requestIsV2" in script
+    assert "document: requestDocument" in script
+    assert "cover: requestCover" in script
+    assert "asset_id: value.strategy === 'EXPLICIT' ? value.asset_id : null" in script
+    assert "const requestSnapshot = contentSnapshot(state.draft);" in script
+    assert "const changedDuringRequest = contentSnapshot(state.draft) !== requestSnapshot;" in script
+    assert "DRAFT_CONTENT_SCHEMA_CONFLICT" in script
+    assert "editor.contentEditable = readonly ? 'false' : 'true';" in script
+    assert "if (isV2Draft()) return [];" in script
+    assert "if (isV2Draft()) {\n            setMessage('content-error', v2ReadonlyMessage());\n            return;\n        }" in script
+    assert "assetUpload.disabled = readonly" in script
+    assert "Word 富文档受保护，当前正文只读；重新导入可替换" in script
+    assert "showDropOverlay(false);" in script
+
+
+def test_v2_local_recovery_conflict_copy_and_title_stay_schema_aware() -> None:
+    script = read("web/static/js/content-studio.js")
+
+    assert "content_schema_version: schemaVersion" in script
+    assert "document: schemaVersion === 2 ? cloneValue(snapshot.document) : null" in script
+    assert "state.draft.document = cloneValue(local.document);" in script
+    assert "const localMatchesSchema = serverIsV2" in script
+    assert "const localSameRevision = Boolean(local?.dirty && local.revision === payload.revision);" in script
+    assert "已保留本地副本且未静默降级" in script
+    assert "state.draft.document.title = event.target.value;" in script
+    assert "content_schema_version: 2,\n                document: cloneValue(state.draft.document)" in script
+    assert "cover: coverRequest(state.draft.cover)" in script
+
+
+def test_v1_patch_keeps_legacy_blocks_and_cover_contract() -> None:
+    script = read("web/static/js/content-studio.js")
+
+    assert "blocks: requestBlocks" in script
+    assert "cover: requestCover" in script
+    assert "content_schema_version: 2" in script
+    assert "content_schema_version: 1" in script

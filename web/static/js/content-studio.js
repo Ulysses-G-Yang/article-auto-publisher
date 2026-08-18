@@ -51,6 +51,55 @@
         return globalThis.crypto?.randomUUID?.() || `local-${Date.now()}-${Math.random().toString(16).slice(2)}`;
     }
 
+    function cloneValue(value) {
+        if (value === null || value === undefined) return value;
+        try { return JSON.parse(JSON.stringify(value)); } catch (_) { return value; }
+    }
+
+    function isV2Draft(draft = state.draft) {
+        return Number(draft?.content_schema_version) === 2;
+    }
+
+    function assetUrl(assetId) {
+        if (typeof assetId !== 'string' || !assetId.trim()) return '';
+        return `/api/content-assets/${encodeURIComponent(assetId)}`;
+    }
+
+    function normalizedCover(cover) {
+        const value = cover && typeof cover === 'object' ? cover : {};
+        const strategy = ['NONE', 'FIRST_BODY_IMAGE', 'EXPLICIT'].includes(value.strategy)
+            ? value.strategy : 'NONE';
+        const assetId = typeof value.asset_id === 'string' && value.asset_id.trim()
+            ? value.asset_id : null;
+        return { strategy, asset_id: assetId, asset_url: assetUrl(assetId) };
+    }
+
+    function coverRequest(cover) {
+        const value = normalizedCover(cover);
+        return {
+            strategy: value.strategy,
+            asset_id: value.strategy === 'EXPLICIT' ? value.asset_id : null,
+        };
+    }
+
+    function contentSnapshot(draft = state.draft) {
+        if (!draft) return '';
+        if (isV2Draft(draft)) {
+            return JSON.stringify({
+                content_schema_version: 2,
+                title: draft.title || '',
+                document: cloneValue(draft.document),
+                cover: normalizedCover(draft.cover),
+            });
+        }
+        return JSON.stringify({
+            content_schema_version: 1,
+            title: draft.title || '',
+            blocks: publicBlocks(draft.blocks),
+            cover: normalizedCover(draft.cover),
+        });
+    }
+
     function coreModal(id) {
         const library = window.coreui || window.bootstrap;
         return library.Modal.getOrCreateInstance(byId(id));
@@ -115,7 +164,17 @@
         if (!state.localDb) return Promise.resolve(null);
         return new Promise(resolve => {
             const request = state.localDb.transaction('drafts', 'readonly').objectStore('drafts').get(draftId);
-            request.onsuccess = () => resolve(request.result || null);
+            request.onsuccess = () => {
+                const snapshot = request.result;
+                if (!snapshot) { resolve(null); return; }
+                const schemaVersion = Number(snapshot.content_schema_version) === 2 ? 2 : 1;
+                resolve({
+                    ...snapshot,
+                    content_schema_version: schemaVersion,
+                    document: schemaVersion === 2 ? cloneValue(snapshot.document) : null,
+                    cover: snapshot.cover === undefined ? undefined : cloneValue(snapshot.cover),
+                });
+            };
             request.onerror = () => resolve(null);
         });
     }
@@ -126,7 +185,11 @@
             draft_id: state.draft.draft_id,
             revision: state.draft.revision,
             title: state.draft.title,
-            blocks: state.draft.blocks,
+            content_schema_version: Number(state.draft.content_schema_version) === 2 ? 2 : 1,
+            document: isV2Draft() ? cloneValue(state.draft.document) : null,
+            blocks: isV2Draft() ? [] : cloneValue(state.draft.blocks),
+            cover: cloneValue(normalizedCover(state.draft.cover)),
+            targets: cloneValue(state.draft.targets || []),
             dirty,
             saved_at: new Date().toISOString(),
         };
@@ -177,18 +240,39 @@
         const baseRevision = state.draft.revision;
         try {
             const requestTitle = state.draft.title;
-            const requestBlocks = publicBlocks();
+            const requestIsV2 = isV2Draft();
+            const requestDocument = requestIsV2 ? cloneValue(state.draft.document) : null;
+            const requestBlocks = requestIsV2 ? null : publicBlocks();
+            const requestCover = coverRequest(state.draft.cover);
+            const requestBody = requestIsV2
+                ? {
+                    revision: baseRevision,
+                    title: requestTitle,
+                    content_schema_version: 2,
+                    document: requestDocument,
+                    cover: requestCover,
+                }
+                : {
+                    revision: baseRevision,
+                    title: requestTitle,
+                    blocks: requestBlocks,
+                    cover: requestCover,
+                };
+            const requestSnapshot = contentSnapshot(state.draft);
             const response = await fetch(endpoint(root.dataset.draftUrlTemplate, 'draft_id', state.draft.draft_id), {
                 method: 'PATCH',
                 headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
-                body: JSON.stringify({ revision: baseRevision, title: requestTitle, blocks: requestBlocks }),
+                body: JSON.stringify(requestBody),
             });
             const payload = await response.json().catch(() => ({}));
-            if (response.status === 409 && payload.error === 'DRAFT_REVISION_CONFLICT') {
+            if (response.status === 409 && ['DRAFT_REVISION_CONFLICT', 'DRAFT_CONTENT_SCHEMA_CONFLICT'].includes(payload.error)) {
                 state.conflictServerDraft = payload.server_draft;
                 byId('conflict-local-revision').textContent = String(baseRevision);
                 byId('conflict-server-revision').textContent = String(payload.server_draft?.revision ?? '—');
                 setSaveState('error', '同步冲突');
+                setMessage('content-error', payload.error === 'DRAFT_CONTENT_SCHEMA_CONFLICT'
+                    ? '当前草稿是 Word 富文档，旧版保存请求不能覆盖它；请选择采用服务端版本或另存副本。'
+                    : '草稿发生修订冲突，请选择如何处理当前本地内容。');
                 coreModal('conflict-modal').show();
                 return false;
             }
@@ -196,8 +280,14 @@
             state.draft.revision = payload.revision;
             state.draft.updated_at = payload.updated_at;
             state.draft.source_type = payload.source_type;
-            const changedDuringRequest = state.draft.title !== requestTitle
-                || JSON.stringify(publicBlocks()) !== JSON.stringify(requestBlocks);
+            const changedDuringRequest = contentSnapshot(state.draft) !== requestSnapshot;
+            if (!changedDuringRequest && requestIsV2 && Number(payload.content_schema_version) === 2) {
+                state.draft.content_schema_version = 2;
+                state.draft.document = cloneValue(payload.document);
+                state.draft.cover = normalizedCover(payload.cover);
+            } else if (!changedDuringRequest && !requestIsV2) {
+                state.draft.cover = normalizedCover(payload.cover);
+            }
             state.dirty = changedDuringRequest;
             await localDraftPut(changedDuringRequest);
             updateDraftMeta();
@@ -217,10 +307,14 @@
     }
 
     function applyDraft(payload, { render = true } = {}) {
+        const schemaVersion = Number(payload.content_schema_version) === 2 ? 2 : 1;
         state.draft = {
             ...payload,
             title: payload.title || '',
             blocks: Array.isArray(payload.blocks) ? payload.blocks.map((block, position) => ({ ...block, position })) : [],
+            content_schema_version: schemaVersion,
+            document: schemaVersion === 2 ? cloneValue(payload.document) : null,
+            cover: normalizedCover(payload.cover),
             targets: Array.isArray(payload.targets) ? payload.targets : [],
         };
         // 回填滑块状态：已有目标 → 平台开关/账号勾选/模式
@@ -251,9 +345,27 @@
     async function openDraft(payload) {
         applyDraft(payload);
         const local = await localDraftGet(payload.draft_id);
-        if (local?.dirty && local.revision === payload.revision) {
+        const serverIsV2 = isV2Draft(state.draft);
+        const localMatchesSchema = serverIsV2
+            ? Number(local?.content_schema_version) === 2
+            : Number(local?.content_schema_version || 1) !== 2;
+        const localSameRevision = Boolean(local?.dirty && local.revision === payload.revision);
+        if (localSameRevision && !localMatchesSchema) {
+            setSaveState('error', '恢复副本版本不一致');
+            setMessage('content-error', '本地恢复副本与服务端内容版本不一致，已保留本地副本且未静默降级。请确认后再编辑或另存。');
+        } else if (localSameRevision && localMatchesSchema) {
             state.draft.title = local.title || '';
-            state.draft.blocks = Array.isArray(local.blocks) ? local.blocks : [];
+            if (serverIsV2) {
+                state.draft.content_schema_version = 2;
+                state.draft.document = cloneValue(local.document);
+                if (state.draft.document && typeof state.draft.document === 'object') {
+                    state.draft.document.title = state.draft.title;
+                }
+                if (local.cover !== undefined) state.draft.cover = normalizedCover(local.cover);
+            } else {
+                state.draft.blocks = Array.isArray(local.blocks) ? local.blocks : [];
+                if (local.cover !== undefined) state.draft.cover = normalizedCover(local.cover);
+            }
             state.dirty = true;
             byId('draft-title').value = state.draft.title;
             renderBlocks();
@@ -319,8 +431,27 @@
         }).join('');
     }
 
+    function v2ReadonlyMessage() {
+        return 'Word 富文档受保护，当前正文只读；重新导入可替换';
+    }
+
+    function syncEditorMode() {
+        const readonly = isV2Draft();
+        const editor = byId('rich-editor');
+        if (editor) {
+            editor.contentEditable = readonly ? 'false' : 'true';
+            editor.setAttribute('aria-readonly', String(readonly));
+            editor.classList.toggle('is-v2-readonly', readonly);
+        }
+        const assetUpload = byId('asset-upload');
+        if (assetUpload) assetUpload.disabled = readonly;
+        const clearButton = byId('clear-blocks');
+        if (clearButton) clearButton.disabled = readonly || !state.draft?.blocks?.length;
+    }
+
     function renderBlocks() {
         const editor = byId('rich-editor');
+        syncEditorMode();
         if (editor) editor.innerHTML = blocksToHtml(state.draft.blocks);
         syncBlocksMeta();
     }
@@ -332,11 +463,12 @@
         byId('blocks-empty').classList.toggle('d-none', blocks.length > 0);
         byId('block-count').textContent = `${paragraphs} 段 · ${images} 图`;
         const clearButton = byId('clear-blocks');
-        if (clearButton) clearButton.disabled = blocks.length === 0;
+        if (clearButton) clearButton.disabled = isV2Draft() || blocks.length === 0;
         updateDraftMeta();
     }
 
     function parseEditorToBlocks() {
+        if (isV2Draft()) return [];
         const editor = byId('rich-editor');
         if (!editor) return [];
         const blocks = [];
@@ -365,6 +497,10 @@
 
     let editorParseTimer = null;
     function handleEditorInput() {
+        if (isV2Draft()) {
+            setMessage('content-error', v2ReadonlyMessage());
+            return;
+        }
         clearTimeout(editorParseTimer);
         editorParseTimer = setTimeout(() => {
             if (!state.draft) return;
@@ -383,6 +519,10 @@
     }
 
     function clearAllBlocks() {
+        if (isV2Draft()) {
+            setMessage('content-error', v2ReadonlyMessage());
+            return;
+        }
         if (!state.draft || state.draft.blocks.length === 0) return;
         if (!window.confirm('确定清空正文全部内容吗？清空后可重新拖入 Word 文档或添加图文块。')) return;
         state.draft.blocks = [];
@@ -391,6 +531,10 @@
     }
 
     function insertImageIntoEditor(asset) {
+        if (isV2Draft()) {
+            setMessage('content-error', v2ReadonlyMessage());
+            return;
+        }
         const editor = byId('rich-editor');
         const figure = document.createElement('figure');
         figure.className = 'rich-image';
@@ -415,6 +559,10 @@
     }
 
     async function uploadAssets(files) {
+        if (isV2Draft()) {
+            setMessage('content-error', v2ReadonlyMessage());
+            return;
+        }
         if (!state.draft || !files.length) return;
         setMessage('content-error', '');
         setSaveState('saving', '正在上传图片');
@@ -915,18 +1063,50 @@
 
     async function resolveConflict(useServer) {
         if (useServer) {
-            const server = state.conflictServerDraft; applyDraft(server); await localDraftPut(false); setSaveState('synced', '已采用服务端版本'); coreModal('conflict-modal').hide(); return;
+            const server = state.conflictServerDraft;
+            if (!server) {
+                setMessage('content-error', '服务端版本不可用，请刷新草稿后重试。');
+                return;
+            }
+            if (isV2Draft() && Number(server.content_schema_version) !== 2) {
+                setMessage('content-error', '服务端返回的不是同一份 v2 富文档，已拒绝降级覆盖；请刷新后重试。');
+                return;
+            }
+            applyDraft(server);
+            await localDraftPut(false);
+            setSaveState('synced', '已采用服务端版本');
+            coreModal('conflict-modal').hide();
+            return;
         }
-        const local = { title: state.draft.title, blocks: publicBlocks() };
+        const local = isV2Draft()
+            ? {
+                title: state.draft.title,
+                content_schema_version: 2,
+                document: cloneValue(state.draft.document),
+                cover: coverRequest(state.draft.cover),
+            }
+            : { title: state.draft.title, blocks: publicBlocks(), cover: coverRequest(state.draft.cover) };
         try { const copy = await jsonResponse(await fetch(root.dataset.draftsUrl, { method: 'POST', headers: { 'Content-Type': 'application/json', Accept: 'application/json' }, body: JSON.stringify(local) })); state.conflictServerDraft = null; await refreshDrafts(); await openDraft(copy); setSaveState('synced', '本地内容已另存副本'); coreModal('conflict-modal').hide(); }
         catch (error) { setMessage('content-error', error.message || '另存草稿副本失败'); }
     }
 
     function bindEvents() {
-        byId('draft-title').addEventListener('input', event => { state.draft.title = event.target.value; byId('side-draft-title').textContent = event.target.value || '未命名草稿'; markDirty(); });
+        byId('draft-title').addEventListener('input', event => {
+            state.draft.title = event.target.value;
+            if (isV2Draft() && state.draft.document && typeof state.draft.document === 'object') {
+                state.draft.document.title = event.target.value;
+            }
+            byId('side-draft-title').textContent = event.target.value || '未命名草稿';
+            markDirty();
+        });
         // 知乎式连续编辑区：输入防抖同步；粘贴图片直接上传插入光标处，文字仅保留纯文本
         byId('rich-editor').addEventListener('input', handleEditorInput);
         byId('rich-editor').addEventListener('paste', event => {
+            if (isV2Draft()) {
+                event.preventDefault();
+                setMessage('content-error', v2ReadonlyMessage());
+                return;
+            }
             event.preventDefault();
             const clipboard = event.clipboardData || window.clipboardData;
             const pastedImages = Array.from(clipboard.items || [])
@@ -950,6 +1130,10 @@
             dropOverlay?.classList.toggle('d-none', !visible);
         }
         ['dragenter', 'dragover'].forEach(type => blocksDrop.addEventListener(type, event => {
+            if (isV2Draft()) {
+                showDropOverlay(false);
+                return;
+            }
             if (Array.from(event.dataTransfer?.types || []).includes('Files')) {
                 event.preventDefault();
                 showDropOverlay(true);
@@ -961,6 +1145,11 @@
         }));
         blocksDrop.addEventListener('drop', event => {
             event.preventDefault();
+            if (isV2Draft()) {
+                showDropOverlay(false);
+                setMessage('content-error', v2ReadonlyMessage());
+                return;
+            }
             const files = Array.from(event.dataTransfer?.files || []);
             setMessage('content-error', '');
             if (!files.length) {

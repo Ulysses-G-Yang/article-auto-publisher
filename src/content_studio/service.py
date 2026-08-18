@@ -15,6 +15,7 @@ from content_studio.assets import AssetStore, StoredAsset
 from content_studio.content_document import (
     ContentDocumentValidationError,
     canonical_document_json,
+    delivery_features,
     document_hash,
     project_to_v1,
     validate_document,
@@ -49,6 +50,10 @@ from content_studio.models import (
     DeliveryPlan,
     DeliveryPlanTarget,
     DraftTarget,
+)
+from content_studio.platform_format_capabilities import (
+    DEFAULT_PLATFORM_FORMAT_CAPABILITIES,
+    PlatformFormatCapabilities,
 )
 
 SEED_KEY = "articleops:system-seed:smart-toilet:v1"
@@ -87,12 +92,18 @@ class ContentStudioService:
         legacy_source: LegacyDatabaseSource | None = None,
         docx_importer: DocxImportAdapter | None = None,
         account_service=None,
+        platform_format_capabilities: PlatformFormatCapabilities | None = None,
     ) -> None:
         self.database = database
         self.asset_store = asset_store or AssetStore()
         self.legacy_source = legacy_source or LegacyDatabaseSource()
         self.docx_importer = docx_importer or DocxImportAdapter(self.asset_store)
         self.account_service = account_service
+        self.platform_format_capabilities = (
+            platform_format_capabilities
+            if platform_format_capabilities is not None
+            else DEFAULT_PLATFORM_FORMAT_CAPABILITIES
+        )
 
     async def initialize(self) -> None:
         await self.database.initialize()
@@ -420,6 +431,21 @@ class ContentStudioService:
                 if account.status != "ACTIVE" or account.session_status != "VALID":
                     raise DraftValidationError(f"账号 {target.account_display_name} 已失效")
 
+            required_format_features = (
+                delivery_features(canonical_document)
+                if schema_version == 2 and canonical_document is not None
+                else frozenset()
+            )
+            format_results = {
+                target.target_id: _format_target_result(
+                    target.platform,
+                    required_format_features,
+                    self.platform_format_capabilities,
+                    schema_version=schema_version,
+                )
+                for target in targets
+            }
+
             content_hash = _content_hash(
                 draft.title,
                 projection,
@@ -460,12 +486,15 @@ class ContentStudioService:
                 draft_id=draft_id,
                 version_id=version.version_id,
                 draft_revision=draft.revision,
-                status="READY",
+                status=_plan_status(
+                    [result[0] for result in format_results.values()]
+                ),
                 actor_id=access.actor_id,
                 source=access.source,
             )
             session.add(plan)
             for position, target in enumerate(targets):
+                target_status, error_code, error_message = format_results[target.target_id]
                 session.add(
                     DeliveryPlanTarget(
                         target_id=str(uuid.uuid4()),
@@ -477,7 +506,9 @@ class ContentStudioService:
                         mode=target.mode,
                         persist_login=target.persist_login,
                         position=position,
-                        status="READY",
+                        status=target_status,
+                        error_code=error_code,
+                        error_message=error_message,
                     )
                 )
             await session.flush()
@@ -1335,6 +1366,13 @@ def _content_hash(
 def _plan_status(statuses: list[str]) -> str:
     if not statuses or all(status == "READY" for status in statuses):
         return "READY"
+    format_review = "FORMAT_REVIEW_REQUIRED"
+    if any(status == format_review for status in statuses):
+        if all(status == format_review for status in statuses):
+            return format_review
+        # 至少还有一个可执行或已执行目标；明确标记部分可执行，不能落到
+        # EXECUTING 这种会误导用户的通用状态。
+        return "PARTIAL_FAIL"
     if any(status == "CONFIRMATION_REQUIRED" for status in statuses):
         return "AWAITING_CONFIRMATION"
     active_or_success = {"QUEUED", "RUNNING", "DRAFT_SAVED", "PUBLISHED"}
@@ -1348,6 +1386,36 @@ def _plan_status(statuses: list[str]) -> str:
     if all(status in failures for status in statuses):
         return "FATAL"
     return "EXECUTING"
+
+
+def _format_target_result(
+    platform: str,
+    required_features: frozenset[str],
+    capabilities: PlatformFormatCapabilities,
+    *,
+    schema_version: int,
+) -> tuple[str, str | None, str | None]:
+    """返回目标初始格式状态、错误码和安全说明。"""
+
+    if schema_version != 2:
+        return "READY", None, None
+    declaration = capabilities.get(platform)
+    if declaration is None:
+        features = ", ".join(sorted(required_features)) or "none"
+        return (
+            "FORMAT_REVIEW_REQUIRED",
+            "PLATFORM_FORMAT_CAPABILITIES_UNDECLARED",
+            f"平台 {platform} 未声明格式能力；需审核 features: {features}",
+        )
+    missing = required_features - declaration.supported
+    if not missing:
+        return "READY", None, None
+    features = ", ".join(sorted(missing))
+    return (
+        "FORMAT_REVIEW_REQUIRED",
+        "CONTENT_FORMAT_UNSUPPORTED",
+        f"平台 {platform} 不支持所需 features: {features}",
+    )
 
 
 def _utc_now() -> datetime:

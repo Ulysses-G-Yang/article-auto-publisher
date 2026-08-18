@@ -2,7 +2,9 @@
 
 import atexit
 import logging
+import uuid
 from collections.abc import Coroutine
+from datetime import datetime
 from pathlib import Path
 from threading import Lock
 from typing import Any
@@ -15,6 +17,8 @@ from account_sessions.errors import AccountSessionError, ConfirmationRequiredErr
 from account_sessions.permissions import LOCAL_WEB_CONTEXT, PermissionDeniedError
 from account_sessions.runtime import AccountRuntime
 from account_sessions.security import safe_error_message
+from article_mvp.contracts import ArticlePublished
+from article_mvp.services.published_event_service import PublishedEventService
 from content_studio.assets import AssetStore
 from content_studio.contracts import (
     CreateDeliveryPlanRequest,
@@ -32,11 +36,10 @@ from content_studio.errors import (
     DraftRevisionConflictError,
 )
 from content_studio.importers import DocxImportAdapter, LegacyDatabaseSource
+from content_studio.platform_format_capabilities import PlatformFormatCapabilities
 from content_studio.service import ContentStudioService
-from article_mvp.contracts import ArticlePublished
-from article_mvp.services.published_event_service import PublishedEventService
-from datetime import datetime
-import uuid
+
+LOGGER = logging.getLogger(__name__)
 
 
 # 在 RuntimeState 中注入事件服务
@@ -50,6 +53,7 @@ class ContentStudioRuntimeState:
         work_root: str | Path | None = None,
         legacy_source=None,
         runtime: AccountRuntime | None = None,
+        platform_format_capabilities: PlatformFormatCapabilities | None = None,
     ) -> None:
         self.account_state = account_state
         self.database = ContentDatabase(database_url)
@@ -61,6 +65,7 @@ class ContentStudioRuntimeState:
             legacy_source=legacy_source or LegacyDatabaseSource(),
             docx_importer=DocxImportAdapter(self.asset_store, work_root=work_root),
             account_service=account_state.accounts,
+            platform_format_capabilities=platform_format_capabilities,
         )
         self.account_state.delivery.content_resolver = self.service.resolve_delivery_payload
         self._runtime = runtime
@@ -140,13 +145,20 @@ class ContentStudioRuntimeState:
             raise ContentStudioError("投递计划包含未知目标", error_code="PLAN_TARGET_UNKNOWN")
 
         selected = [target for target in targets if target["target_id"] in requested_ids]
-        draft_targets = [target for target in selected if target["mode"] == "DRAFT"]
+        executable_targets = [
+            target
+            for target in selected
+            if target["status"] != "FORMAT_REVIEW_REQUIRED"
+        ]
+        draft_targets = [target for target in executable_targets if target["mode"] == "DRAFT"]
         if draft_targets and not payload.draft_batch_confirmed:
             raise DraftBatchConfirmationRequiredError(
                 f"请确认将同一内容保存到 {len(draft_targets)} 个平台草稿"
             )
 
         for target in selected:
+            if target["status"] == "FORMAT_REVIEW_REQUIRED":
+                continue
             if target["operation_id"] or target["status"] in {
                 "QUEUED",
                 "RUNNING",
@@ -335,6 +347,7 @@ def create_content_studio_blueprint(
     work_root: str | Path | None = None,
     legacy_source=None,
     runtime: AccountRuntime | None = None,
+    platform_format_capabilities: PlatformFormatCapabilities | None = None,
 ) -> Blueprint:
     blueprint = Blueprint("content_studio", __name__)
     state = ContentStudioRuntimeState(
@@ -344,6 +357,7 @@ def create_content_studio_blueprint(
         work_root=work_root,
         legacy_source=legacy_source,
         runtime=runtime,
+        platform_format_capabilities=platform_format_capabilities,
     )
 
     @blueprint.record_once

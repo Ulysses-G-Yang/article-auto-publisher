@@ -11,6 +11,7 @@ from content_studio.content_document import (
     PlatformCapabilities,
     canonical_document_json,
     compute_incompatibilities,
+    delivery_features,
     document_features,
     document_hash,
     project_to_v1,
@@ -274,6 +275,53 @@ def test_capability_check_is_exact_and_fail_closed() -> None:
         )
         == frozenset()
     )
+
+
+def test_delivery_features_exclude_title_block_from_platform_requirements() -> None:
+    document = {
+        "schema_version": 2,
+        "title": "标题",
+        "title_block_id": "title-block",
+        "source_fidelity": "NATIVE",
+        "blocks": [
+            {
+                "kind": "heading",
+                "block_id": "title-block",
+                "level": 1,
+                "children": [{"kind": "text", "text": "标题", "marks": ["bold"]}],
+            },
+            {
+                "kind": "heading",
+                "block_id": "body-heading",
+                "level": 2,
+                "children": [{"kind": "text", "text": "小节"}],
+            },
+            {
+                "kind": "paragraph",
+                "block_id": "image-one",
+                "children": [
+                    {
+                        "kind": "image",
+                        "asset_id": "00000000-0000-4000-8000-000000000001",
+                    }
+                ],
+            },
+            {
+                "kind": "paragraph",
+                "block_id": "image-two",
+                "children": [
+                    {
+                        "kind": "image",
+                        "asset_id": "00000000-0000-4000-8000-000000000002",
+                    }
+                ],
+            },
+        ],
+    }
+
+    assert delivery_features(document) == frozenset({"heading", "image_order"})
+    # 完整文档能力的历史 API 仍包含标题本身的 marks。
+    assert "marks" in required_features(document)
 
 
 def test_pydantic_envelope_is_strict_and_style_dimensions_are_hash_sensitive() -> None:

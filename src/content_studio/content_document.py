@@ -891,7 +891,14 @@ def document_features(document: Mapping[str, Any]) -> frozenset[str]:
     return frozenset(counters.features)
 
 
-def _feature_block(block: Mapping[str, Any], counters: _Counters) -> None:
+def _feature_block(
+    block: Mapping[str, Any],
+    counters: _Counters,
+    *,
+    excluded_block_id: str | None = None,
+) -> None:
+    if excluded_block_id is not None and block.get("block_id") == excluded_block_id:
+        return
     kind = block["kind"]
     if kind == "heading":
         counters.features.add("heading")
@@ -933,13 +940,21 @@ def _feature_block(block: Mapping[str, Any], counters: _Counters) -> None:
         counters.features.add("list")
         for item in block["items"]:
             for nested in item["blocks"]:
-                _feature_block(nested, counters)
+                _feature_block(
+                    nested,
+                    counters,
+                    excluded_block_id=excluded_block_id,
+                )
     elif kind == "table":
         counters.features.add("table")
         for row in block["rows"]:
             for cell in row["cells"]:
                 for nested in cell["blocks"]:
-                    _feature_block(nested, counters)
+                    _feature_block(
+                        nested,
+                        counters,
+                        excluded_block_id=excluded_block_id,
+                    )
 
 
 def _image_count(document: Mapping[str, Any]) -> int:
@@ -947,6 +962,27 @@ def _image_count(document: Mapping[str, Any]) -> int:
     for block in _walk_all_blocks(validate_document(document)):
         if block["kind"] in {"paragraph", "heading"}:
             count += sum(child["kind"] == "image" for child in block["children"])
+    return count
+
+
+def _image_count_excluding(
+    blocks: Iterable[Mapping[str, Any]],
+    excluded_block_id: str | None,
+) -> int:
+    count = 0
+    for block in blocks:
+        if excluded_block_id is not None and block.get("block_id") == excluded_block_id:
+            continue
+        kind = block["kind"]
+        if kind in {"paragraph", "heading"}:
+            count += sum(child["kind"] == "image" for child in block["children"])
+        elif kind == "list":
+            for item in block["items"]:
+                count += _image_count_excluding(item["blocks"], excluded_block_id)
+        elif kind == "table":
+            for row in block["rows"]:
+                for cell in row["cells"]:
+                    count += _image_count_excluding(cell["blocks"], excluded_block_id)
     return count
 
 
@@ -965,6 +1001,31 @@ def required_features(document: Mapping[str, Any]) -> frozenset[str]:
     if _image_count(document) > 1:
         features.add("image_order")
     return frozenset(features)
+
+
+def delivery_features(document: Mapping[str, Any]) -> frozenset[str]:
+    """返回投递正文所需能力，不把独立映射的标题块计入其中。
+
+    ``required_features`` 保留文档完整能力的历史语义。投递时标题由平台
+    标题字段单独映射，因此必须排除 ``title_block_id`` 对应 block；正文的
+    heading、图片顺序以及其他富文本能力仍按原结构递归计算。
+    """
+
+    normalized = validate_document(document)
+    title_block_id = normalized.get("title_block_id")
+    counters = _Counters()
+    for block in normalized["blocks"]:
+        _feature_block(
+            block,
+            counters,
+            excluded_block_id=title_block_id,
+        )
+    if _image_count_excluding(normalized["blocks"], title_block_id) > 1:
+        counters.features.add("image_order")
+    return frozenset(counters.features)
+
+
+required_delivery_features = delivery_features
 
 
 def compatibility(
@@ -1029,11 +1090,13 @@ __all__ = [
     "compute_incompatibilities",
     "content_hash",
     "document_features",
+    "delivery_features",
     "document_hash",
     "hash_document",
     "project_to_v1",
     "required_capabilities",
     "required_features",
+    "required_delivery_features",
     "upgrade_v1",
     "validate_document",
 ]

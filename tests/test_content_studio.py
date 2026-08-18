@@ -38,6 +38,10 @@ from content_studio.errors import (
 )
 from content_studio.importers import DocxImportAdapter, LegacyDatabaseSource
 from content_studio.models import ContentAsset, ContentDraft, ContentVersion
+from content_studio.platform_format_capabilities import (
+    DELIVERY_PLATFORMS,
+    PlatformFormatCapabilities,
+)
 from content_studio.service import (
     SEED_KEY,
     SEED_TITLE,
@@ -119,7 +123,12 @@ def make_legacy_database(tmp_path: Path) -> tuple[Path, Path]:
     return database_path, root
 
 
-def make_service(tmp_path: Path, *, account_service=None) -> ContentStudioService:
+def make_service(
+    tmp_path: Path,
+    *,
+    account_service=None,
+    platform_format_capabilities: PlatformFormatCapabilities | None = None,
+) -> ContentStudioService:
     database_path = tmp_path / "content" / "content.db"
     asset_store = AssetStore(tmp_path / "content" / "assets")
     legacy_path, legacy_root = make_legacy_database(tmp_path)
@@ -136,6 +145,7 @@ def make_service(tmp_path: Path, *, account_service=None) -> ContentStudioServic
             work_root=tmp_path / "content" / "work",
         ),
         account_service=account_service,
+        platform_format_capabilities=platform_format_capabilities,
     )
 
 
@@ -180,6 +190,59 @@ def rich_v2_document(
     }
 
 
+def delivery_v2_document(
+    title: str,
+    *,
+    body_heading: bool = False,
+    asset_ids: list[str] | None = None,
+) -> dict:
+    """构造标题独立映射、正文能力可控的投递 fixture。"""
+
+    blocks = [
+        {
+            "kind": "heading",
+            "block_id": "title-block",
+            "level": 1,
+            "children": [
+                {"kind": "text", "text": title, "marks": ["bold"]},
+            ],
+        }
+    ]
+    if body_heading:
+        blocks.append(
+            {
+                "kind": "heading",
+                "block_id": "body-heading",
+                "level": 2,
+                "children": [{"kind": "text", "text": "正文小节"}],
+            }
+        )
+    if asset_ids:
+        blocks.extend(
+            {
+                "kind": "paragraph",
+                "block_id": f"image-{index}",
+                "children": [{"kind": "image", "asset_id": asset_id}],
+            }
+            for index, asset_id in enumerate(asset_ids)
+        )
+    else:
+        blocks.append(
+            {
+                "kind": "paragraph",
+                "block_id": "body",
+                "children": [{"kind": "text", "text": "普通正文"}],
+            }
+        )
+    return {
+        "schema_version": 2,
+        "title": title,
+        "title_block_id": "title-block",
+        "source_fidelity": "NATIVE",
+        "blocks": blocks,
+    }
+
+
 def test_seed_is_idempotent_and_database_pragmas(tmp_path: Path) -> None:
     service = make_service(tmp_path)
 
@@ -203,6 +266,20 @@ def test_seed_is_idempotent_and_database_pragmas(tmp_path: Path) -> None:
         await service.database.dispose()
 
     run(scenario())
+
+
+def test_platform_format_capabilities_are_explicit_and_fail_closed() -> None:
+    registry = PlatformFormatCapabilities()
+
+    assert set(registry.declarations) == set(DELIVERY_PLATFORMS)
+    assert all(not declaration.supported for declaration in registry.declarations.values())
+    assert registry.get("unknown-platform") is None
+
+    injected = PlatformFormatCapabilities({"xiaoheihe": {"heading"}})
+    assert injected.get("xiaoheihe").supported == frozenset({"heading"})
+    assert injected.get("zol").supported == frozenset()
+    with pytest.raises(ValueError, match="未知格式能力"):
+        PlatformFormatCapabilities({"xiaoheihe": {"not_a_real_feature"}})
 
 
 def test_autosave_revision_conflict_returns_server_draft(tmp_path: Path) -> None:
@@ -799,6 +876,348 @@ def test_v2_plan_freezes_document_and_hash_is_semantic_and_idempotent(tmp_path: 
         await account_db.dispose()
 
     run(scenario())
+
+
+def test_v2_format_gate_is_per_target_and_execute_skips_review_targets(
+    tmp_path: Path,
+) -> None:
+    account_db = AccountDatabase(sqlite_url(tmp_path / "accounts.db"))
+    accounts = AccountSessionService(account_db, seed_legacy_profiles=False)
+    delivery = CapturingDelivery()
+    service = make_service(
+        tmp_path,
+        account_service=accounts,
+        platform_format_capabilities=PlatformFormatCapabilities(
+            {"xiaoheihe": {"heading"}}
+        ),
+    )
+
+    async def scenario():
+        await accounts.initialize()
+        inserted = []
+        for platform in ("xiaoheihe", "zol"):
+            account = PlatformAccount(
+                account_id=str(uuid.uuid4()),
+                platform=platform,
+                platform_user_id=f"format-{platform}",
+                display_name=f"{platform}格式账号",
+                profile_path=str(tmp_path / f"profile-{platform}"),
+                status="ACTIVE",
+                session_status="VALID",
+                persist_login=True,
+            )
+            async with account_db.session() as session:
+                session.add(account)
+            inserted.append(account)
+        await service.initialize()
+        draft = await service.create_draft(CreateDraftRequest(title="跨平台格式", blocks=[]))
+        current = await service.patch_draft(
+            draft["draft_id"],
+            PatchDraftRequest(
+                revision=draft["revision"],
+                title="跨平台格式",
+                content_schema_version=2,
+                document=delivery_v2_document("跨平台格式", body_heading=True),
+            ),
+        )
+        current = await service.replace_targets(
+            draft["draft_id"],
+            ReplaceTargetsRequest(
+                revision=current["revision"],
+                targets=[
+                    {
+                        "platform": account.platform,
+                        "account_id": account.account_id,
+                        "mode": "DRAFT",
+                    }
+                    for account in inserted
+                ],
+            ),
+            LOCAL_WEB_CONTEXT,
+        )
+        return await service.create_delivery_plan(
+            draft["draft_id"], current["revision"], LOCAL_WEB_CONTEXT
+        )
+
+    plan = run(scenario())
+    by_platform = {target["platform"]: target for target in plan["targets"]}
+    assert plan["status"] == "PARTIAL_FAIL"
+    assert by_platform["xiaoheihe"]["status"] == "READY"
+    assert by_platform["zol"]["status"] == "FORMAT_REVIEW_REQUIRED"
+    assert by_platform["zol"]["error_code"] == "CONTENT_FORMAT_UNSUPPORTED"
+
+    fake_state = FakeAccountState(accounts, delivery)
+    from content_studio.contracts import ExecuteDeliveryPlanRequest
+    from content_studio.web import ContentStudioRuntimeState
+
+    state = ContentStudioRuntimeState.__new__(ContentStudioRuntimeState)
+    state.account_state = fake_state
+    state.service = service
+    with pytest.raises(DraftBatchConfirmationRequiredError, match="1 个平台草稿"):
+        run(state.execute_plan(plan["plan_id"], ExecuteDeliveryPlanRequest(), LOCAL_WEB_CONTEXT))
+    result = run(
+        state.execute_plan(
+            plan["plan_id"],
+            ExecuteDeliveryPlanRequest(draft_batch_confirmed=True),
+            LOCAL_WEB_CONTEXT,
+        )
+    )
+    assert len(delivery.calls) == 1
+    assert delivery.calls[0][0].platform == "xiaoheihe"
+    result_by_platform = {target["platform"]: target for target in result["targets"]}
+    assert result_by_platform["zol"]["operation_id"] is None
+    assert result_by_platform["zol"]["status"] == "FORMAT_REVIEW_REQUIRED"
+
+    run(service.database.dispose())
+    run(account_db.dispose())
+
+
+def test_v2_delivery_format_gate_handles_basic_heading_and_multi_image(
+    tmp_path: Path,
+) -> None:
+    account_db = AccountDatabase(sqlite_url(tmp_path / "accounts.db"))
+    accounts = AccountSessionService(account_db, seed_legacy_profiles=False)
+    service = make_service(tmp_path, account_service=accounts)
+
+    async def scenario():
+        await accounts.initialize()
+        account = PlatformAccount(
+            account_id=str(uuid.uuid4()),
+            platform="xiaoheihe",
+            platform_user_id="format-gate-user",
+            display_name="格式门禁账号",
+            profile_path=str(tmp_path / "profile"),
+            status="ACTIVE",
+            session_status="VALID",
+            persist_login=True,
+        )
+        async with account_db.session() as session:
+            session.add(account)
+        await service.initialize()
+
+        async def create_plan(
+            title: str,
+            *,
+            body_heading: bool = False,
+            image_count: int = 0,
+        ) -> dict:
+            draft = await service.create_draft(CreateDraftRequest(title=title, blocks=[]))
+            asset_ids = []
+            for index in range(image_count):
+                asset = await service.add_asset(
+                    draft["draft_id"], image_bytes(), f"格式图{index}.png"
+                )
+                asset_ids.append(asset["asset_id"])
+            document = delivery_v2_document(
+                title,
+                body_heading=body_heading,
+                asset_ids=asset_ids,
+            )
+            current = await service.patch_draft(
+                draft["draft_id"],
+                PatchDraftRequest(
+                    revision=draft["revision"],
+                    title=title,
+                    content_schema_version=2,
+                    document=document,
+                ),
+            )
+            current = await service.replace_targets(
+                draft["draft_id"],
+                ReplaceTargetsRequest(
+                    revision=current["revision"],
+                    targets=[
+                        {
+                            "platform": "xiaoheihe",
+                            "account_id": account.account_id,
+                            "mode": "DRAFT",
+                        }
+                    ],
+                ),
+                LOCAL_WEB_CONTEXT,
+            )
+            return await service.create_delivery_plan(
+                draft["draft_id"], current["revision"], LOCAL_WEB_CONTEXT
+            )
+
+        plain = await create_plan("普通段落")
+        single_image = await create_plan("单图正文", image_count=1)
+        heading = await create_plan("正文标题", body_heading=True)
+        multi_image = await create_plan("多图正文", image_count=2)
+
+        assert plain["status"] == "READY"
+        assert plain["targets"][0]["status"] == "READY"
+        assert single_image["status"] == "READY"
+        assert single_image["targets"][0]["status"] == "READY"
+        assert heading["status"] == "FORMAT_REVIEW_REQUIRED"
+        assert heading["targets"][0]["status"] == "FORMAT_REVIEW_REQUIRED"
+        assert heading["targets"][0]["error_code"] == "CONTENT_FORMAT_UNSUPPORTED"
+        assert "heading" in heading["targets"][0]["error_message"]
+        assert multi_image["status"] == "FORMAT_REVIEW_REQUIRED"
+        assert multi_image["targets"][0]["error_code"] == "CONTENT_FORMAT_UNSUPPORTED"
+        assert "image_order" in multi_image["targets"][0]["error_message"]
+
+        await service.database.dispose()
+        await account_db.dispose()
+
+    run(scenario())
+
+
+def test_format_review_target_does_not_reopen_when_capability_changes(
+    tmp_path: Path,
+) -> None:
+    account_db = AccountDatabase(sqlite_url(tmp_path / "accounts.db"))
+    accounts = AccountSessionService(account_db, seed_legacy_profiles=False)
+    delivery = CapturingDelivery()
+    service = make_service(tmp_path, account_service=accounts)
+
+    async def scenario():
+        await accounts.initialize()
+        account = PlatformAccount(
+            account_id=str(uuid.uuid4()),
+            platform="xiaoheihe",
+            platform_user_id="format-later-user",
+            display_name="后验格式账号",
+            profile_path=str(tmp_path / "profile"),
+            status="ACTIVE",
+            session_status="VALID",
+            persist_login=True,
+        )
+        async with account_db.session() as session:
+            session.add(account)
+        await service.initialize()
+        draft = await service.create_draft(CreateDraftRequest(title="后验能力", blocks=[]))
+        current = await service.patch_draft(
+            draft["draft_id"],
+            PatchDraftRequest(
+                revision=draft["revision"],
+                title="后验能力",
+                content_schema_version=2,
+                document=delivery_v2_document("后验能力", body_heading=True),
+            ),
+        )
+        current = await service.replace_targets(
+            draft["draft_id"],
+            ReplaceTargetsRequest(
+                revision=current["revision"],
+                targets=[
+                    {
+                        "platform": "xiaoheihe",
+                        "account_id": account.account_id,
+                        "mode": "DRAFT",
+                    }
+                ],
+            ),
+            LOCAL_WEB_CONTEXT,
+        )
+        plan = await service.create_delivery_plan(
+            draft["draft_id"], current["revision"], LOCAL_WEB_CONTEXT
+        )
+        service.platform_format_capabilities = PlatformFormatCapabilities(
+            {"xiaoheihe": {"heading"}}
+        )
+        return plan
+
+    plan = run(scenario())
+    assert plan["status"] == "FORMAT_REVIEW_REQUIRED"
+    fake_state = FakeAccountState(accounts, delivery)
+    from content_studio.contracts import ExecuteDeliveryPlanRequest
+    from content_studio.web import ContentStudioRuntimeState
+
+    state = ContentStudioRuntimeState.__new__(ContentStudioRuntimeState)
+    state.account_state = fake_state
+    state.service = service
+    result = run(
+        state.execute_plan(
+            plan["plan_id"],
+            ExecuteDeliveryPlanRequest(draft_batch_confirmed=True),
+            LOCAL_WEB_CONTEXT,
+        )
+    )
+    assert delivery.calls == []
+    assert result["targets"][0]["status"] == "FORMAT_REVIEW_REQUIRED"
+    run(service.database.dispose())
+    run(account_db.dispose())
+
+
+def test_v2_undeclared_weibo_target_is_reviewed_and_never_executed(
+    tmp_path: Path,
+) -> None:
+    account_db = AccountDatabase(sqlite_url(tmp_path / "accounts.db"))
+    accounts = AccountSessionService(account_db, seed_legacy_profiles=False)
+    delivery = CapturingDelivery()
+    service = make_service(tmp_path, account_service=accounts)
+
+    async def scenario():
+        await accounts.initialize()
+        account = PlatformAccount(
+            account_id=str(uuid.uuid4()),
+            platform="weibo",
+            platform_user_id="weibo-format-user",
+            display_name="微博格式账号",
+            profile_path=str(tmp_path / "profile-weibo"),
+            status="ACTIVE",
+            session_status="VALID",
+            persist_login=True,
+        )
+        async with account_db.session() as session:
+            session.add(account)
+        await service.initialize()
+        draft = await service.create_draft(
+            CreateDraftRequest(title="微博未声明", blocks=[])
+        )
+        current = await service.patch_draft(
+            draft["draft_id"],
+            PatchDraftRequest(
+                revision=draft["revision"],
+                title="微博未声明",
+                content_schema_version=2,
+                document=delivery_v2_document("微博未声明"),
+            ),
+        )
+        current = await service.replace_targets(
+            draft["draft_id"],
+            ReplaceTargetsRequest(
+                revision=current["revision"],
+                targets=[
+                    {
+                        "platform": "weibo",
+                        "account_id": account.account_id,
+                        "mode": "DRAFT",
+                    }
+                ],
+            ),
+            LOCAL_WEB_CONTEXT,
+        )
+        return await service.create_delivery_plan(
+            draft["draft_id"], current["revision"], LOCAL_WEB_CONTEXT
+        )
+
+    plan = run(scenario())
+    target = plan["targets"][0]
+    assert target["platform"] == "weibo"
+    assert target["status"] == "FORMAT_REVIEW_REQUIRED"
+    assert target["error_code"] == "PLATFORM_FORMAT_CAPABILITIES_UNDECLARED"
+
+    fake_state = FakeAccountState(accounts, delivery)
+    from content_studio.contracts import ExecuteDeliveryPlanRequest
+    from content_studio.web import ContentStudioRuntimeState
+
+    state = ContentStudioRuntimeState.__new__(ContentStudioRuntimeState)
+    state.account_state = fake_state
+    state.service = service
+    result = run(
+        state.execute_plan(
+            plan["plan_id"],
+            ExecuteDeliveryPlanRequest(draft_batch_confirmed=True),
+            LOCAL_WEB_CONTEXT,
+        )
+    )
+    assert delivery.calls == []
+    assert result["targets"][0]["operation_id"] is None
+    assert result["targets"][0]["status"] == "FORMAT_REVIEW_REQUIRED"
+    run(service.database.dispose())
+    run(account_db.dispose())
 
 
 async def _version_id_for_hash(service: ContentStudioService, content_hash: str) -> str:

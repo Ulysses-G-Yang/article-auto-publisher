@@ -34,7 +34,13 @@ from platforms.base import (
     PlatformAutomationError,
     SelectorError,
 )
-from platforms.content_validation import ensure_valid_content, safe_media_error
+from platforms.content_validation import (
+    ContentValidationError,
+    ensure_valid_content,
+    extract_expected_paragraphs,
+    normalize_for_comparison,
+    safe_media_error,
+)
 
 CREATOR_HOME = "https://creator.xiaohongshu.com/"
 CREATOR_MAIN = "https://creator.xiaohongshu.com/new/home"
@@ -48,6 +54,9 @@ XHS_EDITOR_SELECTOR = "div.tiptap.ProseMirror"
 XHS_TOOLBAR_BUTTON_SELECTOR = ".edit-page.new-ui button.menu-item"
 VERIFIED_BODY_IMAGE_ICON_FINGERPRINT = (
     "75d8717d8ac60eb26ac4490c408d1ee766029f5cf293b8adc1dc36d89bce11f2"
+)
+VERIFIED_H2_ICON_FINGERPRINT = (
+    "716e4ef689591d5c7c193e7ece200b8066058db8142d4bf7b182e44af2f8cab0"
 )
 VERIFIED_BODY_IMAGE_ACCEPT = frozenset({
     "image/jpeg",
@@ -104,12 +113,16 @@ class XiaohongshuPlatform(BasePlatform):
     LOGIN_POLL_ATTEMPTS = 40
     LOGIN_POLL_INTERVAL_SECONDS = 3
 
-    def __init__(self, **kwargs):
+    def __init__(self, *, resume_existing_title: str | None = None, **kwargs):
         super().__init__(**kwargs)
         self.last_login_error = ""
         self._identity_payload: dict[str, str | int | bool] | None = None
         self._expected_persisted_blocks: list[dict] | None = None
         self._preflight_title = ""
+        self._resume_existing_title = " ".join(
+            str(resume_existing_title or "").split()
+        )
+        self._editing_existing_draft = False
 
     async def initialize(self):
         await super().initialize()
@@ -354,6 +367,11 @@ class XiaohongshuPlatform(BasePlatform):
         进入编辑器前先记录发布页侧栏的草稿箱计数，供 save_draft 验证。
         """
         self._require_page_alive("小红书打开编辑器")
+        if self._editing_existing_draft:
+            editor = self.page.locator(XHS_EDITOR_SELECTOR).first
+            if await editor.count() == 1 and await editor.is_visible():
+                return
+            raise SelectorError("小红书待恢复草稿编辑器已失效")
         try:
             await self.page.goto(
                 "https://creator.xiaohongshu.com/publish/publish",
@@ -390,6 +408,7 @@ class XiaohongshuPlatform(BasePlatform):
                 wait_until="domcontentloaded",
                 timeout=30000,
             )
+            self._draft_box_count_before = await self._draft_box_count()
             await self._open_long_draft_drawer()
             matches = await self._matching_long_draft_cards(expected_title)
         except DraftBaselineError:
@@ -402,19 +421,43 @@ class XiaohongshuPlatform(BasePlatform):
             raise DraftBaselineError(
                 "DRAFT_BASELINE_FAILED: 小红书无法确认同名长文草稿基线"
             ) from exc
-        if matches:
+        self._editing_existing_draft = False
+        if matches and (
+            len(matches) != 1 or expected_title != self._resume_existing_title
+        ):
             raise DraftBaselineError(
                 "DRAFT_BASELINE_FAILED: 小红书已存在同名草稿，禁止自动重复创建"
             )
         self._preflight_title = expected_title
+        if matches:
+            actions = matches[0].locator(".draft-actions .btn").filter(
+                has_text=re.compile(r"^编辑$")
+            )
+            if await actions.count() != 1:
+                raise DraftBaselineError(
+                    "DRAFT_BASELINE_FAILED: 小红书待恢复草稿编辑入口不唯一"
+                )
+            await actions.click(timeout=15000)
+            await self.page.wait_for_selector(
+                XHS_EDITOR_SELECTOR,
+                state="visible",
+                timeout=20000,
+            )
+            self._editing_existing_draft = True
 
     async def _open_long_draft_drawer(self) -> None:
         """使用真实鼠标事件打开草稿抽屉并切换到长文笔记。"""
 
-        entry = self.page.locator(".draft-title-box")
-        if await entry.count() != 1 or not await entry.is_visible():
+        entries = self.page.locator(".draft-title-box")
+        await entries.first.wait_for(state="visible", timeout=15000)
+        visible_entries = []
+        for index in range(await entries.count()):
+            entry = entries.nth(index)
+            if await entry.is_visible():
+                visible_entries.append(entry)
+        if len(visible_entries) != 1:
             raise DraftBaselineError("DRAFT_BASELINE_FAILED: 小红书草稿箱入口不唯一")
-        await entry.click(timeout=15000)
+        await visible_entries[0].click(timeout=15000)
         tabs = self.page.get_by_text(re.compile(r"^长文笔记\(\d+\)$"))
         visible_tabs = []
         for index in range(await tabs.count()):
@@ -559,11 +602,22 @@ class XiaohongshuPlatform(BasePlatform):
         previous_was_image = False
 
         for block in content_blocks:
+            if not isinstance(block, dict):
+                raise ContentValidationError(
+                    "XHS_CONTENT_CONTRACT_INVALID: 正文块无效"
+                )
             btype = block.get("type")
             if btype in ("text", "heading") and block.get("text"):
                 text = str(block["text"]).strip()
                 if not text:
                     continue
+                if btype == "heading" and (
+                    block.get("level") != 2 or "\n" in text or "\r" in text
+                ):
+                    raise ContentValidationError(
+                        "XHS_HEADING_UNSUPPORTED: 仅支持单行二级标题"
+                    )
+                await self._place_body_caret_at_end()
                 if wrote_any and not previous_was_image:
                     await self.page.keyboard.press("Enter")
                     # 分段间留足节奏，降低风控敏感度
@@ -576,9 +630,12 @@ class XiaohongshuPlatform(BasePlatform):
                     if i < len(lines) - 1:
                         await self.page.keyboard.press("Enter")
                         await self.simulator.random_delay(0.8, 1.5)
+                if btype == "heading":
+                    await self._apply_h2_to_current_block()
                 wrote_any = True
                 previous_was_image = False
             elif btype == "image":
+                await self._place_body_caret_at_end()
                 img_path = block.get("local_path")
                 if not img_path and images:
                     matches = [
@@ -599,8 +656,7 @@ class XiaohongshuPlatform(BasePlatform):
                         wrote_any = True
                         previous_was_image = True
                         # 图片节点后创建下一段，确保后续文字不会落到图片前面。
-                        await editor.click()
-                        await self.page.keyboard.press("Control+End")
+                        await self._place_body_caret_at_end()
                         await self.page.keyboard.press("Enter")
                     else:
                         failed_images.append(
@@ -620,6 +676,10 @@ class XiaohongshuPlatform(BasePlatform):
                         {"filename": "", "error": "文章图片块没有对应本地文件"}
                     )
                     break
+            elif btype not in ("text", "heading"):
+                raise ContentValidationError(
+                    "XHS_CONTENT_CONTRACT_INVALID: 未知正文块类型"
+                )
 
         editor = self.page.locator(XHS_EDITOR_SELECTOR).first
         actual_text = await editor.inner_text()
@@ -630,6 +690,7 @@ class XiaohongshuPlatform(BasePlatform):
             phase="图文写入后",
         )
         logger.info("小红书正文输入并最终验证成功: {} 个文本段落", expected_count)
+        await self._assert_editor_body_tokens(content_blocks)
         self._expected_persisted_blocks = copy.deepcopy(content_blocks)
 
         if expected_images == 0:
@@ -660,6 +721,133 @@ class XiaohongshuPlatform(BasePlatform):
             "media_status": media_status,
             "media_error": media_error,
         }
+
+    async def _place_body_caret_at_end(self) -> None:
+        """把选区放到 TipTap 正文末尾，不依赖工具栏点击后的焦点状态。"""
+
+        placed = await self.page.evaluate(
+            """(selector) => {
+                const root = document.querySelector(selector);
+                if (!root || !root.isContentEditable) return false;
+                root.focus();
+                const range = document.createRange();
+                range.selectNodeContents(root);
+                range.collapse(false);
+                const selection = window.getSelection();
+                selection.removeAllRanges();
+                selection.addRange(range);
+                return true;
+            }""",
+            XHS_EDITOR_SELECTOR,
+        )
+        if not placed:
+            raise ContentValidationError(
+                "XHS_EDITOR_CARET_FAILED: 无法安全定位正文末尾"
+            )
+
+    async def _apply_h2_to_current_block(self) -> None:
+        """用真实 SVG 指纹定位 H2，并验证非空 h2 节点增加。"""
+
+        button = await self._toolbar_button_by_fingerprint(VERIFIED_H2_ICON_FINGERPRINT)
+        if button is None:
+            raise ContentValidationError(
+                "XHS_H2_BUTTON_UNVERIFIED: 二级标题按钮不符合已验证指纹"
+            )
+        headings = self.page.locator(f"{XHS_EDITOR_SELECTOR} > h2")
+        before = await headings.count()
+        await button.click(timeout=5000)
+        for _ in range(10):
+            headings = self.page.locator(f"{XHS_EDITOR_SELECTOR} > h2")
+            if await headings.count() == before + 1 and normalize_for_comparison(
+                await headings.last.inner_text()
+            ):
+                return
+            await asyncio.sleep(0.2)
+        raise ContentValidationError(
+            "XHS_H2_APPLY_FAILED: 当前正文块未变为二级标题"
+        )
+
+    @staticmethod
+    def _expected_body_tokens(content_blocks: list) -> list[dict[str, str]]:
+        tokens: list[dict[str, str]] = []
+        for block in content_blocks:
+            block_type = block.get("type")
+            if block_type == "image":
+                tokens.append({"kind": "image", "text": "", "tag": "img"})
+                continue
+            if block_type not in {"text", "heading"}:
+                continue
+            tag = "h2" if block_type == "heading" else "text"
+            for paragraph in extract_expected_paragraphs([block]):
+                tokens.append(
+                    {
+                        "kind": "text",
+                        "text": paragraph.comparison_text,
+                        "tag": tag,
+                    }
+                )
+        return tokens
+
+    async def _editor_body_tokens(self) -> list[dict[str, str]]:
+        raw = await self.page.locator(XHS_EDITOR_SELECTOR).first.evaluate(
+            """(root) => {
+                const output = [];
+                const flush = (buffer, tag) => {
+                    const text = buffer.join('').trim();
+                    if (text) output.push({kind: 'text', text, tag});
+                    buffer.length = 0;
+                };
+                for (const child of Array.from(root.children)) {
+                    const buffer = [];
+                    const walker = document.createTreeWalker(
+                        child,
+                        NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT,
+                    );
+                    let node = walker.currentNode;
+                    while (node) {
+                        if (node.nodeType === Node.ELEMENT_NODE && node.tagName === 'IMG') {
+                            flush(buffer, child.tagName.toLowerCase());
+                            output.push({kind: 'image', text: '', tag: 'img'});
+                        } else if (node.nodeType === Node.TEXT_NODE) {
+                            buffer.push(node.textContent || '');
+                        }
+                        node = walker.nextNode();
+                    }
+                    flush(buffer, child.tagName.toLowerCase());
+                }
+                return output;
+            }"""
+        )
+        return [
+            {
+                "kind": str(item.get("kind") or ""),
+                "text": normalize_for_comparison(str(item.get("text") or "")),
+                "tag": str(item.get("tag") or "").lower(),
+            }
+            for item in raw
+            if isinstance(item, dict)
+        ]
+
+    async def _assert_editor_body_tokens(self, content_blocks: list) -> None:
+        expected = self._expected_body_tokens(content_blocks)
+        actual = await self._editor_body_tokens()
+        if len(actual) != len(expected):
+            raise ContentValidationError(
+                "XHS_BODY_ORDER_INVALID: 正文图文块数量与冻结版本不一致"
+            )
+        for index, (wanted, observed) in enumerate(zip(expected, actual, strict=True)):
+            if wanted["kind"] != observed["kind"]:
+                raise ContentValidationError(
+                    f"XHS_BODY_ORDER_INVALID: 第 {index + 1} 个图文块类型不一致"
+                )
+            if wanted["kind"] == "text" and wanted["text"] != observed["text"]:
+                raise ContentValidationError(
+                    f"XHS_BODY_ORDER_INVALID: 第 {index + 1} 个文本块内容不一致"
+                )
+            if wanted["tag"] == "h2" and observed["tag"] != "h2":
+                raise ContentValidationError(
+                    f"XHS_BODY_ORDER_INVALID: 第 {index + 1} 个二级标题样式不一致"
+                )
 
     async def _upload_image(self, image_path: str) -> dict:
         """通过已验证工具栏按钮捕获临时 FileChooser，单次上传正文图片。"""
@@ -732,6 +920,13 @@ class XiaohongshuPlatform(BasePlatform):
     async def _get_verified_body_image_button(self):
         """返回 SVG path 指纹唯一匹配的可见正文图片按钮。"""
 
+        return await self._toolbar_button_by_fingerprint(
+            VERIFIED_BODY_IMAGE_ICON_FINGERPRINT
+        )
+
+    async def _toolbar_button_by_fingerprint(self, fingerprint: str):
+        """按完整 SVG path SHA-256 返回唯一可见工具栏按钮。"""
+
         try:
             editor = self.page.locator(XHS_EDITOR_SELECTOR).first
             if await editor.count() != 1 or not await editor.is_visible():
@@ -746,7 +941,7 @@ class XiaohongshuPlatform(BasePlatform):
                     "(nodes) => nodes.map((node) => node.getAttribute('d') || '')"
                 )
                 digest = hashlib.sha256("|".join(paths).encode("utf-8")).hexdigest()
-                if digest == VERIFIED_BODY_IMAGE_ICON_FINGERPRINT:
+                if digest == fingerprint:
                     matches.append(button)
             return matches[0] if len(matches) == 1 else None
         except Exception:
@@ -861,7 +1056,7 @@ class XiaohongshuPlatform(BasePlatform):
             logger.error("小红书草稿 API 未确认成功: {}", captured)
             return ""
 
-        # 重新加载发布页，确认草稿箱计数 +1
+        # 新草稿要求计数 +1；显式恢复同一唯一草稿则要求计数保持不变。
         try:
             await self.page.goto(
                 "https://creator.xiaohongshu.com/publish/publish",
@@ -869,17 +1064,23 @@ class XiaohongshuPlatform(BasePlatform):
                 timeout=30000,
             )
             after = None
+            expected_after = before if self._editing_existing_draft else (
+                before + 1 if before is not None else None
+            )
             for _ in range(3):
                 await self.simulator.random_delay(5, 8)
                 after = await self._draft_box_count()
-                if after is not None and before is not None and after == before + 1:
+                if after is not None and expected_after is not None and after == expected_after:
                     break
             if after is None or before is None:
                 logger.error("小红书草稿箱计数读取失败: before={}, after={}", before, after)
                 return ""
-            if after != before + 1:
+            if after != expected_after:
                 logger.error(
-                    "小红书草稿箱计数未增加: before={}, after={}", before, after
+                    "小红书草稿箱计数不符合预期: before={}, after={}, resume={}",
+                    before,
+                    after,
+                    self._editing_existing_draft,
                 )
                 return ""
             logger.info(
@@ -952,6 +1153,12 @@ class XiaohongshuPlatform(BasePlatform):
             raise DraftResultUnknownError(
                 "DRAFT_RESULT_UNKNOWN: 小红书草稿重开后正文图片数量不一致"
             )
+        try:
+            await self._assert_editor_body_tokens(blocks)
+        except ContentValidationError as exc:
+            raise DraftResultUnknownError(
+                "DRAFT_RESULT_UNKNOWN: 小红书草稿重开后图文顺序或标题样式不一致"
+            ) from exc
 
     async def publish_now(self, title: str = "") -> str:
         self._not_implemented("公开发布")

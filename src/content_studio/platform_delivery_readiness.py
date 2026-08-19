@@ -78,6 +78,7 @@ _BAIJIAHAO_WORD_EVIDENCE = (
     "codex_handoff_20260817.md",
 )
 _XHS_EVIDENCE = (
+    "docs/acceptance/XIAOHONGSHU_WORD_DRAFT_20260820.md",
     "docs/acceptance/XIAOHONGSHU_SINGLE_IMAGE_DRAFT_20260820.md",
     "codex_handoff_20260817.md",
     "docs/XIAOHONGSHU_RISK_CONTROL.md",
@@ -459,6 +460,12 @@ PLATFORM_DELIVERY_READINESS: tuple[PlatformDeliveryReadiness, ...] = (
     _build_platform(
         "xiaohongshu",
         facet_overrides={
+            "account_session": (
+                ReadinessStatus.REAL_VERIFIED,
+                "account_active_valid_during_word_draft_acceptance",
+                date(2026, 8, 20),
+                _XHS_EVIDENCE,
+            ),
             "editor_entry": (
                 ReadinessStatus.REAL_VERIFIED,
                 "real_longform_tiptap_entry_passed",
@@ -467,19 +474,19 @@ PLATFORM_DELIVERY_READINESS: tuple[PlatformDeliveryReadiness, ...] = (
             ),
             "text_draft": (
                 ReadinessStatus.REAL_VERIFIED,
-                "real_reopen_verified_text_before_and_after_image",
+                "real_reopen_verified_17_text_and_5_h2_blocks",
                 date(2026, 8, 20),
                 _XHS_EVIDENCE,
             ),
             "body_images": (
                 ReadinessStatus.REAL_VERIFIED,
-                "real_reopen_verified_single_body_image_in_order",
+                "real_reopen_verified_7_ordered_body_images",
                 date(2026, 8, 20),
                 _XHS_EVIDENCE,
             ),
             "draft_verification": (
                 ReadinessStatus.REAL_VERIFIED,
-                "unique_title_and_text_image_text_reopened",
+                "unique_title_and_29_ordered_tokens_reopened",
                 date(2026, 8, 20),
                 _XHS_EVIDENCE,
             ),

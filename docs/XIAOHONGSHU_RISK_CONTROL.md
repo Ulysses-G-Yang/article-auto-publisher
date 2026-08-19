@@ -36,11 +36,12 @@
 - 账号链路：登录（扫码）/ 会话检测 / 身份捕获已接入，目录
   `account_enabled=True`（`src/account_sessions/platform_catalog.py`）。
 - 文字草稿链路：**已验收**；草稿保存和草稿箱计数验证可以如实报告文字草稿结果。
-- 图片链路：**单图正文草稿已真实验收**。真实编辑器没有常驻 file input；点击
+- 图片链路：**完整 Word 正文草稿已真实验收**。真实编辑器没有常驻 file input；点击
   已冻结 SVG 指纹的正文图片工具栏按钮后才产生临时 FileChooser。适配器验证
   `accept/multiple/cover` 属性后只调用一次 `set_files`，并以 TipTap 正文图片数
-  稳定增加为成功。2026-08-20 已重开唯一标题草稿，确认顺序为
-  `文字 → 图片 → 文字`、正文图片数为 1。
+  稳定增加为成功。2026-08-20 先通过单图顺序门，随后用指定 Word 完成
+  29 个有序 token（17 段普通文字、5 个 H2、7 张正文图片）的同名草稿恢复、
+  保存和重开核验。封面仍未验收。
 - 公开发布：**关闭**。不得通过配置、适配器或测试打开公开发布。
 - 适配器文件：`platforms/xiaohongshu.py`；身份提取：`src/account_sessions/identity.py`
   `_extract_xiaohongshu`；平台工厂：`src/account_sessions/account_service.py`。
@@ -76,3 +77,7 @@
   图片按钮及动态 FileChooser；随后按用户授权执行一次 DRAFT-only 单图验收。
   保存后重开唯一标题草稿，确认 `文字 → 图片 → 文字`、图片数 1；未公开发布、
   未自动重试、未清理或记录 Cookie。
+- 2026-08-20 / Codex：指定 Word 首次执行在第一个 H2 校验处停止，小红书平台
+  自身留下唯一同名自动暂存草稿；基线门阻止重复创建。随后使用仅 DRAFT-only
+  验收入口可开启的精确标题恢复门，继续同一草稿并保存。独立重开确认 29 个
+  token、17 段普通文字、5 个 H2、7 张正文图片顺序一致；公开发布和封面均未触发。

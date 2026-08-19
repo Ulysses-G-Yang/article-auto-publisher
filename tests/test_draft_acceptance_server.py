@@ -87,6 +87,39 @@ def test_smzdm_acceptance_declares_only_observed_h2_and_image_order() -> None:
     assert registry.get("xiaoheihe").supported == frozenset()
 
 
+def test_xiaohongshu_acceptance_temporarily_declares_observed_h2() -> None:
+    app = acceptance.build_acceptance_app(("xiaohongshu",), "DRAFT_ONLY")
+    registry = app.extensions["content_studio"].service.platform_format_capabilities
+
+    assert registry.get("xiaohongshu").supported == FEATURE_KEYS
+    assert registry.get("xiaohongshu").heading_levels == frozenset({2})
+    assert DEFAULT_PLATFORM_FORMAT_CAPABILITIES.get(
+        "xiaohongshu"
+    ).heading_levels == frozenset({2})
+
+
+def test_xiaohongshu_resume_title_is_isolated_to_acceptance_factory() -> None:
+    app = acceptance.build_acceptance_app(
+        ("xiaohongshu",),
+        "DRAFT_ONLY",
+        xhs_resume_title=" 唯一恢复标题 ",
+    )
+    account = SimpleNamespace(
+        platform="xiaohongshu",
+        profile_path="D:/isolated/xhs-profile",
+    )
+    platform = app.extensions["account_sessions"].accounts.platform_factory(account)
+
+    assert platform._resume_existing_title == "唯一恢复标题"
+    assert platform.strict_profile_lock is True
+    with pytest.raises(ValueError, match="单平台"):
+        acceptance.build_acceptance_app(
+            ("xiaohongshu", "zol"),
+            "DRAFT_ONLY",
+            xhs_resume_title="唯一恢复标题",
+        )
+
+
 @pytest.mark.parametrize(
     "platforms",
     [(), ("",), ("not-a-platform",), ("xiaoheihe", "xiaoheihe")],

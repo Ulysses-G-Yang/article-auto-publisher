@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 import asyncio
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
+
+from platforms.base import DraftBaselineError
+from platforms.content_validation import ContentValidationError
 from platforms.xiaohongshu import (
     XiaohongshuPlatform,
     choose_verified_body_image_index,
@@ -177,6 +181,8 @@ def _fill_content_with_upload_results(results: list[dict]) -> dict:
     platform.page = FakeEditorPage()
     platform.simulator.random_delay = AsyncMock()
     platform._upload_image = AsyncMock(side_effect=results)
+    platform._place_body_caret_at_end = AsyncMock()
+    platform._assert_editor_body_tokens = AsyncMock()
     return run(
         platform.fill_content(
             [
@@ -214,6 +220,53 @@ def test_media_status_failed() -> None:
     assert result["uploaded_images"] == 0
     assert len(result["failed_images"]) == 1
 
+
+def test_expected_tokens_preserve_text_image_h2_order() -> None:
+    tokens = XiaohongshuPlatform._expected_body_tokens(
+        [
+            {"type": "text", "text": "前文"},
+            {"type": "image"},
+            {"type": "heading", "level": 2, "text": "二级标题"},
+        ]
+    )
+    assert [(item["kind"], item["tag"]) for item in tokens] == [
+        ("text", "text"),
+        ("image", "img"),
+        ("text", "h2"),
+    ]
+
+
+def test_heading_requires_single_line_level_two() -> None:
+    platform = XiaohongshuPlatform()
+    platform.page = FakeEditorPage()
+    platform.simulator.random_delay = AsyncMock()
+    platform._place_body_caret_at_end = AsyncMock()
+    platform._assert_editor_body_tokens = AsyncMock()
+    with pytest.raises(ContentValidationError, match="XHS_HEADING_UNSUPPORTED"):
+        run(
+            platform.fill_content(
+                [{"type": "heading", "level": 3, "text": "不支持的标题"}],
+                [],
+            )
+        )
+
+
+def test_level_two_heading_uses_verified_toolbar_action() -> None:
+    platform = XiaohongshuPlatform()
+    platform.page = FakeEditorPage()
+    platform.simulator.random_delay = AsyncMock()
+    platform._place_body_caret_at_end = AsyncMock()
+    platform._apply_h2_to_current_block = AsyncMock()
+    platform._assert_editor_body_tokens = AsyncMock()
+    result = run(
+        platform.fill_content(
+            [{"type": "heading", "level": 2, "text": "正文"}],
+            [],
+        )
+    )
+    platform._apply_h2_to_current_block.assert_awaited_once()
+    assert result["text_ok"] is True
+
 def test_two_body_candidates_are_ambiguous() -> None:
     evidence = [
         {
@@ -246,3 +299,37 @@ def test_unverified_file_chooser_metadata_fails_closed() -> None:
     result = run(platform._upload_image("photo.png"))
     assert result["error_code"] == "XHS_BODY_FILE_CHOOSER_UNVERIFIED"
     chooser.set_files.assert_not_awaited()
+
+
+def _preflight_platform(*, resume_title: str = ""):
+    platform = XiaohongshuPlatform(resume_existing_title=resume_title)
+    platform.page = MagicMock()
+    platform.page.is_closed.return_value = False
+    platform.page.goto = AsyncMock()
+    platform.page.wait_for_selector = AsyncMock()
+    platform._draft_box_count = AsyncMock(return_value=10)
+    platform._open_long_draft_drawer = AsyncMock()
+    action = MagicMock()
+    action.count = AsyncMock(return_value=1)
+    action.click = AsyncMock()
+    filtered = MagicMock()
+    filtered.filter.return_value = action
+    card = MagicMock()
+    card.locator.return_value = filtered
+    platform._matching_long_draft_cards = AsyncMock(return_value=[card])
+    return platform, action
+
+
+def test_same_title_still_fails_closed_without_explicit_resume() -> None:
+    platform, _action = _preflight_platform()
+    with pytest.raises(DraftBaselineError, match="禁止自动重复创建"):
+        run(platform.preflight_delivery("唯一标题"))
+    assert platform._editing_existing_draft is False
+
+
+def test_explicit_exact_resume_opens_only_unique_existing_draft() -> None:
+    platform, action = _preflight_platform(resume_title="唯一标题")
+    run(platform.preflight_delivery("  唯一标题  "))
+    action.click.assert_awaited_once()
+    assert platform._editing_existing_draft is True
+    assert platform._draft_box_count_before == 10

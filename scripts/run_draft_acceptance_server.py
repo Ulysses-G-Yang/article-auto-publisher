@@ -105,7 +105,12 @@ def _port(value: str) -> int:
     return port
 
 
-def build_acceptance_app(platforms: Iterable[str], confirmation: str):
+def build_acceptance_app(
+    platforms: Iterable[str],
+    confirmation: str,
+    *,
+    xhs_resume_title: str = "",
+):
     """构造仅对指定平台开放格式能力的验收应用。
 
     ``confirmation`` 必须是固定的 ``DRAFT_ONLY``；调用方仍需在正式工作台
@@ -116,6 +121,9 @@ def build_acceptance_app(platforms: Iterable[str], confirmation: str):
     if confirmation != CONFIRMATION_WORD:
         raise ValueError("必须使用固定确认词 DRAFT_ONLY")
     selected = _normalize_platforms(platforms)
+    normalized_resume_title = " ".join(str(xhs_resume_title or "").split())
+    if normalized_resume_title and selected != ("xiaohongshu",):
+        raise ValueError("小红书草稿恢复只允许单平台 DRAFT-only 验收")
     _assert_draft_only_settings()
 
     # 所有验收门通过后才导入并创建 Flask 应用，失败路径不会初始化路由、
@@ -172,14 +180,22 @@ def build_acceptance_app(platforms: Iterable[str], confirmation: str):
                 frozenset({"heading", "image_order"}),
                 frozenset({2}),
             )
+        elif platform == "xiaohongshu":
+            # 真实只读探测已冻结小红书长文 H2 工具栏的唯一 SVG 指纹。
+            # 仅在本次 DRAFT-only 验收进程临时放行 H2；生产默认能力必须
+            # 等完整 Word 保存后重开证据再晋级。
+            declarations[platform] = PlatformFormatDeclaration(
+                platform,
+                FEATURE_KEYS,
+                frozenset({2}),
+            )
         else:
             declarations[platform] = FEATURE_KEYS
     content_state.service.platform_format_capabilities = PlatformFormatCapabilities(declarations)
 
-    # 真实验收只在本进程内给选中的 ZOL 注入 heading 实验开关；生产
-    # ``account_service._platform_instance`` 永远不使用该开关。其他平台
-    # 必须继续走应用原有工厂，避免验收入口改变生产适配器行为。
-    if "zol" in selected:
+    # 实验能力只注入当前验收进程：ZOL 标题实验，以及小红书唯一同名草稿
+    # 的显式恢复。生产工厂不接受这两个开关。
+    if "zol" in selected or normalized_resume_title:
         account_state = app.extensions.get("account_sessions")
         if account_state is None or not hasattr(account_state, "accounts"):
             raise RuntimeError("账号会话运行时未注册")
@@ -193,6 +209,17 @@ def build_acceptance_app(platforms: Iterable[str], confirmation: str):
                     profile_dir=account.profile_path,
                     strict_profile_lock=True,
                     enable_heading_experiment=True,
+                )
+            if (
+                getattr(account, "platform", "") == "xiaohongshu"
+                and normalized_resume_title
+            ):
+                from platforms.xiaohongshu import XiaohongshuPlatform
+
+                return XiaohongshuPlatform(
+                    profile_dir=account.profile_path,
+                    strict_profile_lock=True,
+                    resume_existing_title=normalized_resume_title,
                 )
             return original_factory(account)
 
@@ -235,12 +262,21 @@ def _parser() -> argparse.ArgumentParser:
         help="固定确认词：DRAFT_ONLY",
     )
     parser.add_argument("--port", type=_port, default=5000)
+    parser.add_argument(
+        "--xhs-resume-title",
+        default="",
+        help="仅限小红书 DRAFT-only：恢复一个标题精确匹配且唯一的已有草稿",
+    )
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> None:
     args = _parser().parse_args(argv)
-    app = build_acceptance_app(args.platform, args.confirmation)
+    app = build_acceptance_app(
+        args.platform,
+        args.confirmation,
+        xhs_resume_title=args.xhs_resume_title,
+    )
     app.config["DRAFT_ACCEPTANCE_PLATFORMS"] = tuple(args.platform)
     run_acceptance_server(app, args.port)
 

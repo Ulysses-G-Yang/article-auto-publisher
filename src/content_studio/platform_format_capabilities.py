@@ -1,7 +1,8 @@
 """Content Studio 的平台格式能力声明。
 
-能力声明是投递安全边界的一部分：六个平台虽然都在投递目录中，但在真实
-验收前不预认证任何 v2 富文档能力。未知平台没有声明时必须保持 fail-closed。
+能力声明是投递安全边界的一部分：只有真实页面和适配器证据才能晋级 v2
+富文档能力。当前小黑盒仅有正文图片顺序证据；heading、列表、表格等能力
+仍未声明。未知平台没有声明时必须保持 fail-closed。
 """
 
 from __future__ import annotations
@@ -33,8 +34,9 @@ class PlatformFormatDeclaration:
 class PlatformFormatCapabilities:
     """可注入的平台格式能力表。
 
-    默认表显式包含六个平台，但 ``supported`` 全部为空。测试或未来真实
-    验收可以通过构造函数注入已证明的能力；构造完成后表不可变。
+    默认表显式包含六个平台。当前只声明小黑盒已经真实观察到的
+    ``image_order``；测试或未来真实验收可以通过构造函数注入已证明的其他
+    能力，构造完成后表不可变。
     """
 
     def __init__(
@@ -83,8 +85,11 @@ class PlatformFormatCapabilities:
         return self._declarations
 
 
-# 未经真实平台验收，不预认证任何能力；平台条目本身仍然显式存在。
-DEFAULT_PLATFORM_FORMAT_CAPABILITIES = PlatformFormatCapabilities()
+# 2026-08-19：小黑盒已有交错插图和稳定图片数量增长的真实证据。
+# 没有 H2/heading DOM 证据，因此绝不把 ``heading`` 放入默认声明。
+DEFAULT_PLATFORM_FORMAT_CAPABILITIES = PlatformFormatCapabilities(
+    {"xiaoheihe": {"image_order"}}
+)
 
 # 便于依赖注入和调用方按语义检索的别名。
 PlatformFormatCapabilityRegistry = PlatformFormatCapabilities

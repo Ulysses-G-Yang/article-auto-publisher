@@ -20,6 +20,7 @@ from account_sessions.models import DeliveryOperation, PlatformAccount
 from account_sessions.permissions import LOCAL_WEB_CONTEXT
 from account_sessions.web import AccountSessionRuntimeState
 from content_studio.assets import AssetStore
+from content_studio.content_document import delivery_features
 from content_studio.contracts import (
     CoverInput,
     CreateDraftRequest,
@@ -39,6 +40,7 @@ from content_studio.errors import (
 from content_studio.importers import DocxImportAdapter, LegacyDatabaseSource
 from content_studio.models import ContentAsset, ContentDraft, ContentVersion
 from content_studio.platform_format_capabilities import (
+    DEFAULT_PLATFORM_FORMAT_CAPABILITIES,
     DELIVERY_PLATFORMS,
     PlatformFormatCapabilities,
 )
@@ -280,6 +282,33 @@ def test_platform_format_capabilities_are_explicit_and_fail_closed() -> None:
     assert injected.get("zol").supported == frozenset()
     with pytest.raises(ValueError, match="未知格式能力"):
         PlatformFormatCapabilities({"xiaoheihe": {"not_a_real_feature"}})
+
+
+def test_default_capabilities_are_limited_to_real_xiaoheihe_image_order_evidence() -> None:
+    assert DEFAULT_PLATFORM_FORMAT_CAPABILITIES.get("xiaoheihe").supported == {
+        "image_order"
+    }
+    assert "heading" not in DEFAULT_PLATFORM_FORMAT_CAPABILITIES.get("xiaoheihe").supported
+    for platform in DELIVERY_PLATFORMS:
+        if platform != "xiaoheihe":
+            assert not DEFAULT_PLATFORM_FORMAT_CAPABILITIES.get(platform).supported
+
+
+def test_exact_word_features_keep_xiaoheihe_heading_plan_blocked() -> None:
+    document = delivery_v2_document(
+        "Word 标题",
+        body_heading=True,
+        asset_ids=[
+            "00000000-0000-4000-8000-000000000001",
+            "00000000-0000-4000-8000-000000000002",
+        ],
+    )
+
+    assert delivery_features(document) == frozenset({"heading", "image_order"})
+    missing = delivery_features(document) - DEFAULT_PLATFORM_FORMAT_CAPABILITIES.get(
+        "xiaoheihe"
+    ).supported
+    assert missing == {"heading"}
 
 
 def test_autosave_revision_conflict_returns_server_draft(tmp_path: Path) -> None:
@@ -1043,7 +1072,7 @@ def test_v2_delivery_format_gate_handles_basic_heading_and_multi_image(
         plain = await create_plan("普通段落")
         single_image = await create_plan("单图正文", image_count=1)
         heading = await create_plan("正文标题", body_heading=True)
-        multi_image = await create_plan("多图正文", image_count=2)
+        image_order_only = await create_plan("多图正文", image_count=2)
 
         assert plain["status"] == "READY"
         assert plain["targets"][0]["status"] == "READY"
@@ -1053,9 +1082,10 @@ def test_v2_delivery_format_gate_handles_basic_heading_and_multi_image(
         assert heading["targets"][0]["status"] == "FORMAT_REVIEW_REQUIRED"
         assert heading["targets"][0]["error_code"] == "CONTENT_FORMAT_UNSUPPORTED"
         assert "heading" in heading["targets"][0]["error_message"]
-        assert multi_image["status"] == "FORMAT_REVIEW_REQUIRED"
-        assert multi_image["targets"][0]["error_code"] == "CONTENT_FORMAT_UNSUPPORTED"
-        assert "image_order" in multi_image["targets"][0]["error_message"]
+        # 小黑盒的真实证据已覆盖交错插图和稳定图片数量；默认能力只声明
+        # image_order，正文 heading 仍由上面的计划单独阻断。
+        assert image_order_only["status"] == "READY"
+        assert image_order_only["targets"][0]["status"] == "READY"
 
         await service.database.dispose()
         await account_db.dispose()

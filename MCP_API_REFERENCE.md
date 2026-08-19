@@ -102,7 +102,7 @@ asyncio.run(main())
 
 登录和文章发布不会在一次工具调用中等待浏览器结束：
 
-1. 调用 `start_login` 或 `publish_article`，获得 MCP `task_id`。
+1. 仅在明确开启旧兼容开关时，调用 `start_login` 或 `publish_article`，获得 MCP `task_id`。
 2. 按返回的 `async_task.poll_tool` 调用 `get_login_result` 或 `get_publish_result`。
 3. 登录任务每 3 秒轮询，发布任务每 10 秒轮询。
 4. `status=completed` 读取 `result`；`status=failed` 读取脱敏错误；`status=awaiting_user_action` 按消息完成扫码或社区/话题选择。
@@ -132,6 +132,21 @@ MCP Adapter 只把 token 注入上述两个内部请求，绝不附加到旧 RES
 只允许 `public_account` 和 `list_activity` 的公开字段，并在 MCP 边界再次脱敏；
 禁止 profile_path、原始 platform_user_id、Cookie、Token。旧的登录、退出、清理、
 发布工具保留作兼容，均标记为 `LEGACY`，不能替代新的只读入口。
+
+### 7.2 旧变更工具开关
+
+旧平台级变更工具 `start_login`、`publish_article`、`resume_task`、
+`logout_account`、`cleanup_locks` 保留注册和输入 Schema 以兼容旧客户端，但默认
+在执行任何 Flask 请求、文件下载、MCP task 写入或清理动作前返回
+`LEGACY_MCP_MUTATIONS_DISABLED`。仅在明确的紧急兼容场景设置：
+
+```text
+MCP_LEGACY_MUTATIONS_ENABLED=true
+```
+
+只有 `true/1/yes/on`（忽略大小写）开启，其他值和缺失值均关闭。该开关不属于
+新的账号级只读工作流，生产环境建议保持 `false`；`get_login_result`、
+`get_publish_result` 与旧查询工具仍可用于读取已有任务状态。
 
 本项目保留 `start_login`、`logout_account` 两个 `LEGACY` 账号环境管理工具，因为发布前必须由管理员完成浏览器扫码和账号切换；这些工具只返回状态，不返回凭据。公开发布仍由现有 Flask 平台流程控制，本 MCP 不提供任意平台或任意 URL 发布能力。
 

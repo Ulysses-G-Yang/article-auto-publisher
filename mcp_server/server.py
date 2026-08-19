@@ -36,6 +36,7 @@ class MCPSettings:
     # malformed values do not prevent the MCP process from starting; only the
     # two internal account-read calls fail closed at the Flask boundary.
     mcp_internal_token: str = field(default="", repr=False)
+    legacy_mutations_enabled: bool = False
 
 
 def _normalise_hosts(raw: str) -> tuple[str, ...]:
@@ -126,6 +127,9 @@ def load_settings() -> MCPSettings:
         if item.strip()
     )
     internal_access = load_internal_access_settings()
+    legacy_mutations_enabled = os.getenv(
+        "MCP_LEGACY_MUTATIONS_ENABLED", ""
+    ).strip().lower() in {"true", "1", "yes", "on"}
     return MCPSettings(
         flask_base_url=flask_base_url,
         # Keep local development safe by default.  LAN deployment can set
@@ -137,6 +141,7 @@ def load_settings() -> MCPSettings:
         task_db_path=task_db_path,
         trusted_proxy_ips=trusted_proxy_ips,
         mcp_internal_token=internal_access.internal_token,
+        legacy_mutations_enabled=legacy_mutations_enabled,
     )
 
 
@@ -165,7 +170,12 @@ def create_server(settings: MCPSettings | None = None) -> MCPServer:
         ),
         lifespan=lifespan,
     )
-    register_tools(server, client, store)
+    register_tools(
+        server,
+        client,
+        store,
+        legacy_mutations_enabled=config.legacy_mutations_enabled,
+    )
 
     @server.custom_route("/healthz", methods=["GET"])
     async def healthz(request: Request) -> JSONResponse:

@@ -76,12 +76,17 @@ MCP_TRUSTED_PROXY_IPS=<受控反向代理IP，可选>
 ```text
 ARTICLEOPS_MCP_INTERNAL_TOKEN=<至少 32 个字符的随机值>
 ARTICLEOPS_MCP_ALLOWED_ACCOUNT_IDS=<允许读取的 account_id，逗号分隔>
+MCP_LEGACY_MUTATIONS_ENABLED=false
 ```
 
 两项缺一都会使内部账号接口以 `MCP_ACCESS_NOT_CONFIGURED` 失败。token 只在
 MCP Adapter 到 Flask 的两条 `/api/internal/mcp/...` 请求中发送，不会附加到
 旧 REST 接口，也不会写入日志、错误响应或工具结果；账号白名单只在 Flask 端
 解释和执行。请通过安全的进程环境注入，不要写进仓库配置文件。
+
+`MCP_LEGACY_MUTATIONS_ENABLED` 只有 `true`、`1`、`yes`、`on`（忽略大小写）
+会开启，默认关闭。它是旧平台级登录、DOCX 发布任务、恢复任务、退出账号和锁
+清理工具的紧急兼容开关，不属于新的账号级工作流；生产环境建议保持 `false`。
 
 如需办公内网访问，应绑定内网 IP（或受控环境使用 `0.0.0.0`），并把实际访问 Host 加入 `MCP_ALLOWED_HOSTS`，同时配置防火墙来源白名单。禁止将 8765 端口直接暴露到公网。Host 白名单支持裸域名并自动允许其端口，例如 `collector.mcp.example.com` 会允许 `collector.mcp.example:<port>`。经受控反向代理访问时，将代理源 IP 配置到 `MCP_TRUSTED_PROXY_IPS`，再把业务域名加入 `MCP_ALLOWED_HOSTS`。
 
@@ -99,14 +104,14 @@ MCP Adapter 到 Flask 的两条 `/api/internal/mcp/...` 请求中发送，不会
 
 ### 异步工具
 
-- `start_login(platform, force)` → `get_login_result(task_id)`：打开本机登录页面，等待人工扫码。
-- `publish_article(source_download_url, platforms)` → `get_publish_result(task_id)`：下载 CS_Admin 注入的 DOCX 临时文件并创建 Flask 发布任务。
+- `[LEGACY MUTATION] start_login(platform, force)` → `get_login_result(task_id)`：旧登录入口，默认关闭。
+- `[LEGACY MUTATION] publish_article(source_download_url, platforms)` → `get_publish_result(task_id)`：旧 DOCX 发布入口，默认关闭。
 
 ### 管理工具
 
-- `resume_task(task_id, community, topic)`：恢复暂停或需要手动选择的小黑盒任务。
-- `logout_account(platform)`：清理指定平台 Cookie 并重置状态。
-- `cleanup_locks`：只清理 Chrome Profile 锁文件，不杀进程、不删除 Cookie。
+- `[LEGACY MUTATION] resume_task(task_id, community, topic)`：旧任务恢复入口，默认关闭。
+- `[LEGACY MUTATION] logout_account(platform)`：旧账号退出入口，默认关闭。
+- `[LEGACY MUTATION] cleanup_locks`：旧 Profile 锁清理入口，默认关闭。
 
 所有异步工具都返回 `cs-admin-async-task/v1` 的 `async_task` 信息。MCP Server 会在 SQLite 中持久化 MCP task id 与 Flask task id 的映射，重启后仍可继续轮询。
 

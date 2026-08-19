@@ -70,7 +70,12 @@ class MCPServerTests(unittest.TestCase):
         self.store = TaskStore(Path(self.temp_dir.name) / "mcp_tasks.db")
         self.client = FakeFlaskClient()
         self.server = MCPServer("content.article-publisher", version="1.0.0")
-        self.handlers = register_tools(self.server, self.client, self.store)
+        self.handlers = register_tools(
+            self.server,
+            self.client,
+            self.store,
+            legacy_mutations_enabled=True,
+        )
 
     def tearDown(self):
         self.temp_dir.cleanup()

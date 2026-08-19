@@ -44,6 +44,7 @@ DEFAULT_FILE_SERVICE_HOSTS = {"dev.sccsai.com"}
 SUPPORTED_PLATFORMS = {"zol", "xiaoheihe"}
 SUPPORTED_ACCOUNT_PLATFORMS = set(ACCOUNT_ENABLED_PLATFORMS)
 MAX_DOWNLOAD_BYTES = 50 * 1024 * 1024
+LEGACY_MCP_MUTATIONS_DISABLED = "LEGACY_MCP_MUTATIONS_DISABLED"
 
 
 class ToolFailure(RuntimeError):
@@ -99,6 +100,14 @@ def _safe_account_id(value: Any) -> str:
     if not account_id or len(account_id) > 128:
         raise ToolFailure("INVALID_ARGUMENT", "account_id 无效")
     return account_id
+
+
+def _require_legacy_mutations(enabled: bool) -> None:
+    if not enabled:
+        raise ToolFailure(
+            LEGACY_MCP_MUTATIONS_DISABLED,
+            "旧版 MCP 变更工具默认关闭；仅允许通过显式紧急兼容开关启用",
+        )
 
 
 def _safe_task_id(value: Any) -> int:
@@ -386,7 +395,13 @@ async def _download_docx(source_download_url: str, destination: Path) -> None:
         raise ToolFailure("INTERNAL_ERROR", "源文件下载失败") from exc
 
 
-def register_tools(server: Any, client: FlaskClient, store: TaskStore) -> dict[str, Callable[..., Any]]:
+def register_tools(
+    server: Any,
+    client: FlaskClient,
+    store: TaskStore,
+    *,
+    legacy_mutations_enabled: bool = False,
+) -> dict[str, Callable[..., Any]]:
     """Register the fixed, business-scoped tool set and return handlers for tests."""
     handlers: dict[str, Callable[..., Any]] = {}
 
@@ -584,11 +599,12 @@ def register_tools(server: Any, client: FlaskClient, store: TaskStore) -> dict[s
 
     @server.tool(
         name="start_login",
-        description="[LEGACY] 发起 ZOL 或小黑盒登录，在本机打开浏览器等待人工扫码。立即返回异步任务，使用 get_login_result 轮询。",
+        description="[LEGACY MUTATION] 默认关闭（需 MCP_LEGACY_MUTATIONS_ENABLED=true）；发起 ZOL 或小黑盒登录。",
         structured_output=True,
     )
     async def start_login(platform: Platform, force: bool = False) -> dict[str, Any]:
         async def operation() -> dict[str, Any]:
+            _require_legacy_mutations(legacy_mutations_enabled)
             checked_platform = _safe_platform(platform)
             if force:
                 await client.clear_cookies(checked_platform)
@@ -664,7 +680,7 @@ def register_tools(server: Any, client: FlaskClient, store: TaskStore) -> dict[s
 
     @server.tool(
         name="publish_article",
-        description="[LEGACY] 下载 CS_Admin 注入的 docx 文件并通过 Flask 创建 ZOL/小黑盒发布任务。返回异步任务，使用 get_publish_result 轮询。",
+        description="[LEGACY MUTATION] 默认关闭（需 MCP_LEGACY_MUTATIONS_ENABLED=true）；下载 DOCX 并创建旧发布任务。",
         structured_output=True,
     )
     async def publish_article(
@@ -672,6 +688,7 @@ def register_tools(server: Any, client: FlaskClient, store: TaskStore) -> dict[s
         platforms: Annotated[list[Platform] | None, Field(min_length=1, max_length=2)] = None,
     ) -> dict[str, Any]:
         async def operation() -> dict[str, Any]:
+            _require_legacy_mutations(legacy_mutations_enabled)
             source_url = _validate_source_url(source_download_url)
             selected = list(platforms or ["zol", "xiaoheihe"])
             if not selected or len(selected) > 2 or len(set(selected)) != len(selected):
@@ -801,7 +818,7 @@ def register_tools(server: Any, client: FlaskClient, store: TaskStore) -> dict[s
 
     @server.tool(
         name="resume_task",
-        description="[LEGACY] 恢复 paused 或 needs_selection 的发布任务；小黑盒需要 community 和 topic，ZOL 需要 topic。",
+        description="[LEGACY MUTATION] 默认关闭（需 MCP_LEGACY_MUTATIONS_ENABLED=true）；恢复旧发布任务。",
         structured_output=True,
     )
     async def resume_task(
@@ -810,6 +827,7 @@ def register_tools(server: Any, client: FlaskClient, store: TaskStore) -> dict[s
         topic: OptionalShortText = None,
     ) -> dict[str, Any]:
         async def operation() -> dict[str, Any]:
+            _require_legacy_mutations(legacy_mutations_enabled)
             checked_id = _safe_task_id(task_id)
             community_value = _optional_text(community, "community")
             topic_value = _optional_text(topic, "topic")
@@ -839,11 +857,12 @@ def register_tools(server: Any, client: FlaskClient, store: TaskStore) -> dict[s
 
     @server.tool(
         name="logout_account",
-        description="[LEGACY] 退出 ZOL 或小黑盒账号，清除该平台 Cookie 并重置登录状态。",
+        description="[LEGACY MUTATION] 默认关闭（需 MCP_LEGACY_MUTATIONS_ENABLED=true）；退出旧平台账号。",
         structured_output=True,
     )
     async def logout_account(platform: Platform) -> dict[str, Any]:
         async def operation() -> dict[str, Any]:
+            _require_legacy_mutations(legacy_mutations_enabled)
             checked_platform = _safe_platform(platform)
             payload = await client.logout(checked_platform)
             return {
@@ -858,11 +877,12 @@ def register_tools(server: Any, client: FlaskClient, store: TaskStore) -> dict[s
 
     @server.tool(
         name="cleanup_locks",
-        description="[LEGACY] 清理 Chrome Profile 残留锁文件，不杀进程，不影响 Cookie。",
+        description="[LEGACY MUTATION] 默认关闭（需 MCP_LEGACY_MUTATIONS_ENABLED=true）；清理旧 Profile 锁文件。",
         structured_output=True,
     )
     async def cleanup_locks() -> dict[str, Any]:
         async def operation() -> dict[str, Any]:
+            _require_legacy_mutations(legacy_mutations_enabled)
             payload = await client.cleanup_locks()
             return {
                 "status": "ok",

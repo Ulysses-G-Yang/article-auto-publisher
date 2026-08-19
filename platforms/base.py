@@ -1,6 +1,5 @@
 """平台自动化抽象基类 —— 使用系统 Chrome 浏览器，Cookie 天然持久化"""
 import os
-import json
 import random
 import asyncio
 from abc import ABC, abstractmethod
@@ -13,6 +12,7 @@ from loguru import logger
 from human.simulator import HumanSimulator
 from models.database import Database
 from config import get_config
+from platforms.media_progress import safe_media_progress
 
 
 class PlatformAutomationError(RuntimeError):
@@ -450,8 +450,12 @@ class BasePlatform(ABC):
 
         except Exception as e:
             logger.exception("{} 发布流水线失败: {}", self.platform_name, e)
-            return {
+            result = {
                 "success": False,
                 "error": str(e),
                 "error_code": getattr(e, "error_code", None),
             }
+            progress = safe_media_progress(getattr(e, "media_progress", None))
+            if progress is not None:
+                result["media_progress"] = progress
+            return result

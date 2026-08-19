@@ -970,9 +970,11 @@ class RegressionTests(DatabaseTestCase):
         platform.page = FakeXiaoPage()
         platform.simulator.random_delay = AsyncMock()
         uploaded = []
+        events = []
 
         async def upload_once(path):
             uploaded.append(path)
+            events.append((Path(path).name, platform.page.body.text))
             return {"success": True, "filename": Path(path).name}
 
         platform._upload_image = AsyncMock(side_effect=upload_once)
@@ -987,6 +989,11 @@ class RegressionTests(DatabaseTestCase):
         self.assertEqual(result["media_status"], "completed")
         self.assertEqual(result["uploaded_images"], 2)
         self.assertEqual(uploaded, ["D:/one.png", "D:/two.png"])
+        self.assertIn("第一段", events[0][1])
+        self.assertNotIn("第二段", events[0][1])
+        self.assertIn("第一段", events[1][1])
+        self.assertIn("第二段", events[1][1])
+        self.assertEqual([name for name, _ in events], ["one.png", "two.png"])
         # 正文编辑器不使用中心 click 当作插入点，否则真实 ProseMirror
         # 会把后续文字插回中段。
         self.assertEqual(platform.page.body.click_count, 0)
@@ -1009,7 +1016,7 @@ class RegressionTests(DatabaseTestCase):
             return {"success": True, "filename": Path(path).name}
 
         platform._upload_image = AsyncMock(side_effect=remove_text_after_first_image)
-        with self.assertRaises(ContentValidationError):
+        with self.assertRaises(ContentValidationError) as exc_info:
             asyncio.run(platform.fill_content([
                 {"type": "text", "text": "第一段"},
                 {"type": "text", "text": "必须保留"},
@@ -1019,6 +1026,15 @@ class RegressionTests(DatabaseTestCase):
 
         self.assertEqual(calls, ["D:/one.png"])
         self.assertEqual(platform._upload_image.await_count, 1)
+        self.assertEqual(
+            exc_info.exception.media_progress,
+            {
+                "expected_images": 2,
+                "uploaded_images": 1,
+                "failed_image_count": 0,
+                "media_status": "in_progress",
+            },
+        )
 
     def test_xiaoheihe_partial_media_contract_is_preserved(self):
         platform = XiaoheihePlatform()

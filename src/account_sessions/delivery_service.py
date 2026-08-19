@@ -43,6 +43,7 @@ from account_sessions.security import (
     delivery_fingerprint,
     safe_error_message,
 )
+from platforms.media_progress import safe_media_progress
 
 SESSION_INVALIDATING_ERROR_CODES = frozenset({"LOGIN_REQUIRED", "SESSION_EXPIRED"})
 ARTICLE_MAPPING_SUCCESS_STATUSES = frozenset(
@@ -240,6 +241,13 @@ class DeliveryService:
                     delivery_mode=operation.mode,
                 )
             if not result.get("success"):
+                media_progress = safe_media_progress(result.get("media_progress"))
+                if media_progress is not None:
+                    buffered_log.add_task_log(
+                        0,
+                        "WARN",
+                        _format_media_progress_log(media_progress),
+                    )
                 raise AccountUnavailableError(
                     result.get("error") or "平台未确认投递成功",
                     error_code=result.get("error_code") or "DELIVERY_FAILED",
@@ -974,6 +982,18 @@ def _token_hash(token: str) -> str:
 
 def _env_flag(name: str) -> bool:
     return os.getenv(name, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _format_media_progress_log(progress: dict[str, int | str]) -> str:
+    """生成只包含安全计数和状态的固定媒体进度审计消息。"""
+
+    return (
+        "MEDIA_PROGRESS 媒体进度："
+        f"expected_images={progress['expected_images']}，"
+        f"uploaded_images={progress['uploaded_images']}，"
+        f"failed_image_count={progress['failed_image_count']}，"
+        f"media_status={progress['media_status']}"
+    )
 
 
 def _extract_platform_article_id(result: Any) -> str | None:

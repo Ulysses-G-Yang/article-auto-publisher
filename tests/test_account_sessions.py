@@ -603,6 +603,76 @@ def test_media_incomplete_without_draft_still_fails(tmp_path: Path) -> None:
     run(database.dispose())
 
 
+def test_failed_media_progress_is_logged_as_safe_account_audit(
+    tmp_path: Path,
+) -> None:
+    class FakePlatform:
+        platform_name = "xiaoheihe"
+        context = None
+
+        async def initialize(self) -> None:
+            return None
+
+        async def publish(self, **_kwargs) -> dict:
+            return {
+                "success": False,
+                "error_code": "CONTENT_VALIDATION_ERROR",
+                "error": "正文校验失败",
+                "media_progress": {
+                    "expected_images": 7,
+                    "uploaded_images": 2,
+                    "failed_image_count": 0,
+                    "media_status": "in_progress",
+                    "path": r"D:\secret\image.png",
+                    "token": "secret-token",
+                    "body": "用户正文不应进入活动日志",
+                },
+            }
+
+        async def cleanup(self) -> None:
+            return None
+
+    database = AccountDatabase(sqlite_database_url(tmp_path))
+    fake = FakePlatform()
+    accounts = AccountSessionService(
+        database,
+        seed_legacy_profiles=False,
+        platform_factory=lambda _account: fake,
+        allowed_profile_roots=(tmp_path / "runtime" / "profiles",),
+    )
+    run(accounts.initialize())
+    profile = make_profile(tmp_path, "xiaoheihe", "media-audit")
+    account = run(insert_account(database, profile))
+    delivery = DeliveryService(
+        accounts,
+        platform_factory=lambda _account: fake,
+        public_publish_enabled=False,
+    )
+    request = DeliveryRequest.model_validate(delivery_payload(account.account_id))
+    queued = run(delivery.request_delivery(request, LOCAL_WEB_CONTEXT))
+
+    with pytest.raises(AccountUnavailableError) as exc_info:
+        run(delivery.execute_operation(queued["operation_id"], LOCAL_WEB_CONTEXT))
+    assert exc_info.value.error_code == "CONTENT_VALIDATION_ERROR"
+
+    stored = run(delivery.get_operation(queued["operation_id"], LOCAL_WEB_CONTEXT))
+    assert stored["status"] == "FAILED"
+    assert stored["error_code"] == "CONTENT_VALIDATION_ERROR"
+    logs = run(accounts.list_activity(account.account_id, LOCAL_WEB_CONTEXT))
+    progress_logs = [row for row in logs if "MEDIA_PROGRESS" in row["message"]]
+    assert len(progress_logs) == 1
+    message = progress_logs[0]["message"]
+    assert message == (
+        "MEDIA_PROGRESS 媒体进度：expected_images=7，uploaded_images=2，"
+        "failed_image_count=0，media_status=in_progress"
+    )
+    all_messages = " ".join(row["message"] for row in logs)
+    assert r"D:\secret" not in all_messages
+    assert "secret-token" not in all_messages
+    assert "用户正文不应进入活动日志" not in all_messages
+    run(database.dispose())
+
+
 @pytest.mark.parametrize(
     ("failure", "expected_session_status"),
     [

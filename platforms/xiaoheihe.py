@@ -5,11 +5,17 @@ from pathlib import Path
 
 from loguru import logger
 
-from platforms.base import BasePlatform, BrowserLifecycleError, SelectorError
+from platforms.base import (
+    BasePlatform,
+    BrowserLifecycleError,
+    SelectorError,
+)
 from platforms.content_validation import (
+    ContentValidationError,
     ensure_valid_content,
     safe_media_error,
 )
+from platforms.media_progress import safe_media_progress
 
 
 class XiaoheihePlatform(BasePlatform):
@@ -45,6 +51,60 @@ class XiaoheihePlatform(BasePlatform):
 
     def _raise_if_page_closed(self, stage: str):
         self._require_page_alive(stage)
+
+    @staticmethod
+    def _media_status(expected: int, uploaded: int, failed: int) -> str:
+        if expected == 0:
+            return "not_required"
+        if uploaded == expected and failed == 0:
+            return "completed"
+        if uploaded == 0 and failed == expected:
+            return "failed"
+        if uploaded + failed == expected:
+            return "partial"
+        return "in_progress"
+
+    def _media_progress_snapshot(self) -> dict[str, int | str] | None:
+        state = getattr(self, "_media_progress_state", None)
+        if not isinstance(state, dict):
+            return None
+        expected = state.get("expected_images")
+        uploaded = state.get("uploaded_images")
+        failed = state.get("failed_image_count")
+        if not all(isinstance(value, int) and not isinstance(value, bool)
+                   for value in (expected, uploaded, failed)):
+            return None
+        return safe_media_progress(
+            {
+                "expected_images": expected,
+                "uploaded_images": uploaded,
+                "failed_image_count": failed,
+                "media_status": self._media_status(expected, uploaded, failed),
+            }
+        )
+
+    def _attach_media_progress(self, exc: ContentValidationError) -> None:
+        progress = self._media_progress_snapshot()
+        if progress is not None:
+            exc.media_progress = progress
+
+    def _ensure_valid_content(
+        self,
+        content_blocks: list,
+        actual_text: str | None,
+        *,
+        phase: str,
+    ) -> int:
+        try:
+            return ensure_valid_content(
+                content_blocks,
+                actual_text,
+                platform="小黑盒",
+                phase=phase,
+            )
+        except ContentValidationError as exc:
+            self._attach_media_progress(exc)
+            raise
 
     async def initialize(self):
         """标准初始化 + 监听 restore_login 响应，暂存同源确认的平台身份。"""
@@ -384,14 +444,19 @@ class XiaoheihePlatform(BasePlatform):
     async def fill_content(self, content_blocks: list, images: list):
         """填写正文（真实字段：.article__edit-content--inner 内的 contenteditable ProseMirror）"""
         self._raise_if_page_closed("小黑盒填写正文")
+        expected_images = sum(
+            1 for block in content_blocks if block.get("type") == "image"
+        )
+        self._media_progress_state = {
+            "expected_images": expected_images,
+            "uploaded_images": 0,
+            "failed_image_count": 0,
+        }
         editor = await self._current_body_editor()
         await editor.fill("")
         await self._place_body_caret_at_end()
         await self.simulator.random_delay(0.3, 0.8)
 
-        expected_images = sum(
-            1 for block in content_blocks if block.get("type") == "image"
-        )
         uploaded_images = 0
         failed_images = []
         content_started = False
@@ -456,6 +521,10 @@ class XiaoheihePlatform(BasePlatform):
                 })
 
             content_started = True
+            self._media_progress_state.update(
+                uploaded_images=uploaded_images,
+                failed_image_count=len(failed_images),
+            )
 
             # 图片操作可能重建正文编辑器；立即从新节点读取截至当前块的
             # 所有文字，首个缺失/乱序必须硬失败，后续图片不得继续。
@@ -474,10 +543,9 @@ class XiaoheihePlatform(BasePlatform):
         )
 
         actual_text = await editor.inner_text()
-        expected_count = ensure_valid_content(
+        expected_count = self._ensure_valid_content(
             content_blocks,
             actual_text,
-            platform="小黑盒",
             phase="图片处理后",
         )
         logger.info("小黑盒正文输入并最终验证成功: {} 个文本段落", expected_count)
@@ -551,10 +619,9 @@ class XiaoheihePlatform(BasePlatform):
             return 0
         editor = await self._current_body_editor()
         actual_text = await editor.inner_text()
-        return ensure_valid_content(
+        return self._ensure_valid_content(
             text_blocks,
             actual_text,
-            platform="小黑盒",
             phase=phase,
         )
 

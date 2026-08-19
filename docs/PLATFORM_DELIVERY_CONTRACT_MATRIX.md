@@ -86,12 +86,12 @@
 
 | 能力项 | 状态 | page_state | last_real_check | evidence_refs |
 |---|---|---|---|---|
-| account_session | `REAL_VERIFIED` | `account_active_valid` | 2026-08-17 | `codex_handoff_20260817.md` |
-| editor_entry | `RETEST_REQUIRED` | `code_fixed_waiting_real_rerun` | 2026-08-17 | `codex_handoff_20260817.md` |
-| text_draft | `RETEST_REQUIRED` | `code_fixed_waiting_real_rerun` | 2026-08-17 | `codex_handoff_20260817.md` |
-| body_images | `RETEST_REQUIRED` | `code_fixed_waiting_real_rerun` | 2026-08-17 | `codex_handoff_20260817.md` |
-| cover | `REAL_FAILED` | `real_acceptance_failed` | 2026-08-17 | `codex_handoff_20260817.md`, `docs/PLATFORM_DRAFTBOX_AUDIT.md` |
-| draft_verification | `RETEST_REQUIRED` | `code_fixed_waiting_real_rerun` | 2026-08-17 | `codex_handoff_20260817.md`, `docs/PLATFORM_DRAFTBOX_AUDIT.md` |
+| account_session | `REAL_VERIFIED` | `account_active_valid_during_word_draft_acceptance` | 2026-08-19 | `docs/acceptance/BAIJIAHAO_WORD_DRAFT_20260819.md`, `codex_handoff_20260817.md` |
+| editor_entry | `REAL_VERIFIED` | `real_ueditor_entry_passed` | 2026-08-19 | `docs/acceptance/BAIJIAHAO_WORD_DRAFT_20260819.md`, `codex_handoff_20260817.md` |
+| text_draft | `REAL_VERIFIED` | `real_reopen_verified_22_text_and_heading_blocks` | 2026-08-19 | `docs/acceptance/BAIJIAHAO_WORD_DRAFT_20260819.md`, `codex_handoff_20260817.md` |
+| body_images | `REAL_VERIFIED` | `real_reopen_verified_7_ordered_body_images` | 2026-08-19 | `docs/acceptance/BAIJIAHAO_WORD_DRAFT_20260819.md`, `codex_handoff_20260817.md` |
+| cover | `REAL_FAILED` | `cover_control_not_independently_verified` | 2026-08-19 | `docs/acceptance/BAIJIAHAO_WORD_DRAFT_20260819.md`, `codex_handoff_20260817.md` |
+| draft_verification | `REAL_VERIFIED` | `persisted_draft_and_29_ordered_tokens_reopened` | 2026-08-19 | `docs/acceptance/BAIJIAHAO_WORD_DRAFT_20260819.md`, `codex_handoff_20260817.md` |
 | public_publish | `DISABLED` | `global_publish_gate_closed` | — | `AGENTS.md`, `codex_handoff_20260817.md` |
 
 ### 小红书 `xiaohongshu`
@@ -116,7 +116,7 @@
 | ZOL | `true` | 唯一草稿重开后 22 个文字/章节块、7 张正文图片和 29 个有序节点完全一致 |
 | 小黑盒 | `true` | 唯一草稿重开后 22 个文字/标题块、7 张正文图片和 29 个有序节点完全一致 |
 | 什么值得买 | `true` | 唯一草稿重开后 22 个文字/标题块、7 张正文图片和 29 个有序节点完全一致 |
-| 百家号 | `false` | 修复后尚未完成同一版本的真实重验收，封面还有明确失败记录 |
+| 百家号 | `true` | 已重开核对 22 个文字/标题节点、7 张正文图片和 29 个有序节点；封面仍不计入稳定带图草稿条件 |
 | 小红书 | `false` | 文字草稿已验收，但正文图片为 `REAL_FAILED` |
 
 当前六个平台的 `can_run_complete_word_draft()` 均为 `false`：知乎、ZOL、小黑盒与什么值得买的带图草稿已经通过，但封面尚未真实验收，所以完整 Word 一键草稿仍未完成。

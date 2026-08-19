@@ -312,8 +312,13 @@ def test_default_capabilities_match_real_platform_evidence() -> None:
         "image_order",
     }
     assert DEFAULT_PLATFORM_FORMAT_CAPABILITIES.get("smzdm").heading_levels == {2}
+    assert DEFAULT_PLATFORM_FORMAT_CAPABILITIES.get("baijiahao").supported == {
+        "heading",
+        "image_order",
+    }
+    assert DEFAULT_PLATFORM_FORMAT_CAPABILITIES.get("baijiahao").heading_levels == {2}
     for platform in DELIVERY_PLATFORMS:
-        if platform not in {"xiaoheihe", "zhihu", "smzdm"}:
+        if platform not in {"xiaoheihe", "zhihu", "smzdm", "baijiahao"}:
             assert not DEFAULT_PLATFORM_FORMAT_CAPABILITIES.get(platform).supported
 
 

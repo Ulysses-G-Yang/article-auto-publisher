@@ -208,14 +208,73 @@ def test_draft_search_uses_debounced_fill_without_enter() -> None:
 
 
 def test_matching_draft_rows_are_scoped_to_article_item_containers() -> None:
-    page = SimpleNamespace(evaluate=AsyncMock(return_value=[{"index": 0}]))
+    page = SimpleNamespace(
+        evaluate=AsyncMock(
+            return_value=[
+                {
+                    "index": 0,
+                    "preview_href": (
+                        "https://baijiahao.baidu.com/builder/preview/s?id=123"
+                    ),
+                }
+            ]
+        )
+    )
     platform = BaijiahaoPlatform()
     platform.page = page
 
-    assert asyncio.run(platform._matching_work_rows("唯一标题")) == [{"index": 0}]
+    assert asyncio.run(platform._matching_work_rows("唯一标题")) == [
+        {
+            "index": 0,
+            "preview_href": "https://baijiahao.baidu.com/builder/preview/s?id=123",
+        }
+    ]
     script = page.evaluate.await_args.args[0]
     assert 'div[class*="articleItem"]' in script
     assert "actions.includes('修改')" in script
+    assert "preview_href" in script
+
+
+def test_unique_draft_uses_preview_id_instead_of_clicking_react_action() -> None:
+    platform = BaijiahaoPlatform()
+    platform.page = SimpleNamespace()
+    platform._open_works_page = AsyncMock()
+    platform._search_works = AsyncMock()
+    platform._matching_work_rows = AsyncMock(
+        return_value=[
+            {
+                "index": 0,
+                "preview_href": (
+                    "https://baijiahao.baidu.com/builder/preview/s?id=123456789"
+                ),
+            }
+        ]
+    )
+
+    result = asyncio.run(platform._find_unique_exact_draft("唯一标题"))
+
+    assert result == (
+        "https://baijiahao.baidu.com/builder/rc/edit?"
+        "type=news&article_id=123456789&is_pay_training_camp="
+    )
+    platform._open_works_page.assert_awaited_once()
+    platform._search_works.assert_awaited_once_with("唯一标题")
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "https://evil.example/builder/preview/s?id=1",
+        "https://baijiahao.baidu.com/builder/preview/s",
+        "https://baijiahao.baidu.com/builder/preview/s?id=1&id=2",
+        "https://baijiahao.baidu.com/builder/preview/s?id=1&foo=bar",
+        "https://baijiahao.baidu.com/builder/preview/s?id=1&token=secret",
+        "https://baijiahao.baidu.com/builder/preview/s?id=1#fragment",
+    ],
+)
+def test_preview_href_fails_closed_without_one_safe_same_origin_id(value: str) -> None:
+    with pytest.raises(DraftResultUnknownError):
+        BaijiahaoPlatform._edit_url_from_preview_href(value)
 
 
 def test_image_upload_fails_closed_without_exact_body_trigger() -> None:

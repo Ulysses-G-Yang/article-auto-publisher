@@ -419,7 +419,23 @@ class BaijiahaoPlatform(BasePlatform):
                     )).filter(visible).map(text);
                     return hasExactTitle && actions.includes('修改');
                 });
-                return rows.map((row, index) => ({index, title}));
+                return rows.map((row, index) => {
+                    const preview = Array.from(row.querySelectorAll('a[href]'))
+                        .find((link) => {
+                            try {
+                                const parsed = new URL(link.href, location.href);
+                                return parsed.origin === location.origin
+                                    && parsed.pathname === '/builder/preview/s';
+                            } catch (_) {
+                                return false;
+                            }
+                        });
+                    return {
+                        index,
+                        title,
+                        preview_href: preview ? preview.href : '',
+                    };
+                });
             }""",
             title,
         )
@@ -1513,41 +1529,55 @@ class BaijiahaoPlatform(BasePlatform):
             raise DraftResultUnknownError(
                 "DRAFT_RESULT_UNKNOWN: 百家号未找到标题精确匹配的唯一草稿"
             )
-        clicked = await self.page.evaluate(
-            """title => {
-                const visible = (el) => !!(
-                    el && (el.offsetWidth || el.offsetHeight
-                        || el.getClientRects().length)
-                );
-                const text = (el) => (el?.innerText || el?.textContent || '')
-                    .replace(/\\s+/g, ' ').trim();
-                const rows = Array.from(document.querySelectorAll(
-                    'div[class*="articleItem"]'
-                )).filter((row) => visible(row) && Array.from(
-                    row.querySelectorAll('a, span, p, div, h1, h2, h3, h4')
-                ).some((el) => visible(el) && text(el) === title
-                    && !Array.from(el.children).some(
-                        (child) => text(child) === title
-                    )));
-                if (rows.length !== 1) return false;
-                const action = Array.from(rows[0].querySelectorAll(
-                    'button, a, [role="button"], span'
-                )).find((el) => visible(el) && text(el) === '修改');
-                if (!action) return false;
-                action.click();
-                return true;
-            }""",
-            title,
+        # 百家号“修改”是 React 处理器调用 window.open，而不是当前页链接。
+        # 浏览器可能拦截该弹窗，导致平台已保存成功但验证器误报结果未知。
+        # 作品行还提供同源预览链接，其 id 与编辑器 article_id 相同；只从
+        # 唯一匹配行提取该稳定 ID，再由持久化核验函数主动打开编辑页。
+        return self._edit_url_from_preview_href(
+            str(matches[0].get("preview_href") or "")
         )
-        if not clicked:
+
+    @classmethod
+    def _edit_url_from_preview_href(cls, value: str) -> str:
+        parts = urlsplit(str(value or ""))
+        if (
+            parts.scheme != "https"
+            or parts.netloc != "baijiahao.baidu.com"
+            or parts.path != "/builder/preview/s"
+            or parts.username
+            or parts.password
+            or parts.fragment
+        ):
             raise DraftResultUnknownError(
-                "DRAFT_RESULT_UNKNOWN: 百家号唯一草稿缺少精确修改入口"
+                "DRAFT_RESULT_UNKNOWN: 百家号草稿预览地址无效"
             )
-        await self.page.wait_for_url(
-            re.compile(r"https://baijiahao\.baidu\.com/builder/rc/edit(?:\?|$)"),
-            timeout=20000,
+        values = parse_qsl(parts.query, keep_blank_values=True)
+        article_ids = [item for key, item in values if key == "id"]
+        if (
+            len(values) != 1
+            or len(article_ids) != 1
+            or re.fullmatch(r"[A-Za-z0-9_-]{1,128}", article_ids[0]) is None
+        ):
+            raise DraftResultUnknownError(
+                "DRAFT_RESULT_UNKNOWN: 百家号草稿预览 ID 无法唯一验证"
+            )
+        return cls._safe_draft_url(
+            urlunsplit(
+                (
+                    "https",
+                    "baijiahao.baidu.com",
+                    "/builder/rc/edit",
+                    urlencode(
+                        {
+                            "type": "news",
+                            "article_id": article_ids[0],
+                            "is_pay_training_camp": "",
+                        }
+                    ),
+                    "",
+                )
+            )
         )
-        return self._safe_draft_url(self.page.url)
 
     @staticmethod
     def _safe_draft_url(value: str) -> str:

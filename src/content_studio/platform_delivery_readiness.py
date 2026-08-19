@@ -72,6 +72,11 @@ _SMZDM_WORD_EVIDENCE = (
     "docs/acceptance/SMZDM_WORD_DRAFT_20260819.md",
     "codex_handoff_20260817.md",
 )
+_BAIJIAHAO_WORD_DATE = date(2026, 8, 19)
+_BAIJIAHAO_WORD_EVIDENCE = (
+    "docs/acceptance/BAIJIAHAO_WORD_DRAFT_20260819.md",
+    "codex_handoff_20260817.md",
+)
 _XHS_EVIDENCE = (
     "codex_handoff_20260817.md",
     "docs/XIAOHONGSHU_RISK_CONTROL.md",
@@ -411,7 +416,44 @@ PLATFORM_DELIVERY_READINESS: tuple[PlatformDeliveryReadiness, ...] = (
     ),
     _build_platform(
         "baijiahao",
-        real_failed=frozenset({"cover"}),
+        facet_overrides={
+            "account_session": (
+                ReadinessStatus.REAL_VERIFIED,
+                "account_active_valid_during_word_draft_acceptance",
+                _BAIJIAHAO_WORD_DATE,
+                _BAIJIAHAO_WORD_EVIDENCE,
+            ),
+            "editor_entry": (
+                ReadinessStatus.REAL_VERIFIED,
+                "real_ueditor_entry_passed",
+                _BAIJIAHAO_WORD_DATE,
+                _BAIJIAHAO_WORD_EVIDENCE,
+            ),
+            "text_draft": (
+                ReadinessStatus.REAL_VERIFIED,
+                "real_reopen_verified_22_text_and_heading_blocks",
+                _BAIJIAHAO_WORD_DATE,
+                _BAIJIAHAO_WORD_EVIDENCE,
+            ),
+            "body_images": (
+                ReadinessStatus.REAL_VERIFIED,
+                "real_reopen_verified_7_ordered_body_images",
+                _BAIJIAHAO_WORD_DATE,
+                _BAIJIAHAO_WORD_EVIDENCE,
+            ),
+            "cover": (
+                ReadinessStatus.REAL_FAILED,
+                "cover_control_not_independently_verified",
+                _BAIJIAHAO_WORD_DATE,
+                _BAIJIAHAO_WORD_EVIDENCE,
+            ),
+            "draft_verification": (
+                ReadinessStatus.REAL_VERIFIED,
+                "persisted_draft_and_29_ordered_tokens_reopened",
+                _BAIJIAHAO_WORD_DATE,
+                _BAIJIAHAO_WORD_EVIDENCE,
+            ),
+        },
     ),
     _build_platform(
         "xiaohongshu",

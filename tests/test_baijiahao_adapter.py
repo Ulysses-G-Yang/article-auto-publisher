@@ -94,6 +94,16 @@ class _FormatPage:
             return self.options
         raise AssertionError(f"unexpected selector: {selector}")
 
+    async def wait_for_selector(
+        self,
+        selector: str,
+        *,
+        state: str,
+        timeout: int,
+    ) -> None:
+        assert selector == "div[class*='dropdownItem'] span[class*='label']"
+        assert (state, timeout) == ("visible", 5000)
+
 
 def _build_image_platform(page: _ImagePage) -> BaijiahaoPlatform:
     platform = BaijiahaoPlatform()

@@ -751,6 +751,11 @@ class BaijiahaoPlatform(BasePlatform):
             if len(visible) != 1:
                 raise RuntimeError("标题格式入口不唯一")
             await visible[0].click(timeout=5000)
+            await self.page.wait_for_selector(
+                "div[class*='dropdownItem'] span[class*='label']",
+                state="visible",
+                timeout=5000,
+            )
             options = self.page.locator(
                 "div[class*='dropdownItem']:visible span[class*='label']:visible"
             )

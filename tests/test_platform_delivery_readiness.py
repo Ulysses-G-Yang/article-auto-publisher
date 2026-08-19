@@ -93,7 +93,7 @@ def test_handoff_facts_are_not_promoted_after_unrerun_fixes() -> None:
     assert by_platform["xiaohongshu"].facets["body_images"].status is ReadinessStatus.REAL_FAILED
     assert by_platform["baijiahao"].facets["cover"].status is ReadinessStatus.REAL_FAILED
 
-    for platform in ("xiaoheihe", "zol", "smzdm"):
+    for platform in ("xiaoheihe", "smzdm"):
         assert (
             by_platform[platform].facets["body_images"].status
             is ReadinessStatus.RETEST_REQUIRED
@@ -102,6 +102,25 @@ def test_handoff_facts_are_not_promoted_after_unrerun_fixes() -> None:
             by_platform[platform].facets["draft_verification"].status
             is ReadinessStatus.RETEST_REQUIRED
         )
+
+
+def test_zol_word_draft_is_promoted_only_after_persisted_reopen_evidence() -> None:
+    record = readiness_by_platform()["zol"]
+    for facet_name in (
+        "account_session",
+        "editor_entry",
+        "text_draft",
+        "body_images",
+        "draft_verification",
+    ):
+        facet = record.facets[facet_name]
+        assert facet.status is ReadinessStatus.REAL_VERIFIED
+        assert facet.last_real_check.isoformat() == "2026-08-19"
+        assert "ZOL_WORD_DRAFT_20260819.md" in " ".join(facet.evidence_refs)
+
+    assert record.facets["cover"].status is ReadinessStatus.RETEST_REQUIRED
+    assert can_run_stable_image_draft("zol")
+    assert not can_run_complete_word_draft("zol")
 
 
 def test_xiaoheihe_word_attempt_updates_only_facet_level_evidence() -> None:
@@ -128,7 +147,7 @@ def test_xiaoheihe_word_attempt_updates_only_facet_level_evidence() -> None:
     [
         ("zhihu", True),
         ("xiaoheihe", False),
-        ("zol", False),
+        ("zol", True),
         ("smzdm", False),
         ("baijiahao", False),
         ("xiaohongshu", False),

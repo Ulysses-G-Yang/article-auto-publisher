@@ -57,6 +57,11 @@ _XHH_WORD_EVIDENCE = (
     "docs/acceptance/XIAOHEIHE_WORD_DRAFT_20260819.md",
     "codex_handoff_20260817.md",
 )
+_ZOL_WORD_DATE = date(2026, 8, 19)
+_ZOL_WORD_EVIDENCE = (
+    "docs/acceptance/ZOL_WORD_DRAFT_20260819.md",
+    "codex_handoff_20260817.md",
+)
 _XHS_EVIDENCE = (
     "codex_handoff_20260817.md",
     "docs/XIAOHONGSHU_RISK_CONTROL.md",
@@ -171,14 +176,7 @@ def _build_platform(
 ) -> PlatformDeliveryReadiness:
     facets: dict[str, FacetReadiness] = {}
     for facet in FACET_NAMES:
-        if facet == "account_session":
-            facets[facet] = _facet(
-                platform,
-                facet,
-                ReadinessStatus.REAL_VERIFIED,
-                page_state="account_active_valid",
-            )
-        elif facet == "public_publish":
+        if facet == "public_publish":
             facets[facet] = _facet(
                 platform,
                 facet,
@@ -195,6 +193,13 @@ def _build_platform(
                 page_state=page_state,
                 last_real_check=last_real_check,
                 evidence_refs=evidence_refs,
+            )
+        elif facet == "account_session":
+            facets[facet] = _facet(
+                platform,
+                facet,
+                ReadinessStatus.REAL_VERIFIED,
+                page_state="account_active_valid",
             )
         elif facet in real_verified:
             facets[facet] = _facet(
@@ -265,7 +270,47 @@ PLATFORM_DELIVERY_READINESS: tuple[PlatformDeliveryReadiness, ...] = (
             ),
         },
     ),
-    _build_platform("zol"),
+    _build_platform(
+        "zol",
+        facet_overrides={
+            "account_session": (
+                ReadinessStatus.REAL_VERIFIED,
+                "account_active_valid_during_word_draft_acceptance",
+                _ZOL_WORD_DATE,
+                _ZOL_WORD_EVIDENCE,
+            ),
+            "editor_entry": (
+                ReadinessStatus.REAL_VERIFIED,
+                "real_creator_editor_entry_passed",
+                _ZOL_WORD_DATE,
+                _ZOL_WORD_EVIDENCE,
+            ),
+            "text_draft": (
+                ReadinessStatus.REAL_VERIFIED,
+                "real_reopen_verified_22_text_and_heading_blocks",
+                _ZOL_WORD_DATE,
+                _ZOL_WORD_EVIDENCE,
+            ),
+            "body_images": (
+                ReadinessStatus.REAL_VERIFIED,
+                "real_reopen_verified_7_ordered_body_images",
+                _ZOL_WORD_DATE,
+                _ZOL_WORD_EVIDENCE,
+            ),
+            "cover": (
+                ReadinessStatus.RETEST_REQUIRED,
+                "cover_control_not_independently_verified",
+                _ZOL_WORD_DATE,
+                _ZOL_WORD_EVIDENCE,
+            ),
+            "draft_verification": (
+                ReadinessStatus.REAL_VERIFIED,
+                "unique_title_and_29_ordered_tokens_reopened",
+                _ZOL_WORD_DATE,
+                _ZOL_WORD_EVIDENCE,
+            ),
+        },
+    ),
     _build_platform(
         "zhihu",
         real_verified=frozenset(

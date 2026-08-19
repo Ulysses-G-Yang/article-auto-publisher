@@ -1292,6 +1292,55 @@ class ZOLPlatform(BasePlatform):
                 "ZOL_HEADING_DOM_VERIFY_FAILED: 标题层级或顺序回读不一致"
             )
 
+    async def _collapse_editor_selection_at_end(self, editor, editor_kind: str) -> None:
+        """在编辑器所属 document 内把 DOM Range 明确折叠到正文末尾。"""
+
+        try:
+            if editor_kind == "textarea":
+                await editor.evaluate(
+                    """
+                    (el) => {
+                        el.focus();
+                        const end = (el.value || '').length;
+                        el.setSelectionRange(end, end);
+                    }
+                    """
+                )
+                return
+            if editor_kind not in {"iframe", "contenteditable"}:
+                raise ContentValidationError(
+                    "ZOL_CONTENT_CURSOR_FAILED: 编辑器类型未确认"
+                )
+            positioned = await editor.evaluate(
+                """
+                (root) => {
+                    const selection = root.ownerDocument.getSelection();
+                    if (!selection) return false;
+                    root.focus();
+                    const range = root.ownerDocument.createRange();
+                    range.selectNodeContents(root);
+                    range.collapse(false);
+                    selection.removeAllRanges();
+                    selection.addRange(range);
+                    return selection.rangeCount === 1 && selection.isCollapsed;
+                }
+                """
+            )
+            if positioned is not True:
+                raise ContentValidationError(
+                    "ZOL_CONTENT_CURSOR_FAILED: 正文末尾选区未确认"
+                )
+        except ContentValidationError:
+            raise
+        except Exception as exc:
+            if self._exception_means_browser_closed(exc):
+                raise BrowserLifecycleError(
+                    "BROWSER_CONTEXT_CLOSED: ZOL 定位正文末尾时页面已关闭"
+                ) from exc
+            raise ContentValidationError(
+                "ZOL_CONTENT_CURSOR_FAILED: 无法定位正文末尾"
+            ) from exc
+
     async def _apply_heading_block(
         self,
         editor,
@@ -1308,7 +1357,7 @@ class ZOLPlatform(BasePlatform):
             raise ContentValidationError(
                 "ZOL_HEADING_EDITOR_UNSUPPORTED: TinyMCE iframe 未确认"
             )
-        await self.page.keyboard.press("Control+End")
+        await self._collapse_editor_selection_at_end(editor, editor_kind)
         await self.page.keyboard.insert_text(text)
         formatted = await editor.evaluate(
             """
@@ -1464,7 +1513,7 @@ class ZOLPlatform(BasePlatform):
                     previous_kind = "text"
                 elif btype == "text" and block_text:
                     editor, editor_kind = await self._click_editor(editor)
-                    await self.page.keyboard.press("Control+End")
+                    await self._collapse_editor_selection_at_end(editor, editor_kind)
                     if previous_kind == "text":
                         await self.page.keyboard.press("Enter")
                         await self.page.keyboard.press("Enter")
@@ -1479,7 +1528,7 @@ class ZOLPlatform(BasePlatform):
                     previous_kind = "text"
                 elif btype == "image":
                     editor, editor_kind = await self._click_editor(editor)
-                    await self.page.keyboard.press("Control+End")
+                    await self._collapse_editor_selection_at_end(editor, editor_kind)
                     image_file = self._image_path_for_block(block, images)
                     if image_file:
                         upload_result = await self._upload_image(image_file) or {}

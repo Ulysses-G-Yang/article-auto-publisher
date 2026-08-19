@@ -677,6 +677,7 @@ def test_first_image_prefix_mismatch_stops_before_second_upload() -> None:
 
     platform.page = FakePage("contenteditable")
     platform.simulator.random_delay = AsyncMock()
+    platform._collapse_editor_selection_at_end = AsyncMock()
     platform._upload_image = AsyncMock(
         return_value={
             "success": True,
@@ -784,6 +785,8 @@ def test_heading_experiment_applies_format_and_requires_h2_dom_node() -> None:
             self.tag_after_format = "p"
 
         async def evaluate(self, script, *args):
+            if "createRange" in script:
+                return True
             if "execCommand" in script:
                 self.tag_after_format = args[0]
                 return True
@@ -822,6 +825,8 @@ def test_heading_experiment_rejects_format_true_when_dom_stays_paragraph() -> No
 
     class _ParagraphEditor(FakeLocator):
         async def evaluate(self, script, *_args):
+            if "createRange" in script:
+                return True
             if "execCommand" in script:
                 return True
             if "const tokens" in script:
@@ -910,6 +915,25 @@ def test_dom_reader_excludes_editor_ui_chrome_without_dropping_images() -> None:
     assert "ignoredUiTags" in captured["script"]
     assert "contenteditable') === 'false'" in captured["script"]
     assert "node.querySelectorAll('img')" in captured["script"]
+
+
+def test_editor_cursor_uses_collapsed_dom_range_instead_of_keyboard_shortcut() -> None:
+    captured = {}
+
+    class _Editor(FakeLocator):
+        async def evaluate(self, script, *_args):
+            captured["script"] = script
+            return True
+
+    platform = ZOLPlatform()
+    asyncio.run(
+        platform._collapse_editor_selection_at_end(_Editor(tag="body"), "iframe")
+    )
+
+    assert "createRange" in captured["script"]
+    assert "selectNodeContents(root)" in captured["script"]
+    assert "range.collapse(false)" in captured["script"]
+    assert "selection.addRange(range)" in captured["script"]
 
 
 def test_expected_text_tokens_keep_three_paragraph_boundaries() -> None:

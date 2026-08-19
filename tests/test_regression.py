@@ -2154,6 +2154,7 @@ class RegressionTests(DatabaseTestCase):
         platform = ZOLPlatform()
         platform.page = FakePage("iframe")
         platform.simulator.random_delay = AsyncMock()
+        platform._collapse_editor_selection_at_end = AsyncMock()
         platform._upload_image = AsyncMock(return_value={
             "success": False,
             "error_code": "ZOL_IMAGE_UPLOAD_CONTROL_NOT_FOUND",
@@ -2172,6 +2173,7 @@ class RegressionTests(DatabaseTestCase):
         platform = ZOLPlatform()
         platform.page = FakePage("iframe")
         platform.simulator.random_delay = AsyncMock()
+        platform._collapse_editor_selection_at_end = AsyncMock()
         platform._upload_image = AsyncMock(side_effect=[
             {
                 "success": True,
@@ -2203,6 +2205,7 @@ class RegressionTests(DatabaseTestCase):
         platform = ZOLPlatform()
         platform.page = FakePage("iframe")
         platform.simulator.random_delay = AsyncMock()
+        platform._collapse_editor_selection_at_end = AsyncMock()
         platform._upload_image = AsyncMock(return_value={
             "success": False,
             "error_code": "ZOL_IMAGE_UPLOAD_CONTROL_NOT_FOUND",

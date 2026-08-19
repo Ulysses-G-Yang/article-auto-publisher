@@ -54,6 +54,7 @@ def test_missing_image_position_is_reported_and_never_uploads_first_image() -> N
     platform = ZOLPlatform()
     platform.page = FakePage("contenteditable")
     platform.simulator.random_delay = AsyncMock()
+    platform._collapse_editor_selection_at_end = AsyncMock()
     platform._upload_image = AsyncMock()
 
     with pytest.raises(ContentValidationError, match="ZOL_IMAGE_FILE_MISSING"):
@@ -104,6 +105,7 @@ def test_multi_image_success_without_dom_fingerprint_stays_failed() -> None:
     platform = ZOLPlatform()
     platform.page = FakePage("contenteditable")
     platform.simulator.random_delay = AsyncMock()
+    platform._collapse_editor_selection_at_end = AsyncMock()
     platform._upload_image = AsyncMock(
         side_effect=[
             {"success": True, "filename": "image-1.png"},
@@ -164,6 +166,7 @@ def test_image_upload_re_resolves_rebuilt_iframe_before_next_text_block() -> Non
     page = FakePage("iframe")
     platform.page = page
     platform.simulator.random_delay = AsyncMock()
+    platform._collapse_editor_selection_at_end = AsyncMock()
     original_body = page.frame_body
     replacement_body = FakeLocator(
         page=page,

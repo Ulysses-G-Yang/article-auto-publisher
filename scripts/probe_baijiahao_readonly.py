@@ -342,6 +342,54 @@ CLICK_MARKER_SCRIPT = r"""(marker) => {
     return {status: 'MARKER_CLICKED', count: 1};
 }"""
 
+COVER_FIELD_SCRIPT = r"""() => {
+    const visible = (element) => {
+        const rect = element.getBoundingClientRect();
+        const style = getComputedStyle(element);
+        return rect.width > 0 && rect.height > 0
+            && style.display !== 'none' && style.visibility !== 'hidden';
+    };
+    const compact = (value) => String(value || '').replace(/\s+/g, ' ').trim();
+    const leaves = Array.from(document.querySelectorAll('span, label, button, div'))
+        .filter((element) => visible(element))
+        .filter((element) => {
+            const own = Array.from(element.childNodes)
+                .filter((node) => node.nodeType === Node.TEXT_NODE)
+                .map((node) => compact(node.nodeValue)).join(' ');
+            return own.includes('封面') || own.includes('更换封面')
+                || own.includes('修改封面') || own.includes('选择封面');
+        });
+    const rows = [];
+    for (const leaf of leaves) {
+        const row = leaf.closest('.cheetah-form-item') || leaf.parentElement;
+        if (!row || rows.some((item) => item.node === row)) continue;
+        const actions = Array.from(row.querySelectorAll(
+            'button, [role="button"], [tabindex], img, [class*="cover" i]'
+        )).filter(visible);
+        rows.push({
+            node: row,
+            shape: {
+                label: compact(leaf.innerText || leaf.textContent).slice(0, 40),
+                row_class: typeof row.className === 'string'
+                    ? row.className.slice(0, 180) : '',
+                image_count: Array.from(row.querySelectorAll('img')).filter(visible).length,
+                background_count: Array.from(row.querySelectorAll('*')).filter((element) =>
+                    visible(element)
+                    && (getComputedStyle(element).backgroundImage || '') !== 'none'
+                ).length,
+                actions: actions.slice(0, 20).map((action) => ({
+                    tag: action.tagName.toLowerCase(),
+                    text: compact(action.innerText || action.getAttribute('aria-label'))
+                        .slice(0, 40),
+                    class_name: typeof action.className === 'string'
+                        ? action.className.slice(0, 180) : '',
+                })),
+            },
+        });
+    }
+    return rows.slice(0, 10).map((item) => item.shape);
+}"""
+
 
 def _sanitize(payload: Any) -> dict[str, Any]:
     if not isinstance(payload, dict):
@@ -451,6 +499,7 @@ async def run_probe(
     find_title: str | None = None,
     open_found_draft: bool = False,
     inspect_cover_asset_id: str | None = None,
+    inspect_cover_state: bool = False,
 ) -> dict[str, Any]:
     account = _load_account(account_id, allow_error_state=identity_structure)
     cover_asset_path = (
@@ -563,6 +612,37 @@ async def run_probe(
                 click_result = raw_click if isinstance(raw_click, dict) else {}
                 if click_result.get("status") == "MARKER_CLICKED":
                     await asyncio.sleep(5)
+            if inspect_cover_state:
+                field_state = await platform.page.evaluate(COVER_FIELD_SCRIPT)
+                persisted_cover_present = await platform._has_persisted_cover()
+                if click_result is None or click_result.get("status") != "MARKER_CLICKED":
+                    return {
+                        "status": "OK",
+                        "location": _safe_location(platform.page.url),
+                        "click_result": click_result,
+                        "cover_field_state": field_state,
+                        "persisted_cover_present": persisted_cover_present,
+                        "persisted_cover_state": None,
+                        "cleanup_ok": True,
+                        "cookie_signal_before": cookie_signal_before,
+                        "cookie_signal_after": cookie_signal_after,
+                    }
+                modal = await platform._wait_for_cover_modal()
+                if modal is None:
+                    raise ProbeError("COVER_MODAL_NOT_READY")
+                persisted_state = await platform._cover_preview_state(modal)
+                cleanup_ok = await platform._dismiss_cover_dialogs()
+                return {
+                    "status": "OK",
+                    "location": _safe_location(platform.page.url),
+                    "click_result": click_result,
+                    "cover_field_state": field_state,
+                    "persisted_cover_present": persisted_cover_present,
+                    "persisted_cover_state": persisted_state,
+                    "cleanup_ok": cleanup_ok,
+                    "cookie_signal_before": cookie_signal_before,
+                    "cookie_signal_after": cookie_signal_after,
+                }
             cover_upload_probe: dict[str, Any] | None = None
             if cover_asset_path is not None:
                 if click_result is None or click_result.get("status") != "MARKER_CLICKED":
@@ -779,6 +859,11 @@ def parse_args() -> argparse.Namespace:
             "随后取消弹窗；不确认、不保存"
         ),
     )
+    parser.add_argument(
+        "--inspect-cover-state",
+        action="store_true",
+        help="只读记录已保存草稿的脱敏封面状态并取消弹窗",
+    )
     return parser.parse_args()
 
 
@@ -799,6 +884,19 @@ async def _main() -> int:
             )
         )
         return 2
+    if args.inspect_cover_state and not (
+        args.open_found_draft
+        and args.find_title
+        and args.click_marker == "COVER_PICKER"
+        and not args.inspect_cover_upload
+    ):
+        print(
+            json.dumps(
+                {"status": "COVER_STATE_PROBE_SCOPE_INVALID"},
+                ensure_ascii=False,
+            )
+        )
+        return 2
     try:
         result = await run_probe(
             args.account_id,
@@ -810,6 +908,7 @@ async def _main() -> int:
             find_title=args.find_title,
             open_found_draft=args.open_found_draft,
             inspect_cover_asset_id=args.inspect_cover_upload,
+            inspect_cover_state=args.inspect_cover_state,
         )
     except ProbeError as exc:
         result = {"status": str(exc)}

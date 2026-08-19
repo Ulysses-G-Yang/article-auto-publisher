@@ -68,6 +68,7 @@ class BaijiahaoPlatform(BasePlatform):
         self.last_login_error = ""
         self._identity_payload: dict[str, str | int | bool] | None = None
         self._expected_persisted_blocks: list[dict] | None = None
+        self._expected_persisted_cover = False
         self._preflight_title = ""
         self._media_progress_state: dict[str, int] | None = None
 
@@ -1238,6 +1239,7 @@ class BaijiahaoPlatform(BasePlatform):
     async def apply_cover(self, cover: dict | None = None) -> dict:
         """把内容版本冻结的封面素材交给百家号封面弹窗。"""
 
+        self._expected_persisted_cover = False
         strategy = str((cover or {}).get("strategy") or "NONE").upper()
         if strategy == "NONE":
             return {"success": True, "cover_status": "not_required"}
@@ -1256,7 +1258,11 @@ class BaijiahaoPlatform(BasePlatform):
                 "error_code": "BAIJIAHAO_COVER_ASSET_UNAVAILABLE",
                 "error": "百家号封面素材不可用",
             }
-        return await self.set_cover(local_path)
+        result = await self.set_cover(local_path)
+        self._expected_persisted_cover = bool(
+            result.get("success") and result.get("cover_status") == "completed"
+        )
+        return result
 
     async def set_cover(self, image_path: str) -> dict:
         """通过「选择封面」弹窗上传本地图片设为封面（3:2 预览后确定）。
@@ -1917,6 +1923,7 @@ class BaijiahaoPlatform(BasePlatform):
         expected_tokens = self._expected_content_tokens(blocks)
         actual_tokens: list[dict] = []
         title_matches = False
+        content_matches = False
         for attempt in range(20):
             title_editor = await self._title_editor_locator()
             if title_editor is not None:
@@ -1924,19 +1931,65 @@ class BaijiahaoPlatform(BasePlatform):
                 title_matches = actual_title == title
             if title_matches:
                 actual_tokens = await self._read_editor_dom_tokens()
-                if actual_tokens == expected_tokens:
-                    return
+                content_matches = actual_tokens == expected_tokens
+                if content_matches:
+                    if (
+                        not self._expected_persisted_cover
+                        or await self._has_persisted_cover()
+                    ):
+                        return
             if attempt + 1 < 20:
                 await asyncio.sleep(1.5)
         if not title_matches:
             raise DraftResultUnknownError(
                 "DRAFT_RESULT_UNKNOWN: 百家号草稿重开后标题不一致"
             )
+        if content_matches and self._expected_persisted_cover:
+            raise DraftResultUnknownError(
+                "DRAFT_RESULT_UNKNOWN: 百家号草稿重开后封面未持久化"
+            )
         raise DraftResultUnknownError(
             "DRAFT_RESULT_UNKNOWN: 百家号草稿重开后图文结构不完整; "
             f"expected={self._token_shape(expected_tokens)}; "
             f"actual={self._token_shape(actual_tokens)}"
         )
+
+    async def _has_persisted_cover(self) -> bool:
+        """只读核验已保存编辑页的唯一封面缩略图。"""
+
+        self._require_page_alive("百家号核验持久化封面")
+        try:
+            count = await self.page.evaluate(
+                r"""() => {
+                    const visible = (element) => {
+                        const rect = element.getBoundingClientRect();
+                        const style = getComputedStyle(element);
+                        return rect.width > 0 && rect.height > 0
+                            && style.display !== 'none'
+                            && style.visibility !== 'hidden';
+                    };
+                    const hasClassSuffix = (element, suffix) =>
+                        typeof element?.className === 'string'
+                        && element.className.split(/\s+/).some((token) =>
+                            token.startsWith('FeEditorApp-')
+                            && token.endsWith(suffix));
+                    return Array.from(document.querySelectorAll('img'))
+                        .filter((image) => visible(image)
+                            && image.complete && image.naturalWidth > 0
+                            && hasClassSuffix(image, '-coverImg')
+                            && Array.from(document.querySelectorAll('*')).some(
+                                (wrapper) => hasClassSuffix(wrapper, '-coverWrapper')
+                                    && wrapper.contains(image)
+                            )).length;
+                }"""
+            )
+        except Exception as exc:
+            if self._exception_means_browser_closed(exc):
+                raise BrowserLifecycleError(
+                    "BROWSER_CONTEXT_CLOSED: 百家号核验持久化封面时页面已关闭"
+                ) from exc
+            return False
+        return int(count or 0) == 1
 
     async def publish_now(self, title: str = "") -> str:
         self._not_implemented("公开发布")

@@ -6,7 +6,10 @@ from __future__ import annotations
 import asyncio
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
+
+import pytest
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 SRC_ROOT = PROJECT_ROOT / "src"
@@ -14,6 +17,7 @@ if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
 from platforms.baijiahao import BaijiahaoPlatform
+from platforms.base import DraftResultUnknownError
 from platforms.weibo import WeiboPlatform
 
 
@@ -402,6 +406,7 @@ def test_baijiahao_apply_cover_uses_exact_frozen_asset(tmp_path: Path) -> None:
     )
 
     assert result["cover_status"] == "completed"
+    assert platform._expected_persisted_cover is True
     platform.set_cover.assert_awaited_once_with(str(cover_path))
 
 
@@ -431,7 +436,50 @@ def test_baijiahao_apply_cover_none_is_not_required() -> None:
     result = run(platform.apply_cover({"strategy": "NONE"}))
 
     assert result == {"success": True, "cover_status": "not_required"}
+    assert platform._expected_persisted_cover is False
     platform.set_cover.assert_not_awaited()
+
+
+def test_baijiahao_persisted_cover_requires_unique_loaded_thumbnail() -> None:
+    platform = BaijiahaoPlatform()
+    platform.page = SimpleNamespace(
+        is_closed=lambda: False,
+        evaluate=AsyncMock(side_effect=[1, 0, 2]),
+    )
+
+    assert run(platform._has_persisted_cover()) is True
+    assert run(platform._has_persisted_cover()) is False
+    assert run(platform._has_persisted_cover()) is False
+
+
+def test_baijiahao_reopen_rejects_missing_persisted_cover() -> None:
+    title = "持久化封面校验"
+    blocks = [{"type": "text", "text": "正文", "position": 0}]
+    platform = BaijiahaoPlatform()
+    platform.page = SimpleNamespace(
+        is_closed=lambda: False,
+        goto=AsyncMock(),
+    )
+    platform._expected_persisted_blocks = blocks
+    platform._expected_persisted_cover = True
+    platform._wait_for_editor_ready = AsyncMock()
+    platform._title_editor_locator = AsyncMock(
+        return_value=SimpleNamespace(inner_text=AsyncMock(return_value=title))
+    )
+    platform._read_editor_dom_tokens = AsyncMock(
+        return_value=platform._expected_content_tokens(blocks)
+    )
+    platform._has_persisted_cover = AsyncMock(return_value=False)
+
+    with patch("platforms.baijiahao.asyncio.sleep", new=AsyncMock()):
+        with pytest.raises(DraftResultUnknownError, match="封面未持久化"):
+            run(
+                platform._verify_persisted_draft(
+                    title,
+                    "https://baijiahao.baidu.com/builder/rc/edit?type=news"
+                    "&article_id=123",
+                )
+            )
 
 
 def test_baijiahao_base_pipeline_dispatches_exact_frozen_cover(tmp_path: Path) -> None:

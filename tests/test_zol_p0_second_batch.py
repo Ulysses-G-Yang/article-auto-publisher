@@ -22,7 +22,7 @@ from platforms.zol import ZOLPlatform, _ZOLDraftSnapshot
 from tests.test_regression import FakeLocator
 
 
-def _payload(items: list[dict], total: int | None = None) -> dict:
+def _payload(items: list[dict], total: int | str | None = None) -> dict:
     return {
         "errcode": 0,
         "data": {
@@ -51,6 +51,15 @@ def test_draft_list_empty_success_is_a_reliable_baseline() -> None:
     assert snapshot.total_num == 0
     assert snapshot.draft_ids == frozenset()
     assert snapshot.title_to_ids == {}
+
+
+def test_draft_list_accepts_observed_decimal_string_total() -> None:
+    snapshot = ZOLPlatform._parse_draft_list_payload(
+        _payload([{"draftId": "one", "title": "草稿"}], total="1")
+    )
+
+    assert snapshot.total_num == 1
+    assert snapshot.title_to_ids == {"草稿": frozenset({"one"})}
 
 
 def test_draft_list_errcode_failure_is_not_an_empty_baseline() -> None:
@@ -107,6 +116,62 @@ def test_zol_preflight_runs_before_auto_saving_editor_navigation() -> None:
     draft_page.close.assert_awaited_once()
 
 
+def test_media_binding_saves_once_then_reopens_exact_draft_id() -> None:
+    platform = ZOLPlatform()
+    platform._current_title = "绑定草稿"
+    editor = FakeLocator(tag="body")
+    control = FakeLocator(count=1, visible=True)
+    platform.page = SimpleNamespace(
+        locator=Mock(return_value=control),
+        goto=AsyncMock(),
+        wait_for_timeout=AsyncMock(),
+    )
+    platform._resolve_content_editor = AsyncMock(
+        return_value=(editor, "contenteditable")
+    )
+    platform._dismiss_editor_overlays = AsyncMock()
+    platform._commit_editor_dom_change = AsyncMock()
+    platform._collect_draft_save_response = AsyncMock(return_value="bound-id")
+    platform._editor_probe_count = AsyncMock(return_value=1)
+    platform._read_content_editor_text = AsyncMock(return_value="第一段\n\n第二段")
+    platform._autosave_responses = [object()]
+
+    asyncio.run(platform._bind_draft_before_media("第一段\n\n第二段"))
+
+    assert platform._bound_draft_id == "bound-id"
+    assert platform._autosave_responses == []
+    platform._collect_draft_save_response.assert_awaited_once_with(control)
+    editor_url = platform.page.goto.await_args.args[0]
+    assert "draftId=bound-id" in editor_url
+    assert "businessType=1" in editor_url
+    assert "editType=1" in editor_url
+    assert "isSecond=0" in editor_url
+
+
+def test_bound_image_autosaves_must_all_match_single_draft_id() -> None:
+    platform = ZOLPlatform()
+    platform._bound_draft_id = "bound-id"
+    platform.DRAFT_RESPONSE_WAIT_SECONDS = 0
+    platform._autosave_responses = [
+        _SaveResponse({"errcode": 0, "data": {"draftId": "bound-id"}}),
+        _SaveResponse({"errcode": 0, "data": {"draftId": "bound-id"}}),
+    ]
+
+    asyncio.run(platform._wait_for_bound_autosave(0))
+
+
+def test_bound_image_autosave_rejects_new_draft_entity() -> None:
+    platform = ZOLPlatform()
+    platform._bound_draft_id = "bound-id"
+    platform.DRAFT_RESPONSE_WAIT_SECONDS = 0
+    platform._autosave_responses = [
+        _SaveResponse({"errcode": 0, "data": {"draftId": "other-id"}})
+    ]
+
+    with pytest.raises(DraftResultUnknownError, match="未绑定草稿实体"):
+        asyncio.run(platform._wait_for_bound_autosave(0))
+
+
 class _SaveControl:
     def __init__(self, page) -> None:
         self.page = page
@@ -132,7 +197,7 @@ class _SaveResponse:
         *,
         status: int = 200,
         method: str = "POST",
-        url: str = "https://post.zol.com.cn/api/v1/creator.content.save?trace=hidden",
+        url: str = "https://post.zol.com.cn/api/v1/creator.content.draft.save.orther?trace=hidden",
     ) -> None:
         self.payload = payload
         self.status = status
@@ -257,14 +322,34 @@ def test_navigate_to_editor_does_not_require_draft_list_baseline() -> None:
 @pytest.mark.parametrize(
     "method,url,expected",
     [
-        ("POST", "https://post.zol.com.cn/api/v1/creator.content.save", True),
-        ("POST", "https://open-api.zol.com.cn/api/v1/creator.content.save", True),
-        ("GET", "https://post.zol.com.cn/api/v1/creator.content.save", False),
-        ("POST", "https://analytics.zol.com.cn/api/v1/creator.content.save", False),
-        ("POST", "https://post.zol.com.cn/api/v1/creator.content.getlist", False),
+        (
+            "POST",
+            "https://open-api.zol.com.cn/api/v1/creator.content.draft.save.orther",
+            True,
+        ),
+        (
+            "GET",
+            "https://open-api.zol.com.cn/api/v1/creator.content.draft.save.orther",
+            False,
+        ),
+        (
+            "POST",
+            "https://analytics.zol.com.cn/api/v1/creator.content.draft.save.orther",
+            False,
+        ),
+        ("POST", "https://post.zol.com.cn/api/v1/creator.content.image.upload", False),
+        (
+            "POST",
+            "https://post.zol.com.cn/api/v1/creator.content.Materials.uploadPic",
+            False,
+        ),
+        (
+            "POST",
+            "https://post.zol.com.cn/api/v1/creator.content.Materials.bindDraftIdToPicMaterial",
+            False,
+        ),
+        ("POST", "https://post.zol.com.cn/api/v1/creator.content.draft.getlist", False),
         ("POST", "https://post.zol.com.cn/api/v1/creator.content.publish", False),
-        ("POST", "https://post.zol.com.cn/api/v1/creator.content.PREVIEWWAP", False),
-        ("POST", "https://open-api.zol.com.cn/api/v1/creator.content.previewWap", False),
     ],
 )
 def test_draft_save_response_filter_is_business_context_only(method, url, expected) -> None:
@@ -306,7 +391,7 @@ def test_save_draft_uses_exact_control_once_and_proves_new_entity() -> None:
         responses=[
             _SaveResponse(
                 {"errcode": 0, "data": {"draftId": "new-id"}},
-                url="https://open-api.zol.com.cn/api/v1/creator.content.save",
+                url="https://open-api.zol.com.cn/api/v1/creator.content.draft.save.orther",
             )
         ],
         card_states=[[], [_SaveCard("新草稿", {"data-draft-id": "new-id"})]],
@@ -454,7 +539,7 @@ def test_preview_response_is_ignored_before_unique_save_response() -> None:
             ),
             _SaveResponse(
                 {"errcode": 0, "data": {"draftId": "new-id"}},
-                url="https://open-api.zol.com.cn/api/v1/creator.content.save",
+                url="https://open-api.zol.com.cn/api/v1/creator.content.draft.save.orther",
             ),
         ],
         card_states=[[], [_SaveCard("新草稿", {"data-draft-id": "new-id"})]],
@@ -472,7 +557,7 @@ def test_preview_wap_response_is_ignored_before_unique_save_response() -> None:
             ),
             _SaveResponse(
                 {"errcode": 0, "data": {"draftId": "new-id"}},
-                url="https://open-api.zol.com.cn/api/v1/creator.content.save",
+                url="https://open-api.zol.com.cn/api/v1/creator.content.draft.save.orther",
             ),
         ],
         card_states=[[], [_SaveCard("新草稿", {"data-draft-id": "new-id"})]],
@@ -741,6 +826,9 @@ def test_first_image_prefix_mismatch_stops_before_second_upload() -> None:
 
     platform.page = FakePage("contenteditable")
     platform.simulator.random_delay = AsyncMock()
+    platform._bind_draft_before_media = AsyncMock()
+    platform._bound_draft_id = "bound-id"
+    platform._wait_for_bound_autosave = AsyncMock()
     platform._collapse_editor_selection_at_end = AsyncMock()
     platform._remove_delayed_duplicate_images = AsyncMock()
     platform._upload_image = AsyncMock(
@@ -1007,6 +1095,9 @@ def test_second_image_checks_existing_prefix_before_new_upload() -> None:
     platform = ZOLPlatform()
     platform.page = FakePage("contenteditable")
     platform.simulator.random_delay = AsyncMock()
+    platform._bind_draft_before_media = AsyncMock()
+    platform._bound_draft_id = "bound-id"
+    platform._wait_for_bound_autosave = AsyncMock()
     platform._collapse_editor_selection_at_end = AsyncMock()
     platform._remove_delayed_duplicate_images = AsyncMock()
     platform._upload_image = AsyncMock(

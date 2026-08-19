@@ -9,7 +9,7 @@ from collections import Counter
 from dataclasses import dataclass
 from io import BytesIO
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import urlencode, urlparse
 
 from loguru import logger
 
@@ -58,21 +58,11 @@ class ZOLPlatform(BasePlatform):
     )
     TOPIC_BUTTON = "button:has-text('选择话题')"
     TOPIC_MODAL = ".ant-modal-wrap:visible"
-    DRAFT_LIST_API_MARKER = "/api/v1/creator.content.getlist"
+    DRAFT_LIST_API_MARKER = "/api/v1/creator.content.draft.getlist"
     DRAFT_SAVE_API_HOSTS = frozenset({"post.zol.com.cn", "open-api.zol.com.cn"})
     DRAFT_SAVE_API_PREFIX = "/api/v1/creator.content."
-    DRAFT_SAVE_API_EXCLUDED_ACTIONS = frozenset(
-        {
-            "getlist",
-            "preview",
-            "previewwap",
-            "publish",
-            "submit",
-            "delete",
-            "remove",
-        }
-    )
-    DRAFT_SAVE_SELECTOR = ".draft-btns .foot-item:has(.foot-item-text:text-is('存草稿'))"
+    DRAFT_SAVE_API_ACTIONS = frozenset({"draft.save.orther"})
+    DRAFT_SAVE_SELECTOR = ".foot-item:has-text('存草稿')"
     DRAFT_RESPONSE_WAIT_SECONDS = 5.0
     DRAFT_RESPONSE_POLL_INTERVAL = 0.1
     DRAFT_CARD_POLL_DELAYS = (0, 1, 2, 3, 4)
@@ -96,6 +86,8 @@ class ZOLPlatform(BasePlatform):
         self._draft_baseline: _ZOLDraftSnapshot | None = None
         self._autosave_responses: list[object] = []
         self._autosave_listener = None
+        self._current_title = ""
+        self._bound_draft_id: str | None = None
 
     def _stop_autosave_observer(self) -> None:
         """移除当前页面的自动保存监听器，不影响已收集的响应证据。"""
@@ -540,7 +532,7 @@ class ZOLPlatform(BasePlatform):
             if not path.startswith(cls.DRAFT_SAVE_API_PREFIX):
                 return False
             action = path[len(cls.DRAFT_SAVE_API_PREFIX):].casefold()
-            return action not in cls.DRAFT_SAVE_API_EXCLUDED_ACTIONS
+            return action in cls.DRAFT_SAVE_API_ACTIONS
         except Exception:
             return False
 
@@ -624,15 +616,16 @@ class ZOLPlatform(BasePlatform):
         data = payload.get("data")
         if not isinstance(data, dict):
             raise DraftBaselineError("DRAFT_BASELINE_UNAVAILABLE: ZOL 草稿列表数据结构无效")
-        total_num = data.get("totalNum")
+        raw_total_num = data.get("totalNum")
+        total_num = cls._scalar_draft_id(raw_total_num)
         items = data.get("list")
         if (
-            isinstance(total_num, bool)
-            or not isinstance(total_num, int)
-            or total_num < 0
+            total_num is None
+            or not total_num.isdecimal()
             or not isinstance(items, list)
         ):
             raise DraftBaselineError("DRAFT_BASELINE_UNAVAILABLE: ZOL 草稿列表分页字段无效")
+        parsed_total_num = int(total_num)
 
         draft_ids: set[str] = set()
         title_to_ids: dict[str, set[str]] = {}
@@ -660,10 +653,10 @@ class ZOLPlatform(BasePlatform):
             if normalized_title:
                 title_to_ids.setdefault(normalized_title, set()).add(draft_id)
 
-        if total_num == 0 and items:
+        if parsed_total_num == 0 and items:
             raise DraftBaselineError("DRAFT_BASELINE_UNAVAILABLE: ZOL 草稿总数与列表不一致")
         return _ZOLDraftSnapshot(
-            total_num=total_num,
+            total_num=parsed_total_num,
             draft_ids=frozenset(draft_ids),
             title_to_ids={
                 title: frozenset(ids) for title, ids in title_to_ids.items()
@@ -812,6 +805,7 @@ class ZOLPlatform(BasePlatform):
                         f"ZOL 标题验证失败: expected={expected!r}, actual={actual!r}"
                     )
                 logger.info("ZOL 标题输入并验证成功: {}", expected[:30])
+                self._current_title = expected
                 return
             except Exception as exc:
                 if self._exception_means_browser_closed(exc):
@@ -1713,6 +1707,108 @@ class ZOLPlatform(BasePlatform):
             observed_positions
         )
 
+    async def _bind_draft_before_media(self, expected_text: str) -> None:
+        """先建立唯一草稿实体，再让图片流程只更新该实体。"""
+
+        if self._bound_draft_id is not None:
+            return
+        if not self._current_title:
+            raise DraftResultUnknownError(
+                "DRAFT_RESULT_UNKNOWN: 图片写入前缺少已验证标题"
+            )
+        if not expected_text.strip():
+            raise ContentValidationError(
+                "ZOL_DRAFT_BIND_TEXT_REQUIRED: 纯图片稿无法安全建立 ZOL 草稿实体"
+            )
+
+        editor, editor_kind = await self._resolve_content_editor()
+        await self._dismiss_editor_overlays()
+        await editor.fill(expected_text)
+        await self._commit_editor_dom_change(editor, editor_kind)
+
+        control = self.page.locator(self.DRAFT_SAVE_SELECTOR)
+        if await control.count() != 1 or not await control.is_visible():
+            raise SelectorError(
+                "ZOL_DRAFT_SAVE_CONTROL_UNAVAILABLE: 未找到唯一可见存草稿控件"
+            )
+
+        draft_id = await self._collect_draft_save_response(control)
+        self._bound_draft_id = draft_id
+        self._autosave_responses.clear()
+
+        editor_url = "https://post.zol.com.cn/v2/create/article?" + urlencode(
+            {
+                "draftId": draft_id,
+                "businessType": "1",
+                "editType": "1",
+                "isSecond": "0",
+            }
+        )
+        try:
+            await self.page.goto(
+                editor_url,
+                wait_until="domcontentloaded",
+                timeout=15000,
+            )
+            await self.page.wait_for_timeout(1500)
+            if await self._editor_probe_count() != 1:
+                raise SelectorError(
+                    "ZOL_BOUND_DRAFT_EDITOR_UNAVAILABLE: 绑定草稿编辑器不可用"
+                )
+            editor, editor_kind = await self._resolve_content_editor()
+            actual_text = await self._read_content_editor_text(editor, editor_kind)
+            ensure_valid_content(
+                [{"type": "text", "text": expected_text}],
+                actual_text,
+                platform="ZOL",
+                phase="绑定草稿重开后",
+            )
+        except DraftResultUnknownError:
+            raise
+        except Exception as exc:
+            raise DraftResultUnknownError(
+                "DRAFT_RESULT_UNKNOWN: 已建立草稿但无法确认绑定编辑器"
+            ) from exc
+
+    async def _wait_for_bound_autosave(self, response_count_before: int) -> None:
+        """要求一次图片动作的所有保存响应都指向已绑定实体。"""
+
+        bound_id = self._bound_draft_id
+        if bound_id is None:
+            raise DraftResultUnknownError(
+                "DRAFT_RESULT_UNKNOWN: 图片保存前未绑定草稿实体"
+            )
+
+        deadline = asyncio.get_running_loop().time() + self.DRAFT_RESPONSE_WAIT_SECONDS
+        stable_since = None
+        last_count = response_count_before
+        while asyncio.get_running_loop().time() < deadline:
+            current_count = len(self._autosave_responses)
+            if current_count > response_count_before:
+                if current_count != last_count:
+                    stable_since = asyncio.get_running_loop().time()
+                    last_count = current_count
+                elif (
+                    stable_since is not None
+                    and asyncio.get_running_loop().time() - stable_since >= 0.5
+                ):
+                    break
+            await asyncio.sleep(self.DRAFT_RESPONSE_POLL_INTERVAL)
+
+        responses = list(self._autosave_responses[response_count_before:])
+        if not responses:
+            raise DraftResultUnknownError(
+                "DRAFT_RESULT_UNKNOWN: 图片写入后未观察到绑定草稿保存响应"
+            )
+        response_ids = {
+            await self._parse_draft_save_response(response)
+            for response in responses
+        }
+        if response_ids != {bound_id}:
+            raise DraftResultUnknownError(
+                "DRAFT_RESULT_UNKNOWN: 图片写入产生了未绑定草稿实体"
+            )
+
     async def fill_content(self, content_blocks: list, images: list):
         """填写正文、插入图片，并验证文字和图片数量。"""
         self._validate_heading_contract(content_blocks)
@@ -1741,6 +1837,10 @@ class ZOLPlatform(BasePlatform):
         ]
         expected_headings_seen: list[dict] = []
         use_tinymce_blocks = has_images and has_headings
+
+        if has_images:
+            await self._bind_draft_before_media(expected_value)
+            editor, editor_kind = await self._resolve_content_editor()
 
         # 没有图片和标题时保留原 fill 快速路径；有图片或实验标题时仍按原始块顺序输入，
         # 规范化只用于读回比较，不得改变冻结内容的写入文本或排版。
@@ -1838,8 +1938,10 @@ class ZOLPlatform(BasePlatform):
                         await self._append_editor_block_anchor(editor, editor_kind)
                     image_file = self._image_path_for_block(block, images)
                     if image_file:
+                        response_count_before = len(self._autosave_responses)
                         upload_result = await self._upload_image(image_file) or {}
                         if upload_result.get("success"):
+                            await self._wait_for_bound_autosave(response_count_before)
                             fingerprint = upload_result.get("image_src_fingerprint")
                             if not isinstance(fingerprint, str) or not fingerprint:
                                 raise ContentValidationError(
@@ -2583,6 +2685,8 @@ class ZOLPlatform(BasePlatform):
             raise DraftBaselineError("DRAFT_BASELINE_UNAVAILABLE: 草稿标题为空")
         draft_page = await self._prepare_draft_verification_page(expected_title)
         try:
+            self._bound_draft_id = None
+            self._current_title = ""
             self._start_autosave_observer()
         finally:
             await draft_page.close()
@@ -2726,6 +2830,13 @@ class ZOLPlatform(BasePlatform):
             draft_page = await self._open_draft_verification_page()
 
             if autosave_id is not None:
+                if (
+                    self._bound_draft_id is not None
+                    and autosave_id != self._bound_draft_id
+                ):
+                    raise DraftResultUnknownError(
+                        "DRAFT_RESULT_UNKNOWN: 最终保存实体与绑定草稿不一致"
+                    )
                 response_id = autosave_id
             else:
                 # 即使网络监听未获得可用响应，只要草稿箱已出现同名实体，

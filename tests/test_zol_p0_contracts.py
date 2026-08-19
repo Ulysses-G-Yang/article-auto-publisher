@@ -54,6 +54,9 @@ def test_missing_image_position_is_reported_and_never_uploads_first_image() -> N
     platform = ZOLPlatform()
     platform.page = FakePage("contenteditable")
     platform.simulator.random_delay = AsyncMock()
+    platform._bind_draft_before_media = AsyncMock()
+    platform._bound_draft_id = "bound-id"
+    platform._wait_for_bound_autosave = AsyncMock()
     platform._collapse_editor_selection_at_end = AsyncMock()
     platform._upload_image = AsyncMock()
 
@@ -105,6 +108,9 @@ def test_multi_image_success_without_dom_fingerprint_stays_failed() -> None:
     platform = ZOLPlatform()
     platform.page = FakePage("contenteditable")
     platform.simulator.random_delay = AsyncMock()
+    platform._bind_draft_before_media = AsyncMock()
+    platform._bound_draft_id = "bound-id"
+    platform._wait_for_bound_autosave = AsyncMock()
     platform._collapse_editor_selection_at_end = AsyncMock()
     platform._upload_image = AsyncMock(
         side_effect=[
@@ -166,6 +172,9 @@ def test_image_upload_re_resolves_rebuilt_iframe_before_next_text_block() -> Non
     page = FakePage("iframe")
     platform.page = page
     platform.simulator.random_delay = AsyncMock()
+    platform._bind_draft_before_media = AsyncMock()
+    platform._bound_draft_id = "bound-id"
+    platform._wait_for_bound_autosave = AsyncMock()
     platform._collapse_editor_selection_at_end = AsyncMock()
     original_body = page.frame_body
     replacement_body = FakeLocator(

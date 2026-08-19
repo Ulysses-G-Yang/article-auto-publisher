@@ -1200,6 +1200,9 @@ class RegressionTests(DatabaseTestCase):
         page = FakePage("iframe")
         platform.page = page
         platform.simulator.random_delay = AsyncMock()
+        platform._bind_draft_before_media = AsyncMock()
+        platform._bound_draft_id = "bound-id"
+        platform._wait_for_bound_autosave = AsyncMock()
 
         async def replace_iframe_after_upload(_path):
             replacement_body = FakeLocator(page=page, tag="body", text="第一段")
@@ -2120,6 +2123,9 @@ class RegressionTests(DatabaseTestCase):
         platform = ZOLPlatform()
         platform.page = FakePage("iframe")
         platform.simulator.random_delay = AsyncMock()
+        platform._bind_draft_before_media = AsyncMock()
+        platform._bound_draft_id = "bound-id"
+        platform._wait_for_bound_autosave = AsyncMock()
         platform._upload_image = AsyncMock(return_value={
             "success": False,
             "error_code": "ZOL_IMAGE_UPLOAD_FAILED",
@@ -2154,6 +2160,9 @@ class RegressionTests(DatabaseTestCase):
         platform = ZOLPlatform()
         platform.page = FakePage("iframe")
         platform.simulator.random_delay = AsyncMock()
+        platform._bind_draft_before_media = AsyncMock()
+        platform._bound_draft_id = "bound-id"
+        platform._wait_for_bound_autosave = AsyncMock()
         platform._collapse_editor_selection_at_end = AsyncMock()
         platform._upload_image = AsyncMock(return_value={
             "success": False,
@@ -2173,6 +2182,9 @@ class RegressionTests(DatabaseTestCase):
         platform = ZOLPlatform()
         platform.page = FakePage("iframe")
         platform.simulator.random_delay = AsyncMock()
+        platform._bind_draft_before_media = AsyncMock()
+        platform._bound_draft_id = "bound-id"
+        platform._wait_for_bound_autosave = AsyncMock()
         platform._collapse_editor_selection_at_end = AsyncMock()
         platform._remove_delayed_duplicate_images = AsyncMock()
         platform._upload_image = AsyncMock(side_effect=[
@@ -2206,6 +2218,9 @@ class RegressionTests(DatabaseTestCase):
         platform = ZOLPlatform()
         platform.page = FakePage("iframe")
         platform.simulator.random_delay = AsyncMock()
+        platform._bind_draft_before_media = AsyncMock()
+        platform._bound_draft_id = "bound-id"
+        platform._wait_for_bound_autosave = AsyncMock()
         platform._collapse_editor_selection_at_end = AsyncMock()
         platform._upload_image = AsyncMock(return_value={
             "success": False,

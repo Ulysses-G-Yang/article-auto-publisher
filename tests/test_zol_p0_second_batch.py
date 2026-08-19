@@ -936,6 +936,46 @@ def test_editor_cursor_uses_collapsed_dom_range_instead_of_keyboard_shortcut() -
     assert "selection.addRange(range)" in captured["script"]
 
 
+def test_second_image_checks_existing_prefix_before_new_upload() -> None:
+    from tests.test_regression import FakePage
+
+    platform = ZOLPlatform()
+    platform.page = FakePage("contenteditable")
+    platform.simulator.random_delay = AsyncMock()
+    platform._collapse_editor_selection_at_end = AsyncMock()
+    platform._upload_image = AsyncMock(
+        return_value={
+            "success": True,
+            "filename": "first.png",
+            "image_src_fingerprint": "first-fingerprint",
+        }
+    )
+    platform._verify_content_prefix = AsyncMock(
+        side_effect=[
+            None,
+            ContentValidationError("ZOL_CONTENT_PREFIX_VERIFY_FAILED: 旧前缀已损坏"),
+        ]
+    )
+
+    with pytest.raises(ContentValidationError, match="ZOL_CONTENT_PREFIX_VERIFY_FAILED"):
+        asyncio.run(
+            platform.fill_content(
+                [
+                    {"type": "text", "text": "第一段"},
+                    {"type": "image", "position": 1},
+                    {"type": "text", "text": "第二段"},
+                    {"type": "image", "position": 2},
+                ],
+                [
+                    {"position_index": 1, "local_path": "D:/fixture/first.png"},
+                    {"position_index": 2, "local_path": "D:/fixture/second.png"},
+                ],
+            )
+        )
+
+    platform._upload_image.assert_awaited_once()
+
+
 def test_expected_text_tokens_keep_three_paragraph_boundaries() -> None:
     blocks = [
         {"type": "text", "text": "第一段"},

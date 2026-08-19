@@ -1486,6 +1486,8 @@ class ZOLPlatform(BasePlatform):
                 btype = block.get("type")
                 block_text = (block.get("text") or "").strip()
                 if btype == "heading" and block_text:
+                    editor, editor_kind = await self._click_editor(editor)
+                    await self._collapse_editor_selection_at_end(editor, editor_kind)
                     if previous_kind == "text":
                         await self.page.keyboard.press("Enter")
                         await self.page.keyboard.press("Enter")
@@ -1529,6 +1531,13 @@ class ZOLPlatform(BasePlatform):
                 elif btype == "image":
                     editor, editor_kind = await self._click_editor(editor)
                     await self._collapse_editor_selection_at_end(editor, editor_kind)
+                    if observed_image_fingerprints:
+                        # 在产生下一次真实上传副作用前，先确认已有图文前缀仍完整。
+                        # 若图片后的换行或格式化破坏了旧内容，立即 fail closed。
+                        await self._verify_content_prefix(
+                            content_blocks[:block_index],
+                            observed_image_fingerprints,
+                        )
                     image_file = self._image_path_for_block(block, images)
                     if image_file:
                         upload_result = await self._upload_image(image_file) or {}

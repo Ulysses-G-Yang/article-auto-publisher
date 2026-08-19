@@ -1036,7 +1036,7 @@ def test_tinymce_structured_block_escapes_text_and_commits_model() -> None:
     assert captured["markup"] == "<h2>A &lt; B &amp; C</h2>"
     assert "instance.insertContent(markup)" in captured["script"]
     assert "instance.save()" in captured["script"]
-    assert "doc.execCommand('insertHTML', false, markup)" in captured["script"]
+    assert "root.insertAdjacentHTML('beforeend', markup)" in captured["script"]
     assert "inputType: 'insertHTML'" in captured["script"]
 
 

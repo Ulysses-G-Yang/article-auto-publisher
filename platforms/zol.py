@@ -1506,21 +1506,13 @@ class ZOLPlatform(BasePlatform):
                         return true;
                     }
                     root.focus();
-                    const doc = root.ownerDocument;
-                    const range = doc.createRange();
-                    range.selectNodeContents(root);
-                    range.collapse(false);
-                    const selection = doc.getSelection();
-                    if (!selection) return false;
-                    selection.removeAllRanges();
-                    selection.addRange(range);
-                    const inserted = doc.execCommand('insertHTML', false, markup);
+                    root.insertAdjacentHTML('beforeend', markup);
                     root.dispatchEvent(new InputEvent('input', {
                         bubbles: true,
                         inputType: 'insertHTML'
                     }));
                     root.dispatchEvent(new Event('change', {bubbles: true}));
-                    return inserted === true;
+                    return true;
                 }
                 """,
                 markup,

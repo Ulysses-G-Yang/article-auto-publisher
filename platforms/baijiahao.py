@@ -1031,8 +1031,13 @@ class BaijiahaoPlatform(BasePlatform):
             if kind == "image":
                 normalized.append({"kind": "image"})
                 continue
+            # UEditor 会在图片相邻段落中残留 U+FFFC（对象替换字符）。图片本身
+            # 已由独立 image token 严格计数；若把该占位符混进正文，会造成
+            # “平台比冻结文本多 1 字符”的假失败。只在 DOM 比较视图中移除，
+            # 不修改冻结 ContentVersion，也不放宽真实文字比较。
+            comparison_text = str(item.get("text") or "").replace("\uFFFC", "")
             paragraphs = extract_expected_paragraphs(
-                [{"type": "text", "text": str(item.get("text") or "")}]
+                [{"type": "text", "text": comparison_text}]
             )
             for paragraph in paragraphs:
                 if kind == "heading":

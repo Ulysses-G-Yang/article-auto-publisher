@@ -402,6 +402,26 @@ def test_dom_reader_ignores_baijiahao_image_caption_and_blank_sentinels() -> Non
     assert "|| zeroWidthParagraph" in script
 
 
+def test_dom_reader_removes_ueditor_object_placeholder_from_text_only() -> None:
+    editor = _Item()
+    editor.evaluate = AsyncMock(
+        return_value=[
+            {"kind": "text", "level": 0, "text": "冻结正文\uFFFC"},
+            {"kind": "image"},
+        ]
+    )
+    platform = BaijiahaoPlatform()
+    platform.page = object()
+    platform._current_body_editor = AsyncMock(return_value=editor)
+
+    result = asyncio.run(platform._read_editor_dom_tokens())
+
+    assert result == [
+        {"kind": "text", "text": "冻结正文"},
+        {"kind": "image"},
+    ]
+
+
 def test_current_body_editor_reacquires_after_transient_iframe_rebuild() -> None:
     body = _Item()
     body.count = AsyncMock(return_value=1)

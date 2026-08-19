@@ -249,6 +249,7 @@ def test_navigate_to_editor_does_not_require_draft_list_baseline() -> None:
         ("POST", "https://post.zol.com.cn/api/v1/creator.content.getlist", False),
         ("POST", "https://post.zol.com.cn/api/v1/creator.content.publish", False),
         ("POST", "https://post.zol.com.cn/api/v1/creator.content.PREVIEWWAP", False),
+        ("POST", "https://open-api.zol.com.cn/api/v1/creator.content.previewWap", False),
     ],
 )
 def test_draft_save_response_filter_is_business_context_only(method, url, expected) -> None:
@@ -384,6 +385,24 @@ def test_preview_response_is_ignored_before_unique_save_response() -> None:
             _SaveResponse(
                 {"errcode": 0, "data": {"id": "preview-id"}},
                 url="https://open-api.zol.com.cn/api/v1/creator.content.preview",
+            ),
+            _SaveResponse(
+                {"errcode": 0, "data": {"draftId": "new-id"}},
+                url="https://open-api.zol.com.cn/api/v1/creator.content.save",
+            ),
+        ],
+        card_states=[[], [_SaveCard("新草稿", {"data-draft-id": "new-id"})]],
+    )
+
+    assert asyncio.run(platform.save_draft("新草稿")).endswith("/draft")
+
+
+def test_preview_wap_response_is_ignored_before_unique_save_response() -> None:
+    platform, _draft_page = _save_platform(
+        responses=[
+            _SaveResponse(
+                {"errcode": 0, "data": {"id": "preview-id"}},
+                url="https://open-api.zol.com.cn/api/v1/creator.content.previewWap",
             ),
             _SaveResponse(
                 {"errcode": 0, "data": {"draftId": "new-id"}},

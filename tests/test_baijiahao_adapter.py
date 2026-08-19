@@ -80,6 +80,27 @@ class _DraftTabPage:
         return self.tabs
 
 
+class _SearchInput:
+    def __init__(self) -> None:
+        self.fill = AsyncMock()
+        self.press = AsyncMock()
+
+    async def count(self) -> int:
+        return 1
+
+    async def is_visible(self) -> bool:
+        return True
+
+
+class _SearchPage:
+    def __init__(self, search: _SearchInput) -> None:
+        self.search = search
+
+    def locator(self, selector: str):
+        assert selector == 'input[placeholder*="输入标题关键字"]'
+        return SimpleNamespace(first=self.search)
+
+
 class _Modal(_Item):
     def __init__(self, image_inputs: list[_Item], confirms: list[_Item]) -> None:
         super().__init__()
@@ -172,6 +193,29 @@ def test_draft_tab_requires_one_visible_selected_tab() -> None:
     asyncio.run(platform._select_draft_tab())
 
     tab.click.assert_awaited_once_with(timeout=5000)
+
+
+def test_draft_search_uses_debounced_fill_without_enter() -> None:
+    search = _SearchInput()
+    platform = BaijiahaoPlatform()
+    platform.page = _SearchPage(search)
+
+    with patch("platforms.baijiahao.asyncio.sleep", new=AsyncMock()):
+        asyncio.run(platform._search_works("唯一标题"))
+
+    search.fill.assert_awaited_once_with("唯一标题")
+    search.press.assert_not_awaited()
+
+
+def test_matching_draft_rows_are_scoped_to_article_item_containers() -> None:
+    page = SimpleNamespace(evaluate=AsyncMock(return_value=[{"index": 0}]))
+    platform = BaijiahaoPlatform()
+    platform.page = page
+
+    assert asyncio.run(platform._matching_work_rows("唯一标题")) == [{"index": 0}]
+    script = page.evaluate.await_args.args[0]
+    assert 'div[class*="articleItem"]' in script
+    assert "actions.includes('修改')" in script
 
 
 def test_image_upload_fails_closed_without_exact_body_trigger() -> None:

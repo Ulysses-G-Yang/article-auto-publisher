@@ -389,8 +389,9 @@ class BaijiahaoPlatform(BasePlatform):
                 "DRAFT_BASELINE_FAILED: 百家号作品搜索框不可用"
             )
         await search.fill(title)
-        await search.press("Enter")
-        await self.simulator.random_delay(1.5, 2.5)
+        # 真实页面是受控输入 + 防抖查询。按 Enter 会触发表单默认行为并把
+        # 已正确过滤的草稿行清空；填值后等待防抖完成即可。
+        await asyncio.sleep(4)
 
     async def _matching_work_rows(self, title: str) -> list[dict]:
         """返回标题精确匹配且同时包含“修改”动作的最小作品行。"""
@@ -403,23 +404,21 @@ class BaijiahaoPlatform(BasePlatform):
                 );
                 const text = (el) => (el?.innerText || el?.textContent || '')
                     .replace(/\\s+/g, ' ').trim();
-                const leaves = Array.from(
-                    document.querySelectorAll('a, span, p, div, h1, h2, h3, h4')
-                ).filter((el) => visible(el) && text(el) === title
-                    && !Array.from(el.children).some((child) => text(child) === title));
-                const rows = [];
-                for (const leaf of leaves) {
-                    let row = leaf;
-                    while (row && row !== document.body) {
-                        const actions = Array.from(
-                            row.querySelectorAll('button, a, [role="button"], span')
-                        ).filter(visible).map(text);
-                        if (actions.includes('修改')) break;
-                        row = row.parentElement;
-                    }
-                    if (!row || row === document.body || rows.includes(row)) continue;
-                    rows.push(row);
-                }
+                const rows = Array.from(document.querySelectorAll(
+                    'div[class*="articleItem"]'
+                )).filter((row) => {
+                    if (!visible(row)) return false;
+                    const hasExactTitle = Array.from(row.querySelectorAll(
+                        'a, span, p, div, h1, h2, h3, h4'
+                    )).some((el) => visible(el) && text(el) === title
+                        && !Array.from(el.children).some(
+                            (child) => text(child) === title
+                        ));
+                    const actions = Array.from(row.querySelectorAll(
+                        'button, a, [role="button"], span'
+                    )).filter(visible).map(text);
+                    return hasExactTitle && actions.includes('修改');
+                });
                 return rows.map((row, index) => ({index, title}));
             }""",
             title,
@@ -1522,20 +1521,21 @@ class BaijiahaoPlatform(BasePlatform):
                 );
                 const text = (el) => (el?.innerText || el?.textContent || '')
                     .replace(/\\s+/g, ' ').trim();
-                const leaf = Array.from(
-                    document.querySelectorAll('a, span, p, div, h1, h2, h3, h4')
-                ).find((el) => visible(el) && text(el) === title
-                    && !Array.from(el.children).some((child) => text(child) === title));
-                if (!leaf) return false;
-                let row = leaf;
-                while (row && row !== document.body) {
-                    const action = Array.from(
-                        row.querySelectorAll('button, a, [role="button"], span')
-                    ).find((el) => visible(el) && text(el) === '修改');
-                    if (action) { action.click(); return true; }
-                    row = row.parentElement;
-                }
-                return false;
+                const rows = Array.from(document.querySelectorAll(
+                    'div[class*="articleItem"]'
+                )).filter((row) => visible(row) && Array.from(
+                    row.querySelectorAll('a, span, p, div, h1, h2, h3, h4')
+                ).some((el) => visible(el) && text(el) === title
+                    && !Array.from(el.children).some(
+                        (child) => text(child) === title
+                    )));
+                if (rows.length !== 1) return false;
+                const action = Array.from(rows[0].querySelectorAll(
+                    'button, a, [role="button"], span'
+                )).find((el) => visible(el) && text(el) === '修改');
+                if (!action) return false;
+                action.click();
+                return true;
             }""",
             title,
         )

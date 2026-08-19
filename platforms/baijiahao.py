@@ -33,7 +33,6 @@ from platforms.base import (
 from platforms.content_validation import (
     ContentValidationError,
     extract_expected_paragraphs,
-    normalize_for_comparison,
     safe_media_error,
 )
 from platforms.media_progress import safe_media_progress
@@ -760,40 +759,48 @@ class BaijiahaoPlatform(BasePlatform):
             ) from exc
 
     async def _apply_h2_to_current_block(self) -> None:
-        """把 Word H2 映射到百家号字号菜单中的“标题”。"""
+        """把 Word H2 映射到百家号当前正文段落的 21px 标题样式。
+
+        百家号 2026 年编辑器的字号下拉框由 React 门户渲染。真实验收确认，
+        点击“标题”菜单项会重置整块编辑器并短暂移除正文 iframe，导致随后
+        的段落无法继续写入。UEditor 的正文仍以 iframe ``body`` DOM 作为
+        保存源，因此这里把样式严格施加到当前选区所属的根级段落，并派发
+        ``input``/``selectionchange``，避免依赖不稳定的外围菜单实现。
+
+        该方法只改变当前段落样式，不改文字、不移动段落，也不影响冻结内容
+        版本的哈希。若无法唯一确定当前根级段落则失败关闭。
+        """
 
         try:
-            trigger = self.page.locator(".edui-for-customfontsize:visible")
-            visible = [
-                trigger.nth(index)
-                for index in range(await trigger.count())
-                if await trigger.nth(index).is_visible()
-            ]
-            if len(visible) != 1:
-                raise RuntimeError("标题格式入口不唯一")
-            await visible[0].click(timeout=5000)
-            await self.page.wait_for_selector(
-                "div[class*='dropdownItem'] span[class*='label']",
-                state="visible",
-                timeout=5000,
+            editor = await self._current_body_editor()
+            applied = await editor.evaluate(
+                """root => {
+                    const doc = root.ownerDocument;
+                    const selection = doc.getSelection();
+                    let node = selection && selection.anchorNode;
+                    if (node && node.nodeType === Node.TEXT_NODE) {
+                        node = node.parentElement;
+                    }
+                    let block = node instanceof Element ? node : null;
+                    while (block && block.parentElement !== root) {
+                        block = block.parentElement;
+                    }
+                    if (!block || block.parentElement !== root
+                            || !(block.innerText || block.textContent || '').trim()) {
+                        return false;
+                    }
+                    block.style.fontSize = '21px';
+                    root.dispatchEvent(new InputEvent('input', {
+                        bubbles: true,
+                        composed: true,
+                        inputType: 'formatFontSize',
+                    }));
+                    doc.dispatchEvent(new Event('selectionchange', {bubbles: true}));
+                    return block.style.fontSize === '21px';
+                }"""
             )
-            options = self.page.locator(
-                "div[class*='dropdownItem']:visible span[class*='label']:visible"
-            )
-            candidates = []
-            for index in range(await options.count()):
-                option = options.nth(index)
-                if not await option.is_visible():
-                    continue
-                label = normalize_for_comparison(await option.inner_text())
-                if label == "标题":
-                    candidates.append(option.locator(".."))
-            if len(candidates) != 1:
-                raise RuntimeError(
-                    f"标题格式选项不唯一: candidates={len(candidates)}"
-                )
-            await candidates[0].click(timeout=5000)
-            await options.first.wait_for(state="hidden", timeout=5000)
+            if applied is not True:
+                raise RuntimeError("当前标题段落无法唯一定位")
         except Exception as exc:
             if self._exception_means_browser_closed(exc):
                 raise BrowserLifecycleError(

@@ -7,6 +7,7 @@ import pytest
 
 from platforms.baijiahao import BaijiahaoPlatform
 from platforms.base import DraftBaselineError, DraftResultUnknownError
+from platforms.content_validation import ContentValidationError
 
 
 class _Item:
@@ -157,23 +158,32 @@ def test_image_mapping_never_falls_back_to_first_unrelated_image() -> None:
     assert BaijiahaoPlatform._image_path_for_block(block, images) is None
 
 
-def test_heading_uses_exact_dropdown_item_instead_of_page_wide_text() -> None:
-    trigger = _Item()
-    title = _Item(text=" 标题 ")
-    body = _Item(text="正文")
-    title_parent = _Item()
-    body_parent = _Item()
-    title.parent = title_parent
-    body.parent = body_parent
+def test_heading_formats_only_current_ueditor_block_without_opening_menu() -> None:
+    editor = _Item()
+    editor.evaluate = AsyncMock(return_value=True)
     platform = BaijiahaoPlatform()
-    platform.page = _FormatPage(trigger, [title, body])
+    platform.page = object()
+    platform._current_body_editor = AsyncMock(return_value=editor)
 
     asyncio.run(platform._apply_h2_to_current_block())
 
-    trigger.click.assert_awaited_once()
-    title_parent.click.assert_awaited_once()
-    title.click.assert_not_awaited()
-    body.click.assert_not_awaited()
+    platform._current_body_editor.assert_awaited_once()
+    editor.evaluate.assert_awaited_once()
+    script = editor.evaluate.await_args.args[0]
+    assert "block.parentElement !== root" in script
+    assert "block.style.fontSize = '21px'" in script
+    assert "InputEvent('input'" in script
+
+
+def test_heading_fails_closed_when_current_root_block_is_not_identifiable() -> None:
+    editor = _Item()
+    editor.evaluate = AsyncMock(return_value=False)
+    platform = BaijiahaoPlatform()
+    platform.page = object()
+    platform._current_body_editor = AsyncMock(return_value=editor)
+
+    with pytest.raises(ContentValidationError, match="BAIJIAHAO_HEADING_APPLY_FAILED"):
+        asyncio.run(platform._apply_h2_to_current_block())
 
 
 def test_appinfo_identity_requires_matching_stable_ids_and_name() -> None:

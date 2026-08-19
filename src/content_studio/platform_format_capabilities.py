@@ -101,8 +101,9 @@ class PlatformFormatCapabilities:
         return self._declarations
 
 
-# 2026-08-19：小黑盒与知乎均已用同一份 v2 Word 内容完成交错插图、
-# 标题映射和保存后重开 DOM 核验。未真实证明的 heading level 仍保持关闭。
+# 2026-08-19：小黑盒、知乎与什么值得买均已用同一份 v2 Word 内容完成
+# 交错插图、标题映射和保存后重开 DOM 核验。未真实证明的 heading level
+# 仍保持关闭。
 DEFAULT_PLATFORM_FORMAT_CAPABILITIES = PlatformFormatCapabilities(
     {
         "xiaoheihe": PlatformFormatDeclaration(
@@ -112,6 +113,11 @@ DEFAULT_PLATFORM_FORMAT_CAPABILITIES = PlatformFormatCapabilities(
         ),
         "zhihu": PlatformFormatDeclaration(
             "zhihu",
+            frozenset({"heading", "image_order"}),
+            frozenset({2}),
+        ),
+        "smzdm": PlatformFormatDeclaration(
+            "smzdm",
             frozenset({"heading", "image_order"}),
             frozenset({2}),
         ),

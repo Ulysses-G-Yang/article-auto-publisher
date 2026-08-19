@@ -85,24 +85,13 @@ def test_matrix_validation_checks_existing_relative_evidence_and_public_gate() -
                     assert facet.last_real_check is not None
 
 
-def test_handoff_facts_are_not_promoted_after_unrerun_fixes() -> None:
+def test_unrerun_platform_facts_are_not_promoted() -> None:
     by_platform = readiness_by_platform()
 
     assert by_platform["zhihu"].facets["body_images"].status is ReadinessStatus.REAL_VERIFIED
     assert by_platform["xiaohongshu"].facets["text_draft"].status is ReadinessStatus.REAL_VERIFIED
     assert by_platform["xiaohongshu"].facets["body_images"].status is ReadinessStatus.REAL_FAILED
     assert by_platform["baijiahao"].facets["cover"].status is ReadinessStatus.REAL_FAILED
-
-    for platform in ("smzdm",):
-        assert (
-            by_platform[platform].facets["body_images"].status
-            is ReadinessStatus.RETEST_REQUIRED
-        )
-        assert (
-            by_platform[platform].facets["draft_verification"].status
-            is ReadinessStatus.RETEST_REQUIRED
-        )
-
 
 def test_zol_word_draft_is_promoted_only_after_persisted_reopen_evidence() -> None:
     record = readiness_by_platform()["zol"]
@@ -161,13 +150,32 @@ def test_zhihu_word_draft_is_promoted_only_after_persisted_reopen_evidence() -> 
     assert not can_run_complete_word_draft("zhihu")
 
 
+def test_smzdm_word_draft_is_promoted_only_after_persisted_reopen_evidence() -> None:
+    record = readiness_by_platform()["smzdm"]
+    for facet_name in (
+        "account_session",
+        "editor_entry",
+        "text_draft",
+        "body_images",
+        "draft_verification",
+    ):
+        facet = record.facets[facet_name]
+        assert facet.status is ReadinessStatus.REAL_VERIFIED
+        assert facet.last_real_check.isoformat() == "2026-08-19"
+        assert "SMZDM_WORD_DRAFT_20260819.md" in " ".join(facet.evidence_refs)
+
+    assert record.facets["cover"].status is ReadinessStatus.RETEST_REQUIRED
+    assert can_run_stable_image_draft("smzdm")
+    assert not can_run_complete_word_draft("smzdm")
+
+
 @pytest.mark.parametrize(
     ("platform", "expected"),
     [
         ("zhihu", True),
         ("xiaoheihe", True),
         ("zol", True),
-        ("smzdm", False),
+        ("smzdm", True),
         ("baijiahao", False),
         ("xiaohongshu", False),
         ("unknown", False),

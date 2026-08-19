@@ -209,6 +209,20 @@ def test_expected_tokens_preserve_word_text_heading_image_order() -> None:
     ]
 
 
+def test_current_body_editor_reacquires_after_transient_iframe_rebuild() -> None:
+    body = _Item()
+    body.count = AsyncMock(return_value=1)
+    platform = BaijiahaoPlatform()
+    platform.page = object()
+    platform._body_editor_locator = AsyncMock(side_effect=[None, body])
+
+    with patch("platforms.baijiahao.asyncio.sleep", new=AsyncMock()):
+        result = asyncio.run(platform._current_body_editor(timeout_seconds=1))
+
+    assert result is body
+    assert platform._body_editor_locator.await_count == 2
+
+
 def test_preflight_rejects_existing_exact_title_before_editor_side_effect() -> None:
     platform = BaijiahaoPlatform()
     platform.page = object()

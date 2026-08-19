@@ -719,11 +719,32 @@ class BaijiahaoPlatform(BasePlatform):
             "media_error": media_error,
         }
 
-    async def _current_body_editor(self):
-        editor = await self._body_editor_locator()
-        if editor is None or await editor.count() == 0 or not await editor.is_visible():
-            raise SelectorError("百家号正文编辑器未找到或当前不可见")
-        return editor
+    async def _current_body_editor(self, *, timeout_seconds: float = 10):
+        """重新解析当前 UEditor iframe，容忍格式/图片操作造成的短暂重建。"""
+
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout_seconds
+        while loop.time() < deadline:
+            self._require_page_alive("百家号定位当前正文编辑器")
+            try:
+                editor = await self._body_editor_locator()
+                if (
+                    editor is not None
+                    and await editor.count() > 0
+                    and await editor.is_visible()
+                ):
+                    return editor
+            except BrowserLifecycleError:
+                raise
+            except Exception as exc:
+                if self._exception_means_browser_closed(exc):
+                    raise BrowserLifecycleError(
+                        "BROWSER_CONTEXT_CLOSED: 百家号定位正文时页面已关闭"
+                    ) from exc
+            remaining = deadline - loop.time()
+            if remaining > 0:
+                await asyncio.sleep(min(0.25, remaining))
+        raise SelectorError("百家号正文编辑器在 10 秒内未重新就绪")
 
     async def _place_body_caret_at_end(self) -> None:
         editor = await self._current_body_editor()

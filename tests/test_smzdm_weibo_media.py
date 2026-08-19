@@ -10,15 +10,22 @@ from platforms.weibo import WeiboPlatform
 
 
 class FakeFileInput:
-    def __init__(self, accept: str, error: Exception | None = None) -> None:
+    def __init__(
+        self,
+        accept: str,
+        error: Exception | None = None,
+        *,
+        visible: bool = True,
+    ) -> None:
         self.accept = accept
+        self.visible = visible
         self.set_input_files = AsyncMock(side_effect=error)
 
     async def get_attribute(self, name: str) -> str | None:
         return self.accept if name == "accept" else None
 
     async def is_visible(self) -> bool:
-        return True
+        return self.visible
 
 
 class FakeFileInputs:
@@ -203,6 +210,26 @@ class FakeSmzdmKeyboard:
         self.press = AsyncMock()
 
 
+class FakeSmzdmInsertButton:
+    def __init__(self, inputs: list[FakeFileInput]) -> None:
+        self.inputs = inputs
+        self.click = AsyncMock(side_effect=self._close_panel)
+
+    @property
+    def first(self):
+        return self
+
+    async def count(self) -> int:
+        return 1
+
+    async def is_visible(self) -> bool:
+        return True
+
+    async def _close_panel(self, **_kwargs) -> None:
+        for item in self.inputs:
+            item.visible = False
+
+
 class FakeSmzdmUploadPage:
     def __init__(
         self,
@@ -213,6 +240,7 @@ class FakeSmzdmUploadPage:
     ) -> None:
         self.trigger = FakeSmzdmTrigger(present=trigger_present)
         self.inputs = FakeFileInputs(inputs)
+        self.insert_button = FakeSmzdmInsertButton(inputs)
         self.images = FakeSmzdmImageNodes(image_counts)
         self.keyboard = FakeSmzdmKeyboard()
 
@@ -221,6 +249,8 @@ class FakeSmzdmUploadPage:
             return self.trigger
         if selector == 'input[type="file"][accept*="image"]':
             return self.inputs
+        if selector == '.btn-item:has-text("插入正文")':
+            return self.insert_button
         if selector == "div.ProseMirror img":
             return self.images
         raise AssertionError(f"unexpected selector: {selector}")
@@ -252,7 +282,7 @@ def test_smzdm_opens_real_picture_control_before_uploading() -> None:
     assert result["success"] is True
     platform.page.trigger.click.assert_awaited_once()
     body_image.set_input_files.assert_awaited_once_with("photo.png", timeout=15000)
-    platform.page.keyboard.press.assert_awaited_once_with("Escape")
+    platform.page.insert_button.click.assert_awaited_once_with(timeout=5000)
 
 
 def test_smzdm_missing_picture_trigger_fails_closed() -> None:

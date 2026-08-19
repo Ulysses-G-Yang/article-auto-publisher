@@ -783,6 +783,22 @@ class SmzdmPlatform(BasePlatform):
                 }
             target_input = image_candidates[0]
             await target_input.set_input_files(str(image_path), timeout=15000)
+            insert_button = self.page.locator(
+                '.btn-item:has-text("插入正文")'
+            ).first
+            insert_ready = False
+            for _ in range(15):
+                if await insert_button.count() and await insert_button.is_visible():
+                    insert_ready = True
+                    break
+                await asyncio.sleep(1)
+            if not insert_ready:
+                return {
+                    "success": False,
+                    "error_code": "SMZDM_BODY_IMAGE_INSERT_NOT_READY",
+                    "error": "smzdm 图片已选择，但插入正文控件未就绪",
+                }
+            await insert_button.click(timeout=5000)
             after = before
             for _ in range(10):
                 await asyncio.sleep(1)
@@ -800,7 +816,22 @@ class SmzdmPlatform(BasePlatform):
                     "error_code": "SMZDM_EDITOR_IMAGE_COUNT_UNCHANGED",
                     "error": "上传后正文编辑器图片数量未稳定增加",
                 }
-            await self.page.keyboard.press("Escape")
+            panel_closed = False
+            for _ in range(8):
+                visible_inputs = 0
+                for index in range(await file_inputs.count()):
+                    if await file_inputs.nth(index).is_visible():
+                        visible_inputs += 1
+                if visible_inputs == 0:
+                    panel_closed = True
+                    break
+                await asyncio.sleep(0.25)
+            if not panel_closed:
+                return {
+                    "success": False,
+                    "error_code": "SMZDM_BODY_IMAGE_PANEL_STUCK",
+                    "error": "smzdm 图片插入后上传面板未关闭，已安全停止",
+                }
             return {"success": True, "error": ""}
         except Exception as exc:
             if self._exception_means_browser_closed(exc):

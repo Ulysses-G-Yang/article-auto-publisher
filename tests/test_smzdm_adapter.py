@@ -90,6 +90,7 @@ def test_smzdm_fill_content_processes_blocks_in_source_order() -> None:
     platform._place_body_caret_at_end = AsyncMock()
     platform._apply_h2_to_current_block = AsyncMock()
     platform._upload_image = AsyncMock(return_value={"success": True})
+    platform._create_paragraph_after_image = AsyncMock()
     platform._validate_dom_prefix = AsyncMock()
     platform._validate_dom_exact = AsyncMock()
     blocks = [
@@ -107,6 +108,7 @@ def test_smzdm_fill_content_processes_blocks_in_source_order() -> None:
     )
 
     platform._upload_image.assert_awaited_once_with("middle.png")
+    platform._create_paragraph_after_image.assert_awaited_once()
     platform._validate_dom_prefix.assert_awaited_once_with(
         blocks[:2],
         phase="图片处理后第2块",
@@ -116,6 +118,24 @@ def test_smzdm_fill_content_processes_blocks_in_source_order() -> None:
     assert keyboard.insert_text.await_args_list == [call("开头"), call("章节"), call("结尾")]
     assert result["media_status"] == "completed"
     assert result["uploaded_images"] == 1
+
+
+def test_smzdm_creates_real_paragraph_after_image_atom() -> None:
+    editor = SimpleNamespace(press=AsyncMock(), evaluate=AsyncMock(return_value=True))
+    keyboard = SimpleNamespace(press=AsyncMock())
+    platform = SmzdmPlatform()
+    platform.page = SimpleNamespace(keyboard=keyboard)
+    platform._current_body_editor = AsyncMock(return_value=editor)
+
+    asyncio.run(platform._create_paragraph_after_image())
+
+    editor.press.assert_awaited_once_with("Control+End")
+    assert keyboard.press.await_args_list == [
+        call("ArrowDown"),
+        call("ArrowRight"),
+        call("Enter"),
+    ]
+    assert "tail.tagName.toLowerCase() === 'p'" in editor.evaluate.await_args.args[0]
 
 
 class PersistedTitle:

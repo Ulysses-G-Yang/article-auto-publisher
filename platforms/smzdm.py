@@ -416,6 +416,7 @@ class SmzdmPlatform(BasePlatform):
         uploaded_images = 0
         failed_images: list[dict[str, str]] = []
         content_started = False
+        paragraph_ready_after_image = False
         for block_index, block in enumerate(content_blocks):
             if not isinstance(block, dict):
                 raise ContentValidationError("SMZDM_CONTENT_CONTRACT_INVALID: 正文块无效")
@@ -432,7 +433,10 @@ class SmzdmPlatform(BasePlatform):
                     )
                 if content_started:
                     await self._place_body_caret_at_end()
-                    await self.page.keyboard.press("Enter")
+                    if paragraph_ready_after_image:
+                        paragraph_ready_after_image = False
+                    else:
+                        await self.page.keyboard.press("Enter")
                 await self._place_body_caret_at_end()
                 lines = text.splitlines() or [text]
                 for line_index, line in enumerate(lines):
@@ -451,13 +455,18 @@ class SmzdmPlatform(BasePlatform):
                 )
             if content_started:
                 await self._place_body_caret_at_end()
-                await self.page.keyboard.press("Enter")
+                if paragraph_ready_after_image:
+                    paragraph_ready_after_image = False
+                else:
+                    await self.page.keyboard.press("Enter")
             await self._place_body_caret_at_end()
             image_path = self._image_path_for_block(block, images)
             if image_path:
                 upload_result = await self._upload_image(image_path) or {}
                 if upload_result.get("success"):
                     uploaded_images += 1
+                    await self._create_paragraph_after_image()
+                    paragraph_ready_after_image = True
                 else:
                     failed_images.append(
                         {
@@ -609,6 +618,35 @@ class SmzdmPlatform(BasePlatform):
                 ) from exc
             raise ContentValidationError(
                 "SMZDM_HEADING_APPLY_FAILED: 二级标题样式未能应用"
+            ) from exc
+
+    async def _create_paragraph_after_image(self) -> None:
+        """越过 TipTap 图片原子块，创建可继续写入的末尾正文段落。"""
+
+        editor = await self._current_body_editor()
+        try:
+            await editor.press("Control+End")
+            await self.page.keyboard.press("ArrowDown")
+            await self.page.keyboard.press("ArrowRight")
+            await self.page.keyboard.press("Enter")
+            tail_ready = bool(
+                await editor.evaluate(
+                    """root => {
+                        const tail = root.lastElementChild;
+                        return !!tail && tail.tagName.toLowerCase() === 'p'
+                            && tail.querySelectorAll('img').length === 0;
+                    }"""
+                )
+            )
+            if not tail_ready:
+                raise RuntimeError("图片后正文段落未建立")
+        except Exception as exc:
+            if self._exception_means_browser_closed(exc):
+                raise BrowserLifecycleError(
+                    "BROWSER_CONTEXT_CLOSED: smzdm 图片后创建正文段落时页面已关闭"
+                ) from exc
+            raise ContentValidationError(
+                "SMZDM_POST_IMAGE_PARAGRAPH_FAILED: 图片后无法建立正文插入点"
             ) from exc
 
     @staticmethod

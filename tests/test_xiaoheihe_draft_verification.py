@@ -150,7 +150,30 @@ async def test_hidden_or_non_card_candidate_is_ignored_by_snapshot_contract():
     assert "getBoundingClientRect" in snapshot_script
     assert "aria-hidden" in snapshot_script
     assert "document.querySelectorAll" in snapshot_script
+    assert "article.creator-draft__item" in snapshot_script
+    assert ".creator-draft__list" in snapshot_script
+    assert ".creator-draft__content" in snapshot_script
+    assert "fingerprintOccurrences" in snapshot_script
+    assert r"replace(/\s+/g" in snapshot_script
+    assert r"return /\/creator\/editor\/draft\/" in snapshot_script
+    assert "[role='status']" not in snapshot_script
     assert "document.body.innerText" not in snapshot_script
+
+
+@pytest.mark.asyncio
+async def test_playwright_evaluate_syntax_error_fails_closed_before_save():
+    baseline = _FakePage(
+        url=XiaoheihePlatform.DRAFTS_URL,
+        evaluate_error=RuntimeError(
+            "Page.evaluate: SyntaxError: missing ) after argument list"
+        )
+    )
+    main = _main_page()
+    platform = _platform(main, baseline)
+
+    assert await platform.save_draft("脚本语法异常") == ""
+    assert main.click_count == 0
+    assert baseline.closed is True
 
 
 @pytest.mark.asyncio

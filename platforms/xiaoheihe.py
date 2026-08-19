@@ -1387,11 +1387,20 @@ class XiaoheihePlatform(BasePlatform):
             return [], False
         try:
             raw_candidates = await page.evaluate(
-                """
+                r"""
                 () => {
                     const draftLinkSelector = "a[href*='/creator/editor/draft/']";
-                    const candidateSelector = `${draftLinkSelector}, [data-draft-id]`;
+                    // 小黑盒当前真实草稿箱使用 article.creator-draft__item，
+                    // 条目本身没有 href/data-draft-id；必须把它作为受控实体
+                    // 读取，不能退回 document.body 的全文匹配。
+                    const draftEntitySelector = "article.creator-draft__item";
+                    const candidateSelector = [
+                        draftLinkSelector,
+                        "[data-draft-id]",
+                        draftEntitySelector,
+                    ].join(",");
                     const rootSelector = [
+                        draftEntitySelector,
                         "[data-draft-id]",
                         "[class*='draft-card']",
                         "[class*='draft-item']",
@@ -1400,6 +1409,7 @@ class XiaoheihePlatform(BasePlatform):
                         "li",
                     ].join(",");
                     const listRootSelector = [
+                        ".creator-draft__list",
                         "[data-draft-list]",
                         "[data-testid='draft-list']",
                         "[role='list'][aria-label='草稿箱']",
@@ -1409,10 +1419,17 @@ class XiaoheihePlatform(BasePlatform):
                         ".drafts-list",
                     ].join(",");
                     const emptyStateSelector = [
+                        ".creator-draft__empty",
                         "[data-draft-empty]",
                         ".draft-empty",
                         ".empty-draft",
-                        "[role='status']",
+                    ].join(",");
+                    const loadingSelector = [
+                        "[aria-busy='true']",
+                        ".loading",
+                        ".skeleton",
+                        "[class*='loading']",
+                        "[class*='skeleton']",
                     ].join(",");
                     const genericLabels = new Set([
                         "草稿", "草稿箱", "编辑", "继续编辑", "打开", "删除",
@@ -1422,87 +1439,155 @@ class XiaoheihePlatform(BasePlatform):
                     ]);
 
                     const visible = (element) => {
-                        if (!element || element.nodeType !== Node.ELEMENT_NODE) return false;
-                        if (element.hidden || element.getAttribute("aria-hidden") === "true") {
-                            return false;
-                        }
-                        const style = window.getComputedStyle(element);
-                        if (style.display === "none" || style.visibility === "hidden" ||
-                            Number(style.opacity) === 0) return false;
-                        const rect = element.getBoundingClientRect();
-                        return rect.width > 0 && rect.height > 0;
-                    };
-
-                    const normalize = (value) => String(value || "")
-                        .replace(/\\s+/g, " ").trim().slice(0, 30);
-
-                    const isConcreteDraftHref = (href) => {
                         try {
-                            const path = new URL(href, window.location.href).pathname;
-                            return /\\/creator\\/editor\\/draft\\/[^/]+\\/?$/.test(path);
+                            if (!element || element.nodeType !== Node.ELEMENT_NODE) return false;
+                            if (element.hidden || element.getAttribute("aria-hidden") === "true") {
+                                return false;
+                            }
+                            const style = window.getComputedStyle(element);
+                            if (style.display === "none" || style.visibility === "hidden" ||
+                                Number(style.opacity) === 0) return false;
+                            const rect = element.getBoundingClientRect();
+                            return rect.width > 0 && rect.height > 0;
                         } catch (_error) {
                             return false;
                         }
                     };
 
+                    const normalize = (value) => String(value || "")
+                        .replace(/\s+/g, " ").trim().slice(0, 30);
+
+                    const fingerprint = (value) => {
+                        let hash = 2166136261;
+                        for (const character of String(value || "")) {
+                            hash ^= character.charCodeAt(0);
+                            hash = Math.imul(hash, 16777619);
+                        }
+                        return (hash >>> 0).toString(16).padStart(8, "0");
+                    };
+
+                    const isConcreteDraftHref = (href) => {
+                        try {
+                            const path = new URL(href, window.location.href).pathname;
+                            return /\/creator\/editor\/draft\/[^/]+\/?$/.test(path);
+                        } catch (_error) {
+                            return false;
+                        }
+                    };
+
+                    const titleSelector = [
+                        ".creator-draft__content",
+                        "[data-title]",
+                        "[class*='title']",
+                        "[class*='name']",
+                        "h1, h2, h3, h4, h5, h6",
+                    ].join(",");
+
                     const readText = (element) => {
                         if (!element) return "";
                         const values = [];
-                        for (const attribute of ["data-title", "title", "aria-label"]) {
-                            const value = normalize(element.getAttribute(attribute));
-                            if (value) values.push(value);
+                        try {
+                            for (const attribute of ["data-title", "title", "aria-label"]) {
+                                const value = normalize(element.getAttribute(attribute));
+                                if (value) values.push(value);
+                            }
+                            const titleNode = element.matches(titleSelector)
+                                ? element
+                                : element.querySelector(titleSelector);
+                            if (titleNode) {
+                                const value = normalize(titleNode.textContent);
+                                if (value) values.push(value);
+                            }
+                        } catch (_error) {
+                            return "";
                         }
-                        const titleNode = element.matches(
-                            "[data-title], [class*='title'], [class*='name'], "
-                            "h1, h2, h3, h4, h5, h6"
-                        ) ? element : element.querySelector(
-                            "[data-title], [class*='title'], [class*='name'], "
-                            "h1, h2, h3, h4, h5, h6"
-                        );
-                        if (titleNode) {
-                            const value = normalize(titleNode.textContent);
-                            if (value) values.push(value);
-                        }
-                        const firstLine = normalize((element.innerText || "").split("\\n")[0]);
-                        if (firstLine) values.push(firstLine);
                         return values.find((value) => !genericLabels.has(value)) || "";
                     };
 
+                    const listRootFor = (element) => {
+                        try {
+                            return element.closest(listRootSelector);
+                        } catch (_error) {
+                            return null;
+                        }
+                    };
+
+                    const entityRootFor = (element) => {
+                        try {
+                            return element.matches(draftEntitySelector)
+                                ? element
+                                : element.closest(draftEntitySelector) ||
+                                    element.closest(rootSelector) || element;
+                        } catch (_error) {
+                            return null;
+                        }
+                    };
+
                     const seen = new Set();
+                    const processedRoots = new Set();
+                    const fingerprintOccurrences = new Map();
                     const result = [];
                     for (const element of document.querySelectorAll(candidateSelector)) {
                         if (!visible(element)) continue;
-                        const link = element.matches(draftLinkSelector)
-                            ? element
-                            : element.querySelector(draftLinkSelector);
+                        const root = entityRootFor(element);
+                        if (!root || !visible(root)) continue;
+                        if (processedRoots.has(root)) continue;
+                        processedRoots.add(root);
+                        const listRoot = listRootFor(root) || listRootFor(element);
+                        if (!listRoot || !visible(listRoot)) continue;
+                        const link = root.matches(draftLinkSelector)
+                            ? root
+                            : root.querySelector(draftLinkSelector);
                         const href = link ? String(link.getAttribute("href") || "") : "";
+                        const nestedIdNode = root.querySelector("[data-draft-id]");
                         const draftId = String(
-                            element.getAttribute("data-draft-id") ||
-                            (link && link.getAttribute("data-draft-id")) || ""
+                            root.getAttribute("data-draft-id") ||
+                            (nestedIdNode ? nestedIdNode.getAttribute("data-draft-id") : "") ||
+                            element.getAttribute("data-draft-id") || ""
                         ).trim();
-                        if (!draftId && !href) continue;
+                        if (!draftId && !href && !root.matches(draftEntitySelector)) continue;
                         if (href && !isConcreteDraftHref(href)) continue;
 
-                        const root = element.closest(rootSelector) || element;
-                        if (!visible(root)) continue;
-                        const opaque = draftId ? `data:${draftId}` : `href:${href}`;
-                        if (seen.has(opaque)) continue;
-                        const title = readText(root) || readText(element);
+                        const title = readText(root);
                         if (!title) continue;
+                        let opaque = draftId ? `data:${draftId}` : `href:${href}`;
+                        if (!draftId && !href) {
+                            // 真实 article 条目没有公开 ID；只用该条目自身的
+                            // 文本/元数据指纹做同页差异判断，绝不把全局正文当实体。
+                            let identity = "";
+                            try {
+                                identity = normalize(root.innerText || "");
+                            } catch (_error) {
+                                identity = "";
+                            }
+                            if (!identity) continue;
+                            const fingerprintBase = `fingerprint:${fingerprint(identity)}`;
+                            const occurrence = fingerprintOccurrences.get(fingerprintBase) || 0;
+                            fingerprintOccurrences.set(fingerprintBase, occurrence + 1);
+                            opaque = `${fingerprintBase}:${occurrence}`;
+                        }
+                        if (seen.has(opaque)) continue;
                         seen.add(opaque);
                         result.push({opaque, title});
                     }
-                    const hasVisibleListRoot = Array.from(
+                    const visibleListRoots = Array.from(
                         document.querySelectorAll(listRootSelector)
-                    ).some(visible);
-                    const hasVisibleEmptyState = Array.from(
-                        document.querySelectorAll(emptyStateSelector)
-                    ).some((element) => visible(element) && emptyLabels.has(
-                        normalize(element.innerText)
-                    ));
+                    ).filter(visible);
+                    const hasStableListRoot = visibleListRoots.some((root) => {
+                        if (root.getAttribute("aria-busy") === "true") return false;
+                        return !root.querySelector(loadingSelector);
+                    });
+                    const hasVisibleEmptyState = visibleListRoots.some((root) =>
+                        Array.from(root.querySelectorAll(emptyStateSelector)).some(
+                            (element) => {
+                                const text = normalize(element.innerText);
+                                return visible(element) && emptyLabels.has(text);
+                            }
+                        )
+                    );
                     return {
                         candidates: result,
-                        reliable: result.length > 0 || hasVisibleListRoot || hasVisibleEmptyState,
+                        reliable: result.length > 0 || hasStableListRoot || hasVisibleEmptyState,
                     };
                 }
                 """

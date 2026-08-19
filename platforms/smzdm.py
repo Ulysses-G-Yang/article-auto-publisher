@@ -783,6 +783,33 @@ class SmzdmPlatform(BasePlatform):
                 }
             target_input = image_candidates[0]
             await target_input.set_input_files(str(image_path), timeout=15000)
+            ready_streak = 0
+            for _ in range(40):
+                await asyncio.sleep(0.25)
+                upload_ready = bool(
+                    await self.page.evaluate(
+                        """() => {
+                            const visible = (el) => !!(
+                                el.offsetWidth || el.offsetHeight || el.getClientRects().length
+                            );
+                            const preview = document.querySelector('.pic-box img.thumb-imgs');
+                            const progress = Array.from(
+                                document.querySelectorAll('.pic-box .progress-bar')
+                            ).some(visible);
+                            return !!preview && preview.complete
+                                && preview.naturalWidth > 0 && !progress;
+                        }"""
+                    )
+                )
+                ready_streak = ready_streak + 1 if upload_ready else 0
+                if ready_streak >= 2:
+                    break
+            if ready_streak < 2:
+                return {
+                    "success": False,
+                    "error_code": "SMZDM_BODY_IMAGE_UPLOAD_NOT_READY",
+                    "error": "smzdm 图片上传未达到可插入正文状态",
+                }
             insert_button = self.page.locator(
                 '.btn-item:has-text("插入正文")'
             ).first
@@ -800,17 +827,38 @@ class SmzdmPlatform(BasePlatform):
                 }
             await insert_button.click(timeout=5000)
             after = before
-            for _ in range(10):
-                await asyncio.sleep(1)
+            stable_streak = 0
+            for _ in range(30):
+                await asyncio.sleep(0.5)
                 observed = await self.page.locator(f"{BODY_SELECTOR} img").count()
                 if observed <= before:
+                    stable_streak = 0
                     continue
-                await asyncio.sleep(1)
-                stable = await self.page.locator(f"{BODY_SELECTOR} img").count()
-                if stable >= observed:
-                    after = stable
+                remote_ready = bool(
+                    await self.page.evaluate(
+                        """({selector, before}) => {
+                            const root = document.querySelector(selector);
+                            if (!root) return false;
+                            const images = Array.from(root.querySelectorAll('img')).slice(before);
+                            return images.length > 0 && images.every((image) => {
+                                const src = image.getAttribute('src') || '';
+                                return image.complete && image.naturalWidth > 0
+                                    && (src.startsWith('http://')
+                                        || src.startsWith('https://')
+                                        || src.startsWith('//'));
+                            });
+                        }""",
+                        {"selector": BODY_SELECTOR, "before": before},
+                    )
+                )
+                if remote_ready:
+                    after = observed
+                    stable_streak += 1
+                else:
+                    stable_streak = 0
+                if stable_streak >= 3:
                     break
-            if after <= before:
+            if after <= before or stable_streak < 3:
                 return {
                     "success": False,
                     "error_code": "SMZDM_EDITOR_IMAGE_COUNT_UNCHANGED",

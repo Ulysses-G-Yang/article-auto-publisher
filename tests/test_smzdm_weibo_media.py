@@ -255,6 +255,9 @@ class FakeSmzdmUploadPage:
             return self.images
         raise AssertionError(f"unexpected selector: {selector}")
 
+    async def evaluate(self, _script: str, *_args) -> bool:
+        return True
+
 
 def run_smzdm_upload(
     inputs: list[FakeFileInput],

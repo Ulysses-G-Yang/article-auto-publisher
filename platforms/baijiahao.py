@@ -927,10 +927,14 @@ class BaijiahaoPlatform(BasePlatform):
                             continue;
                         }
                         const sentinelText = (node.textContent || '').replace(
-                            /[\s\u200B\u200C\u200D\u2060\uFEFF]/g,
+                            /[\s\p{Cf}\p{Cc}\uFFFC]/gu,
                             '',
                         );
-                        if (node.querySelector('br') && !sentinelText) {
+                        const touchesImage = Boolean(
+                            node.previousElementSibling?.querySelector('img')
+                            || node.nextElementSibling?.querySelector('img')
+                        );
+                        if (!sentinelText && (node.querySelector('br') || touchesImage)) {
                             continue;
                         }
                         const text = node.innerText || node.textContent || '';

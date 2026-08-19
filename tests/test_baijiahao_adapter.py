@@ -259,8 +259,9 @@ def test_dom_reader_ignores_baijiahao_image_caption_and_blank_sentinels() -> Non
 
     script = editor.evaluate.await_args.args[0]
     assert "className.includes('bjh-image-caption')" in script
-    assert "node.querySelector('br') && !sentinelText" in script
-    assert "\\u200C\\u200D" in script
+    assert "[\\s\\p{Cf}\\p{Cc}\\uFFFC]" in script
+    assert "node.nextElementSibling?.querySelector('img')" in script
+    assert "!sentinelText && (node.querySelector('br') || touchesImage)" in script
 
 
 def test_current_body_editor_reacquires_after_transient_iframe_rebuild() -> None:

@@ -1,0 +1,180 @@
+"""启动一次性、仅保存草稿的真实验收 Flask 入口。
+
+这个入口只用于在明确授权后验证指定平台的 DRAFT 链路。它会在当前进程内
+注入本次验收选择的平台格式能力，不修改默认能力注册表、数据库能力状态或
+平台适配器。它不能用于生产环境，也不能用于公开发布。
+"""
+
+from __future__ import annotations
+
+import argparse
+import os
+import sys
+from collections.abc import Iterable, Sequence
+from pathlib import Path
+from typing import Any
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+for import_root in (REPO_ROOT, REPO_ROOT / "src"):
+    if str(import_root) not in sys.path:
+        sys.path.insert(0, str(import_root))
+
+CONFIRMATION_WORD = "DRAFT_ONLY"
+_TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
+_FALSE_VALUES = frozenset({"0", "false", "no", "off"})
+_SAFETY_SWITCHES = (
+    "PUBLISH_AFTER_DRAFT",
+    "ACCOUNT_SESSIONS_ALLOW_PUBLIC_PUBLISH",
+    "LEGACY_UPLOAD_QUEUE_ENABLED",
+)
+
+
+def _delivery_platforms() -> tuple[str, ...]:
+    from content_studio.platform_format_capabilities import DELIVERY_PLATFORMS
+
+    return DELIVERY_PLATFORMS
+
+
+def _normalize_platforms(platforms: Iterable[str]) -> tuple[str, ...]:
+    if isinstance(platforms, (str, bytes, bytearray)):
+        raise ValueError("--platform 必须重复传入一个或多个平台名称")
+
+    normalized = tuple(str(platform).strip() for platform in platforms)
+    if not normalized:
+        raise ValueError("至少需要指定一个验收平台")
+    if any(not platform for platform in normalized):
+        raise ValueError("验收平台名称不能为空")
+    if len(set(normalized)) != len(normalized):
+        raise ValueError("验收平台不能重复指定")
+
+    unknown = sorted(set(normalized) - set(_delivery_platforms()))
+    if unknown:
+        raise ValueError(f"验收平台不在投递目录中: {', '.join(unknown)}")
+    return normalized
+
+
+def _read_disabled_switch(name: str) -> bool:
+    """读取必须关闭的开关；未设置或明确 false 才允许继续。"""
+
+    if name not in os.environ:
+        return False
+    raw = os.environ[name].strip().lower()
+    if raw in _TRUE_VALUES:
+        raise RuntimeError(f"{name} 必须保持关闭")
+    if raw in _FALSE_VALUES:
+        return False
+    raise RuntimeError(f"{name} 必须未设置或明确为 false")
+
+
+def _assert_draft_only_settings() -> None:
+    for name in _SAFETY_SWITCHES:
+        _read_disabled_switch(name)
+
+    # 配置解析也必须发生在 create_app 之前；错误配置不能触发应用初始化。
+    config = _load_config()
+    app_config = config.get("app", {})
+    if app_config.get("publish_after_draft"):
+        raise RuntimeError("配置中的 publish_after_draft 必须保持关闭")
+    if app_config.get("legacy_upload_queue_enabled"):
+        raise RuntimeError("配置中的 legacy_upload_queue_enabled 必须保持关闭")
+
+
+def _load_config() -> dict:
+    """在开关环境门通过后才加载项目配置。"""
+
+    from config import get_config
+
+    return get_config()
+
+
+def _load_create_app():
+    """在所有安全门通过后才加载项目 Flask 工厂。"""
+
+    from app import create_app
+
+    return create_app()
+
+
+def _port(value: str) -> int:
+    try:
+        port = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("端口必须是整数") from exc
+    if not 1 <= port <= 65535:
+        raise argparse.ArgumentTypeError("端口必须在 1 到 65535 之间")
+    return port
+
+
+def build_acceptance_app(platforms: Iterable[str], confirmation: str):
+    """构造仅对指定平台开放格式能力的验收应用。
+
+    ``confirmation`` 必须是固定的 ``DRAFT_ONLY``；调用方仍需在正式工作台
+    中选择具体账号和内容。能力声明只替换当前 Flask 进程内的 Content Studio
+    service，不会改变 ``DEFAULT_PLATFORM_FORMAT_CAPABILITIES``。
+    """
+
+    if confirmation != CONFIRMATION_WORD:
+        raise ValueError("必须使用固定确认词 DRAFT_ONLY")
+    selected = _normalize_platforms(platforms)
+    _assert_draft_only_settings()
+
+    # 所有验收门通过后才导入并创建 Flask 应用，失败路径不会初始化路由、
+    # 数据库扩展或账号运行时。
+    from content_studio.content_document import FEATURE_KEYS
+    from content_studio.platform_format_capabilities import PlatformFormatCapabilities
+
+    app = _load_create_app()
+    content_state = app.extensions.get("content_studio")
+    if content_state is None or not hasattr(content_state, "service"):
+        raise RuntimeError("Content Studio 运行时未注册")
+    content_state.service.platform_format_capabilities = PlatformFormatCapabilities(
+        {platform: FEATURE_KEYS for platform in selected}
+    )
+    return app
+
+
+def run_acceptance_server(app: Any, port: int) -> None:
+    """以固定本地地址运行验收应用，不启用调试器或自动重载。"""
+
+    print(
+        "DRAFT_ACCEPTANCE_SERVER_READY "
+        f"platforms={','.join(app.config.get('DRAFT_ACCEPTANCE_PLATFORMS', ())) or 'selected'} "
+        f"host=127.0.0.1 port={port}"
+    )
+    app.run(
+        host="127.0.0.1",
+        port=port,
+        debug=False,
+        use_reloader=False,
+    )
+
+
+def _parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="一次性 ArticleOps DRAFT 真实验收入口（禁止 PUBLISH）"
+    )
+    parser.add_argument(
+        "--platform",
+        action="append",
+        required=True,
+        choices=_delivery_platforms(),
+        help="要在本进程内临时放行格式能力的平台；可重复传入",
+    )
+    parser.add_argument(
+        "--confirmation",
+        required=True,
+        help="固定确认词：DRAFT_ONLY",
+    )
+    parser.add_argument("--port", type=_port, default=5000)
+    return parser
+
+
+def main(argv: Sequence[str] | None = None) -> None:
+    args = _parser().parse_args(argv)
+    app = build_acceptance_app(args.platform, args.confirmation)
+    app.config["DRAFT_ACCEPTANCE_PLATFORMS"] = tuple(args.platform)
+    run_acceptance_server(app, args.port)
+
+
+if __name__ == "__main__":
+    main()

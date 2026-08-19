@@ -383,6 +383,48 @@ def test_delivery_projection_preserves_heading_levels_and_inline_image_order() -
     ]
 
 
+def test_delivery_projection_accepts_matching_word_heading_style_only() -> None:
+    document = {
+        "schema_version": 2,
+        "title": "标题",
+        "title_block_id": "title-block",
+        "source_fidelity": "NATIVE",
+        "blocks": [
+            {
+                "kind": "heading",
+                "block_id": "title-block",
+                "level": 1,
+                "style_name": "Heading 1",
+                "children": [{"kind": "text", "text": "标题"}],
+            },
+            {
+                "kind": "heading",
+                "block_id": "h2",
+                "level": 2,
+                "style_name": "Heading 2",
+                "children": [{"kind": "text", "text": "章节二"}],
+            },
+            {
+                "kind": "heading",
+                "block_id": "h3",
+                "level": 3,
+                "style_name": "Heading 3",
+                "children": [{"kind": "text", "text": "章节三"}],
+            },
+        ],
+    }
+
+    assert project_to_delivery_blocks(document) == [
+        {"type": "heading", "text": "章节二", "position": 0, "level": 2},
+        {"type": "heading", "text": "章节三", "position": 1, "level": 3},
+    ]
+
+    mismatched = json.loads(json.dumps(document))
+    mismatched["blocks"][1]["style_name"] = "Heading 4"
+    with pytest.raises(ContentDocumentValidationError, match="不匹配"):
+        project_to_delivery_blocks(mismatched)
+
+
 def test_delivery_projection_rejects_unrepresentable_rich_features() -> None:
     document = mixed_document()
     with pytest.raises(ContentDocumentValidationError, match="marks/link"):

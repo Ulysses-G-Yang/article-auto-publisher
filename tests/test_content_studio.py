@@ -1090,6 +1090,9 @@ def test_v2_delivery_format_gate_handles_basic_heading_and_multi_image(
         plain = await create_plan("普通段落")
         single_image = await create_plan("单图正文", image_count=1)
         heading = await create_plan("正文标题", body_heading=True)
+        unsupported_h1 = await create_plan(
+            "未验证一级标题", body_heading=True, body_heading_level=1
+        )
         unsupported_heading = await create_plan(
             "未验证标题", body_heading=True, body_heading_level=4
         )
@@ -1101,6 +1104,11 @@ def test_v2_delivery_format_gate_handles_basic_heading_and_multi_image(
         assert single_image["targets"][0]["status"] == "READY"
         assert heading["status"] == "READY"
         assert heading["targets"][0]["status"] == "READY"
+        assert unsupported_h1["status"] == "FORMAT_REVIEW_REQUIRED"
+        assert unsupported_h1["targets"][0]["error_code"] == (
+            "CONTENT_FORMAT_UNSUPPORTED"
+        )
+        assert "heading_levels=1" in unsupported_h1["targets"][0]["error_message"]
         assert unsupported_heading["status"] == "FORMAT_REVIEW_REQUIRED"
         assert unsupported_heading["targets"][0]["error_code"] == (
             "CONTENT_FORMAT_UNSUPPORTED"

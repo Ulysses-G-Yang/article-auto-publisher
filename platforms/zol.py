@@ -15,7 +15,11 @@ from platforms.base import (
     PlatformAccessError,
     SelectorError,
 )
-from platforms.content_validation import ensure_valid_content, safe_media_error
+from platforms.content_validation import (
+    ContentValidationError,
+    ensure_valid_content,
+    safe_media_error,
+)
 
 
 class ZOLPlatform(BasePlatform):
@@ -762,8 +766,75 @@ class ZOLPlatform(BasePlatform):
                 )
                 return fresh, fresh_kind
 
+    @staticmethod
+    def _validate_heading_contract(content_blocks: list) -> None:
+        """在没有真实 DOM 证据前拒绝把 heading 静默降级成普通文本。
+
+        公共内容层已经保留了 ``heading.level``，但 ZOL 当前尚未有可复核的
+        标题输入规则和 DOM 回读证据。这里故意不猜 Markdown、快捷键或
+        编辑器选择器；任何 heading 都必须等下一轮真实证据后再实现。
+        """
+
+        levels: list[str] = []
+        for block in content_blocks or []:
+            if not isinstance(block, dict) or block.get("type") != "heading":
+                continue
+            level = block.get("level")
+            if isinstance(level, int) and not isinstance(level, bool):
+                levels.append(str(level))
+            else:
+                levels.append("unknown")
+        if not levels:
+            return
+        raise ContentValidationError(
+            "ZOL_HEADING_UNVERIFIED: ZOL 尚无正文标题输入和 DOM 回读证据，"
+            "拒绝将 heading 按普通文本写入（levels="
+            + ",".join(levels)
+            + ")"
+        )
+
+    @staticmethod
+    def _image_path_for_block(block: dict, images: list[dict]) -> str | None:
+        """按冻结块位置精确解析图片路径，缺失或歧义时返回 ``None``。
+
+        绝不能回退到 ``images[0]``：位置不匹配时继续上传会把错误图片写入
+        平台，且后续仅凭数量校验无法发现这种错配。
+        """
+
+        if not isinstance(block, dict):
+            return None
+        position = block.get("position")
+        matches = [
+            image
+            for image in images or []
+            if isinstance(image, dict)
+            and image.get("position_index") == position
+        ]
+        if len(matches) != 1:
+            return None
+        local_path = matches[0].get("local_path")
+        return str(local_path) if local_path else None
+
+    @staticmethod
+    def _image_order_matches(
+        expected_positions: list[object],
+        observed_positions: list[object] | None,
+    ) -> bool:
+        """只接受真实编辑器回读的图片位置序列，不接受适配器自报字段。
+
+        当前 ZOL DOM 证据尚未证明能稳定关联正文图片和冻结块位置，因此
+        ``observed_positions`` 暂时只能是 ``None``，多图结果必须保持失败
+        状态。后续拿到编辑器 bundle/DOM 证据后，接入方必须把真实回读序列
+        传入此 helper，再允许多图进入 ``completed``。
+        """
+
+        return observed_positions is not None and list(expected_positions) == list(
+            observed_positions
+        )
+
     async def fill_content(self, content_blocks: list, images: list):
         """填写正文、插入图片，并验证文字和图片数量。"""
+        self._validate_heading_contract(content_blocks)
         editor, editor_kind = await self._resolve_content_editor()
 
         text_parts = [
@@ -810,17 +881,12 @@ class ZOLPlatform(BasePlatform):
                 elif btype == "image":
                     editor, editor_kind = await self._click_editor(editor)
                     await self.page.keyboard.press("Control+End")
-                    image_file = next(
-                        (
-                            img.get("local_path")
-                            for img in images
-                            if img.get("position_index") == block.get("position")
-                        ),
-                        None,
-                    ) or (images[0].get("local_path") if images else None)
+                    image_file = self._image_path_for_block(block, images)
                     if image_file:
                         upload_result = await self._upload_image(image_file) or {}
                         if upload_result.get("success"):
+                            # 成功响应只证明上传动作完成，不证明图片在正文
+                            # 中的真实位置；顺序必须由编辑器 DOM 回读确认。
                             uploaded_images += 1
                         else:
                             failed_images.append({
@@ -840,6 +906,9 @@ class ZOLPlatform(BasePlatform):
                             "error": "文章图片块没有对应本地文件",
                             "error_code": "ZOL_IMAGE_FILE_MISSING",
                         })
+                    # 图片弹窗可能重建 iframe；每张图片后都重新解析当前编辑器，
+                    # 不沿用上传前的旧 body/iframe locator。
+                    editor, editor_kind = await self._resolve_content_editor()
                     previous_kind = "image"
                 # 块与块之间放慢节奏，降低风控敏感度
                 await self.simulator.random_delay(1.5, 3.0)
@@ -857,10 +926,23 @@ class ZOLPlatform(BasePlatform):
             platform="ZOL",
             phase="输入及图片处理后",
         )
+        expected_image_positions = [
+            block.get("position")
+            for block in content_blocks
+            if block.get("type") == "image"
+        ]
         if expected_images == 0:
             media_status = "not_required"
             media_error = None
             media_error_code = None
+        elif (
+            expected_images > 1
+            and uploaded_images == expected_images
+            and not self._image_order_matches(expected_image_positions, None)
+        ):
+            media_status = "failed"
+            media_error = "多图正文已上传，但尚无真实 DOM 回读证据证明图片顺序"
+            media_error_code = "ZOL_IMAGE_ORDER_UNVERIFIED"
         elif uploaded_images == expected_images:
             media_status = "completed"
             media_error = None
@@ -890,25 +972,22 @@ class ZOLPlatform(BasePlatform):
             "media_error": media_error,
             "media_error_code": media_error_code,
         }
+
     async def _editor_image_count(self) -> int:
-        """只统计 ZOL 正文编辑器 iframe 内的图片。"""
+        """只统计当前解析出的 ZOL 正文编辑器内的图片。"""
         self._require_page_alive("ZOL 统计编辑器图片")
-        for selector in ("#editor_ifr", "iframe.tox-edit-area__iframe"):
-            try:
-                iframe = self.page.locator(selector).first
-                if await iframe.count() > 0:
-                    return await self.page.frame_locator(selector).locator("body img").count()
-            except Exception as exc:
-                if self._exception_means_browser_closed(exc):
-                    raise BrowserLifecycleError("BROWSER_CONTEXT_CLOSED: ZOL 统计图片时页面已关闭") from exc
-                logger.debug("ZOL iframe 图片统计失败: selector={}, error={}", selector, exc)
         try:
-            return await self.page.locator(
-                ".mce-content-body img, #tinymce img, [contenteditable='true'] img"
-            ).count()
+            editor, editor_kind = await self._resolve_content_editor()
+            if editor_kind == "textarea":
+                return 0
+            return await editor.locator("img").count()
         except Exception as exc:
             if self._exception_means_browser_closed(exc):
                 raise BrowserLifecycleError("BROWSER_CONTEXT_CLOSED: ZOL 统计图片时页面已关闭") from exc
+            logger.debug(
+                "ZOL 当前正文编辑器图片统计失败: error_type={}",
+                type(exc).__name__,
+            )
             return 0
 
     async def _upload_image(self, image_path: str):

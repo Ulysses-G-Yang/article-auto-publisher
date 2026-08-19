@@ -903,10 +903,8 @@ class RegressionTests(DatabaseTestCase):
         platform.page = FakePage("textarea")
         platform.simulator.random_delay = AsyncMock()
         asyncio.run(platform.fill_content([
-            {"type": "heading", "text": "标题段"},
             {"type": "text", "text": "正文段"},
         ], []))
-        self.assertIn("标题段", platform.page.target.value)
         self.assertIn("正文段", platform.page.target.value)
 
     def test_zol_content_contenteditable_strategy(self):

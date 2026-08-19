@@ -2542,6 +2542,18 @@ class ZOLPlatform(BasePlatform):
                 except Exception:
                     logger.warning("ZOL 草稿基线页关闭失败，业务结果保持原状态")
 
+    async def preflight_delivery(self, title: str) -> None:
+        """在进入会自动保存的 ZOL 编辑器前拒绝同标题草稿。"""
+
+        expected_title = normalize_for_comparison(title)
+        if not expected_title:
+            raise DraftBaselineError("DRAFT_BASELINE_UNAVAILABLE: 草稿标题为空")
+        draft_page = await self._prepare_draft_verification_page(expected_title)
+        try:
+            return None
+        finally:
+            await draft_page.close()
+
     async def _collect_draft_save_response(self, control) -> str:
         """点击一次后收集有限候选，只接受唯一明确成功的保存响应。"""
 

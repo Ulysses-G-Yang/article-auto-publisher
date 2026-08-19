@@ -92,6 +92,10 @@ class _AdapterRuntimeMixin:
     async def navigate_to_editor(self) -> None:
         return None
 
+    async def preflight_delivery(self, _title: str) -> None:
+        # 隔离链路没有真实草稿页；平台基线行为由 ZOL 专项测试覆盖。
+        return None
+
     async def fill_title(self, title: str) -> None:
         self.written_title = title
 

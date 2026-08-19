@@ -270,6 +270,11 @@ class BasePlatform(ABC):
         """导航到编辑器页面"""
         ...
 
+    async def preflight_delivery(self, title: str) -> None:
+        """进入编辑器前的平台副作用预检；默认无需额外检查。"""
+
+        return None
+
     @abstractmethod
     async def fill_title(self, title: str):
         """填写标题"""
@@ -343,7 +348,10 @@ class BasePlatform(ABC):
                         "need_login": login_code == "LOGIN_REQUIRED",
                     }
 
-            # 2. 导航到编辑器
+            # 2. 在任何编辑器自动保存副作用发生前执行平台预检。
+            await self.preflight_delivery(title)
+
+            # 3. 导航到编辑器
             db.add_task_log(task_id, "INFO", "打开编辑器...")
             await self.navigate_to_editor()
             await self.simulator.random_delay(1, 3)

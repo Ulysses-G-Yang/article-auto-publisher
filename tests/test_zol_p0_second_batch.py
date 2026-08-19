@@ -94,6 +94,17 @@ def test_new_draft_requires_total_increment_and_unique_exact_title_entity() -> N
     assert ZOLPlatform._new_draft_id_for_title(before, exact_new, "新草稿") == "new"
 
 
+def test_zol_preflight_runs_before_auto_saving_editor_navigation() -> None:
+    platform = ZOLPlatform()
+    draft_page = AsyncMock()
+    platform._prepare_draft_verification_page = AsyncMock(return_value=draft_page)
+
+    asyncio.run(platform.preflight_delivery("  唯一标题  "))
+
+    platform._prepare_draft_verification_page.assert_awaited_once_with("唯一标题")
+    draft_page.close.assert_awaited_once()
+
+
 class _SaveControl:
     def __init__(self, page) -> None:
         self.page = page

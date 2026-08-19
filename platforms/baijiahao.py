@@ -934,7 +934,21 @@ class BaijiahaoPlatform(BasePlatform):
                             node.previousElementSibling?.querySelector('img')
                             || node.nextElementSibling?.querySelector('img')
                         );
-                        if (!sentinelText && (node.querySelector('br') || touchesImage)) {
+                        const range = root.ownerDocument.createRange();
+                        range.selectNodeContents(node);
+                        const renderedWidth = Math.max(
+                            0,
+                            ...Array.from(range.getClientRects()).map(
+                                (rect) => rect.width
+                            ),
+                        );
+                        const shortTextLength = Array.from(
+                            node.innerText || node.textContent || ''
+                        ).length;
+                        const zeroWidthParagraph = node.tagName.toLowerCase() === 'p'
+                            && shortTextLength <= 2 && renderedWidth < 0.5;
+                        if ((!sentinelText && (node.querySelector('br') || touchesImage))
+                                || zeroWidthParagraph) {
                             continue;
                         }
                         const text = node.innerText || node.textContent || '';

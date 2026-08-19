@@ -261,7 +261,9 @@ def test_dom_reader_ignores_baijiahao_image_caption_and_blank_sentinels() -> Non
     assert "className.includes('bjh-image-caption')" in script
     assert "[\\s\\p{M}\\p{Cf}\\p{Cc}\\uFFFC]" in script
     assert "node.nextElementSibling?.querySelector('img')" in script
-    assert "!sentinelText && (node.querySelector('br') || touchesImage)" in script
+    assert "range.selectNodeContents(node)" in script
+    assert "shortTextLength <= 2 && renderedWidth < 0.5" in script
+    assert "|| zeroWidthParagraph" in script
 
 
 def test_current_body_editor_reacquires_after_transient_iframe_rebuild() -> None:

@@ -49,7 +49,12 @@ class ZOLPlatform(BasePlatform):
     CRITICAL_COOKIES = {"last_userid", "lv", "zol_userid", "zol_sid"}
     IMAGE_BUTTON = "button[title='图片上传'], button[aria-label='图片上传']"
     IMAGE_MODAL = ".ant-modal-wrap:visible"
-    IMAGE_INPUT = "input[type='file'][accept='image'][multiple]"
+    # 真实探测确认：正文图片控件位于可见图片弹窗的本地上传区域，隐藏
+    # input 由 Ant Design 的上传按钮触发；不能回退到任意 file input。
+    IMAGE_INPUT = (
+        ".local_upload .ant-upload[role='button'] "
+        "input[type='file'][accept='image/*'][multiple]"
+    )
     TOPIC_BUTTON = "button:has-text('选择话题')"
     TOPIC_MODAL = ".ant-modal-wrap:visible"
     DRAFT_LIST_API_MARKER = "/api/v1/creator.content.getlist"
@@ -1536,7 +1541,9 @@ class ZOLPlatform(BasePlatform):
 
         ZOL 的封面控件可能先出现在 DOM 中，不能用 ``first`` 或任意
         ``input[type=file]`` 回退，否则会把正文图片写成封面。正文控件由
-        ``accept=image`` 与 ``multiple`` 两个事实共同限定，且必须唯一。
+        ``accept=image/*``、``multiple`` 以及 ``.local_upload .ant-upload``
+        正文上传祖先共同限定，且必须唯一。真实页面的 input 可以隐藏，
+        但隐藏状态不能放宽祖先和属性约束。
         """
 
         if modal is None or not await modal.is_visible():

@@ -451,8 +451,12 @@ class _Modal:
             [
                 item
                 for item in self.inputs
-                if item.attributes.get("accept") == "image"
+                if item.attributes.get("accept") == "image/*"
                 and item.attributes.get("multiple") is not None
+                and item.attributes.get("ancestor_role") == "button"
+                and {"local_upload", "ant-upload"}.issubset(
+                    set(item.attributes.get("ancestor_classes", ()))
+                )
             ]
         )
 
@@ -473,17 +477,72 @@ def test_body_image_input_ignores_cover_input_and_requires_unique_multiple_input
     cover = FakeLocator(
         count=1,
         visible=False,
-        attributes={"accept": "image", "multiple": None},
+        attributes={
+            "accept": "image/*",
+            "multiple": "",
+            "ancestor_role": "button",
+            "ancestor_classes": ("cover_upload", "ant-upload"),
+        },
     )
     body = FakeLocator(
         count=1,
         visible=False,
-        attributes={"accept": "image", "multiple": ""},
+        attributes={
+            "accept": "image/*",
+            "multiple": "",
+            "ancestor_role": "button",
+            "ancestor_classes": ("local_upload", "ant-upload"),
+        },
     )
     video = FakeLocator(
         count=1,
         visible=False,
-        attributes={"accept": "video/*", "multiple": ""},
+        attributes={
+            "accept": "video/*",
+            "multiple": "",
+            "ancestor_role": "button",
+            "ancestor_classes": ("local_upload", "ant-upload"),
+        },
+    )
+    legacy_image_accept = FakeLocator(
+        count=1,
+        visible=False,
+        attributes={
+            "accept": "image",
+            "multiple": "",
+            "ancestor_role": "button",
+            "ancestor_classes": ("local_upload", "ant-upload"),
+        },
+    )
+    without_multiple = FakeLocator(
+        count=1,
+        visible=False,
+        attributes={
+            "accept": "image/*",
+            "multiple": None,
+            "ancestor_role": "button",
+            "ancestor_classes": ("local_upload", "ant-upload"),
+        },
+    )
+    wrong_ancestor = FakeLocator(
+        count=1,
+        visible=False,
+        attributes={
+            "accept": "image/*",
+            "multiple": "",
+            "ancestor_role": "button",
+            "ancestor_classes": ("cover_upload", "ant-upload"),
+        },
+    )
+    wrong_role = FakeLocator(
+        count=1,
+        visible=False,
+        attributes={
+            "accept": "image/*",
+            "multiple": "",
+            "ancestor_role": None,
+            "ancestor_classes": ("local_upload", "ant-upload"),
+        },
     )
     platform = ZOLPlatform()
 
@@ -491,9 +550,90 @@ def test_body_image_input_ignores_cover_input_and_requires_unique_multiple_input
     assert asyncio.run(platform._resolve_body_image_input(_Modal([cover, body]))) is body
     assert asyncio.run(platform._resolve_body_image_input(_Modal([cover]))) is None
     assert asyncio.run(platform._resolve_body_image_input(_Modal([video]))) is None
+    assert asyncio.run(platform._resolve_body_image_input(_Modal([legacy_image_accept]))) is None
+    assert asyncio.run(platform._resolve_body_image_input(_Modal([without_multiple]))) is None
+    assert asyncio.run(platform._resolve_body_image_input(_Modal([wrong_ancestor]))) is None
+    assert asyncio.run(platform._resolve_body_image_input(_Modal([wrong_role]))) is None
     assert (
         asyncio.run(platform._resolve_body_image_input(_Modal([body, body]))) is None
     )
+
+
+def test_upload_image_sets_files_once_on_unique_body_input(tmp_path) -> None:
+    class _FileInput(FakeLocator):
+        def __init__(self) -> None:
+            super().__init__(
+                count=1,
+                visible=False,
+                attributes={
+                    "accept": "image/*",
+                    "multiple": "",
+                    "ancestor_role": "button",
+                    "ancestor_classes": ("local_upload", "ant-upload"),
+                },
+            )
+            self.set_calls: list[str] = []
+
+        async def set_input_files(self, path: str) -> None:
+            self.set_calls.append(str(path))
+
+    class _InsertButton(FakeLocator):
+        async def is_enabled(self) -> bool:
+            return True
+
+    class _UploadModal(_Modal):
+        def __init__(self, file_input, insert_button) -> None:
+            super().__init__([file_input])
+            self.insert_button = insert_button
+
+        async def wait_for(self, **_kwargs) -> None:
+            return None
+
+        def get_by_role(self, _role=None, **_kwargs):
+            return self.insert_button
+
+    class _LocatorProxy:
+        def __init__(self, target) -> None:
+            self.first = target
+            self.last = target
+
+    class _Page:
+        def __init__(self, modal, button) -> None:
+            self.modal = modal
+            self.button = button
+
+        def locator(self, selector: str):
+            if selector == ZOLPlatform.IMAGE_BUTTON:
+                return _LocatorProxy(self.button)
+            if selector == ZOLPlatform.IMAGE_MODAL:
+                return _LocatorProxy(self.modal)
+            raise AssertionError(f"unexpected selector: {selector}")
+
+        async def wait_for_timeout(self, _milliseconds: int) -> None:
+            return None
+
+    file_input = _FileInput()
+    insert_button = _InsertButton(count=1, visible=True)
+    modal = _UploadModal(file_input, insert_button)
+    upload_button = FakeLocator(count=1, visible=True)
+    page = _Page(modal, upload_button)
+    image_path = tmp_path / "body.png"
+    image_path.write_bytes(b"fixture")
+
+    platform = ZOLPlatform()
+    platform.page = page
+    platform._close_image_modal = AsyncMock()
+    platform._editor_image_src_fingerprints = AsyncMock(
+        side_effect=[[], ["new-image"]]
+    )
+    platform._verify_image_content = AsyncMock(return_value={"success": True})
+
+    result = asyncio.run(platform._upload_image(str(image_path)))
+
+    assert result["success"] is True
+    assert file_input.set_calls == [str(image_path.resolve())]
+    assert upload_button.click_count == 1
+    assert insert_button.click_count == 1
 
 
 def test_modal_close_failure_is_not_silently_ignored() -> None:

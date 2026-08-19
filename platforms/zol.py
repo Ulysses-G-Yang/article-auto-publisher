@@ -1205,7 +1205,25 @@ class ZOLPlatform(BasePlatform):
 
     @staticmethod
     def _content_tokens_match(expected: list[dict], actual: list[dict]) -> bool:
-        return expected == actual
+        """严格比较正文结构，但不把平台图片 ``src`` 当作永久身份。
+
+        ZOL 在图片刚插入编辑器时可能先使用临时地址，弹窗关闭或上传落盘后再
+        改写为 CDN 地址。图片内容已经在 ``_verify_image_content`` 中通过截图
+        与本地文件逐张核验；这里继续严格校验 token 数量、图文位置、标题层级
+        和文本内容，只把两个 ``image`` token 视为同一结构槽位，避免 URL 漂移
+        造成正文完整却被误判失败。
+        """
+
+        if len(expected) != len(actual):
+            return False
+        for expected_token, actual_token in zip(expected, actual, strict=True):
+            if expected_token.get("kind") != actual_token.get("kind"):
+                return False
+            if expected_token.get("kind") == "image":
+                continue
+            if expected_token != actual_token:
+                return False
+        return True
 
     async def _verify_content_prefix(
         self,

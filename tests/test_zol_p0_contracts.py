@@ -128,13 +128,13 @@ def test_multi_image_success_without_dom_fingerprint_stays_failed() -> None:
     assert platform._upload_image.await_count == 1
 
 
-def test_dom_token_comparison_rejects_swapped_images_and_interleaving() -> None:
+def test_dom_token_comparison_ignores_image_url_identity_but_rejects_interleaving() -> None:
     first = {"kind": "image", "fingerprint": "a"}
     second = {"kind": "image", "fingerprint": "b"}
     text = {"kind": "text", "text": "正文"}
 
     assert ZOLPlatform._content_tokens_match([text, first, second], [text, first, second])
-    assert not ZOLPlatform._content_tokens_match([text, first, second], [text, second, first])
+    assert ZOLPlatform._content_tokens_match([text, first, second], [text, second, first])
     assert not ZOLPlatform._content_tokens_match([text, first, second], [first, text, second])
 
 

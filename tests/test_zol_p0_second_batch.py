@@ -847,16 +847,32 @@ def test_heading_experiment_rejects_format_true_when_dom_stays_paragraph() -> No
         )
 
 
-def test_seven_image_tokens_require_exact_interleaved_order() -> None:
+def test_seven_image_tokens_require_exact_interleaved_structure() -> None:
     expected = []
     for index in range(7):
         expected.append({"kind": "text", "text": f"段落{index}"})
         expected.append({"kind": "image", "fingerprint": f"fp-{index}"})
 
     assert ZOLPlatform._content_tokens_match(expected, list(expected))
-    swapped = list(expected)
-    swapped[1], swapped[3] = swapped[3], swapped[1]
-    assert not ZOLPlatform._content_tokens_match(expected, swapped)
+    moved = list(expected)
+    moved[1], moved[2] = moved[2], moved[1]
+    assert not ZOLPlatform._content_tokens_match(expected, moved)
+
+
+def test_image_src_fingerprint_drift_does_not_break_structural_match() -> None:
+    expected = [
+        {"kind": "text", "text": "图片前"},
+        {"kind": "image", "fingerprint": "temporary-upload-url"},
+        {"kind": "text", "text": "图片后"},
+    ]
+    actual = [
+        {"kind": "text", "text": "图片前"},
+        {"kind": "image", "fingerprint": "rewritten-cdn-url"},
+        {"kind": "text", "text": "图片后"},
+    ]
+
+    assert ZOLPlatform._content_tokens_match(expected, actual)
+    assert not ZOLPlatform._content_tokens_match(expected, actual[:-1])
 
 
 def test_expected_text_tokens_keep_three_paragraph_boundaries() -> None:

@@ -7,6 +7,8 @@
 from __future__ import annotations
 
 import asyncio
+import copy
+import hashlib
 from io import BytesIO
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -897,3 +899,62 @@ def test_dom_mixed_image_block_keeps_text_on_both_sides() -> None:
     )
 
     assert [token["kind"] for token in tokens] == ["text", "image", "text"]
+
+
+def test_dom_text_token_is_split_like_expected_paragraphs_without_mutating_input() -> None:
+    image_src = "https://cdn.invalid/paragraph.png"
+
+    class _ParagraphEditor(FakeLocator):
+        async def evaluate(self, script, *_args):
+            if "const tokens" in script:
+                return [
+                    {
+                        "kind": "text",
+                        "text": "第一段\r\n\r\n第二段\n\n\n第三段",
+                    },
+                    {"kind": "image", "src": image_src},
+                ]
+            return await super().evaluate(script, *_args)
+
+    blocks = [
+        {"type": "text", "text": "第一段\r\n\r\n第二段\n\n\n第三段"},
+        {"type": "image", "position": 2},
+    ]
+    original = copy.deepcopy(blocks)
+    image_fingerprint = hashlib.sha256(image_src.encode()).hexdigest()
+    expected = ZOLPlatform._expected_content_tokens(blocks, [image_fingerprint])
+    actual = asyncio.run(
+        ZOLPlatform()._read_editor_dom_tokens(_ParagraphEditor(tag="body"), "iframe")
+    )
+
+    assert actual == expected
+    assert blocks == original
+
+
+@pytest.mark.parametrize(
+    "actual",
+    [
+        [
+            {"kind": "text", "text": "第一段"},
+            {"kind": "text", "text": "第三段"},
+        ],
+        [
+            {"kind": "text", "text": "第二段"},
+            {"kind": "text", "text": "第一段"},
+            {"kind": "text", "text": "第三段"},
+        ],
+        [
+            {"kind": "text", "text": "第一段"},
+            {"kind": "text", "text": "第二段"},
+            {"kind": "text", "text": "第二段"},
+        ],
+    ],
+)
+def test_dom_text_missing_reordered_or_duplicated_paragraph_stays_failed(actual) -> None:
+    expected = [
+        {"kind": "text", "text": "第一段"},
+        {"kind": "text", "text": "第二段"},
+        {"kind": "text", "text": "第三段"},
+    ]
+
+    assert not ZOLPlatform._content_tokens_match(expected, actual)

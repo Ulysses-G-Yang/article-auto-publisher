@@ -1137,10 +1137,14 @@ class ZOLPlatform(BasePlatform):
                 normalized.append({"kind": "heading", "tag": tag, "text": text})
                 continue
             if kind == "text":
-                text = normalize_for_comparison(raw.get("text"))
-                if not text:
-                    continue
-                normalized.append({"kind": "text", "text": text})
+                raw_text = raw.get("text")
+                paragraphs = extract_expected_paragraphs(
+                    [{"type": "text", "text": raw_text}]
+                )
+                normalized.extend(
+                    {"kind": "text", "text": paragraph.comparison_text}
+                    for paragraph in paragraphs
+                )
                 continue
             raise ContentValidationError("ZOL_CONTENT_DOM_VERIFY_FAILED: DOM token 类型无效")
         return normalized

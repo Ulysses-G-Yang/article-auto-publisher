@@ -9,7 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from platforms.base import BrowserLifecycleError
+from platforms.base import BrowserLifecycleError, DraftResultUnknownError
 from platforms.xiaoheihe import XiaoheihePlatform
 
 
@@ -119,7 +119,8 @@ async def test_body_only_title_is_not_a_draft_card_and_never_succeeds():
     )
     platform = _platform(main, baseline)
 
-    assert await platform.save_draft("正文中出现的标题") == ""
+    with pytest.raises(DraftResultUnknownError):
+        await platform.save_draft("正文中出现的标题")
     assert main.click_count == 1
     assert baseline.closed is True
     assert all("document.body.innerText" not in script for script in main.evaluate_scripts)
@@ -132,7 +133,8 @@ async def test_old_same_title_card_does_not_count_as_new_draft():
     main = _main_page([_candidate("old", title)], [_candidate("old", title)])
     platform = _platform(main, baseline)
 
-    assert await platform.save_draft(title) == ""
+    with pytest.raises(DraftResultUnknownError):
+        await platform.save_draft(title)
     assert main.click_count == 1
 
 
@@ -142,7 +144,8 @@ async def test_hidden_or_non_card_candidate_is_ignored_by_snapshot_contract():
     main = _main_page([_candidate("old", "旧草稿")], [])
     platform = _platform(main, baseline)
 
-    assert await platform.save_draft("隐藏卡片标题") == ""
+    with pytest.raises(DraftResultUnknownError):
+        await platform.save_draft("隐藏卡片标题")
     snapshot_script = next(
         script for script in main.evaluate_scripts if "candidateSelector" in script
     )
@@ -251,7 +254,7 @@ async def test_browser_close_during_save_is_terminal_without_retry():
     )
     platform = _platform(main, baseline)
 
-    with pytest.raises(BrowserLifecycleError):
+    with pytest.raises(DraftResultUnknownError):
         await platform.save_draft("保存时关闭")
     assert main.click_count == 1
     assert baseline.closed is True

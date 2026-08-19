@@ -1,5 +1,6 @@
 """小黑盒（Xiaoheihe）平台自动化"""
 import asyncio
+import copy
 import json
 from pathlib import Path
 
@@ -8,11 +9,13 @@ from loguru import logger
 from platforms.base import (
     BasePlatform,
     BrowserLifecycleError,
+    DraftResultUnknownError,
     SelectorError,
 )
 from platforms.content_validation import (
     ContentValidationError,
     ensure_valid_content,
+    extract_expected_paragraphs,
     normalize_for_comparison,
     safe_media_error,
 )
@@ -41,6 +44,7 @@ class XiaoheihePlatform(BasePlatform):
     DRAFT_BOX_BTN = "button.editor-publish__btn.sub-btn.margin-left"  # 草稿箱
     DRAFTS_URL = "https://www.xiaoheihe.cn/creator/draft"
     DRAFT_VERIFY_ATTEMPTS = 3
+    DRAFT_CONTENT_POLL_DELAYS = (1.0, 2.0, 3.0)
     PUBLISH_NOW_BTN = "button.editor-publish__btn.main-btn"        # 发布
     IMAGE_LOCAL_UPLOAD = (
         ".editor-model__image-model .model-image__local-box "
@@ -54,6 +58,12 @@ class XiaoheihePlatform(BasePlatform):
     # 真实编辑器输入规则证据（2026-08-19）：`# ` 生成 H2，`## ` 生成 H3。
     # 未经 DOM 回读证明的层级必须保持 fail-closed。
     HEADING_MARKDOWN_PREFIX = {2: "# ", 3: "## "}
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        # 只保存在内存中，用于保存后重新打开平台草稿并核对。不得用比较视图
+        # 回写正文或重算 ContentVersion 哈希。
+        self._expected_persisted_blocks: list[dict] | None = None
 
     def _raise_if_page_closed(self, stage: str):
         self._require_page_alive(stage)
@@ -455,6 +465,7 @@ class XiaoheihePlatform(BasePlatform):
     async def fill_content(self, content_blocks: list, images: list):
         """填写正文（真实字段：.article__edit-content--inner 内的 contenteditable ProseMirror）"""
         self._raise_if_page_closed("小黑盒填写正文")
+        self._expected_persisted_blocks = copy.deepcopy(content_blocks)
         expected_images = sum(
             1 for block in content_blocks if block.get("type") == "image"
         )
@@ -520,15 +531,7 @@ class XiaoheihePlatform(BasePlatform):
                 await self.page.keyboard.press("Enter")
             await self._place_body_caret_at_end()
 
-            img_path = block.get("local_path")
-            if not img_path and images:
-                # 按 position 匹配，否则取第一张
-                for img in images:
-                    if img.get("position_index") == block.get("position"):
-                        img_path = img.get("local_path")
-                        break
-                if not img_path:
-                    img_path = images[0].get("local_path")
+            img_path = self._image_path_for_block(block, images)
             if img_path:
                 upload_result = await self._upload_image(img_path) or {}
                 if upload_result.get("success"):
@@ -610,6 +613,198 @@ class XiaoheihePlatform(BasePlatform):
             "media_status": media_status,
             "media_error": media_error,
         }
+
+    @staticmethod
+    def _image_path_for_block(block: dict, images: list[dict]) -> str | None:
+        """按冻结块位置精确解析图片路径，缺失或歧义时 fail closed。
+
+        旧逻辑在位置匹配失败时回退 ``images[0]``，会把第一张图片重复写到
+        其他位置，数量校验仍可能通过。正文图片身份不明确时宁可失败，也不能
+        猜测上传。
+        """
+
+        direct_path = block.get("local_path") if isinstance(block, dict) else None
+        if direct_path:
+            return str(direct_path)
+        position = block.get("position") if isinstance(block, dict) else None
+        matches = [
+            image
+            for image in images or []
+            if isinstance(image, dict) and image.get("position_index") == position
+        ]
+        if len(matches) != 1:
+            return None
+        local_path = matches[0].get("local_path")
+        return str(local_path) if local_path else None
+
+    async def _read_editor_dom_tokens(self, editor) -> list[dict]:
+        """读取正文内文本、标题和图片的有序结构，不读取页面全局内容。"""
+
+        try:
+            raw_tokens = await editor.evaluate(
+                """
+                (root) => {
+                    const tokens = [];
+                    const blockTags = new Set([
+                        'P', 'DIV', 'LI', 'BLOCKQUOTE', 'PRE'
+                    ]);
+                    const ignoredUiTags = new Set([
+                        'BUTTON', 'SCRIPT', 'STYLE', 'NOSCRIPT', 'TEMPLATE'
+                    ]);
+                    const textOf = (node) => (
+                        node.innerText !== undefined
+                            ? node.innerText
+                            : (node.textContent || '')
+                    );
+                    const visit = (node) => {
+                        if (!node || node.nodeType !== Node.ELEMENT_NODE) return;
+                        const tag = node.tagName.toLowerCase();
+                        if (tag === 'img') {
+                            tokens.push({kind: 'image'});
+                            return;
+                        }
+                        if (ignoredUiTags.has(node.tagName)) return;
+                        if (node.getAttribute('contenteditable') === 'false') {
+                            for (const image of node.querySelectorAll('img')) visit(image);
+                            return;
+                        }
+                        if (/^h[1-6]$/.test(tag)) {
+                            tokens.push({kind: 'heading', tag, text: textOf(node)});
+                            return;
+                        }
+                        const hasImage = Boolean(node.querySelector('img'));
+                        const hasBlockChild = Array.from(node.children).some(
+                            (child) => blockTags.has(child.tagName)
+                                || /^h[1-6]$/i.test(child.tagName)
+                        );
+                        if (blockTags.has(node.tagName) && !hasImage && !hasBlockChild) {
+                            tokens.push({kind: 'text', text: textOf(node)});
+                            return;
+                        }
+                        for (const child of node.childNodes) {
+                            if (child.nodeType === Node.TEXT_NODE) {
+                                const text = child.textContent || '';
+                                if (text.trim()) tokens.push({kind: 'text', text});
+                            } else {
+                                visit(child);
+                            }
+                        }
+                    };
+                    for (const child of root.children) visit(child);
+                    return tokens;
+                }
+                """
+            )
+        except Exception as exc:
+            if self._exception_means_browser_closed(exc):
+                raise BrowserLifecycleError(
+                    "BROWSER_CONTEXT_CLOSED: 小黑盒读取正文 DOM 时页面已关闭"
+                ) from exc
+            raise ContentValidationError(
+                "XIAOHEIHE_CONTENT_DOM_VERIFY_FAILED: 正文 DOM 回读失败"
+            ) from exc
+
+        if not isinstance(raw_tokens, list):
+            raise ContentValidationError(
+                "XIAOHEIHE_CONTENT_DOM_VERIFY_FAILED: 正文 DOM 序列无效"
+            )
+        normalized: list[dict] = []
+        for raw in raw_tokens:
+            if not isinstance(raw, dict):
+                raise ContentValidationError(
+                    "XIAOHEIHE_CONTENT_DOM_VERIFY_FAILED: DOM token 无效"
+                )
+            kind = raw.get("kind")
+            if kind == "image":
+                normalized.append({"kind": "image"})
+                continue
+            if kind == "heading":
+                tag = str(raw.get("tag") or "").lower()
+                text = normalize_for_comparison(raw.get("text"))
+                if tag not in {"h2", "h3"} or not text:
+                    raise ContentValidationError(
+                        "XIAOHEIHE_HEADING_DOM_VERIFY_FAILED: 标题 DOM 字段无效"
+                    )
+                normalized.append({"kind": "heading", "tag": tag, "text": text})
+                continue
+            if kind == "text":
+                paragraphs = extract_expected_paragraphs(
+                    [{"type": "text", "text": raw.get("text")}]
+                )
+                normalized.extend(
+                    {"kind": "text", "text": paragraph.comparison_text}
+                    for paragraph in paragraphs
+                )
+                continue
+            raise ContentValidationError(
+                "XIAOHEIHE_CONTENT_DOM_VERIFY_FAILED: DOM token 类型无效"
+            )
+        return normalized
+
+    @staticmethod
+    def _expected_content_tokens(content_blocks: list[dict]) -> list[dict]:
+        expected: list[dict] = []
+        for block in content_blocks:
+            if not isinstance(block, dict):
+                raise ContentValidationError(
+                    "XIAOHEIHE_CONTENT_CONTRACT_INVALID: 正文块无效"
+                )
+            block_type = block.get("type")
+            if block_type == "image":
+                expected.append({"kind": "image"})
+                continue
+            for paragraph in extract_expected_paragraphs([block]):
+                if block_type == "heading":
+                    expected.append(
+                        {
+                            "kind": "heading",
+                            "tag": f"h{block.get('level')}",
+                            "text": paragraph.comparison_text,
+                        }
+                    )
+                else:
+                    expected.append(
+                        {"kind": "text", "text": paragraph.comparison_text}
+                    )
+        return expected
+
+    @staticmethod
+    def _content_token_shape(tokens: list[dict], *, limit: int = 40) -> str:
+        """只返回类型与长度，禁止在错误/API 中暴露正文或图片地址。"""
+
+        shape: list[str] = []
+        for token in tokens[:limit]:
+            kind = token.get("kind")
+            if kind == "image":
+                shape.append("I")
+            elif kind == "heading":
+                text = token.get("text")
+                shape.append(
+                    f"H{token.get('tag', '?')}:{len(text) if isinstance(text, str) else 0}"
+                )
+            elif kind == "text":
+                text = token.get("text")
+                shape.append(f"T:{len(text) if isinstance(text, str) else 0}")
+            else:
+                shape.append("?")
+        if len(tokens) > limit:
+            shape.append(f"+{len(tokens) - limit}")
+        return ",".join(shape) or "EMPTY"
+
+    @staticmethod
+    def _content_tokens_match(expected: list[dict], actual: list[dict]) -> bool:
+        """严格比较图文位置；平台 CDN 改写图片地址不影响结构判断。"""
+
+        if len(expected) != len(actual):
+            return False
+        for expected_token, actual_token in zip(expected, actual, strict=True):
+            if expected_token.get("kind") != actual_token.get("kind"):
+                return False
+            if expected_token.get("kind") == "image":
+                continue
+            if expected_token != actual_token:
+                return False
+        return True
 
     async def _current_body_editor(self):
         """每次操作都重新获取可见正文节点，避免使用重渲染前的旧节点。"""
@@ -1348,23 +1543,49 @@ class XiaoheihePlatform(BasePlatform):
             logger.warning("小黑盒保存草稿拒绝：保存前无法取得可靠草稿箱基线")
             return ""
 
-        # 点击真实保存草稿按钮
+        # 点击真实保存草稿按钮。此点之后的任何不确定结果都禁止自动重试，
+        # 必须上报 DRAFT_RESULT_UNKNOWN，而不是伪装成“尚未发生副作用”。
+        clicked = False
         try:
             # close leftover modal mask if any (e.g. community/topic picker left open)
             await self._dismiss_overlays()
+            clicked = True
             await self.page.click(self.SAVE_DRAFT_BTN, timeout=8000)
+        except asyncio.CancelledError as exc:
+            if clicked:
+                raise DraftResultUnknownError(
+                    "DRAFT_RESULT_UNKNOWN: 小黑盒保存动作已触发，结果未知"
+                ) from exc
+            raise
         except Exception as e:
             if self._exception_means_browser_closed(e):
+                if clicked:
+                    raise DraftResultUnknownError(
+                        "DRAFT_RESULT_UNKNOWN: 小黑盒保存后页面已关闭"
+                    ) from e
                 raise BrowserLifecycleError(
-                    "BROWSER_CONTEXT_CLOSED: 小黑盒点击保存草稿时页面已关闭"
+                    "BROWSER_CONTEXT_CLOSED: 小黑盒点击保存草稿前页面已关闭"
                 ) from e
             logger.error("小黑盒点击保存草稿按钮失败: {}", e)
             return ""
 
         await self.simulator.random_delay(2, 4)
 
-        # 验证：进入草稿箱，确认保存后出现了 baseline 之外的新卡片
-        return await self._verify_draft_in_drafts(expected_title, baseline)
+        # 验证：进入草稿箱确认新增实体；若本轮有正文，再打开唯一实体并严格
+        # 核对持久化后的文本、标题层级、图片数量和图文顺序。
+        try:
+            draft_url = await self._verify_draft_in_drafts(expected_title, baseline)
+            if not draft_url:
+                raise DraftResultUnknownError(
+                    "DRAFT_RESULT_UNKNOWN: 小黑盒保存后草稿实体无法证明"
+                )
+            return draft_url
+        except DraftResultUnknownError:
+            raise
+        except Exception as exc:
+            raise DraftResultUnknownError(
+                "DRAFT_RESULT_UNKNOWN: 小黑盒保存后内容无法证明"
+            ) from exc
 
     @staticmethod
     def _is_drafts_route(url: str | None) -> bool:
@@ -1699,6 +1920,88 @@ class XiaoheihePlatform(BasePlatform):
         ]
         return len(matches) == 1
 
+    async def _open_unique_matching_draft(self, expected_title: str) -> None:
+        """只点击标题精确且全页唯一的真实草稿卡片。"""
+
+        try:
+            match_count = await self.page.evaluate(
+                r"""
+                (expectedTitle) => {
+                    const normalize = (value) => String(value || '')
+                        .replace(/\s+/g, ' ').trim().slice(0, 30);
+                    const visible = (element) => {
+                        if (!element || element.hidden ||
+                            element.getAttribute('aria-hidden') === 'true') return false;
+                        const style = window.getComputedStyle(element);
+                        if (style.display === 'none' || style.visibility === 'hidden' ||
+                            Number(style.opacity) === 0) return false;
+                        const rect = element.getBoundingClientRect();
+                        return rect.width > 0 && rect.height > 0;
+                    };
+                    const cards = Array.from(document.querySelectorAll(
+                        '.creator-draft__list article.creator-draft__item'
+                    )).filter((card) => {
+                        if (!visible(card)) return false;
+                        const title = card.querySelector('.creator-draft__content');
+                        return title && visible(title) &&
+                            normalize(title.textContent) === expectedTitle;
+                    });
+                    if (cards.length === 1) cards[0].click();
+                    return cards.length;
+                }
+                """,
+                expected_title,
+            )
+        except Exception as exc:
+            if self._exception_means_browser_closed(exc):
+                raise BrowserLifecycleError(
+                    "BROWSER_CONTEXT_CLOSED: 小黑盒打开已保存草稿时页面已关闭"
+                ) from exc
+            raise DraftResultUnknownError(
+                "DRAFT_RESULT_UNKNOWN: 小黑盒无法定位唯一草稿实体"
+            ) from exc
+        if match_count != 1:
+            raise DraftResultUnknownError(
+                "DRAFT_RESULT_UNKNOWN: 小黑盒同名草稿实体不唯一"
+            )
+
+    async def _verify_persisted_draft_content(self, expected_title: str) -> None:
+        """重新打开平台草稿，核验真正落盘的完整图文结构。"""
+
+        blocks = self._expected_persisted_blocks
+        if blocks is None:
+            return
+        expected_tokens = self._expected_content_tokens(blocks)
+        actual_tokens: list[dict] = []
+        await self._open_unique_matching_draft(expected_title)
+        for delay in self.DRAFT_CONTENT_POLL_DELAYS:
+            await asyncio.sleep(delay)
+            try:
+                if "creator/editor" not in str(self.page.url or ""):
+                    continue
+                title_editor = await self._first_visible(self.TITLE_FIELD)
+                if title_editor is None:
+                    continue
+                actual_title = self._normalize_platform_title(
+                    await title_editor.inner_text()
+                )
+                if actual_title != expected_title:
+                    continue
+                editor = await self._current_body_editor()
+                actual_tokens = await self._read_editor_dom_tokens(editor)
+                if self._content_tokens_match(expected_tokens, actual_tokens):
+                    return
+            except Exception as exc:
+                if self._exception_means_browser_closed(exc):
+                    raise BrowserLifecycleError(
+                        "BROWSER_CONTEXT_CLOSED: 小黑盒持久化正文核验时页面已关闭"
+                    ) from exc
+        raise DraftResultUnknownError(
+            "DRAFT_RESULT_UNKNOWN: 小黑盒草稿重开后图文结构不完整; "
+            f"expected={self._content_token_shape(expected_tokens)}; "
+            f"actual={self._content_token_shape(actual_tokens)}"
+        )
+
     async def _verify_draft_in_drafts(
         self,
         expected_title: str,
@@ -1731,6 +2034,7 @@ class XiaoheihePlatform(BasePlatform):
                 current,
                 expected_title,
             ):
+                await self._verify_persisted_draft_content(expected_title)
                 return drafts_url
             if attempt + 1 < self.DRAFT_VERIFY_ATTEMPTS:
                 await self.simulator.random_delay(2, 4)

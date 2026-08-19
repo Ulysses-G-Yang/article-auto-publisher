@@ -76,6 +76,17 @@ def test_zhihu_acceptance_declares_only_observed_h2() -> None:
     assert registry.get("xiaoheihe").supported == frozenset()
 
 
+def test_smzdm_acceptance_declares_only_observed_h2_and_image_order() -> None:
+    app = acceptance.build_acceptance_app(("smzdm",), "DRAFT_ONLY")
+    registry = app.extensions["content_studio"].service.platform_format_capabilities
+
+    assert registry.get("smzdm").supported == frozenset(
+        {"heading", "image_order"}
+    )
+    assert registry.get("smzdm").heading_levels == frozenset({2})
+    assert registry.get("xiaoheihe").supported == frozenset()
+
+
 @pytest.mark.parametrize(
     "platforms",
     [(), ("",), ("not-a-platform",), ("xiaoheihe", "xiaoheihe")],

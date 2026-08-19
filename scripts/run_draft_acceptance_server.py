@@ -155,6 +155,15 @@ def build_acceptance_app(platforms: Iterable[str], confirmation: str):
                 FEATURE_KEYS,
                 frozenset({2}),
             )
+        elif platform == "smzdm":
+            # 真实 TipTap 编辑器探测已证明：“二级标题”持久化为 h3。
+            # 验收进程只临时放行 Word H2 与原始图片顺序；生产默认能力
+            # 必须等待完整 Word 草稿保存后重开证据。
+            declarations[platform] = PlatformFormatDeclaration(
+                platform,
+                frozenset({"heading", "image_order"}),
+                frozenset({2}),
+            )
         else:
             declarations[platform] = FEATURE_KEYS
     content_state.service.platform_format_capabilities = PlatformFormatCapabilities(declarations)

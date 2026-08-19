@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from platforms.baijiahao import BaijiahaoPlatform
-from platforms.base import BrowserLifecycleError, SelectorError
+from platforms.base import BrowserLifecycleError, DraftResultUnknownError, SelectorError
 from platforms.content_validation import ContentValidationError
 from platforms.smzdm import SmzdmPlatform
 
@@ -182,13 +182,16 @@ class FakeSaveKeyboard:
             await self.page.response_callback(self.page.response)
 
 
+class FakeSaveEditor:
+    press = AsyncMock()
+    evaluate = AsyncMock()
+
+
 class FakeSavePage:
-    def __init__(self, response: FakeSaveResponse | None, title_present: bool) -> None:
+    def __init__(self, response: FakeSaveResponse | None) -> None:
         self.response = response
-        self.title_present = title_present
         self.response_callback = None
         self.keyboard = FakeSaveKeyboard(self)
-        self.goto = AsyncMock()
 
     def on(self, event: str, callback) -> None:
         assert event == "response"
@@ -198,35 +201,47 @@ class FakeSavePage:
         assert event == "response"
         self.response_callback = None
 
-    async def evaluate(self, _script: str, *args):
-        return self.title_present if args else True
-
-
-def run_save(response: FakeSaveResponse | None, title_present: bool) -> tuple[SmzdmPlatform, str]:
+def build_save_platform(response: FakeSaveResponse | None) -> SmzdmPlatform:
     platform = SmzdmPlatform()
-    platform.page = FakeSavePage(response, title_present)
+    platform.page = FakeSavePage(response)
     platform.simulator.random_delay = AsyncMock()
+    platform._expected_persisted_blocks = [{"type": "text", "text": "正文"}]
+    platform._current_body_editor = AsyncMock(return_value=FakeSaveEditor())
+    platform._find_unique_exact_draft = AsyncMock(
+        return_value="https://post.smzdm.com/edit/safe-draft-id"
+    )
+    platform._verify_persisted_draft = AsyncMock()
+    return platform
+
+
+def run_save(response: FakeSaveResponse | None) -> tuple[SmzdmPlatform, str]:
+    platform = build_save_platform(response)
     with patch("platforms.smzdm.asyncio.sleep", new=AsyncMock()):
         result = asyncio.run(platform.save_draft("同名草稿"))
     return platform, result
 
 
-def test_smzdm_old_same_title_without_new_save_response_fails() -> None:
-    platform, result = run_save(None, title_present=True)
+def test_smzdm_missing_current_save_response_is_result_unknown() -> None:
+    platform = build_save_platform(None)
 
-    assert result == ""
-    platform.page.goto.assert_not_awaited()
-
-
-def test_smzdm_requires_current_2xx_response_and_title() -> None:
-    platform, result = run_save(FakeSaveResponse(204), title_present=True)
-
-    assert result == "https://post.smzdm.com/tougao/"
-    platform.page.goto.assert_awaited_once()
+    with patch("platforms.smzdm.asyncio.sleep", new=AsyncMock()):
+        with pytest.raises(DraftResultUnknownError):
+            asyncio.run(platform.save_draft("同名草稿"))
+    platform._find_unique_exact_draft.assert_not_awaited()
 
 
-def test_smzdm_non_2xx_save_response_fails_even_with_title() -> None:
-    platform, result = run_save(FakeSaveResponse(500), title_present=True)
+def test_smzdm_requires_current_2xx_response_and_persisted_reopen() -> None:
+    platform, result = run_save(FakeSaveResponse(204))
 
-    assert result == ""
-    platform.page.goto.assert_not_awaited()
+    assert result == "https://post.smzdm.com/edit/safe-draft-id"
+    platform._find_unique_exact_draft.assert_awaited_once_with("同名草稿")
+    platform._verify_persisted_draft.assert_awaited_once()
+
+
+def test_smzdm_non_2xx_save_response_is_result_unknown() -> None:
+    platform = build_save_platform(FakeSaveResponse(500))
+
+    with patch("platforms.smzdm.asyncio.sleep", new=AsyncMock()):
+        with pytest.raises(DraftResultUnknownError):
+            asyncio.run(platform.save_draft("同名草稿"))
+    platform._find_unique_exact_draft.assert_not_awaited()

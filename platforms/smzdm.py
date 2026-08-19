@@ -15,26 +15,40 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 import re
 from pathlib import Path
+from urllib.parse import urljoin, urlsplit
 
 from loguru import logger
 
 from platforms.base import (
     BasePlatform,
     BrowserLifecycleError,
+    DraftResultUnknownError,
     LoginRequiredError,
     PlatformAutomationError,
     SelectorError,
 )
-from platforms.content_validation import ensure_valid_content, safe_media_error
+from platforms.content_validation import (
+    ContentValidationError,
+    extract_expected_paragraphs,
+    normalize_for_comparison,
+    safe_media_error,
+)
+from platforms.media_progress import safe_media_progress
 
 LOGIN_URL = "https://zhiyou.smzdm.com/user/login"
 HOME_URL = "https://zhiyou.smzdm.com/"
 USERNAME_SELECTOR = "input#username.form-input"
 IDENTITY_NAME_KEYS = {"nickname", "user_name", "screen_name", "name", "nick"}
 IDENTITY_UID_KEYS = {"smzdm_id", "uid", "user_id", "id"}
+TITLE_SELECTOR = "textarea.article-title"
+BODY_SELECTOR = "div.ProseMirror"
+DRAFTS_URL = "https://post.smzdm.com/tougao/"
+BODY_IMAGE_TRIGGER = ".right-menu-bar:has(svg.zicon-picture)"
+BODY_IMAGE_INPUT = 'input[type="file"][accept*="image"]'
 
 
 class PlatformNotImplementedError(PlatformAutomationError):
@@ -44,7 +58,7 @@ class PlatformNotImplementedError(PlatformAutomationError):
 
 
 class SmzdmPlatform(BasePlatform):
-    """什么值得买账号会话适配器；内容投递能力保持关闭。"""
+    """什么值得买账号会话与 DRAFT-only 图文投递适配器。"""
 
     platform_name = "smzdm"
     SESSION_COOKIE_NAMES = frozenset({"sess"})
@@ -55,6 +69,8 @@ class SmzdmPlatform(BasePlatform):
         super().__init__(**kwargs)
         self.last_login_error = ""
         self._identity_payload: dict[str, str | int | bool] | None = None
+        self._expected_persisted_blocks: list[dict] | None = None
+        self._media_progress_state: dict[str, int] | None = None
 
     async def initialize(self):
         await super().initialize()
@@ -372,100 +388,119 @@ class SmzdmPlatform(BasePlatform):
             raise SelectorError("smzdm 标题输入框未找到或填写失败") from exc
 
     async def fill_content(self, content_blocks: list, images: list):
-        """填写正文（ProseMirror），回读并有序校验。"""
+        """按冻结 ContentVersion 的原始顺序写入 TipTap 图文并严格回读。"""
 
         self._require_page_alive("smzdm 填写正文")
-        editor = self.page.locator("div.ProseMirror").first
+        self._expected_persisted_blocks = copy.deepcopy(content_blocks)
+        expected_images = sum(1 for block in content_blocks if block.get("type") == "image")
+        self._media_progress_state = {
+            "expected_images": expected_images,
+            "uploaded_images": 0,
+            "failed_image_count": 0,
+        }
+        editor = await self._current_body_editor()
         try:
-            if await editor.count() == 0 or not await editor.is_visible():
-                raise RuntimeError("正文编辑器不可见")
-            try:
-                await editor.click(timeout=5000)
-            except Exception:
-                await editor.evaluate("(el) => el.focus()")
-            await self.simulator.random_delay(0.3, 0.8)
-            try:
-                await self.page.keyboard.press("Control+A")
-                await self.page.keyboard.press("Backspace")
-            except Exception:
-                pass
+            await editor.click(timeout=5000)
+            await self.page.keyboard.press("Control+A")
+            await self.page.keyboard.press("Backspace")
             await self.simulator.random_delay(0.3, 0.8)
         except Exception as exc:
             if self._exception_means_browser_closed(exc):
                 raise BrowserLifecycleError(
-                    "BROWSER_CONTEXT_CLOSED: smzdm 定位正文编辑器时页面已关闭"
+                    "BROWSER_CONTEXT_CLOSED: smzdm 清空正文时页面已关闭"
                 ) from exc
-            raise SelectorError("smzdm 正文编辑器未找到") from exc
+            raise ContentValidationError(
+                "SMZDM_EDITOR_RESET_FAILED: 正文编辑器无法安全清空"
+            ) from exc
 
-        first_text = True
-        for block in content_blocks:
-            btype = block.get("type")
-            if btype in ("text", "heading") and block.get("text"):
-                text = str(block["text"]).strip()
+        uploaded_images = 0
+        failed_images: list[dict[str, str]] = []
+        content_started = False
+        for block_index, block in enumerate(content_blocks):
+            if not isinstance(block, dict):
+                raise ContentValidationError("SMZDM_CONTENT_CONTRACT_INVALID: 正文块无效")
+            block_type = block.get("type")
+            if block_type in {"text", "heading"}:
+                text = str(block.get("text") or "").strip()
                 if not text:
                     continue
-                if not first_text:
+                if block_type == "heading" and (
+                    block.get("level") != 2 or "\n" in text or "\r" in text
+                ):
+                    raise ContentValidationError(
+                        "SMZDM_HEADING_UNSUPPORTED: 仅支持单行二级标题"
+                    )
+                if content_started:
+                    await self._place_body_caret_at_end()
                     await self.page.keyboard.press("Enter")
+                await self._place_body_caret_at_end()
                 lines = text.splitlines() or [text]
-                for i, line in enumerate(lines):
+                for line_index, line in enumerate(lines):
                     if line.strip():
                         await self.page.keyboard.insert_text(line.strip())
-                    if i < len(lines) - 1:
+                    if line_index < len(lines) - 1:
                         await self.page.keyboard.press("Enter")
-                first_text = False
+                if block_type == "heading":
+                    await self._apply_h2_to_current_block()
+                content_started = True
+                continue
 
-        actual_text = await editor.inner_text()
-        expected_count = ensure_valid_content(
-            content_blocks,
-            actual_text,
-            platform="smzdm",
-            phase="输入后",
-        )
-        logger.info("smzdm 正文文字输入并验证成功: {} 个文本段落", expected_count)
-
-        expected_images = sum(
-            1 for block in content_blocks if block.get("type") == "image"
-        )
-        uploaded_images = 0
-        failed_images = []
-        for block in content_blocks:
-            if block.get("type") == "image":
-                img_path = block.get("local_path")
-                if not img_path and images:
-                    for img in images:
-                        if img.get("position_index") == block.get("position"):
-                            img_path = img.get("local_path")
-                            break
-                    if not img_path:
-                        img_path = images[0].get("local_path")
-                if img_path:
-                    upload_result = await self._upload_image(img_path) or {}
-                    if upload_result.get("success"):
-                        uploaded_images += 1
-                    else:
-                        failed_images.append(
-                            {
-                                "filename": Path(str(img_path)).name,
-                                "error": safe_media_error(
-                                    upload_result.get("error"),
-                                    fallback="图片上传失败",
-                                ),
-                            }
-                        )
-                    # 每张图片之间放慢节奏，降低风控敏感度
-                    await self.simulator.random_delay(2.5, 4.5)
+            if block_type != "image":
+                raise ContentValidationError(
+                    "SMZDM_CONTENT_CONTRACT_INVALID: 未知正文块类型"
+                )
+            if content_started:
+                await self._place_body_caret_at_end()
+                await self.page.keyboard.press("Enter")
+            await self._place_body_caret_at_end()
+            image_path = self._image_path_for_block(block, images)
+            if image_path:
+                upload_result = await self._upload_image(image_path) or {}
+                if upload_result.get("success"):
+                    uploaded_images += 1
                 else:
                     failed_images.append(
-                        {"filename": "", "error": "文章图片块没有对应本地文件"}
+                        {
+                            "filename": Path(image_path).name,
+                            "error_code": str(
+                                upload_result.get("error_code")
+                                or "PLATFORM_MEDIA_INCOMPLETE"
+                            ),
+                            "error": safe_media_error(
+                                upload_result.get("error"),
+                                fallback="图片上传失败",
+                            ),
+                        }
                     )
+            else:
+                failed_images.append(
+                    {
+                        "filename": "",
+                        "error_code": "IMAGE_PATH_UNRESOLVED",
+                        "error": "文章图片块没有唯一对应本地文件",
+                    }
+                )
+            content_started = True
+            self._media_progress_state.update(
+                uploaded_images=uploaded_images,
+                failed_image_count=len(failed_images),
+            )
+            try:
+                await self._validate_dom_prefix(
+                    content_blocks[: block_index + 1],
+                    phase=f"图片处理后第{block_index + 1}块",
+                )
+            except ContentValidationError as exc:
+                self._attach_media_progress(exc)
+                raise
+            await self.simulator.random_delay(2.5, 4.5)
 
-        actual_text = await editor.inner_text()
-        ensure_valid_content(
-            content_blocks,
-            actual_text,
-            platform="smzdm",
-            phase="图片处理后",
-        )
+        try:
+            await self._validate_dom_exact(content_blocks, phase="正文最终")
+        except ContentValidationError as exc:
+            self._attach_media_progress(exc)
+            raise
+        expected_count = len(extract_expected_paragraphs(content_blocks))
         logger.info("smzdm 正文输入并最终验证成功: {} 个文本段落", expected_count)
 
         if expected_images == 0:
@@ -497,26 +532,243 @@ class SmzdmPlatform(BasePlatform):
             "media_error": media_error,
         }
 
+    @staticmethod
+    def _media_status(expected: int, uploaded: int, failed: int) -> str:
+        if expected == 0:
+            return "not_required"
+        if uploaded == expected:
+            return "completed"
+        if uploaded == 0 and failed:
+            return "failed"
+        if uploaded + failed == expected:
+            return "partial"
+        return "in_progress"
+
+    def _attach_media_progress(self, exc: ContentValidationError) -> None:
+        state = self._media_progress_state
+        if not isinstance(state, dict):
+            return
+        progress = safe_media_progress(
+            {
+                **state,
+                "media_status": self._media_status(
+                    state["expected_images"],
+                    state["uploaded_images"],
+                    state["failed_image_count"],
+                ),
+            }
+        )
+        if progress is not None:
+            exc.media_progress = progress
+
+    async def _current_body_editor(self):
+        self._require_page_alive("smzdm 定位当前正文编辑器")
+        editor = self.page.locator(BODY_SELECTOR).first
+        try:
+            if await editor.count() == 0 or not await editor.is_visible():
+                raise SelectorError("smzdm 正文编辑器未找到或当前不可见")
+            return editor
+        except SelectorError:
+            raise
+        except Exception as exc:
+            if self._exception_means_browser_closed(exc):
+                raise BrowserLifecycleError(
+                    "BROWSER_CONTEXT_CLOSED: smzdm 定位正文编辑器时页面已关闭"
+                ) from exc
+            raise SelectorError("smzdm 正文编辑器未找到或当前不可见") from exc
+
+    async def _place_body_caret_at_end(self) -> None:
+        editor = await self._current_body_editor()
+        try:
+            await editor.press("Control+End")
+        except Exception as exc:
+            if self._exception_means_browser_closed(exc):
+                raise BrowserLifecycleError(
+                    "BROWSER_CONTEXT_CLOSED: smzdm 移动正文光标时页面已关闭"
+                ) from exc
+            raise ContentValidationError(
+                "SMZDM_CARET_POSITION_FAILED: 正文末尾光标定位失败"
+            ) from exc
+
+    async def _apply_h2_to_current_block(self) -> None:
+        try:
+            menu = self.page.locator("button.list-item:has(svg.zicon-t)").first
+            if await menu.count() == 0 or not await menu.is_visible():
+                raise RuntimeError("标题菜单不可见")
+            await menu.click(timeout=5000)
+            option = self.page.locator(".dropdown-listitem").filter(
+                has_text=re.compile(r"^二级标题$")
+            ).first
+            if await option.count() == 0 or not await option.is_visible():
+                raise RuntimeError("二级标题选项不可见")
+            await option.click(timeout=5000)
+        except Exception as exc:
+            if self._exception_means_browser_closed(exc):
+                raise BrowserLifecycleError(
+                    "BROWSER_CONTEXT_CLOSED: smzdm 设置二级标题时页面已关闭"
+                ) from exc
+            raise ContentValidationError(
+                "SMZDM_HEADING_APPLY_FAILED: 二级标题样式未能应用"
+            ) from exc
+
+    @staticmethod
+    def _image_path_for_block(block: dict, images: list[dict]) -> str | None:
+        direct = block.get("local_path") if isinstance(block, dict) else None
+        if direct:
+            return str(direct)
+        position = block.get("position") if isinstance(block, dict) else None
+        matches = [
+            image
+            for image in images or []
+            if isinstance(image, dict) and image.get("position_index") == position
+        ]
+        if len(matches) != 1:
+            return None
+        local_path = matches[0].get("local_path")
+        return str(local_path) if local_path else None
+
+    @staticmethod
+    def _expected_content_tokens(blocks: list[dict]) -> list[dict]:
+        tokens: list[dict] = []
+        for block in blocks:
+            block_type = block.get("type") if isinstance(block, dict) else None
+            if block_type == "image":
+                tokens.append({"kind": "image"})
+                continue
+            for paragraph in extract_expected_paragraphs([block]):
+                if block_type == "heading":
+                    tokens.append(
+                        {
+                            "kind": "heading",
+                            "level": int(block.get("level") or 0),
+                            "text": paragraph.comparison_text,
+                        }
+                    )
+                else:
+                    tokens.append({"kind": "text", "text": paragraph.comparison_text})
+        return tokens
+
+    async def _read_editor_dom_tokens(self) -> list[dict]:
+        editor = await self._current_body_editor()
+        try:
+            raw = await editor.evaluate(
+                """root => {
+                    const tokens = [];
+                    for (const node of root.children) {
+                        const images = node.querySelectorAll('img');
+                        if (images.length) {
+                            for (const _image of images) tokens.push({kind: 'image'});
+                            continue;
+                        }
+                        const text = node.innerText || node.textContent || '';
+                        if (!text.trim()) continue;
+                        const tag = node.tagName.toLowerCase();
+                        if (tag === 'h3') {
+                            tokens.push({kind: 'heading', level: 2, text});
+                        } else if (tag === 'h2') {
+                            tokens.push({kind: 'heading', level: 1, text});
+                        } else {
+                            tokens.push({kind: 'text', text});
+                        }
+                    }
+                    return tokens;
+                }"""
+            )
+        except Exception as exc:
+            if self._exception_means_browser_closed(exc):
+                raise BrowserLifecycleError(
+                    "BROWSER_CONTEXT_CLOSED: smzdm 读取正文 DOM 时页面已关闭"
+                ) from exc
+            raise ContentValidationError(
+                "SMZDM_CONTENT_DOM_VERIFY_FAILED: 正文 DOM 回读失败"
+            ) from exc
+        if not isinstance(raw, list):
+            raise ContentValidationError("SMZDM_CONTENT_DOM_VERIFY_FAILED: DOM 序列无效")
+        normalized: list[dict] = []
+        for item in raw:
+            if not isinstance(item, dict):
+                raise ContentValidationError("SMZDM_CONTENT_DOM_VERIFY_FAILED: DOM token 无效")
+            kind = item.get("kind")
+            if kind == "image":
+                normalized.append({"kind": "image"})
+                continue
+            text = normalize_for_comparison(item.get("text"))
+            if not text:
+                continue
+            if kind == "heading":
+                normalized.append(
+                    {
+                        "kind": "heading",
+                        "level": int(item.get("level") or 0),
+                        "text": text,
+                    }
+                )
+            elif kind == "text":
+                for paragraph in extract_expected_paragraphs(
+                    [{"type": "text", "text": text}]
+                ):
+                    normalized.append(
+                        {"kind": "text", "text": paragraph.comparison_text}
+                    )
+            else:
+                raise ContentValidationError(
+                    "SMZDM_CONTENT_DOM_VERIFY_FAILED: DOM token 类型无效"
+                )
+        return normalized
+
+    @staticmethod
+    def _token_shape(tokens: list[dict]) -> str:
+        shape: list[str] = []
+        for token in tokens[:40]:
+            if token.get("kind") == "image":
+                shape.append("I")
+            elif token.get("kind") == "heading":
+                shape.append(f"H{token.get('level')}:{len(token.get('text') or '')}")
+            else:
+                shape.append(f"T:{len(token.get('text') or '')}")
+        return ",".join(shape) or "EMPTY"
+
+    async def _validate_dom_prefix(self, blocks: list[dict], *, phase: str) -> None:
+        expected = self._expected_content_tokens(blocks)
+        actual = await self._read_editor_dom_tokens()
+        if actual[: len(expected)] != expected:
+            raise ContentValidationError(
+                f"CONTENT_VALIDATION_ERROR: smzdm{phase}图文顺序不完整; "
+                f"expected={self._token_shape(expected)}; "
+                f"actual={self._token_shape(actual)}"
+            )
+
+    async def _validate_dom_exact(self, blocks: list[dict], *, phase: str) -> None:
+        expected = self._expected_content_tokens(blocks)
+        actual = await self._read_editor_dom_tokens()
+        if actual != expected:
+            raise ContentValidationError(
+                f"CONTENT_VALIDATION_ERROR: smzdm{phase}图文顺序不完整; "
+                f"expected={self._token_shape(expected)}; "
+                f"actual={self._token_shape(actual)}"
+            )
+
     async def _upload_image(self, image_path: str) -> dict:
-        """通过编辑器文件控件上传图片；以编辑器内图片数量增加为判据。"""
+        """点击真实正文图片入口后上传一张图，并验证正文图片数量增长。"""
 
         self._require_page_alive("smzdm 上传图片")
         try:
-            # 当前没有经过真实 DOM 探测的正文归属证据，只允许唯一的
-            # image accept 控件；多个候选时拒绝猜测，绝不回退到 first。
-            file_inputs = self.page.locator("input[type=file]")
-            count = await file_inputs.count()
-            if count == 0:
+            trigger = self.page.locator(BODY_IMAGE_TRIGGER).first
+            if await trigger.count() == 0 or not await trigger.is_visible():
                 return {
                     "success": False,
-                    "error_code": "SMZDM_BODY_IMAGE_INPUT_NOT_FOUND",
-                    "error": "smzdm 正文图片控件未找到，已安全停止",
+                    "error_code": "SMZDM_BODY_IMAGE_TRIGGER_NOT_FOUND",
+                    "error": "smzdm 正文图片入口未找到，已安全停止",
                 }
+            before = await self.page.locator(f"{BODY_SELECTOR} img").count()
+            await trigger.click(timeout=5000)
+            await self.simulator.random_delay(0.3, 0.8)
+            file_inputs = self.page.locator(BODY_IMAGE_INPUT)
             image_candidates = []
-            for i in range(count):
-                accept = (await file_inputs.nth(i).get_attribute("accept")) or ""
-                if "image" in accept.lower():
-                    image_candidates.append(file_inputs.nth(i))
+            for index in range(await file_inputs.count()):
+                candidate = file_inputs.nth(index)
+                if await candidate.is_visible():
+                    image_candidates.append(candidate)
             if not image_candidates:
                 return {
                     "success": False,
@@ -530,22 +782,15 @@ class SmzdmPlatform(BasePlatform):
                     "error": "smzdm 正文图片控件候选不唯一，已安全停止",
                 }
             target_input = image_candidates[0]
-            before = await self.page.evaluate(
-                """() => document.querySelectorAll('.ProseMirror img').length"""
-            )
             await target_input.set_input_files(str(image_path), timeout=15000)
             after = before
             for _ in range(10):
                 await asyncio.sleep(1)
-                observed = await self.page.evaluate(
-                    """() => document.querySelectorAll('.ProseMirror img').length"""
-                )
+                observed = await self.page.locator(f"{BODY_SELECTOR} img").count()
                 if observed <= before:
                     continue
                 await asyncio.sleep(1)
-                stable = await self.page.evaluate(
-                    """() => document.querySelectorAll('.ProseMirror img').length"""
-                )
+                stable = await self.page.locator(f"{BODY_SELECTOR} img").count()
                 if stable >= observed:
                     after = stable
                     break
@@ -555,6 +800,7 @@ class SmzdmPlatform(BasePlatform):
                     "error_code": "SMZDM_EDITOR_IMAGE_COUNT_UNCHANGED",
                     "error": "上传后正文编辑器图片数量未稳定增加",
                 }
+            await self.page.keyboard.press("Escape")
             return {"success": True, "error": ""}
         except Exception as exc:
             if self._exception_means_browser_closed(exc):
@@ -591,17 +837,18 @@ class SmzdmPlatform(BasePlatform):
         }
 
     async def save_draft(self, title: str = "") -> str:
-        """smzdm 编辑器「草稿将自动保存」；验证 = 草稿箱出现标题。
+        """强制刷新自动保存，定位唯一草稿实体并重开核验完整图文。"""
 
-        无独立存草稿按钮，自动保存在内容变化后触发。要点：
-        1. fill_content 输入期间自动保存已可能触发（此时监听器尚未挂上），
-           因此仅等待「新请求」会误报失败——本方法先主动制造一次内容变化
-           （光标处空格+退格，文档内容不变但触发 onChange），强制刷新自动保存；
-        2. 捕获保存相关 POST/PUT/PATCH 2xx 作为补充证据；
-        3. **平台真值**：回到投稿页「我的草稿」区块，标题关键字出现才算成功
-           （2026-08 实测该区块展示 标题/字数/图数/创建时间/继续编辑）。
-        """
         self._require_page_alive("smzdm 保存草稿")
+        expected_title = " ".join(str(title or "").split())
+        if not expected_title:
+            raise DraftResultUnknownError(
+                "DRAFT_RESULT_UNKNOWN: smzdm 自动保存结果缺少可核验标题"
+            )
+        if self._expected_persisted_blocks is None:
+            raise DraftResultUnknownError(
+                "DRAFT_RESULT_UNKNOWN: smzdm 缺少冻结内容核验快照"
+            )
         captured: dict = {}
 
         async def _on_response(response) -> None:
@@ -623,31 +870,28 @@ class SmzdmPlatform(BasePlatform):
 
         try:
             self.page.on("response", _on_response)
-            # 主动制造一次内容变化，强制触发自动保存（文档内容保持不变）：
-            # 聚焦正文 → 移到末尾 → 输入一个空格 → 删除 → 失焦。
-            await self.page.evaluate(
-                """() => {
-                    const el = document.querySelector('.ProseMirror');
-                    if (el) el.focus();
-                }"""
-            )
+            editor = await self._current_body_editor()
+            await editor.press("Control+End")
             await self.simulator.random_delay(0.3, 0.8)
-            await self.page.keyboard.press("End")
             await self.page.keyboard.type(" ", delay=50)
             await self.page.keyboard.press("Backspace")
-            await self.page.evaluate(
-                """() => {
-                    const el = document.activeElement;
-                    if (el) el.blur();
-                }"""
-            )
+            await editor.evaluate("el => el.blur()")
             await self.simulator.random_delay(1, 2)
-            for _ in range(15):
+            for _ in range(20):
                 if captured.get("status"):
                     break
                 await asyncio.sleep(1)
-            # 自动保存可能有防抖，多等一会儿让请求落地
             await self.simulator.random_delay(1, 2)
+        except Exception as exc:
+            if self._exception_means_browser_closed(exc):
+                raise DraftResultUnknownError(
+                    "DRAFT_RESULT_UNKNOWN: smzdm 自动保存期间浏览器已关闭"
+                ) from exc
+            if isinstance(exc, DraftResultUnknownError):
+                raise
+            raise DraftResultUnknownError(
+                "DRAFT_RESULT_UNKNOWN: smzdm 无法触发可核验的自动保存"
+            ) from exc
         finally:
             try:
                 self.page.remove_listener("response", _on_response)
@@ -656,56 +900,140 @@ class SmzdmPlatform(BasePlatform):
 
         status = captured.get("status")
         if not isinstance(status, int) or not 200 <= status < 300:
-            logger.warning(
-                "smzdm 本次未捕获到成功保存响应: status={}",
-                status if isinstance(status, int) else "missing",
+            raise DraftResultUnknownError(
+                "DRAFT_RESULT_UNKNOWN: smzdm 本次未捕获到成功自动保存响应"
             )
-            return ""
-
-        # 平台真值：投稿页「我的草稿」区块出现标题关键字
         try:
-            await self.page.goto(
-                "https://post.smzdm.com/tougao/",
-                wait_until="domcontentloaded",
-                timeout=30000,
-            )
-            keyword = str(title or "").strip()[:12]
-            if not keyword:
-                logger.error("smzdm 草稿验证缺少标题关键字")
-                return ""
-            found = False
-            for _ in range(3):
-                await self.simulator.random_delay(3, 5)
-                found = bool(
-                    await self.page.evaluate(
-                        "(kw) => (document.body.innerText || '').includes(kw)",
-                        keyword,
-                    )
-                )
-                if found:
-                    break
-            if not found:
-                logger.error(
-                    "smzdm 草稿箱未找到标题包含「{}」的草稿（保存请求={}）",
-                    keyword,
-                    status,
-                )
-                return ""
-            logger.info(
-                "smzdm 草稿验证成功: 草稿箱出现标题「{}」（保存请求={}）",
-                keyword,
-                status,
-            )
-            return "https://post.smzdm.com/tougao/"
-        except BrowserLifecycleError:
+            edit_url = await self._find_unique_exact_draft(expected_title)
+            await self._verify_persisted_draft(expected_title, edit_url)
+            return edit_url
+        except DraftResultUnknownError:
             raise
         except Exception as exc:
             if self._exception_means_browser_closed(exc):
-                raise BrowserLifecycleError(
-                    "BROWSER_CONTEXT_CLOSED: smzdm 草稿验证时页面已关闭"
+                raise DraftResultUnknownError(
+                    "DRAFT_RESULT_UNKNOWN: smzdm 自动保存后浏览器已关闭"
                 ) from exc
-            logger.error("smzdm 草稿箱验证失败: {}", exc)
-            return ""
+            raise DraftResultUnknownError(
+                "DRAFT_RESULT_UNKNOWN: smzdm 持久化草稿核验失败"
+            ) from exc
+
+    async def _find_unique_exact_draft(self, expected_title: str) -> str:
+        try:
+            await self.page.goto(
+                DRAFTS_URL,
+                wait_until="domcontentloaded",
+                timeout=30000,
+            )
+            matches: list[str] = []
+            for attempt in range(5):
+                await self.simulator.random_delay(2, 4)
+                matches = await self.page.evaluate(
+                    """title => Array.from(document.querySelectorAll('.draft-list li'))
+                        .map(item => {
+                            const titleLink = item.querySelector('a.sub-title');
+                            const editLink = Array.from(item.querySelectorAll('a'))
+                                .find(link => (link.innerText || '').trim() === '继续编辑');
+                            return {
+                                title: (titleLink?.textContent || '').trim(),
+                                href: editLink?.href || ''
+                            };
+                        })
+                        .filter(item => item.title === title && item.href)
+                        .map(item => item.href)""",
+                    expected_title,
+                )
+                if len(matches) == 1:
+                    break
+                if attempt + 1 < 5:
+                    await self.page.reload(
+                        wait_until="domcontentloaded",
+                        timeout=30000,
+                    )
+            if len(matches) != 1:
+                raise DraftResultUnknownError(
+                    "DRAFT_RESULT_UNKNOWN: smzdm 未找到标题精确匹配的唯一草稿"
+                )
+            edit_url = urljoin(DRAFTS_URL, matches[0])
+            parts = urlsplit(edit_url)
+            if (
+                parts.scheme != "https"
+                or parts.netloc != "post.smzdm.com"
+                or not re.fullmatch(r"/edit/[A-Za-z0-9_-]{1,128}", parts.path)
+            ):
+                raise DraftResultUnknownError(
+                    "DRAFT_RESULT_UNKNOWN: smzdm 草稿实体编辑地址无效"
+                )
+            return edit_url
+        except DraftResultUnknownError:
+            raise
+        except Exception as exc:
+            if self._exception_means_browser_closed(exc):
+                raise DraftResultUnknownError(
+                    "DRAFT_RESULT_UNKNOWN: smzdm 打开草稿箱时浏览器已关闭"
+                ) from exc
+            raise DraftResultUnknownError(
+                "DRAFT_RESULT_UNKNOWN: smzdm 草稿实体查询失败"
+            ) from exc
+
+    async def _verify_persisted_draft(
+        self,
+        expected_title: str,
+        edit_url: str,
+    ) -> None:
+        blocks = self._expected_persisted_blocks
+        if blocks is None:
+            raise DraftResultUnknownError(
+                "DRAFT_RESULT_UNKNOWN: smzdm 缺少冻结内容核验快照"
+            )
+        try:
+            await self.page.goto(
+                edit_url,
+                wait_until="domcontentloaded",
+                timeout=30000,
+            )
+            await self.page.wait_for_selector(
+                TITLE_SELECTOR,
+                state="visible",
+                timeout=20000,
+            )
+            await self.page.wait_for_selector(
+                BODY_SELECTOR,
+                state="visible",
+                timeout=20000,
+            )
+            expected_tokens = self._expected_content_tokens(blocks)
+            actual_tokens: list[dict] = []
+            title_matched = False
+            for attempt in range(15):
+                title_field = self.page.locator(TITLE_SELECTOR).first
+                actual_title = " ".join((await title_field.input_value()).split())
+                title_matched = actual_title == expected_title
+                if title_matched:
+                    actual_tokens = await self._read_editor_dom_tokens()
+                    if actual_tokens == expected_tokens:
+                        return
+                if attempt + 1 < 15:
+                    await asyncio.sleep(2)
+            if not title_matched:
+                raise DraftResultUnknownError(
+                    "DRAFT_RESULT_UNKNOWN: smzdm 草稿重开后标题不一致"
+                )
+            raise DraftResultUnknownError(
+                "DRAFT_RESULT_UNKNOWN: smzdm 草稿重开后图文结构不完整; "
+                f"expected={self._token_shape(expected_tokens)}; "
+                f"actual={self._token_shape(actual_tokens)}"
+            )
+        except DraftResultUnknownError:
+            raise
+        except Exception as exc:
+            if self._exception_means_browser_closed(exc):
+                raise DraftResultUnknownError(
+                    "DRAFT_RESULT_UNKNOWN: smzdm 重开草稿时浏览器已关闭"
+                ) from exc
+            raise DraftResultUnknownError(
+                "DRAFT_RESULT_UNKNOWN: smzdm 草稿重开核验失败"
+            ) from exc
 
     async def publish_now(self, title: str = "") -> str:
         self._not_implemented("公开发布")

@@ -17,6 +17,9 @@ class FakeFileInput:
     async def get_attribute(self, name: str) -> str | None:
         return self.accept if name == "accept" else None
 
+    async def is_visible(self) -> bool:
+        return True
+
 
 class FakeFileInputs:
     def __init__(self, inputs: list[FakeFileInput]) -> None:
@@ -52,7 +55,6 @@ class FakeUploadPage:
 
 
 PLATFORMS = (
-    (SmzdmPlatform, "platforms.smzdm", "SMZDM"),
     (WeiboPlatform, "platforms.weibo", "WEIBO"),
 )
 
@@ -162,5 +164,146 @@ def test_upload_exception_redacts_physical_path(
     serialized = repr(result)
     assert result["success"] is False
     assert result["error_code"] == f"{prefix}_IMAGE_UPLOAD_FAILED"
+    assert r"D:\Secret Folder" not in serialized
+    assert "abcdefghijklmnopqrstuv123456" not in serialized
+
+
+class FakeSmzdmTrigger:
+    def __init__(self, *, present: bool = True, visible: bool = True) -> None:
+        self.present = present
+        self.visible = visible
+        self.click = AsyncMock()
+
+    @property
+    def first(self):
+        return self
+
+    async def count(self) -> int:
+        return int(self.present)
+
+    async def is_visible(self) -> bool:
+        return self.visible
+
+
+class FakeSmzdmImageNodes:
+    def __init__(self, counts: list[int]) -> None:
+        self.counts = iter(counts)
+        self.last = counts[-1] if counts else 0
+
+    async def count(self) -> int:
+        try:
+            self.last = next(self.counts)
+        except StopIteration:
+            pass
+        return self.last
+
+
+class FakeSmzdmKeyboard:
+    def __init__(self) -> None:
+        self.press = AsyncMock()
+
+
+class FakeSmzdmUploadPage:
+    def __init__(
+        self,
+        *,
+        inputs: list[FakeFileInput],
+        image_counts: list[int],
+        trigger_present: bool = True,
+    ) -> None:
+        self.trigger = FakeSmzdmTrigger(present=trigger_present)
+        self.inputs = FakeFileInputs(inputs)
+        self.images = FakeSmzdmImageNodes(image_counts)
+        self.keyboard = FakeSmzdmKeyboard()
+
+    def locator(self, selector: str):
+        if selector == ".right-menu-bar:has(svg.zicon-picture)":
+            return self.trigger
+        if selector == 'input[type="file"][accept*="image"]':
+            return self.inputs
+        if selector == "div.ProseMirror img":
+            return self.images
+        raise AssertionError(f"unexpected selector: {selector}")
+
+
+def run_smzdm_upload(
+    inputs: list[FakeFileInput],
+    image_counts: list[int],
+    *,
+    trigger_present: bool = True,
+) -> tuple[SmzdmPlatform, dict]:
+    platform = SmzdmPlatform()
+    platform.page = FakeSmzdmUploadPage(
+        inputs=inputs,
+        image_counts=image_counts,
+        trigger_present=trigger_present,
+    )
+    platform.simulator.random_delay = AsyncMock()
+    with patch("platforms.smzdm.asyncio.sleep", new=AsyncMock()):
+        result = asyncio.run(platform._upload_image("photo.png"))
+    return platform, result
+
+
+def test_smzdm_opens_real_picture_control_before_uploading() -> None:
+    body_image = FakeFileInput("image/gif, image/png, image/jpeg")
+
+    platform, result = run_smzdm_upload([body_image], [0, 1, 1])
+
+    assert result["success"] is True
+    platform.page.trigger.click.assert_awaited_once()
+    body_image.set_input_files.assert_awaited_once_with("photo.png", timeout=15000)
+    platform.page.keyboard.press.assert_awaited_once_with("Escape")
+
+
+def test_smzdm_missing_picture_trigger_fails_closed() -> None:
+    body_image = FakeFileInput("image/png")
+
+    _platform, result = run_smzdm_upload(
+        [body_image],
+        [0],
+        trigger_present=False,
+    )
+
+    assert result["success"] is False
+    assert result["error_code"] == "SMZDM_BODY_IMAGE_TRIGGER_NOT_FOUND"
+    body_image.set_input_files.assert_not_awaited()
+
+
+def test_smzdm_ambiguous_visible_body_inputs_fail_closed() -> None:
+    first_image = FakeFileInput("image/png")
+    second_image = FakeFileInput("image/jpeg")
+
+    _platform, result = run_smzdm_upload([first_image, second_image], [0])
+
+    assert result["success"] is False
+    assert result["error_code"] == "SMZDM_BODY_IMAGE_INPUT_AMBIGUOUS"
+    first_image.set_input_files.assert_not_awaited()
+    second_image.set_input_files.assert_not_awaited()
+
+
+def test_smzdm_image_count_must_stably_increase() -> None:
+    body_image = FakeFileInput("image/png")
+
+    _platform, result = run_smzdm_upload([body_image], [0] + [0] * 12)
+
+    assert result["success"] is False
+    assert result["error_code"] == "SMZDM_EDITOR_IMAGE_COUNT_UNCHANGED"
+    body_image.set_input_files.assert_awaited_once()
+
+
+def test_smzdm_upload_error_redacts_physical_path() -> None:
+    body_image = FakeFileInput(
+        "image/png",
+        RuntimeError(
+            r"set_input_files failed for D:\Secret Folder\a.png "
+            "token=abcdefghijklmnopqrstuv123456"
+        ),
+    )
+
+    _platform, result = run_smzdm_upload([body_image], [0])
+
+    serialized = repr(result)
+    assert result["success"] is False
+    assert result["error_code"] == "SMZDM_IMAGE_UPLOAD_FAILED"
     assert r"D:\Secret Folder" not in serialized
     assert "abcdefghijklmnopqrstuv123456" not in serialized

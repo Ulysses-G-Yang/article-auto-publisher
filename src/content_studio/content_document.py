@@ -1025,6 +1025,128 @@ def delivery_features(document: Mapping[str, Any]) -> frozenset[str]:
     return frozenset(counters.features)
 
 
+def delivery_heading_levels(document: Mapping[str, Any]) -> frozenset[int]:
+    """返回正文中需要平台保留的标题层级。
+
+    ``title_block_id`` 对应的文档标题由平台标题字段单独映射，不属于正文
+    标题能力。返回值只来自已通过 canonical 校验的 v2 文档，调用方可以用
+    它和平台声明的真实支持层级做精确的 fail-closed 比较。
+    """
+
+    normalized = validate_document(document)
+    excluded_id = normalized.get("title_block_id")
+    levels: set[int] = set()
+
+    def visit(blocks: Iterable[Mapping[str, Any]]) -> None:
+        for block in blocks:
+            if excluded_id is not None and block.get("block_id") == excluded_id:
+                continue
+            kind = block["kind"]
+            if kind == "heading":
+                levels.add(block["level"])
+            elif kind == "list":
+                for item in block["items"]:
+                    visit(item["blocks"])
+            elif kind == "table":
+                for row in block["rows"]:
+                    for cell in row["cells"]:
+                        visit(cell["blocks"])
+
+    visit(normalized["blocks"])
+    return frozenset(levels)
+
+
+def project_to_delivery_blocks(
+    document: Mapping[str, Any], *, omit_title_block: bool = True
+) -> list[dict[str, Any]]:
+    """把 v2 canonical 文档投影为带标题层级的安全平台块。
+
+    与历史 ``project_to_v1`` 不同，此投影保留 ``heading.level``。它只接受
+    平台执行层已经能表达的简单段落/标题/图片序列；marks、link、图注、浮动
+    锚点、列表和表格必须先经过格式能力门禁，不能在这里静默降级成普通文本。
+    输出只含公开文本、标题层级和受控 ``asset_id``，绝不包含本机路径。
+    """
+
+    normalized = validate_document(document)
+    title_block_id = normalized.get("title_block_id")
+    projected: list[dict[str, Any]] = []
+
+    def flush_text(
+        text_parts: list[str],
+        *,
+        block_type: str,
+        level: int | None,
+    ) -> None:
+        text = "".join(text_parts)
+        if not text:
+            return
+        item: dict[str, Any] = {
+            "type": block_type,
+            "text": text,
+            "position": len(projected),
+        }
+        if level is not None:
+            item["level"] = level
+        projected.append(item)
+        text_parts.clear()
+
+    def visit(blocks: Iterable[Mapping[str, Any]]) -> None:
+        for block in blocks:
+            block_id = block.get("block_id")
+            if omit_title_block and title_block_id is not None and block_id == title_block_id:
+                continue
+            kind = block["kind"]
+            if kind not in {"paragraph", "heading"}:
+                raise ContentDocumentValidationError(
+                    f"平台投影不支持 {kind}；必须先通过格式能力门禁"
+                )
+            if block.get("style_name") not in (None, "Normal"):
+                raise ContentDocumentValidationError(
+                    "平台投影不支持段落样式；必须先通过格式能力门禁"
+                )
+            level = block.get("level") if kind == "heading" else None
+            text_parts: list[str] = []
+            for child in block["children"]:
+                if child["kind"] == "text":
+                    if child.get("marks") or child.get("link") is not None:
+                        raise ContentDocumentValidationError(
+                            "平台投影不支持 marks/link；必须先通过格式能力门禁"
+                        )
+                    text_parts.append(child["text"])
+                    continue
+
+                if child.get("caption") is not None:
+                    raise ContentDocumentValidationError(
+                        "平台投影不支持图片 caption；必须先通过格式能力门禁"
+                    )
+                anchor = child.get("anchor")
+                if anchor is not None and anchor.get("kind") != "inline":
+                    raise ContentDocumentValidationError(
+                        "平台投影不支持浮动图片锚点；必须先通过格式能力门禁"
+                    )
+                flush_text(
+                    text_parts,
+                    block_type=kind if kind == "heading" else "text",
+                    level=level,
+                )
+                image = {
+                    "type": "image",
+                    "asset_id": child["asset_id"],
+                    "position": len(projected),
+                }
+                if child.get("alt") is not None:
+                    image["alt"] = child["alt"]
+                projected.append(image)
+            flush_text(
+                text_parts,
+                block_type=kind if kind == "heading" else "text",
+                level=level,
+            )
+
+    visit(normalized["blocks"])
+    return projected
+
+
 required_delivery_features = delivery_features
 
 
@@ -1089,11 +1211,13 @@ __all__ = [
     "compatibility",
     "compute_incompatibilities",
     "content_hash",
+    "delivery_heading_levels",
     "document_features",
     "delivery_features",
     "document_hash",
     "hash_document",
     "project_to_v1",
+    "project_to_delivery_blocks",
     "required_capabilities",
     "required_features",
     "required_delivery_features",

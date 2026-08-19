@@ -16,7 +16,9 @@ from content_studio.content_document import (
     ContentDocumentValidationError,
     canonical_document_json,
     delivery_features,
+    delivery_heading_levels,
     document_hash,
+    project_to_delivery_blocks,
     project_to_v1,
     validate_document,
 )
@@ -436,12 +438,18 @@ class ContentStudioService:
                 if schema_version == 2 and canonical_document is not None
                 else frozenset()
             )
+            required_heading_levels = (
+                delivery_heading_levels(canonical_document)
+                if schema_version == 2 and canonical_document is not None
+                else frozenset()
+            )
             format_results = {
                 target.target_id: _format_target_result(
                     target.platform,
                     required_format_features,
                     self.platform_format_capabilities,
                     schema_version=schema_version,
+                    required_heading_levels=required_heading_levels,
                 )
                 for target in targets
             }
@@ -680,9 +688,16 @@ class ContentStudioService:
         images = []
         body_parts = []
         for position, raw in enumerate(sorted(blocks, key=lambda item: item.get("position", 0))):
-            if raw.get("type") == "text":
+            if raw.get("type") in {"text", "heading"}:
                 text = str(raw.get("text") or "")
-                platform_blocks.append({"type": "text", "text": text, "position": position})
+                item = {
+                    "type": raw.get("type"),
+                    "text": text,
+                    "position": position,
+                }
+                if raw.get("type") == "heading":
+                    item["level"] = raw["level"]
+                platform_blocks.append(item)
                 if text.strip():
                     body_parts.append(text)
                 continue
@@ -717,12 +732,18 @@ class ContentStudioService:
             version = await session.get(ContentVersion, version_id)
             if version is None:
                 raise DraftValidationError("投递执行单引用的内容版本不存在")
-            _schema_version, _document, projection = _validated_stored_version(version)
+            schema_version, document, projection = _validated_stored_version(version)
             draft_id = version.draft_id
             title = version.title
+        if schema_version == 2:
+            if document is None:
+                raise DraftValidationError("v2 内容版本缺少 document，无法解析投递内容")
+            platform_blocks = project_to_delivery_blocks(document, omit_title_block=True)
+        else:
+            platform_blocks = projection
         _body, platform_blocks, images = await self.build_platform_content(
             draft_id,
-            projection,
+            platform_blocks,
         )
         return title, platform_blocks, images
 
@@ -1394,6 +1415,7 @@ def _format_target_result(
     capabilities: PlatformFormatCapabilities,
     *,
     schema_version: int,
+    required_heading_levels: frozenset[int] = frozenset(),
 ) -> tuple[str, str | None, str | None]:
     """返回目标初始格式状态、错误码和安全说明。"""
 
@@ -1401,21 +1423,37 @@ def _format_target_result(
         return "READY", None, None
     declaration = capabilities.get(platform)
     if declaration is None:
-        features = ", ".join(sorted(required_features)) or "none"
+        features = _format_required_features(required_features, required_heading_levels)
         return (
             "FORMAT_REVIEW_REQUIRED",
             "PLATFORM_FORMAT_CAPABILITIES_UNDECLARED",
             f"平台 {platform} 未声明格式能力；需审核 features: {features}",
         )
     missing = required_features - declaration.supported
-    if not missing:
+    missing_heading_levels = (
+        required_heading_levels - declaration.heading_levels
+        if "heading" in required_features
+        else frozenset()
+    )
+    if not missing and not missing_heading_levels:
         return "READY", None, None
-    features = ", ".join(sorted(missing))
+    features = _format_required_features(missing, missing_heading_levels)
     return (
         "FORMAT_REVIEW_REQUIRED",
         "CONTENT_FORMAT_UNSUPPORTED",
         f"平台 {platform} 不支持所需 features: {features}",
     )
+
+
+def _format_required_features(
+    features: frozenset[str], heading_levels: frozenset[int]
+) -> str:
+    values = list(sorted(features))
+    if heading_levels:
+        values.append(
+            "heading_levels=" + ",".join(str(level) for level in sorted(heading_levels))
+        )
+    return ", ".join(values) or "none"
 
 
 def _utc_now() -> datetime:

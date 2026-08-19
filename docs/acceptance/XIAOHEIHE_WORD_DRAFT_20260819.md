@@ -33,8 +33,9 @@
 ## 格式能力只读探测（2026-08-19）
 
 - 使用目标账号的现有登录态和 Profile 租约，只读进入空白编辑器；未填写标题/正文，未上传、保存、发布或删除。进入 `local_*` 编辑器路由本身可能产生一个空白草稿导航副作用，未把它当作草稿成功。
-- 真实编辑器为可见 `div.ProseMirror.hb-editor[contenteditable=true]`；可见工具栏包含图片、引用、列表和一个标题菜单入口，但没有可证明 H2/`heading-2` 的控件，初始 DOM 的 `h1` 至 `h6` 数量均为 0。
-- 因此小黑盒默认格式声明只加入已有真实证据的 `image_order`；没有 H2 DOM 回读证据，不声明 `heading`。含正文 heading 的 Word v2 需求 `{heading, image_order}` 仍保持 `FORMAT_REVIEW_REQUIRED`，不能借普通文字回读冒充二级标题。
+- 真实编辑器为可见 `div.ProseMirror.hb-editor[contenteditable=true]`；可见工具栏包含图片、引用、列表和一个标题菜单入口，但菜单没有可识别的 H2/H1-H6 项或明确 `level=2` 控件，初始 DOM 的 `h1` 至 `h6` 数量均为 0。
+- 使用两个新的空白编辑器做真实、不可保存的输入探测：用户输入规则 `# ` 后回读到带探测标记的真实 `h2` 节点；`## ` 后回读到真实 `h3` 节点。没有使用 `innerHTML`、`execCommand` 或普通文本推断；ClipboardEvent 路径本轮未作为能力证据。
+- 因此小黑盒默认格式声明加入 `heading`，但只允许真实证明的层级 `{2, 3}`，并继续声明已有真实证据的 `image_order`。正文 heading level 为 2/3 且图片顺序需求为 `{heading, image_order}` 时可进入 `READY`；H1、H4-H6 或其他未验证层级保持 `FORMAT_REVIEW_REQUIRED`，错误只展示缺失层级，不展示正文。
 - 正文图片交错插入和稳定数量增长已有先前脱敏真实证据；这项证据只覆盖 `image_order`，不覆盖标题格式、封面或草稿箱持久化核验。
 
 ## 人工现场观察补充

@@ -13,6 +13,7 @@ from platforms.base import (
 from platforms.content_validation import (
     ContentValidationError,
     ensure_valid_content,
+    normalize_for_comparison,
     safe_media_error,
 )
 from platforms.media_progress import safe_media_progress
@@ -50,6 +51,9 @@ class XiaoheihePlatform(BasePlatform):
         ".editor-model__image-model "
         ".editor-__model-frame-bottom-btn:has-text('确定')"
     )
+    # 真实编辑器输入规则证据（2026-08-19）：`# ` 生成 H2，`## ` 生成 H3。
+    # 未经 DOM 回读证明的层级必须保持 fail-closed。
+    HEADING_MARKDOWN_PREFIX = {2: "# ", 3: "## "}
 
     def _raise_if_page_closed(self, stage: str):
         self._require_page_alive(stage)
@@ -477,11 +481,22 @@ class XiaoheihePlatform(BasePlatform):
                 text = block["text"].strip()
                 if not text:
                     continue
+                heading_level = None
+                if btype == "heading" and "level" in block:
+                    heading_level = self._validated_heading_level(block.get("level"))
+                    if "\n" in text or "\r" in text:
+                        raise ContentValidationError(
+                            "小黑盒标题块包含换行，无法安全映射为单一标题节点"
+                        )
                 if content_started:
                     await self._place_body_caret_at_end()
                     await self.page.keyboard.press("Enter")
                     await self.page.keyboard.press("Enter")
                 await self._place_body_caret_at_end()
+                if heading_level is not None:
+                    await self.page.keyboard.type(
+                        self.HEADING_MARKDOWN_PREFIX[heading_level]
+                    )
                 lines = text.splitlines() or [text]
                 for i, line in enumerate(lines):
                     if line.strip():
@@ -489,6 +504,11 @@ class XiaoheihePlatform(BasePlatform):
                     if i < len(lines) - 1:
                         await self.page.keyboard.press("Enter")
                 content_started = True
+                if heading_level is not None:
+                    await self._validate_heading_structure(
+                        content_blocks[: block_index + 1],
+                        phase=f"标题处理后第{block_index + 1}块",
+                    )
                 continue
 
             if btype != "image":
@@ -539,6 +559,10 @@ class XiaoheihePlatform(BasePlatform):
                 content_blocks[: block_index + 1],
                 phase=f"图片处理后第{block_index + 1}块",
             )
+            await self._validate_heading_structure(
+                content_blocks[: block_index + 1],
+                phase=f"图片处理后标题第{block_index + 1}块",
+            )
             if img_path:
                 # 每张图片之间放慢节奏，降低风控敏感度
                 await self.simulator.random_delay(2.5, 4.5)
@@ -555,6 +579,7 @@ class XiaoheihePlatform(BasePlatform):
             actual_text,
             phase="图片处理后",
         )
+        await self._validate_heading_structure(content_blocks, phase="正文最终")
         logger.info("小黑盒正文输入并最终验证成功: {} 个文本段落", expected_count)
 
         if expected_images == 0:
@@ -631,6 +656,61 @@ class XiaoheihePlatform(BasePlatform):
             actual_text,
             phase=phase,
         )
+
+    @staticmethod
+    def _validated_heading_level(value) -> int:
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ContentValidationError("小黑盒标题层级无效")
+        if value not in XiaoheihePlatform.HEADING_MARKDOWN_PREFIX:
+            raise ContentValidationError("小黑盒仅验证了 H2/H3 标题层级")
+        return value
+
+    async def _validate_heading_structure(self, content_blocks, *, phase: str) -> None:
+        """从当前正文编辑器回读 H2/H3 节点并验证层级与顺序。"""
+
+        expected = []
+        for block in content_blocks:
+            if block.get("type") != "heading" or "level" not in block:
+                continue
+            level = self._validated_heading_level(block.get("level"))
+            text = normalize_for_comparison(str(block.get("text") or ""))
+            if text:
+                expected.append({"level": level, "text": text})
+        if not expected:
+            return
+
+        editor = await self._current_body_editor()
+        actual = await editor.evaluate(
+            """element => Array.from(
+                element.querySelectorAll('h1,h2,h3,h4,h5,h6')
+            ).map(node => ({
+                tag: node.tagName.toLowerCase(),
+                text: node.textContent || '',
+            }))"""
+        )
+        if not isinstance(actual, list):
+            raise ContentValidationError(
+                f"小黑盒标题层级回读失败，阶段={phase}"
+            )
+        normalized_actual = [
+            (item.get("tag"), normalize_for_comparison(item.get("text")))
+            for item in actual
+            if isinstance(item, dict)
+        ]
+        cursor = 0
+        for item in expected:
+            expected_tag = f"h{item['level']}"
+            expected_text = normalize_for_comparison(item["text"])
+            found = -1
+            for index in range(cursor, len(normalized_actual)):
+                if normalized_actual[index] == (expected_tag, expected_text):
+                    found = index
+                    break
+            if found < 0:
+                raise ContentValidationError(
+                    f"小黑盒标题层级回读失败，阶段={phase}"
+                )
+            cursor = found + 1
 
     async def _find_file_input(self, timeout_ms: int = 3000):
         """查找页面或 iframe 中已挂载的文件控件。"""

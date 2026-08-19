@@ -43,6 +43,7 @@ from content_studio.platform_format_capabilities import (
     DEFAULT_PLATFORM_FORMAT_CAPABILITIES,
     DELIVERY_PLATFORMS,
     PlatformFormatCapabilities,
+    PlatformFormatDeclaration,
 )
 from content_studio.service import (
     SEED_KEY,
@@ -196,6 +197,7 @@ def delivery_v2_document(
     title: str,
     *,
     body_heading: bool = False,
+    body_heading_level: int = 2,
     asset_ids: list[str] | None = None,
 ) -> dict:
     """构造标题独立映射、正文能力可控的投递 fixture。"""
@@ -215,7 +217,7 @@ def delivery_v2_document(
             {
                 "kind": "heading",
                 "block_id": "body-heading",
-                "level": 2,
+                "level": body_heading_level,
                 "children": [{"kind": "text", "text": "正文小节"}],
             }
         )
@@ -277,18 +279,29 @@ def test_platform_format_capabilities_are_explicit_and_fail_closed() -> None:
     assert all(not declaration.supported for declaration in registry.declarations.values())
     assert registry.get("unknown-platform") is None
 
-    injected = PlatformFormatCapabilities({"xiaoheihe": {"heading"}})
+    injected = PlatformFormatCapabilities(
+        {
+            "xiaoheihe": PlatformFormatDeclaration(
+                "xiaoheihe", frozenset({"heading"}), frozenset({2, 3})
+            )
+        }
+    )
     assert injected.get("xiaoheihe").supported == frozenset({"heading"})
+    assert injected.get("xiaoheihe").heading_levels == frozenset({2, 3})
     assert injected.get("zol").supported == frozenset()
     with pytest.raises(ValueError, match="未知格式能力"):
         PlatformFormatCapabilities({"xiaoheihe": {"not_a_real_feature"}})
 
 
-def test_default_capabilities_are_limited_to_real_xiaoheihe_image_order_evidence() -> None:
+def test_default_capabilities_match_real_xiaoheihe_heading_and_image_evidence() -> None:
     assert DEFAULT_PLATFORM_FORMAT_CAPABILITIES.get("xiaoheihe").supported == {
-        "image_order"
+        "heading",
+        "image_order",
     }
-    assert "heading" not in DEFAULT_PLATFORM_FORMAT_CAPABILITIES.get("xiaoheihe").supported
+    assert DEFAULT_PLATFORM_FORMAT_CAPABILITIES.get("xiaoheihe").heading_levels == {
+        2,
+        3,
+    }
     for platform in DELIVERY_PLATFORMS:
         if platform != "xiaoheihe":
             assert not DEFAULT_PLATFORM_FORMAT_CAPABILITIES.get(platform).supported
@@ -305,10 +318,9 @@ def test_exact_word_features_keep_xiaoheihe_heading_plan_blocked() -> None:
     )
 
     assert delivery_features(document) == frozenset({"heading", "image_order"})
-    missing = delivery_features(document) - DEFAULT_PLATFORM_FORMAT_CAPABILITIES.get(
-        "xiaoheihe"
-    ).supported
-    assert missing == {"heading"}
+    declaration = DEFAULT_PLATFORM_FORMAT_CAPABILITIES.get("xiaoheihe")
+    assert delivery_features(document) - declaration.supported == set()
+    assert {2} - declaration.heading_levels == set()
 
 
 def test_autosave_revision_conflict_returns_server_draft(tmp_path: Path) -> None:
@@ -917,7 +929,11 @@ def test_v2_format_gate_is_per_target_and_execute_skips_review_targets(
         tmp_path,
         account_service=accounts,
         platform_format_capabilities=PlatformFormatCapabilities(
-            {"xiaoheihe": {"heading"}}
+            {
+                "xiaoheihe": PlatformFormatDeclaration(
+                    "xiaoheihe", frozenset({"heading"}), frozenset({2})
+                )
+            }
         ),
     )
 
@@ -1028,6 +1044,7 @@ def test_v2_delivery_format_gate_handles_basic_heading_and_multi_image(
             title: str,
             *,
             body_heading: bool = False,
+            body_heading_level: int = 2,
             image_count: int = 0,
         ) -> dict:
             draft = await service.create_draft(CreateDraftRequest(title=title, blocks=[]))
@@ -1040,6 +1057,7 @@ def test_v2_delivery_format_gate_handles_basic_heading_and_multi_image(
             document = delivery_v2_document(
                 title,
                 body_heading=body_heading,
+                body_heading_level=body_heading_level,
                 asset_ids=asset_ids,
             )
             current = await service.patch_draft(
@@ -1072,18 +1090,23 @@ def test_v2_delivery_format_gate_handles_basic_heading_and_multi_image(
         plain = await create_plan("普通段落")
         single_image = await create_plan("单图正文", image_count=1)
         heading = await create_plan("正文标题", body_heading=True)
+        unsupported_heading = await create_plan(
+            "未验证标题", body_heading=True, body_heading_level=4
+        )
         image_order_only = await create_plan("多图正文", image_count=2)
 
         assert plain["status"] == "READY"
         assert plain["targets"][0]["status"] == "READY"
         assert single_image["status"] == "READY"
         assert single_image["targets"][0]["status"] == "READY"
-        assert heading["status"] == "FORMAT_REVIEW_REQUIRED"
-        assert heading["targets"][0]["status"] == "FORMAT_REVIEW_REQUIRED"
-        assert heading["targets"][0]["error_code"] == "CONTENT_FORMAT_UNSUPPORTED"
-        assert "heading" in heading["targets"][0]["error_message"]
-        # 小黑盒的真实证据已覆盖交错插图和稳定图片数量；默认能力只声明
-        # image_order，正文 heading 仍由上面的计划单独阻断。
+        assert heading["status"] == "READY"
+        assert heading["targets"][0]["status"] == "READY"
+        assert unsupported_heading["status"] == "FORMAT_REVIEW_REQUIRED"
+        assert unsupported_heading["targets"][0]["error_code"] == (
+            "CONTENT_FORMAT_UNSUPPORTED"
+        )
+        assert "heading_levels=4" in unsupported_heading["targets"][0]["error_message"]
+        # 小黑盒的真实证据已覆盖 H2/H3 与交错插图和稳定图片数量。
         assert image_order_only["status"] == "READY"
         assert image_order_only["targets"][0]["status"] == "READY"
 
@@ -1123,7 +1146,9 @@ def test_format_review_target_does_not_reopen_when_capability_changes(
                 revision=draft["revision"],
                 title="后验能力",
                 content_schema_version=2,
-                document=delivery_v2_document("后验能力", body_heading=True),
+                document=delivery_v2_document(
+                    "后验能力", body_heading=True, body_heading_level=4
+                ),
             ),
         )
         current = await service.replace_targets(
@@ -1144,7 +1169,11 @@ def test_format_review_target_does_not_reopen_when_capability_changes(
             draft["draft_id"], current["revision"], LOCAL_WEB_CONTEXT
         )
         service.platform_format_capabilities = PlatformFormatCapabilities(
-            {"xiaoheihe": {"heading"}}
+            {
+                "xiaoheihe": PlatformFormatDeclaration(
+                    "xiaoheihe", frozenset({"heading"}), frozenset()
+                )
+            }
         )
         return plan
 
@@ -1260,6 +1289,106 @@ async def _version_id_for_hash(service: ContentStudioService, content_hash: str)
             return version.version_id
 
     return await lookup()
+
+
+def test_v2_resolver_preserves_heading_level_and_inline_anchor_asset(
+    tmp_path: Path,
+) -> None:
+    account_db = AccountDatabase(sqlite_url(tmp_path / "accounts.db"))
+    accounts = AccountSessionService(account_db, seed_legacy_profiles=False)
+    service = make_service(tmp_path, account_service=accounts)
+
+    async def scenario():
+        await accounts.initialize()
+        account = PlatformAccount(
+            account_id=str(uuid.uuid4()),
+            platform="xiaoheihe",
+            platform_user_id="heading-resolver-user",
+            display_name="标题解析账号",
+            profile_path=str(tmp_path / "profile"),
+            status="ACTIVE",
+            session_status="VALID",
+            persist_login=True,
+        )
+        async with account_db.session() as session:
+            session.add(account)
+        await service.initialize()
+        draft = await service.create_draft(CreateDraftRequest(title="解析标题", blocks=[]))
+        asset = await service.add_asset(draft["draft_id"], image_bytes(), "inline.png")
+        document = {
+            "schema_version": 2,
+            "title": "解析标题",
+            "title_block_id": "title-block",
+            "source_fidelity": "NATIVE",
+            "blocks": [
+                {
+                    "kind": "heading",
+                    "block_id": "title-block",
+                    "level": 1,
+                    "children": [{"kind": "text", "text": "解析标题"}],
+                },
+                {
+                    "kind": "heading",
+                    "block_id": "body-heading",
+                    "level": 2,
+                    "children": [{"kind": "text", "text": "正文 H2"}],
+                },
+                {
+                    "kind": "paragraph",
+                    "block_id": "inline-image",
+                    "children": [
+                        {
+                            "kind": "image",
+                            "asset_id": asset["asset_id"],
+                            "anchor": {"kind": "inline"},
+                        }
+                    ],
+                },
+            ],
+        }
+        current = await service.patch_draft(
+            draft["draft_id"],
+            PatchDraftRequest(
+                revision=draft["revision"],
+                title="解析标题",
+                content_schema_version=2,
+                document=document,
+            ),
+        )
+        current = await service.replace_targets(
+            draft["draft_id"],
+            ReplaceTargetsRequest(
+                revision=current["revision"],
+                targets=[
+                    {
+                        "platform": "xiaoheihe",
+                        "account_id": account.account_id,
+                        "mode": "DRAFT",
+                    }
+                ],
+            ),
+            LOCAL_WEB_CONTEXT,
+        )
+        plan = await service.create_delivery_plan(
+            draft["draft_id"], current["revision"], LOCAL_WEB_CONTEXT
+        )
+        version_id = await _version_id_for_hash(service, plan["content_version"])
+        resolved = await service.resolve_delivery_payload(version_id)
+        await service.database.dispose()
+        await account_db.dispose()
+        return plan, resolved, asset["original_filename"]
+
+    plan, resolved, asset_filename = run(scenario())
+    assert plan["status"] == "READY"
+    assert resolved[1][0] == {
+        "type": "heading",
+        "text": "正文 H2",
+        "position": 0,
+        "level": 2,
+    }
+    assert resolved[1][1]["type"] == "image"
+    assert resolved[1][1]["position"] == 1
+    assert resolved[2][0]["filename"] == asset_filename
 
 
 def test_v2_corruption_fails_closed_before_plan_and_operation(tmp_path: Path) -> None:

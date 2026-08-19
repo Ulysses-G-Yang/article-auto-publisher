@@ -12,8 +12,10 @@ from content_studio.content_document import (
     canonical_document_json,
     compute_incompatibilities,
     delivery_features,
+    delivery_heading_levels,
     document_features,
     document_hash,
+    project_to_delivery_blocks,
     project_to_v1,
     required_features,
     upgrade_v1,
@@ -322,6 +324,69 @@ def test_delivery_features_exclude_title_block_from_platform_requirements() -> N
     assert delivery_features(document) == frozenset({"heading", "image_order"})
     # 完整文档能力的历史 API 仍包含标题本身的 marks。
     assert "marks" in required_features(document)
+
+
+def test_delivery_projection_preserves_heading_levels_and_inline_image_order() -> None:
+    document = {
+        "schema_version": 2,
+        "title": "标题",
+        "title_block_id": "title-block",
+        "source_fidelity": "NATIVE",
+        "blocks": [
+            {
+                "kind": "heading",
+                "block_id": "title-block",
+                "level": 1,
+                "children": [{"kind": "text", "text": "标题"}],
+            },
+            {
+                "kind": "heading",
+                "block_id": "h2",
+                "level": 2,
+                "children": [{"kind": "text", "text": "章节二"}],
+            },
+            {
+                "kind": "paragraph",
+                "block_id": "mixed",
+                "children": [
+                    {"kind": "text", "text": "图前"},
+                    {
+                        "kind": "image",
+                        "asset_id": "00000000-0000-4000-8000-000000000001",
+                        "alt": "插图",
+                        "anchor": {"kind": "inline"},
+                    },
+                    {"kind": "text", "text": "图后"},
+                ],
+            },
+            {
+                "kind": "heading",
+                "block_id": "h3",
+                "level": 3,
+                "children": [{"kind": "text", "text": "章节三"}],
+            },
+        ],
+    }
+
+    assert delivery_heading_levels(document) == frozenset({2, 3})
+    assert project_to_delivery_blocks(document) == [
+        {"type": "heading", "text": "章节二", "position": 0, "level": 2},
+        {"type": "text", "text": "图前", "position": 1},
+        {
+            "type": "image",
+            "asset_id": "00000000-0000-4000-8000-000000000001",
+            "alt": "插图",
+            "position": 2,
+        },
+        {"type": "text", "text": "图后", "position": 3},
+        {"type": "heading", "text": "章节三", "position": 4, "level": 3},
+    ]
+
+
+def test_delivery_projection_rejects_unrepresentable_rich_features() -> None:
+    document = mixed_document()
+    with pytest.raises(ContentDocumentValidationError, match="marks/link"):
+        project_to_delivery_blocks(document)
 
 
 def test_pydantic_envelope_is_strict_and_style_dimensions_are_hash_sensitive() -> None:

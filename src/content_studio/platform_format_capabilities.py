@@ -1,8 +1,8 @@
 """Content Studio 的平台格式能力声明。
 
 能力声明是投递安全边界的一部分：只有真实页面和适配器证据才能晋级 v2
-富文档能力。当前小黑盒仅有正文图片顺序证据；heading、列表、表格等能力
-仍未声明。未知平台没有声明时必须保持 fail-closed。
+富文档能力。当前小黑盒已通过真实输入规则证明正文 H2/H3；其他标题层级、
+列表、表格等能力仍未声明。未知平台没有声明时必须保持 fail-closed。
 """
 
 from __future__ import annotations
@@ -29,14 +29,15 @@ class PlatformFormatDeclaration:
 
     platform: str
     supported: frozenset[str]
+    heading_levels: frozenset[int] = frozenset()
 
 
 class PlatformFormatCapabilities:
     """可注入的平台格式能力表。
 
     默认表显式包含六个平台。当前只声明小黑盒已经真实观察到的
-    ``image_order``；测试或未来真实验收可以通过构造函数注入已证明的其他
-    能力，构造完成后表不可变。
+    ``image_order`` 以及通过真实输入规则和 DOM 回读证明的 H2/H3；测试或
+    未来真实验收可以通过构造函数注入已证明的其他能力，构造完成后表不可变。
     """
 
     def __init__(
@@ -62,14 +63,29 @@ class PlatformFormatCapabilities:
                 if value.platform != platform:
                     raise ValueError("格式声明 platform 与映射键不一致")
                 supported = value.supported
+                heading_levels = value.heading_levels
             else:
                 supported = frozenset(value)
+                heading_levels = frozenset()
             unknown = supported - FEATURE_KEYS
             if unknown:
                 raise ValueError(
                     f"平台 {platform} 包含未知格式能力: {', '.join(sorted(unknown))}"
                 )
-            normalized[platform] = PlatformFormatDeclaration(platform, supported)
+            if any(
+                isinstance(level, bool)
+                or not isinstance(level, int)
+                or level not in range(1, 7)
+                for level in heading_levels
+            ):
+                raise ValueError(f"平台 {platform} 包含无效 heading level")
+            if heading_levels and "heading" not in supported:
+                raise ValueError("heading_levels 只能随 heading 能力声明")
+            normalized[platform] = PlatformFormatDeclaration(
+                platform,
+                supported,
+                frozenset(heading_levels),
+            )
         self._declarations = MappingProxyType(normalized)
 
     def get(self, platform: str) -> PlatformFormatDeclaration | None:
@@ -85,10 +101,16 @@ class PlatformFormatCapabilities:
         return self._declarations
 
 
-# 2026-08-19：小黑盒已有交错插图和稳定图片数量增长的真实证据。
-# 没有 H2/heading DOM 证据，因此绝不把 ``heading`` 放入默认声明。
+# 2026-08-19：小黑盒已有交错插图、稳定图片数量增长，以及 ``# ``→H2、
+# ``## ``→H3 的真实编辑器 DOM 回读证据。其他 heading level 仍保持关闭。
 DEFAULT_PLATFORM_FORMAT_CAPABILITIES = PlatformFormatCapabilities(
-    {"xiaoheihe": {"image_order"}}
+    {
+        "xiaoheihe": PlatformFormatDeclaration(
+            "xiaoheihe",
+            frozenset({"heading", "image_order"}),
+            frozenset({2, 3}),
+        )
+    }
 )
 
 # 便于依赖注入和调用方按语义检索的别名。

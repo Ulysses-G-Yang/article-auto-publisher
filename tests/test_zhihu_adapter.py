@@ -18,7 +18,11 @@ from account_sessions.account_service import AccountSessionService
 from account_sessions.database import AccountDatabase
 from account_sessions.identity import extract_identity
 from account_sessions.permissions import LOCAL_WEB_CONTEXT
-from platforms.base import BrowserLifecycleError, LoginRequiredError
+from platforms.base import (
+    BrowserLifecycleError,
+    DraftResultUnknownError,
+    LoginRequiredError,
+)
 from platforms.content_validation import ContentValidationError
 from platforms.zhihu import (
     DRAFTS_URL,
@@ -176,9 +180,7 @@ def test_account_service_creates_and_verifies_isolated_zhihu_profile(
 ) -> None:
     data_root = tmp_path / "account-sessions"
     monkeypatch.setenv("ACCOUNT_SESSION_DATA_DIR", str(data_root))
-    database = AccountDatabase(
-        f"sqlite+aiosqlite:///{(tmp_path / 'accounts.db').as_posix()}"
-    )
+    database = AccountDatabase(f"sqlite+aiosqlite:///{(tmp_path / 'accounts.db').as_posix()}")
     created_platforms = []
 
     class FakeZhihuSessionPlatform:
@@ -305,6 +307,7 @@ def test_account_service_cleans_up_after_zhihu_login_timeout(
 
 # ==================== 草稿投递链路契约测试 ====================
 
+
 class _InstantSimulator:
     async def random_delay(self, *_args, **_kwargs):
         return None
@@ -336,7 +339,33 @@ class _FakeLocator:
         self.text = value
 
     async def inner_text(self):
+        if self is self.page.body:
+            return "\n".join(
+                item.get("text", "") for item in self.page.dom_tokens if item.get("kind") != "image"
+            )
         return self.text
+
+    async def input_value(self):
+        return self.value
+
+    async def evaluate(self, script):
+        if "const tokens" in script:
+            return [dict(item) for item in self.page.dom_tokens]
+        return None
+
+
+class _FakeRoleButton:
+    def __init__(self, page, name):
+        self.page = page
+        self.name = name
+
+    async def click(self, **_kwargs):
+        if self.name == "二级标题":
+            for item in reversed(self.page.dom_tokens):
+                if item.get("kind") != "image" and item.get("text"):
+                    item["kind"] = "heading"
+                    item["level"] = 2
+                    break
 
 
 class _FakeEditorKeyboard:
@@ -349,10 +378,12 @@ class _FakeEditorKeyboard:
         elif key == "Backspace" and self.page.selected_all:
             self.page.body.text = ""
             self.page.body.value = ""
+            self.page.dom_tokens = []
             self.page.selected_all = False
         elif key == "Enter":
             self.page.body.text += "\n"
             self.page.body.value = self.page.body.text
+            self.page.dom_tokens.append({"kind": "text", "text": ""})
 
     async def insert_text(self, value):
         if self.page.selected_all:
@@ -361,27 +392,30 @@ class _FakeEditorKeyboard:
             self.page.selected_all = False
         self.page.body.text += value
         self.page.body.value = self.page.body.text
+        if not self.page.dom_tokens or self.page.dom_tokens[-1].get("kind") == "image":
+            self.page.dom_tokens.append({"kind": "text", "text": ""})
+        self.page.dom_tokens[-1]["text"] += value
 
 
 class _FakeDraftsResponse:
-    def __init__(self, titles):
-        self._titles = titles
+    def __init__(self, records):
+        self._records = records
 
     async def json(self):
         return {
-            "paging": {"totals": len(self._titles)},
-            "data": [{"title": title} for title in self._titles],
+            "paging": {"totals": len(self._records)},
+            "data": list(self._records),
         }
 
 
 class _FakeResponseInfo:
-    def __init__(self, titles):
-        self._titles = titles
+    def __init__(self, records):
+        self._records = records
 
     @property
     def value(self):
         async def _resolve():
-            return _FakeDraftsResponse(self._titles)
+            return _FakeDraftsResponse(self._records)
 
         return _resolve()
 
@@ -401,9 +435,13 @@ class _FakeEditorPage:
         self.title = _FakeLocator(self, text=title_text)
         self.body = _FakeLocator(self, text=body_text)
         self.drafts_text = drafts_text
-        self.drafts_api_titles = list(drafts_api_titles or [])
+        self.drafts_api_records = [
+            item if isinstance(item, dict) else {"id": str(index + 1), "title": item}
+            for index, item in enumerate(drafts_api_titles or [])
+        ]
         self.selected_all = False
         self.active = None
+        self.dom_tokens: list[dict] = []
 
     def is_closed(self) -> bool:
         return False
@@ -423,6 +461,9 @@ class _FakeEditorPage:
         if "textarea" in selector or "placeholder" in selector:
             return self.title
         return self.body
+
+    def get_by_role(self, _role: str, *, name: str, exact: bool = False):
+        return _FakeRoleButton(self, name)
 
     async def evaluate(self, script: str, *args):
         if "includes" in script:
@@ -448,7 +489,7 @@ class _FakeEditorPage:
 
             @property
             def value(self):
-                return _FakeResponseInfo(self.page.drafts_api_titles).value
+                return _FakeResponseInfo(self.page.drafts_api_records).value
 
         return _Expect(self)
 
@@ -503,7 +544,7 @@ def test_fill_content_types_blocks_and_validates_in_order() -> None:
     platform = _make_delivery_platform(page)
     blocks = [
         {"type": "text", "text": "第一段\n第二段"},
-        {"type": "heading", "text": "小标题"},
+        {"type": "heading", "level": 2, "text": "小标题"},
     ]
 
     result = run(platform.fill_content(blocks, []))
@@ -513,6 +554,11 @@ def test_fill_content_types_blocks_and_validates_in_order() -> None:
     assert result["expected_images"] == 0
     assert result["uploaded_images"] == 0
     assert page.body.text == "第一段\n第二段\n小标题"
+    assert page.dom_tokens[-1] == {
+        "kind": "heading",
+        "level": 2,
+        "text": "小标题",
+    }
 
 
 def test_fill_content_detects_missing_paragraph() -> None:
@@ -524,34 +570,132 @@ def test_fill_content_detects_missing_paragraph() -> None:
         run(platform.fill_content(blocks, []))
 
 
-def test_save_draft_returns_drafts_url_when_title_appears() -> None:
-    page = _FakeEditorPage(drafts_text="草稿箱(4)\n深夜食堂的标题")
+def test_image_path_mapping_never_falls_back_to_first_image() -> None:
+    block = {"type": "image", "position": 7}
+    images = [
+        {"position_index": 1, "local_path": "first.png"},
+        {"position_index": 8, "local_path": "other.png"},
+    ]
+
+    assert ZhihuPlatform._image_path_for_block(block, images) is None
+
+
+def test_image_path_mapping_rejects_ambiguous_position() -> None:
+    block = {"type": "image", "position": 7}
+    images = [
+        {"position_index": 7, "local_path": "one.png"},
+        {"position_index": 7, "local_path": "two.png"},
+    ]
+
+    assert ZhihuPlatform._image_path_for_block(block, images) is None
+
+
+def test_dom_token_validation_rejects_misplaced_image() -> None:
+    page = _FakeEditorPage()
+    page.dom_tokens = [
+        {"kind": "image"},
+        {"kind": "text", "text": "第一段"},
+    ]
+    platform = _make_delivery_platform(page)
+    blocks = [
+        {"type": "text", "text": "第一段"},
+        {"type": "image", "local_path": "a.png"},
+    ]
+
+    with pytest.raises(ContentValidationError, match="图文顺序不完整"):
+        run(platform._validate_dom_exact(blocks, phase="测试"))
+
+
+def test_media_error_never_exposes_physical_path(monkeypatch) -> None:
+    page = _FakeEditorPage()
     platform = _make_delivery_platform(page)
 
-    url = run(platform.save_draft("深夜食堂的标题"))
+    async def upload(_path):
+        return {
+            "success": False,
+            "error_code": "UPLOAD_FAILED",
+            "error": r"set_input_files D:\Secret Folder\private.png failed",
+        }
 
-    assert url == DRAFTS_URL
+    async def no_verify(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(platform, "_upload_image", upload)
+    monkeypatch.setattr(platform, "_validate_dom_prefix", no_verify)
+    monkeypatch.setattr(platform, "_validate_dom_exact", no_verify)
+    result = run(
+        platform.fill_content(
+            [{"type": "image", "local_path": r"D:\Secret Folder\private.png"}],
+            [],
+        )
+    )
+
+    rendered = str(result["failed_images"])
+    assert "D:\\Secret" not in rendered
+    assert "private.png" in rendered
+
+
+def test_save_draft_returns_drafts_url_when_title_appears() -> None:
+    title = "深夜食堂的标题"
+    page = _FakeEditorPage(drafts_api_titles=[title], title_text=title)
+    page.dom_tokens = [{"kind": "text", "text": "正文"}]
+    platform = _make_delivery_platform(page)
+    platform._expected_persisted_blocks = [{"type": "text", "text": "正文"}]
+
+    url = run(platform.save_draft(title))
+
+    assert url.endswith("/p/1/edit")
+
+
+def test_save_draft_rejects_duplicate_exact_titles() -> None:
+    title = "完全相同的标题"
+    page = _FakeEditorPage(
+        drafts_api_titles=[
+            {"id": "1", "title": title},
+            {"id": "2", "title": title},
+        ],
+        title_text=title,
+    )
+    platform = _make_delivery_platform(page)
+    platform._expected_persisted_blocks = [{"type": "text", "text": "正文"}]
+
+    with pytest.raises(DraftResultUnknownError, match="唯一草稿"):
+        run(platform.save_draft(title))
+
+
+def test_save_draft_reopen_rejects_missing_persisted_tail() -> None:
+    title = "持久化正文缺尾"
+    page = _FakeEditorPage(drafts_api_titles=[title], title_text=title)
+    page.dom_tokens = [{"kind": "text", "text": "第一段"}]
+    platform = _make_delivery_platform(page)
+    platform._expected_persisted_blocks = [
+        {"type": "text", "text": "第一段"},
+        {"type": "text", "text": "第二段"},
+    ]
+
+    with pytest.raises(DraftResultUnknownError, match="图文结构不完整"):
+        run(platform.save_draft(title))
 
 
 def test_save_draft_returns_empty_when_title_missing() -> None:
     page = _FakeEditorPage(drafts_text="草稿箱(4)\n别的文章")
     platform = _make_delivery_platform(page)
 
-    url = run(platform.save_draft("深夜食堂的标题"))
+    platform._expected_persisted_blocks = [{"type": "text", "text": "正文"}]
+    with pytest.raises(DraftResultUnknownError):
+        run(platform.save_draft("深夜食堂的标题"))
 
-    assert url == ""
 
-
-def test_save_draft_falls_back_to_drafts_api_when_list_ui_unavailable() -> None:
+def test_save_draft_requires_full_exact_title_from_api() -> None:
     page = _FakeEditorPage(
         drafts_text="草稿箱(4)\n系统升级中，请稍后再试",
         drafts_api_titles=["凌晨三点，公司的智能马桶开始给我做绩效面谈"],
     )
     platform = _make_delivery_platform(page)
+    platform._expected_persisted_blocks = [{"type": "text", "text": "正文"}]
 
-    url = run(platform.save_draft("凌晨三点，公司的智能马桶"))
-
-    assert url == DRAFTS_URL
+    with pytest.raises(DraftResultUnknownError):
+        run(platform.save_draft("凌晨三点，公司的智能马桶"))
 
 
 def test_save_draft_fails_honestly_when_api_also_misses_title() -> None:
@@ -561,9 +705,9 @@ def test_save_draft_fails_honestly_when_api_also_misses_title() -> None:
     )
     platform = _make_delivery_platform(page)
 
-    url = run(platform.save_draft("凌晨三点，公司的智能马桶"))
-
-    assert url == ""
+    platform._expected_persisted_blocks = [{"type": "text", "text": "正文"}]
+    with pytest.raises(DraftResultUnknownError):
+        run(platform.save_draft("凌晨三点，公司的智能马桶"))
 
 
 def test_select_topic_is_not_required_for_drafts() -> None:

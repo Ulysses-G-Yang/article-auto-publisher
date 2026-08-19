@@ -67,6 +67,15 @@ def test_build_injects_only_selected_platform_capabilities(monkeypatch: pytest.M
     assert registry is not DEFAULT_PLATFORM_FORMAT_CAPABILITIES
 
 
+def test_zhihu_acceptance_declares_only_observed_h2() -> None:
+    app = acceptance.build_acceptance_app(("zhihu",), "DRAFT_ONLY")
+    registry = app.extensions["content_studio"].service.platform_format_capabilities
+
+    assert registry.get("zhihu").supported == FEATURE_KEYS
+    assert registry.get("zhihu").heading_levels == frozenset({2})
+    assert registry.get("xiaoheihe").supported == frozenset()
+
+
 @pytest.mark.parametrize(
     "platforms",
     [(), ("",), ("not-a-platform",), ("xiaoheihe", "xiaoheihe")],

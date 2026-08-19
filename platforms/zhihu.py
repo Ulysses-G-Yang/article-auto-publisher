@@ -18,6 +18,8 @@
 from __future__ import annotations
 
 import asyncio
+import copy
+import re
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -26,19 +28,23 @@ from loguru import logger
 from platforms.base import (
     BasePlatform,
     BrowserLifecycleError,
+    DraftResultUnknownError,
     LoginRequiredError,
     PlatformAutomationError,
     SelectorError,
 )
-from platforms.content_validation import ensure_valid_content, safe_media_error
+from platforms.content_validation import (
+    ContentValidationError,
+    extract_expected_paragraphs,
+    normalize_for_comparison,
+    safe_media_error,
+)
 
 TITLE_SELECTOR = "textarea.Input[placeholder^='请输入标题']"
 BODY_SELECTOR = "div.notranslate.public-DraftEditor-content"
 EDITOR_URL = "https://zhuanlan.zhihu.com/write"
 DRAFTS_URL = "https://www.zhihu.com/creator/manage/creation/drafts"
-BODY_IMAGE_INPUT = (
-    "input[type=file]:not(.UploadPicture-input)[accept*='image']"
-)
+BODY_IMAGE_INPUT = "input[type=file]:not(.UploadPicture-input)[accept*='image']"
 
 
 class PlatformNotImplementedError(PlatformAutomationError):
@@ -59,6 +65,7 @@ class ZhihuPlatform(BasePlatform):
         super().__init__(**kwargs)
         self.last_login_error = ""
         self._identity_payload: dict[str, str | int | bool] | None = None
+        self._expected_persisted_blocks: list[dict] | None = None
 
     async def fetch_identity_payload(self) -> dict[str, str | int | bool]:
         """通过同源身份 API 返回最小、脱敏后的账号身份。"""
@@ -106,9 +113,7 @@ class ZhihuPlatform(BasePlatform):
             "display_name": _text(payload.get("display_name")),
         }
         sanitized["ok"] = bool(
-            sanitized["ok"]
-            and sanitized["user_id"]
-            and sanitized["display_name"]
+            sanitized["ok"] and sanitized["user_id"] and sanitized["display_name"]
         )
         self._identity_payload = sanitized if sanitized["ok"] else None
         return sanitized
@@ -124,10 +129,7 @@ class ZhihuPlatform(BasePlatform):
             cookies = await self.context.cookies()
         except Exception:
             return False
-        return any(
-            str(item.get("name") or "") in self.SESSION_COOKIE_NAMES
-            for item in cookies
-        )
+        return any(str(item.get("name") or "") in self.SESSION_COOKIE_NAMES for item in cookies)
 
     async def check_login(self) -> bool:
         """只读验证现有 Profile；身份 API 成功才认定登录有效。"""
@@ -213,9 +215,7 @@ class ZhihuPlatform(BasePlatform):
                         "BROWSER_CONTEXT_CLOSED: 知乎打开编辑器时页面已关闭"
                     ) from exc
                 last_error = exc
-        raise SelectorError(
-            f"知乎编辑器未找到标题输入框（{last_error}）"
-        )
+        raise SelectorError(f"知乎编辑器未找到标题输入框（{last_error}）")
 
     async def fill_title(self, title: str):
         """填写知乎文章标题（textarea.Input，placeholder 以「请输入标题」开头）。"""
@@ -236,104 +236,91 @@ class ZhihuPlatform(BasePlatform):
             raise SelectorError("知乎标题输入框未找到或填写失败") from exc
 
     async def fill_content(self, content_blocks: list, images: list):
-        """填写正文：键盘逐段写入 Draft.js 编辑器，回读并有序校验。
+        """按冻结 ContentVersion 的图文顺序写入并校验 Draft.js 正文。"""
 
-        heading 块按普通段落写入（知乎标题样式切换后续细化），正文完整性
-        以 content_validation 有序段落校验为准，绝不伪造。
-        """
         self._require_page_alive("知乎填写正文")
-        editor = self.page.locator(BODY_SELECTOR).first
-        try:
-            if await editor.count() == 0 or not await editor.is_visible():
-                raise RuntimeError("正文编辑器不可见")
-            await editor.click()
-        except Exception as exc:
-            if self._exception_means_browser_closed(exc):
-                raise BrowserLifecycleError(
-                    "BROWSER_CONTEXT_CLOSED: 知乎定位正文编辑器时页面已关闭"
-                ) from exc
-            raise SelectorError("知乎正文编辑器未找到") from exc
-
-        # 清空编辑器：全选 + 退格（新建页通常为空，幂等处理）
-        try:
-            await self.page.keyboard.press("Control+A")
-            await self.page.keyboard.press("Backspace")
-        except Exception:
-            pass
+        self._expected_persisted_blocks = copy.deepcopy(content_blocks)
+        editor = await self._current_body_editor()
+        await editor.click()
+        await self.page.keyboard.press("Control+A")
+        await self.page.keyboard.press("Backspace")
         await self.simulator.random_delay(0.3, 0.8)
 
-        # 先完整写入文字：block 间按 Enter 分段，块内行按 Enter 换行
-        first_text = True
-        for block in content_blocks:
-            btype = block.get("type")
-            if btype in ("text", "heading") and block.get("text"):
-                text = str(block["text"]).strip()
+        expected_images = sum(1 for block in content_blocks if block.get("type") == "image")
+        uploaded_images = 0
+        failed_images: list[dict[str, str]] = []
+        content_started = False
+
+        for block_index, block in enumerate(content_blocks):
+            if not isinstance(block, dict):
+                raise ContentValidationError("ZHIHU_CONTENT_CONTRACT_INVALID: 正文块无效")
+            block_type = block.get("type")
+            if block_type in {"text", "heading"}:
+                text = str(block.get("text") or "").strip()
                 if not text:
                     continue
-                if not first_text:
+                if block_type == "heading":
+                    if block.get("level") != 2 or "\n" in text or "\r" in text:
+                        raise ContentValidationError(
+                            "ZHIHU_HEADING_UNSUPPORTED: 仅支持单行二级标题"
+                        )
+                if content_started:
+                    await self._place_body_caret_at_end()
                     await self.page.keyboard.press("Enter")
+                await self._place_body_caret_at_end()
                 lines = text.splitlines() or [text]
-                for i, line in enumerate(lines):
+                for line_index, line in enumerate(lines):
                     if line.strip():
                         await self.page.keyboard.insert_text(line.strip())
-                    if i < len(lines) - 1:
+                    if line_index < len(lines) - 1:
                         await self.page.keyboard.press("Enter")
-                first_text = False
+                if block_type == "heading":
+                    await self._apply_h2_to_current_block()
+                content_started = True
+                continue
 
-        actual_text = await editor.inner_text()
-        expected_count = ensure_valid_content(
-            content_blocks,
-            actual_text,
-            platform="知乎",
-            phase="输入后",
-        )
-        logger.info("知乎正文文字输入并验证成功: {} 个文本段落", expected_count)
+            if block_type != "image":
+                raise ContentValidationError("ZHIHU_CONTENT_CONTRACT_INVALID: 未知正文块类型")
 
-        expected_images = sum(
-            1 for block in content_blocks if block.get("type") == "image"
-        )
-        uploaded_images = 0
-        failed_images = []
-
-        # 文字验证通过后再上传图片；图片失败不抹掉正文，如实返回结构化结果
-        for block in content_blocks:
-            if block.get("type") == "image":
-                img_path = block.get("local_path")
-                if not img_path and images:
-                    for img in images:
-                        if img.get("position_index") == block.get("position"):
-                            img_path = img.get("local_path")
-                            break
-                    if not img_path:
-                        img_path = images[0].get("local_path")
-                if img_path:
-                    upload_result = await self._upload_image(img_path) or {}
-                    if upload_result.get("success"):
-                        uploaded_images += 1
-                    else:
-                        failed_images.append(
-                            {
-                                "filename": Path(str(img_path)).name,
-                                "error": safe_media_error(
-                                    upload_result.get("error"),
-                                    fallback="图片上传失败",
-                                ),
-                            }
-                        )
-                    await self.simulator.random_delay(0.2, 0.5)
+            if content_started:
+                await self._place_body_caret_at_end()
+                await self.page.keyboard.press("Enter")
+            await self._place_body_caret_at_end()
+            image_path = self._image_path_for_block(block, images)
+            if image_path:
+                upload_result = await self._upload_image(image_path) or {}
+                if upload_result.get("success"):
+                    uploaded_images += 1
                 else:
                     failed_images.append(
-                        {"filename": "", "error": "文章图片块没有对应本地文件"}
+                        {
+                            "filename": Path(image_path).name,
+                            "error_code": str(
+                                upload_result.get("error_code") or "PLATFORM_MEDIA_INCOMPLETE"
+                            ),
+                            "error": safe_media_error(
+                                upload_result.get("error"),
+                                fallback="图片上传失败",
+                            ),
+                        }
                     )
+            else:
+                failed_images.append(
+                    {
+                        "filename": "",
+                        "error_code": "IMAGE_PATH_UNRESOLVED",
+                        "error": "文章图片块没有唯一对应本地文件",
+                    }
+                )
+            content_started = True
+            await self._validate_dom_prefix(
+                content_blocks[: block_index + 1],
+                phase=f"图片处理后第{block_index + 1}块",
+            )
+            await self.simulator.random_delay(1.5, 3.0)
 
-        # 图片操作可能触发编辑器重渲染，最终再校验一次正文
-        actual_text = await editor.inner_text()
-        ensure_valid_content(
-            content_blocks,
-            actual_text,
-            platform="知乎",
-            phase="图片处理后",
-        )
+        await self._validate_dom_exact(content_blocks, phase="正文最终")
+        expected_count = len(extract_expected_paragraphs(content_blocks))
         logger.info("知乎正文输入并最终验证成功: {} 个文本段落", expected_count)
 
         if expected_images == 0:
@@ -364,6 +351,191 @@ class ZhihuPlatform(BasePlatform):
             "media_status": media_status,
             "media_error": media_error,
         }
+
+    async def _current_body_editor(self):
+        self._require_page_alive("知乎定位当前正文编辑器")
+        editor = self.page.locator(BODY_SELECTOR).first
+        try:
+            if await editor.count() == 0 or not await editor.is_visible():
+                raise SelectorError("知乎正文编辑器未找到或当前不可见")
+            return editor
+        except SelectorError:
+            raise
+        except Exception as exc:
+            if self._exception_means_browser_closed(exc):
+                raise BrowserLifecycleError(
+                    "BROWSER_CONTEXT_CLOSED: 知乎定位正文编辑器时页面已关闭"
+                ) from exc
+            raise SelectorError("知乎正文编辑器未找到或当前不可见") from exc
+
+    async def _place_body_caret_at_end(self) -> None:
+        editor = await self._current_body_editor()
+        await editor.evaluate(
+            """root => {
+                root.focus();
+                const range = document.createRange();
+                range.selectNodeContents(root);
+                range.collapse(false);
+                const selection = window.getSelection();
+                selection.removeAllRanges();
+                selection.addRange(range);
+            }"""
+        )
+
+    async def _apply_h2_to_current_block(self) -> None:
+        try:
+            heading_menu = self.page.get_by_role("button", name="标题", exact=True)
+            await heading_menu.click(timeout=5000)
+            h2_option = self.page.get_by_role("button", name="二级标题", exact=True)
+            await h2_option.click(timeout=5000)
+        except Exception as exc:
+            if self._exception_means_browser_closed(exc):
+                raise BrowserLifecycleError(
+                    "BROWSER_CONTEXT_CLOSED: 知乎设置二级标题时页面已关闭"
+                ) from exc
+            raise ContentValidationError(
+                "ZHIHU_HEADING_APPLY_FAILED: 二级标题样式未能应用"
+            ) from exc
+
+    @staticmethod
+    def _image_path_for_block(block: dict, images: list[dict]) -> str | None:
+        direct = block.get("local_path") if isinstance(block, dict) else None
+        if direct:
+            return str(direct)
+        position = block.get("position") if isinstance(block, dict) else None
+        matches = [
+            image
+            for image in images or []
+            if isinstance(image, dict) and image.get("position_index") == position
+        ]
+        if len(matches) != 1:
+            return None
+        local_path = matches[0].get("local_path")
+        return str(local_path) if local_path else None
+
+    @staticmethod
+    def _expected_content_tokens(blocks: list[dict]) -> list[dict]:
+        tokens: list[dict] = []
+        for block in blocks:
+            block_type = block.get("type") if isinstance(block, dict) else None
+            if block_type == "image":
+                tokens.append({"kind": "image"})
+                continue
+            for paragraph in extract_expected_paragraphs([block]):
+                if block_type == "heading":
+                    tokens.append(
+                        {
+                            "kind": "heading",
+                            "level": int(block.get("level") or 0),
+                            "text": paragraph.comparison_text,
+                        }
+                    )
+                else:
+                    tokens.append({"kind": "text", "text": paragraph.comparison_text})
+        return tokens
+
+    async def _read_editor_dom_tokens(self) -> list[dict]:
+        editor = await self._current_body_editor()
+        try:
+            raw = await editor.evaluate(
+                """root => {
+                    const tokens = [];
+                    for (const wrapper of root.children) {
+                        const images = wrapper.querySelectorAll('img');
+                        if (images.length) {
+                            for (const _image of images) tokens.push({kind: 'image'});
+                            continue;
+                        }
+                        const blocks = wrapper.matches('[data-block="true"]')
+                            ? [wrapper]
+                            : Array.from(wrapper.querySelectorAll('[data-block="true"]'));
+                        for (const block of blocks) {
+                            const text = block.innerText || block.textContent || '';
+                            if (!text.trim()) continue;
+                            const tag = block.tagName.toLowerCase();
+                            if (tag === 'h3') {
+                                tokens.push({kind: 'heading', level: 2, text});
+                            } else if (tag === 'h2') {
+                                tokens.push({kind: 'heading', level: 1, text});
+                            } else {
+                                tokens.push({kind: 'text', text});
+                            }
+                        }
+                    }
+                    return tokens;
+                }"""
+            )
+        except Exception as exc:
+            if self._exception_means_browser_closed(exc):
+                raise BrowserLifecycleError(
+                    "BROWSER_CONTEXT_CLOSED: 知乎读取正文 DOM 时页面已关闭"
+                ) from exc
+            raise ContentValidationError(
+                "ZHIHU_CONTENT_DOM_VERIFY_FAILED: 正文 DOM 回读失败"
+            ) from exc
+        if not isinstance(raw, list):
+            raise ContentValidationError("ZHIHU_CONTENT_DOM_VERIFY_FAILED: 正文 DOM 序列无效")
+        normalized: list[dict] = []
+        for item in raw:
+            if not isinstance(item, dict):
+                raise ContentValidationError("ZHIHU_CONTENT_DOM_VERIFY_FAILED: DOM token 无效")
+            kind = item.get("kind")
+            if kind == "image":
+                normalized.append({"kind": "image"})
+                continue
+            text = normalize_for_comparison(item.get("text"))
+            if not text:
+                continue
+            if kind == "heading":
+                normalized.append(
+                    {
+                        "kind": "heading",
+                        "level": int(item.get("level") or 0),
+                        "text": text,
+                    }
+                )
+            elif kind == "text":
+                for paragraph in extract_expected_paragraphs([{"type": "text", "text": text}]):
+                    normalized.append({"kind": "text", "text": paragraph.comparison_text})
+            else:
+                raise ContentValidationError("ZHIHU_CONTENT_DOM_VERIFY_FAILED: DOM token 类型无效")
+        return normalized
+
+    @staticmethod
+    def _tokens_match(expected: list[dict], actual: list[dict]) -> bool:
+        return expected == actual
+
+    @staticmethod
+    def _token_shape(tokens: list[dict]) -> str:
+        shape = []
+        for token in tokens[:40]:
+            if token.get("kind") == "image":
+                shape.append("I")
+            elif token.get("kind") == "heading":
+                shape.append(f"H{token.get('level')}:{len(token.get('text') or '')}")
+            else:
+                shape.append(f"T:{len(token.get('text') or '')}")
+        return ",".join(shape) or "EMPTY"
+
+    async def _validate_dom_prefix(self, blocks: list[dict], *, phase: str) -> None:
+        expected = self._expected_content_tokens(blocks)
+        actual = await self._read_editor_dom_tokens()
+        if actual[: len(expected)] != expected:
+            raise ContentValidationError(
+                f"CONTENT_VALIDATION_ERROR: 知乎{phase}图文顺序不完整; "
+                f"expected={self._token_shape(expected)}; "
+                f"actual={self._token_shape(actual)}"
+            )
+
+    async def _validate_dom_exact(self, blocks: list[dict], *, phase: str) -> None:
+        expected = self._expected_content_tokens(blocks)
+        actual = await self._read_editor_dom_tokens()
+        if not self._tokens_match(expected, actual):
+            raise ContentValidationError(
+                f"CONTENT_VALIDATION_ERROR: 知乎{phase}图文顺序不完整; "
+                f"expected={self._token_shape(expected)}; "
+                f"actual={self._token_shape(actual)}"
+            )
 
     async def _upload_image(self, image_path: str) -> dict:
         """通过正文图片文件控件上传单张图片；以编辑器内图片数量增加为成功判据。"""
@@ -421,7 +593,11 @@ class ZhihuPlatform(BasePlatform):
                 raise BrowserLifecycleError(
                     "BROWSER_CONTEXT_CLOSED: 知乎上传图片时页面已关闭"
                 ) from exc
-            return {"success": False, "error": str(exc)}
+            return {
+                "success": False,
+                "error_code": "IMAGE_UPLOAD_FAILED",
+                "error": safe_media_error(exc, fallback="知乎图片上传失败"),
+            }
 
     async def select_topic(
         self,
@@ -447,12 +623,15 @@ class ZhihuPlatform(BasePlatform):
         }
 
     async def save_draft(self, title: str = "") -> str:
-        """知乎 /write 自动保存草稿；等自动保存稳定后去草稿箱按标题验证。
+        """等待自动保存，取得唯一草稿 ID，并重开核验完整持久化正文。"""
 
-        返回草稿箱 URL；标题未在草稿箱出现则返回空串（绝不以当前页 URL 冒充成功）。
-        """
         self._require_page_alive("知乎保存草稿")
-        # 输入停止后知乎通常在数秒内自动保存；等待状态提示消失
+        expected_title = " ".join(str(title or "").split())
+        if not expected_title:
+            raise DraftResultUnknownError("DRAFT_RESULT_UNKNOWN: 知乎自动保存结果缺少可核验标题")
+
+        # 知乎从标题首次输入起便可能产生自动保存副作用；此处以后任何
+        # 不确定状态只能标记 RESULT_UNKNOWN，绝不能返回可自动重试的普通失败。
         await self.simulator.random_delay(3, 5)
         try:
             await self.page.wait_for_selector(
@@ -475,67 +654,34 @@ class ZhihuPlatform(BasePlatform):
                 raise BrowserLifecycleError(
                     "BROWSER_CONTEXT_CLOSED: 知乎打开草稿箱时页面已关闭"
                 ) from exc
-            logger.error("知乎打开草稿箱失败: {}", exc)
-            return ""
+            raise DraftResultUnknownError(
+                "DRAFT_RESULT_UNKNOWN: 知乎自动保存后无法打开草稿箱"
+            ) from exc
         await self.simulator.random_delay(3, 5)
 
-        keyword = str(title or "").strip()[:12]
-        if not keyword:
-            return drafts_url
         try:
-            found = await self._draft_list_contains(keyword)
-            if not found:
+            draft = await self._find_unique_exact_draft(expected_title)
+            if draft is None:
                 await self.simulator.random_delay(3, 5)
-                found = await self._draft_list_contains(keyword)
-            if not found:
-                logger.error("知乎草稿箱未找到标题包含「{}」的草稿", keyword)
-                return ""
+                draft = await self._find_unique_exact_draft(expected_title)
+            if draft is None:
+                raise DraftResultUnknownError(
+                    "DRAFT_RESULT_UNKNOWN: 知乎未找到标题精确匹配的唯一草稿"
+                )
+            edit_url = self._draft_edit_url(draft.get("id"))
+            await self._verify_persisted_draft(expected_title, edit_url)
         except Exception as exc:
+            if isinstance(exc, DraftResultUnknownError):
+                raise
             if self._exception_means_browser_closed(exc):
                 raise BrowserLifecycleError(
                     "BROWSER_CONTEXT_CLOSED: 知乎验证草稿箱时页面已关闭"
                 ) from exc
-            logger.error("知乎草稿箱验证失败: {}", exc)
-            return ""
-        return drafts_url
+            raise DraftResultUnknownError("DRAFT_RESULT_UNKNOWN: 知乎持久化草稿核验失败") from exc
+        return edit_url
 
-    async def _draft_list_contains(self, keyword: str) -> bool:
-        """草稿箱页面正文是否包含关键字；必要时先点击侧栏「草稿箱」入口。
-
-        页面文本检查失败（例如知乎列表区维护中显示「系统升级中」）时，
-        回退到捕获页面自身发出的 ``articles/my_drafts`` API 响应验证标题。
-        """
-
-        if "creation/drafts" not in (self.page.url or ""):
-            clicked = await self.page.evaluate(
-                """() => {
-                    const nodes = Array.from(
-                        document.querySelectorAll('a, button, [role=button]')
-                    );
-                    const target = nodes.find((el) =>
-                        (el.innerText || '').trim().startsWith('草稿箱')
-                    );
-                    if (target) { target.click(); return true; }
-                    return false;
-                }"""
-            )
-            await self.simulator.random_delay(2, 4)
-            if not clicked:
-                return False
-        found = await self.page.evaluate(
-            "(kw) => (document.body.innerText || '').includes(kw)",
-            keyword,
-        )
-        if found:
-            return True
-        return await self._api_draft_list_contains(keyword)
-
-    async def _api_draft_list_contains(self, keyword: str) -> bool:
-        """重载草稿箱页面、点击「草稿箱」入口，捕获列表 API 响应按标题验证。
-
-        注意：``articles/my_drafts/count`` 与列表端点共享 URL 前缀，谓词必须
-        精确匹配路径，否则会误捕获计数响应（无 data 字段）。
-        """
+    async def _find_unique_exact_draft(self, expected_title: str) -> dict | None:
+        """只接受列表 API 中标题精确且唯一的草稿实体。"""
 
         try:
             async with self.page.expect_response(
@@ -561,23 +707,21 @@ class ZhihuPlatform(BasePlatform):
                 )
                 await self.simulator.random_delay(2, 4)
             if not clicked:
-                return False
+                return None
             response = await response_info.value
             payload = await response.json()
-            titles = [
-                str(item.get("title") or "")
+            candidates = [
+                {
+                    "id": str(item.get("id") or item.get("url_token") or ""),
+                    "title": " ".join(str(item.get("title") or "").split()),
+                }
                 for item in (payload.get("data") or [])
                 if isinstance(item, dict)
             ]
-            if any(keyword in title for title in titles):
-                return True
-            # 兜底：列表区可能已直接渲染标题
-            return bool(
-                await self.page.evaluate(
-                    "(kw) => (document.body.innerText || '').includes(kw)",
-                    keyword,
-                )
-            )
+            matches = [
+                item for item in candidates if item["id"] and item["title"] == expected_title
+            ]
+            return matches[0] if len(matches) == 1 else None
         except BrowserLifecycleError:
             raise
         except Exception as exc:
@@ -585,22 +729,67 @@ class ZhihuPlatform(BasePlatform):
                 raise BrowserLifecycleError(
                     "BROWSER_CONTEXT_CLOSED: 知乎草稿列表 API 验证时页面已关闭"
                 ) from exc
-            logger.warning("知乎草稿列表 API 验证失败: {}", exc)
-            return False
+            logger.warning(
+                "知乎草稿列表 API 验证失败: error_type={}",
+                type(exc).__name__,
+            )
+            return None
+
+    @staticmethod
+    def _draft_edit_url(draft_id: object) -> str:
+        safe_id = str(draft_id or "").strip()
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", safe_id):
+            raise DraftResultUnknownError("DRAFT_RESULT_UNKNOWN: 知乎草稿实体 ID 无效")
+        return f"https://zhuanlan.zhihu.com/p/{safe_id}/edit"
+
+    async def _verify_persisted_draft(
+        self,
+        expected_title: str,
+        edit_url: str,
+    ) -> None:
+        blocks = self._expected_persisted_blocks
+        if blocks is None:
+            raise DraftResultUnknownError("DRAFT_RESULT_UNKNOWN: 知乎缺少冻结内容核验快照")
+        try:
+            await self.page.goto(
+                edit_url,
+                wait_until="domcontentloaded",
+                timeout=30000,
+            )
+            await self.page.wait_for_selector(
+                TITLE_SELECTOR,
+                state="visible",
+                timeout=20000,
+            )
+            title_field = self.page.locator(TITLE_SELECTOR).first
+            actual_title = " ".join((await title_field.input_value()).split())
+            if actual_title != expected_title:
+                raise DraftResultUnknownError("DRAFT_RESULT_UNKNOWN: 知乎草稿重开后标题不一致")
+            expected_tokens = self._expected_content_tokens(blocks)
+            actual_tokens = await self._read_editor_dom_tokens()
+            if not self._tokens_match(expected_tokens, actual_tokens):
+                raise DraftResultUnknownError(
+                    "DRAFT_RESULT_UNKNOWN: 知乎草稿重开后图文结构不完整; "
+                    f"expected={self._token_shape(expected_tokens)}; "
+                    f"actual={self._token_shape(actual_tokens)}"
+                )
+        except DraftResultUnknownError:
+            raise
+        except Exception as exc:
+            if self._exception_means_browser_closed(exc):
+                raise BrowserLifecycleError(
+                    "BROWSER_CONTEXT_CLOSED: 知乎重开草稿核验时页面已关闭"
+                ) from exc
+            raise DraftResultUnknownError("DRAFT_RESULT_UNKNOWN: 知乎草稿重开核验失败") from exc
 
     @staticmethod
     def _is_drafts_list_response(response) -> bool:
         parts = urlsplit(response.url)
-        return (
-            parts.path == "/api/v4/articles/my_drafts"
-            and response.request.method == "GET"
-        )
+        return parts.path == "/api/v4/articles/my_drafts" and response.request.method == "GET"
 
     @staticmethod
     def _not_implemented(operation: str):
-        raise PlatformNotImplementedError(
-            f"PLATFORM_NOT_IMPLEMENTED: 知乎{operation}能力尚未接入"
-        )
+        raise PlatformNotImplementedError(f"PLATFORM_NOT_IMPLEMENTED: 知乎{operation}能力尚未接入")
 
     async def publish_now(self, title: str = "") -> str:
         self._not_implemented("公开发布")

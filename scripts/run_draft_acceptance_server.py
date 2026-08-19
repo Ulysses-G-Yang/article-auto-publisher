@@ -147,11 +147,17 @@ def build_acceptance_app(platforms: Iterable[str], confirmation: str):
                 FEATURE_KEYS,
                 frozenset({2, 3}),
             )
+        elif platform == "zhihu":
+            # 真实 Draft.js 编辑器探测已证明：Word H2 通过“标题 →
+            # 二级标题”落为正文 h3；验收进程只临时放行已证明的 H2。
+            declarations[platform] = PlatformFormatDeclaration(
+                platform,
+                FEATURE_KEYS,
+                frozenset({2}),
+            )
         else:
             declarations[platform] = FEATURE_KEYS
-    content_state.service.platform_format_capabilities = PlatformFormatCapabilities(
-        declarations
-    )
+    content_state.service.platform_format_capabilities = PlatformFormatCapabilities(declarations)
 
     # 真实验收只在本进程内给选中的 ZOL 注入 heading 实验开关；生产
     # ``account_service._platform_instance`` 永远不使用该开关。其他平台

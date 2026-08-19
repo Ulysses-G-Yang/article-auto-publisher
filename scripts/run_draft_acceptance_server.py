@@ -138,6 +138,15 @@ def build_acceptance_app(platforms: Iterable[str], confirmation: str):
                 FEATURE_KEYS,
                 frozenset({2}),
             )
+        elif platform == "xiaoheihe":
+            # 真实编辑器只读/不可保存探测已证明：`# ` 生成 H2，`## `
+            # 生成 H3。验收入口必须保留该层级白名单，不能把已验证能力降为
+            # 空集合并在计划创建阶段误拦截同一 Word。
+            declarations[platform] = PlatformFormatDeclaration(
+                platform,
+                FEATURE_KEYS,
+                frozenset({2, 3}),
+            )
         else:
             declarations[platform] = FEATURE_KEYS
     content_state.service.platform_format_capabilities = PlatformFormatCapabilities(

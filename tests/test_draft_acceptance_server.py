@@ -58,7 +58,7 @@ def test_build_injects_only_selected_platform_capabilities(monkeypatch: pytest.M
     assert registry.get("xiaoheihe").supported == FEATURE_KEYS
     assert registry.get("zol").supported == FEATURE_KEYS
     assert registry.get("zol").heading_levels == frozenset({2})
-    assert registry.get("xiaoheihe").heading_levels == frozenset()
+    assert registry.get("xiaoheihe").heading_levels == frozenset({2, 3})
     assert registry.get("zhihu").supported == frozenset()
     assert {
         name: DEFAULT_PLATFORM_FORMAT_CAPABILITIES.get(name).supported

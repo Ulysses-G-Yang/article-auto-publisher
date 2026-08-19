@@ -959,11 +959,87 @@ class RegressionTests(DatabaseTestCase):
 
         self.assertTrue(result["text_ok"])
         self.assertEqual(result["media_status"], "not_required")
-        self.assertEqual(platform.page.body.click_count, 1)
+        self.assertEqual(platform.page.body.click_count, 0)
         actual = platform.page.body.text
         self.assertLess(actual.index("第一标题"), actual.index("第一段落"))
         self.assertLess(actual.index("第一段落"), actual.index("第二标题"))
         self.assertLess(actual.index("第二标题"), actual.index("第二段落"))
+
+    def test_xiaoheihe_interleaves_text_and_images_without_center_click(self):
+        platform = XiaoheihePlatform()
+        platform.page = FakeXiaoPage()
+        platform.simulator.random_delay = AsyncMock()
+        uploaded = []
+
+        async def upload_once(path):
+            uploaded.append(path)
+            return {"success": True, "filename": Path(path).name}
+
+        platform._upload_image = AsyncMock(side_effect=upload_once)
+        result = asyncio.run(platform.fill_content([
+            {"type": "text", "text": "第一段"},
+            {"type": "image", "position": 1, "local_path": "D:/one.png"},
+            {"type": "text", "text": "第二段"},
+            {"type": "image", "position": 3, "local_path": "D:/two.png"},
+        ], []))
+
+        self.assertTrue(result["text_ok"])
+        self.assertEqual(result["media_status"], "completed")
+        self.assertEqual(result["uploaded_images"], 2)
+        self.assertEqual(uploaded, ["D:/one.png", "D:/two.png"])
+        # 正文编辑器不使用中心 click 当作插入点，否则真实 ProseMirror
+        # 会把后续文字插回中段。
+        self.assertEqual(platform.page.body.click_count, 0)
+        actual = platform.page.body.text
+        self.assertLess(actual.index("第一段"), actual.index("第二段"))
+
+    def test_xiaoheihe_stops_after_first_image_validation_break(self):
+        platform = XiaoheihePlatform()
+        platform.page = FakeXiaoPage()
+        platform.simulator.random_delay = AsyncMock()
+        calls = []
+
+        async def remove_text_after_first_image(path):
+            calls.append(path)
+            platform.page.body = FakeLocator(
+                page=platform.page,
+                tag="div",
+                text="第一段",
+            )
+            return {"success": True, "filename": Path(path).name}
+
+        platform._upload_image = AsyncMock(side_effect=remove_text_after_first_image)
+        with self.assertRaises(ContentValidationError):
+            asyncio.run(platform.fill_content([
+                {"type": "text", "text": "第一段"},
+                {"type": "text", "text": "必须保留"},
+                {"type": "image", "position": 2, "local_path": "D:/one.png"},
+                {"type": "image", "position": 3, "local_path": "D:/two.png"},
+            ], []))
+
+        self.assertEqual(calls, ["D:/one.png"])
+        self.assertEqual(platform._upload_image.await_count, 1)
+
+    def test_xiaoheihe_partial_media_contract_is_preserved(self):
+        platform = XiaoheihePlatform()
+        platform.page = FakeXiaoPage()
+        platform.simulator.random_delay = AsyncMock()
+        platform._upload_image = AsyncMock(side_effect=[
+            {"success": True, "filename": "one.png"},
+            {"success": False, "error": "上传失败"},
+        ])
+
+        result = asyncio.run(platform.fill_content([
+            {"type": "text", "text": "正文"},
+            {"type": "image", "position": 1, "local_path": "D:/one.png"},
+            {"type": "image", "position": 2, "local_path": "D:/two.png"},
+        ], []))
+
+        self.assertTrue(result["text_ok"])
+        self.assertEqual(result["expected_images"], 2)
+        self.assertEqual(result["uploaded_images"], 1)
+        self.assertEqual(result["media_status"], "partial")
+        self.assertEqual(len(result["failed_images"]), 1)
 
     def test_xiaoheihe_revalidates_body_after_image_rerender(self):
         # 图片处理会重建编辑器；最终必须从新节点读取并在正文缺失时硬失败。

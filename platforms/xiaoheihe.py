@@ -385,30 +385,87 @@ class XiaoheihePlatform(BasePlatform):
         """填写正文（真实字段：.article__edit-content--inner 内的 contenteditable ProseMirror）"""
         self._raise_if_page_closed("小黑盒填写正文")
         editor = await self._current_body_editor()
-        await editor.click()
         await editor.fill("")
+        await self._place_body_caret_at_end()
         await self.simulator.random_delay(0.3, 0.8)
 
-        # 保持已经真实验收过的布局：先完整写入文字，再按内容块中的
-        # position 顺序上传图片。图片弹窗会重建 ProseMirror，未经真实 DOM
-        # 证据不能擅自改成逐块交错插入。
-        first_text = True
-        for block in content_blocks:
+        expected_images = sum(
+            1 for block in content_blocks if block.get("type") == "image"
+        )
+        uploaded_images = 0
+        failed_images = []
+        content_started = False
+
+        # 必须沿着 ContentVersion 的原始块顺序写入。小黑盒的图片弹窗可能
+        # 重建 ProseMirror，先把所有文字写完再批量插图会让插入点落到中段，
+        # 进而破坏后续段落；每个块都从当前可见编辑器末尾继续。
+        for block_index, block in enumerate(content_blocks):
             btype = block.get("type")
             if btype in ("text", "heading") and block.get("text"):
                 text = block["text"].strip()
                 if not text:
                     continue
-                if not first_text:
+                if content_started:
+                    await self._place_body_caret_at_end()
                     await self.page.keyboard.press("Enter")
                     await self.page.keyboard.press("Enter")
+                await self._place_body_caret_at_end()
                 lines = text.splitlines() or [text]
                 for i, line in enumerate(lines):
                     if line.strip():
                         await self.page.keyboard.insert_text(line.strip())
                     if i < len(lines) - 1:
                         await self.page.keyboard.press("Enter")
-                first_text = False
+                content_started = True
+                continue
+
+            if btype != "image":
+                continue
+
+            if content_started:
+                await self._place_body_caret_at_end()
+                await self.page.keyboard.press("Enter")
+                await self.page.keyboard.press("Enter")
+            await self._place_body_caret_at_end()
+
+            img_path = block.get("local_path")
+            if not img_path and images:
+                # 按 position 匹配，否则取第一张
+                for img in images:
+                    if img.get("position_index") == block.get("position"):
+                        img_path = img.get("local_path")
+                        break
+                if not img_path:
+                    img_path = images[0].get("local_path")
+            if img_path:
+                upload_result = await self._upload_image(img_path) or {}
+                if upload_result.get("success"):
+                    uploaded_images += 1
+                else:
+                    failed_images.append({
+                        "filename": Path(str(img_path)).name,
+                        "error": safe_media_error(
+                            upload_result.get("error"),
+                            fallback="图片上传失败",
+                        ),
+                    })
+            else:
+                failed_images.append({
+                    "filename": "",
+                    "error": "文章图片块没有对应本地文件",
+                })
+
+            content_started = True
+
+            # 图片操作可能重建正文编辑器；立即从新节点读取截至当前块的
+            # 所有文字，首个缺失/乱序必须硬失败，后续图片不得继续。
+            await self._validate_written_text(
+                content_blocks[: block_index + 1],
+                phase=f"图片处理后第{block_index + 1}块",
+            )
+            if img_path:
+                # 每张图片之间放慢节奏，降低风控敏感度
+                await self.simulator.random_delay(2.5, 4.5)
 
         editor = await self._current_body_editor()
         await editor.evaluate(
@@ -416,55 +473,6 @@ class XiaoheihePlatform(BasePlatform):
             "inputType: 'insertText'}))"
         )
 
-        actual_text = await editor.inner_text()
-        expected_count = ensure_valid_content(
-            content_blocks,
-            actual_text,
-            platform="小黑盒",
-            phase="输入后",
-        )
-        logger.info("小黑盒正文文字输入并验证成功: {} 个文本段落", expected_count)
-
-        expected_images = sum(
-            1 for block in content_blocks if block.get("type") == "image"
-        )
-        uploaded_images = 0
-        failed_images = []
-
-        # 图片失败不抹掉正文，但必须返回结构化结果，让上层标记
-        # completed_with_warnings；图片处理后的正文校验仍然是硬失败。
-        for block in content_blocks:
-            if block.get("type") == "image":
-                img_path = block.get("local_path")
-                if not img_path and images:
-                    # 按 position 匹配，否则取第一张
-                    for img in images:
-                        if img.get("position_index") == block.get("position"):
-                            img_path = img.get("local_path")
-                            break
-                    if not img_path:
-                        img_path = images[0].get("local_path")
-                if img_path:
-                    upload_result = await self._upload_image(img_path) or {}
-                    if upload_result.get("success"):
-                        uploaded_images += 1
-                    else:
-                        failed_images.append({
-                            "filename": Path(str(img_path)).name,
-                            "error": safe_media_error(
-                                upload_result.get("error"),
-                                fallback="图片上传失败",
-                            ),
-                        })
-                    # 每张图片之间放慢节奏，降低风控敏感度
-                    await self.simulator.random_delay(2.5, 4.5)
-                else:
-                    failed_images.append({
-                        "filename": "",
-                        "error": "文章图片块没有对应本地文件",
-                    })
-
-        editor = await self._current_body_editor()
         actual_text = await editor.inner_text()
         expected_count = ensure_valid_content(
             content_blocks,
@@ -511,6 +519,44 @@ class XiaoheihePlatform(BasePlatform):
         if editor is None:
             raise SelectorError("小黑盒正文编辑区未找到或当前不可见")
         return editor
+
+    async def _place_body_caret_at_end(self):
+        """把插入点放到当前可见正文编辑器末尾，不使用中心 click。"""
+
+        editor = await self._current_body_editor()
+        await editor.focus()
+        await editor.evaluate(
+            """element => {
+                element.focus();
+                const selection = window.getSelection();
+                const range = document.createRange();
+                range.selectNodeContents(element);
+                range.collapse(false);
+                selection.removeAllRanges();
+                selection.addRange(range);
+            }"""
+        )
+        return editor
+
+    async def _validate_written_text(self, content_blocks, *, phase: str) -> int:
+        """从当前编辑器校验已写入的文字块，图片块不参与文字计数。"""
+
+        text_blocks = [
+            block
+            for block in content_blocks
+            if block.get("type") in ("text", "heading")
+            and str(block.get("text") or "").strip()
+        ]
+        if not text_blocks:
+            return 0
+        editor = await self._current_body_editor()
+        actual_text = await editor.inner_text()
+        return ensure_valid_content(
+            text_blocks,
+            actual_text,
+            platform="小黑盒",
+            phase=phase,
+        )
 
     async def _find_file_input(self, timeout_ms: int = 3000):
         """查找页面或 iframe 中已挂载的文件控件。"""
@@ -564,9 +610,6 @@ class XiaoheihePlatform(BasePlatform):
         image_name = Path(str(image_path)).name
         try:
             await self._dismiss_overlays()
-            editor = await self._first_visible(self.BODY_FIELD)
-            if editor is not None:
-                await editor.click(timeout=3000)
 
             before_count = await self._editor_image_count()
             btn = self.page.locator(

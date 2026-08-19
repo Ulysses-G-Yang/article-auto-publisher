@@ -617,6 +617,16 @@ def test_dom_reader_walks_nested_draftjs_blocks_instead_of_collapsing_parent() -
     assert "if (images.length) {" in source
 
 
+def test_caret_targets_last_draftjs_block_not_contenteditable_root() -> None:
+    source = Path(PROJECT_ROOT / "platforms" / "zhihu.py").read_text(encoding="utf-8")
+
+    assert "root.querySelectorAll('[data-block=\"true\"]')" in source
+    assert "tailBlock.querySelectorAll('[data-text=\"true\"]')" in source
+    assert "range.selectNodeContents(tail);" in source
+    assert "new Event('selectionchange'" in source
+    assert "range.selectNodeContents(root);" not in source
+
+
 def test_media_overlay_must_be_gone_before_next_content_block() -> None:
     page = _FakeEditorPage()
     platform = _make_delivery_platform(page)

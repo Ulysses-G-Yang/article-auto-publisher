@@ -374,12 +374,25 @@ class ZhihuPlatform(BasePlatform):
         await editor.evaluate(
             """root => {
                 root.focus();
+                const blocks = Array.from(
+                    root.querySelectorAll('[data-block="true"]')
+                );
+                const tailBlock = blocks.length ? blocks[blocks.length - 1] : root;
+                const textLeaves = Array.from(
+                    tailBlock.querySelectorAll('[data-text="true"]')
+                );
+                const tail = textLeaves.length
+                    ? textLeaves[textLeaves.length - 1]
+                    : tailBlock;
                 const range = document.createRange();
-                range.selectNodeContents(root);
+                range.selectNodeContents(tail);
                 range.collapse(false);
                 const selection = window.getSelection();
                 selection.removeAllRanges();
                 selection.addRange(range);
+                document.dispatchEvent(
+                    new Event('selectionchange', {bubbles: true})
+                );
             }"""
         )
 

@@ -1,5 +1,6 @@
 """中关村在线（ZOL）创作者中心自动化"""
 import asyncio
+import copy
 import hashlib
 import html
 import os
@@ -9,7 +10,7 @@ from collections import Counter
 from dataclasses import dataclass
 from io import BytesIO
 from pathlib import Path
-from urllib.parse import urlencode, urlparse
+from urllib.parse import parse_qs, urlencode, urlparse
 
 from loguru import logger
 
@@ -66,6 +67,7 @@ class ZOLPlatform(BasePlatform):
     DRAFT_RESPONSE_WAIT_SECONDS = 5.0
     DRAFT_RESPONSE_POLL_INTERVAL = 0.1
     DRAFT_CARD_POLL_DELAYS = (0, 1, 2, 3, 4)
+    DRAFT_CONTENT_POLL_DELAYS = (0, 1, 2)
     DRAFT_CARD_SELECTORS = (
         ".article-card",
         ".draft-item",
@@ -88,6 +90,9 @@ class ZOLPlatform(BasePlatform):
         self._autosave_listener = None
         self._current_title = ""
         self._bound_draft_id: str | None = None
+        self._final_content_response_index = 0
+        self._expected_persisted_blocks: list[dict] | None = None
+        self._heading_sequence = 0
 
     def _stop_autosave_observer(self) -> None:
         """移除当前页面的自动保存监听器，不影响已收集的响应证据。"""
@@ -1099,6 +1104,18 @@ class ZOLPlatform(BasePlatform):
                             return;
                         }
                         if (
+                            tag === 'blockquote'
+                            && node.classList.contains('wxeditor-title')
+                        ) {
+                            const editable = node.querySelector('.wxeditor-text-con');
+                            tokens.push({
+                                kind: 'heading',
+                                tag: 'h2',
+                                text: editable ? textOf(editable) : ''
+                            });
+                            return;
+                        }
+                        if (
                             ignoredUiTags.has(node.tagName)
                             || node.getAttribute('contenteditable') === 'false'
                         ) {
@@ -1540,18 +1557,27 @@ class ZOLPlatform(BasePlatform):
                 "ZOL_STRUCTURED_EDITOR_UNSUPPORTED: TinyMCE iframe 未确认"
             )
         if block_type == "heading":
-            if level not in {2, 3}:
+            if level != 2:
                 raise ContentValidationError(
-                    "ZOL_HEADING_UNSUPPORTED_LEVEL: 实验路径只允许 H2/H3"
+                    "ZOL_HEADING_UNSUPPORTED_LEVEL: ZOL 章节标题只支持 H2 映射"
                 )
-            tag = f"h{level}"
+            self._heading_sequence += 1
+            escaped = html.escape(text, quote=False)
+            markup = (
+                '<blockquote class="wxeditor-ui wxeditor-title '
+                'wxeditor-title_06 mceNonEditable">'
+                '<p id="header" class="wxeditor-box pspan mceNonEditable">'
+                '<span class="wxeditor-title-number fontFace mceNonEditable">'
+                f"{self._heading_sequence}</span>"
+                '<span class="wxeditor-text-con mceEditable">'
+                f"&nbsp;{escaped}</span></p></blockquote>"
+            )
         elif block_type == "text":
-            tag = "p"
+            markup = f"<p>{html.escape(text, quote=False)}</p>"
         else:
             raise ContentValidationError(
                 "ZOL_STRUCTURED_BLOCK_INVALID: 正文块类型无效"
             )
-        markup = f"<{tag}>{html.escape(text, quote=False)}</{tag}>"
         try:
             inserted = await editor.evaluate(
                 """
@@ -1608,41 +1634,34 @@ class ZOLPlatform(BasePlatform):
         *,
         selection_prepared: bool = False,
     ):
-        if level not in {2, 3}:
+        if level != 2:
             raise ContentValidationError(
-                "ZOL_HEADING_UNSUPPORTED_LEVEL: 实验路径只允许 H2/H3"
+                "ZOL_HEADING_UNSUPPORTED_LEVEL: ZOL 章节标题只支持 H2 映射"
             )
         if selection_prepared:
             editor_kind = "iframe"
         else:
             editor, editor_kind = await self._click_editor(editor)
-            await self._collapse_editor_selection_at_end(editor, editor_kind)
         if editor_kind != "iframe":
             raise ContentValidationError(
                 "ZOL_HEADING_EDITOR_UNSUPPORTED: TinyMCE iframe 未确认"
             )
-        await self.page.keyboard.insert_text(text)
-        formatted = await editor.evaluate(
-            """
-            (el, tag) => Boolean(
-                el.ownerDocument.execCommand('formatBlock', false, tag)
-            )
-            """,
-            f"h{level}",
+        await self._insert_tinymce_block(
+            editor,
+            editor_kind,
+            block_type="heading",
+            text=text,
+            level=level,
         )
-        if formatted is not True:
-            raise ContentValidationError(
-                "ZOL_HEADING_DOM_VERIFY_FAILED: TinyMCE formatBlock 未确认成功"
-            )
         await self._verify_heading_nodes(expected_headings)
         return await self._resolve_content_editor()
 
     def _validate_heading_contract(self, content_blocks: list) -> None:
-        """在没有真实 DOM 证据前拒绝把 heading 静默降级成普通文本。
+        """只允许真实工具栏已证明的 ZOL“章节标题”承担 Word H2 映射。
 
-        公共内容层已经保留了 ``heading.level``，但 ZOL 当前尚未有可复核的
-        标题输入规则和 DOM 回读证据。这里故意不猜 Markdown、快捷键或
-        编辑器选择器；任何 heading 都必须等下一轮真实证据后再实现。
+        ZOL 会在保存时把直接插入的 ``h2/h3`` 清洗成普通 ``p``；当前唯一
+        可持久化的标题证据来自编辑器自己的 ``header`` 工具，它生成
+        ``blockquote.wxeditor-title``。H3 尚无独立格式证据，继续 fail closed。
         """
 
         levels: list[str] = []
@@ -1656,9 +1675,9 @@ class ZOLPlatform(BasePlatform):
                 levels.append("unknown")
         if not levels:
             return
-        if any(level not in {"2", "3"} for level in levels):
+        if any(level != "2" for level in levels):
             raise ContentValidationError(
-                "ZOL_HEADING_UNSUPPORTED_LEVEL: 实验路径只允许 H2/H3"
+                "ZOL_HEADING_UNSUPPORTED_LEVEL: ZOL 章节标题只支持 H2 映射"
             )
         if not self.enable_heading_experiment:
             raise ContentValidationError(
@@ -1812,6 +1831,8 @@ class ZOLPlatform(BasePlatform):
     async def fill_content(self, content_blocks: list, images: list):
         """填写正文、插入图片，并验证文字和图片数量。"""
         self._validate_heading_contract(content_blocks)
+        self._expected_persisted_blocks = copy.deepcopy(content_blocks)
+        self._heading_sequence = 0
         editor, editor_kind = await self._resolve_content_editor()
 
         text_parts = [
@@ -1836,7 +1857,7 @@ class ZOLPlatform(BasePlatform):
             token for token in expected_tokens if token.get("kind") == "heading"
         ]
         expected_headings_seen: list[dict] = []
-        use_tinymce_blocks = has_images and has_headings
+        use_tinymce_blocks = has_headings
 
         if has_images:
             await self._bind_draft_before_media(expected_value)
@@ -1980,9 +2001,11 @@ class ZOLPlatform(BasePlatform):
                 # 块与块之间放慢节奏，降低风控敏感度
                 await self.simulator.random_delay(1.5, 3.0)
             editor, editor_kind = await self._resolve_content_editor()
-            await editor.evaluate(
-                "el => el.dispatchEvent(new InputEvent('input', {bubbles: true, inputType: 'insertText'}))"
-            )
+            # 只把这个位置之后的响应视为“完整正文版本”的自动保存证据。
+            # 图片上传阶段更早的响应只能证明同一草稿实体，不能证明最后一张图
+            # 之后的尾部文字已经落盘。
+            self._final_content_response_index = len(self._autosave_responses)
+            await self._commit_editor_dom_change(editor, editor_kind)
 
         # 图片弹窗可能替换 iframe/body 节点，必须重新解析编辑器再读取。
         editor, editor_kind = await self._resolve_content_editor()
@@ -2687,6 +2710,9 @@ class ZOLPlatform(BasePlatform):
         try:
             self._bound_draft_id = None
             self._current_title = ""
+            self._final_content_response_index = 0
+            self._expected_persisted_blocks = None
+            self._heading_sequence = 0
             self._start_autosave_observer()
         finally:
             await draft_page.close()
@@ -2800,6 +2826,70 @@ class ZOLPlatform(BasePlatform):
             "DRAFT_RESULT_UNKNOWN: 保存后草稿卡片在有界轮询内无法证明"
         )
 
+    @classmethod
+    def _editor_draft_id(cls, url: str) -> str | None:
+        """只从已验证编辑器 URL 的唯一 ``draftId`` 查询参数取身份。"""
+
+        try:
+            parsed = urlparse(url)
+            if parsed.hostname != cls.CREATOR_HOST or parsed.path != "/v2/create/article":
+                return None
+            values = parse_qs(parsed.query, keep_blank_values=False).get("draftId", [])
+            if len(values) != 1:
+                return None
+            return cls._scalar_draft_id(values[0])
+        except Exception:
+            return None
+
+    async def _verify_persisted_draft_content(self, response_id: str) -> None:
+        """重开唯一草稿并核验平台真正持久化的完整图文结构。"""
+
+        blocks = self._expected_persisted_blocks
+        if blocks is None:
+            return
+        expected_image_count = sum(
+            1 for block in blocks if isinstance(block, dict) and block.get("type") == "image"
+        )
+        expected_tokens = self._expected_content_tokens(
+            blocks,
+            ["expected-image"] * expected_image_count,
+        )
+        actual_tokens: list[dict] = []
+        editor_url = "https://post.zol.com.cn/v2/create/article?" + urlencode(
+            {
+                "draftId": response_id,
+                "businessType": "1",
+                "editType": "1",
+                "isSecond": "0",
+            }
+        )
+        for delay in self.DRAFT_CONTENT_POLL_DELAYS:
+            if delay:
+                await asyncio.sleep(delay)
+            try:
+                await self.page.goto(
+                    editor_url,
+                    wait_until="domcontentloaded",
+                    timeout=15000,
+                )
+                await self.page.wait_for_timeout(1500)
+                if await self._editor_probe_count() != 1:
+                    continue
+                editor, editor_kind = await self._resolve_content_editor()
+                actual_tokens = await self._read_editor_dom_tokens(editor, editor_kind)
+                if self._content_tokens_match(expected_tokens, actual_tokens):
+                    return
+            except Exception as exc:
+                if self._exception_means_browser_closed(exc):
+                    raise BrowserLifecycleError(
+                        "BROWSER_CONTEXT_CLOSED: ZOL 持久化正文核验时页面已关闭"
+                    ) from exc
+        raise DraftResultUnknownError(
+            "DRAFT_RESULT_UNKNOWN: ZOL 草稿重开后图文结构不完整; "
+            f"expected={self._content_token_shape(expected_tokens, limit=40)}; "
+            f"actual={self._content_token_shape(actual_tokens, limit=40)}"
+        )
+
     async def save_draft(self, title: str = "") -> str:
         """优先证明编辑器自动保存；仅在无副作用证据时点击一次保存。"""
         self._require_page_alive("ZOL 保存草稿")
@@ -2823,13 +2913,40 @@ class ZOLPlatform(BasePlatform):
             # 再按草稿实体 ID 去重；同一 ID 多次响应是同一实体的连续版本，
             # 不同 ID 则说明一次投递产生了多个草稿，必须停止且禁止重试。
             await asyncio.sleep(self.DRAFT_RESPONSE_WAIT_SECONDS)
+            final_responses = list(
+                self._autosave_responses[self._final_content_response_index :]
+            )
             autosave_id = await self._unique_draft_id_from_responses(
-                list(self._autosave_responses),
+                final_responses,
                 allow_empty=True,
             )
             draft_page = await self._open_draft_verification_page()
 
-            if autosave_id is not None:
+            if self._bound_draft_id is not None:
+                # 多图流程已经通过唯一 ID 重开绑定草稿。即使有自动保存响应，
+                # 仍必须在当前 URL 身份一致的前提下点击一次最终保存，确保
+                # 最后一张图之后的尾部正文进入平台持久化版本。
+                if autosave_id is not None and autosave_id != self._bound_draft_id:
+                    raise DraftResultUnknownError(
+                        "DRAFT_RESULT_UNKNOWN: 完整正文自动保存实体与绑定草稿不一致"
+                    )
+                current_draft_id = self._editor_draft_id(self.page.url or "")
+                if current_draft_id != self._bound_draft_id:
+                    raise DraftResultUnknownError(
+                        "DRAFT_RESULT_UNKNOWN: 最终保存前编辑器草稿身份不一致"
+                    )
+                control = self.page.locator(self.DRAFT_SAVE_SELECTOR)
+                if await control.count() != 1 or not await control.is_visible():
+                    raise SelectorError(
+                        "ZOL_DRAFT_SAVE_CONTROL_UNAVAILABLE: 未找到唯一可见存草稿控件"
+                    )
+                clicked = True
+                response_id = await self._collect_draft_save_response(control)
+                if response_id != self._bound_draft_id:
+                    raise DraftResultUnknownError(
+                        "DRAFT_RESULT_UNKNOWN: 最终保存响应与绑定草稿不一致"
+                    )
+            elif autosave_id is not None:
                 if (
                     self._bound_draft_id is not None
                     and autosave_id != self._bound_draft_id
@@ -2864,6 +2981,7 @@ class ZOLPlatform(BasePlatform):
                 response_id,
                 expected_title,
             )
+            await self._verify_persisted_draft_content(response_id)
             draft_url = self.platform_cfg.get(
                 "draft_url", "https://post.zol.com.cn/v2/manage/works/draft"
             )

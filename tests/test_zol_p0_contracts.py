@@ -85,14 +85,25 @@ def test_heading_unknown_or_unsupported_level_is_fail_closed(level) -> None:
         asyncio.run(platform.fill_content([block], []))
 
 
-@pytest.mark.parametrize("level", [2, 3])
-def test_heading_h2_h3_remain_closed_without_experimental_flag(level) -> None:
+def test_heading_h2_remains_closed_without_experimental_flag() -> None:
     platform = ZOLPlatform()
 
     with pytest.raises(ContentValidationError, match="ZOL_HEADING_UNVERIFIED"):
         asyncio.run(
             platform.fill_content(
-                [{"type": "heading", "level": level, "text": "不会写入"}],
+                [{"type": "heading", "level": 2, "text": "不会写入"}],
+                [],
+            )
+        )
+
+
+def test_heading_h3_is_rejected_even_with_experimental_flag() -> None:
+    platform = ZOLPlatform(enable_heading_experiment=True)
+
+    with pytest.raises(ContentValidationError, match="ZOL_HEADING_UNSUPPORTED_LEVEL"):
+        asyncio.run(
+            platform.fill_content(
+                [{"type": "heading", "level": 3, "text": "不会写入"}],
                 [],
             )
         )

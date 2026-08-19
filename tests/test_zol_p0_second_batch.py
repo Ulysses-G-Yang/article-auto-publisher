@@ -589,6 +589,76 @@ def test_multiple_successful_save_responses_are_ambiguous() -> None:
         asyncio.run(platform.save_draft("新草稿"))
 
 
+def test_bound_draft_always_gets_one_final_explicit_save_on_exact_editor_id() -> None:
+    platform, draft_page = _save_platform(
+        responses=[_SaveResponse({"errcode": 0, "data": {"draftId": "bound-id"}})],
+        card_states=[[_SaveCard("完整草稿", {"data-draft-id": "bound-id"})]],
+    )
+    platform.page.url = (
+        "https://post.zol.com.cn/v2/create/article?draftId=bound-id&businessType=1"
+    )
+    platform._bound_draft_id = "bound-id"
+    platform._autosave_responses = [
+        _SaveResponse({"errcode": 0, "data": {"draftId": "bound-id"}})
+    ]
+    platform._final_content_response_index = len(platform._autosave_responses)
+
+    assert asyncio.run(platform.save_draft("完整草稿")).endswith("/draft")
+    assert platform.page.control.click_count == 1
+    assert draft_page.closed is True
+
+
+def test_bound_draft_final_save_rejects_mismatched_response_id() -> None:
+    platform, _draft_page = _save_platform(
+        responses=[_SaveResponse({"errcode": 0, "data": {"draftId": "other-id"}})],
+        card_states=[],
+    )
+    platform.page.url = (
+        "https://post.zol.com.cn/v2/create/article?draftId=bound-id&businessType=1"
+    )
+    platform._bound_draft_id = "bound-id"
+
+    with pytest.raises(DraftResultUnknownError, match="最终保存响应与绑定草稿不一致"):
+        asyncio.run(platform.save_draft("完整草稿"))
+    assert platform.page.control.click_count == 1
+
+
+def test_persisted_content_reopen_requires_full_ordered_tail_and_images() -> None:
+    platform = ZOLPlatform()
+    platform._expected_persisted_blocks = [
+        {"type": "text", "text": "图片前"},
+        {"type": "image", "position": 1},
+        {"type": "heading", "level": 2, "text": "章节标题"},
+        {"type": "text", "text": "图片后尾段"},
+    ]
+    platform.DRAFT_CONTENT_POLL_DELAYS = (0,)
+    platform.page = SimpleNamespace(goto=AsyncMock(), wait_for_timeout=AsyncMock())
+    platform._editor_probe_count = AsyncMock(return_value=1)
+    platform._resolve_content_editor = AsyncMock(
+        return_value=(FakeLocator(tag="body"), "iframe")
+    )
+    platform._read_editor_dom_tokens = AsyncMock(
+        return_value=[
+            {"kind": "text", "text": "图片前"},
+            {"kind": "image", "fingerprint": "persisted"},
+            {"kind": "heading", "tag": "h2", "text": "章节标题"},
+            {"kind": "text", "text": "图片后尾段"},
+        ]
+    )
+
+    asyncio.run(platform._verify_persisted_draft_content("bound-id"))
+
+    platform._read_editor_dom_tokens = AsyncMock(
+        return_value=[
+            {"kind": "text", "text": "图片前"},
+            {"kind": "image", "fingerprint": "persisted"},
+            {"kind": "heading", "tag": "h2", "text": "章节标题"},
+        ]
+    )
+    with pytest.raises(DraftResultUnknownError, match="重开后图文结构不完整"):
+        asyncio.run(platform._verify_persisted_draft_content("bound-id"))
+
+
 class _Modal:
     def __init__(self, inputs: list[FakeLocator]) -> None:
         self.inputs = inputs
@@ -894,42 +964,33 @@ def test_image_content_compare_accepts_resize_compression_but_rejects_other_imag
     )
 
 
-def test_heading_experiment_still_only_accepts_h2_h3_and_reads_actual_dom() -> None:
+def test_heading_experiment_only_accepts_verified_h2_widget_and_reads_dom() -> None:
     platform = ZOLPlatform(enable_heading_experiment=True)
 
     platform._validate_heading_contract(
-        [
-            {"type": "heading", "level": 2, "text": "一级"},
-            {"type": "heading", "level": 3, "text": "二级"},
-        ]
+        [{"type": "heading", "level": 2, "text": "一级"}]
     )
     with pytest.raises(ContentValidationError, match="ZOL_HEADING_UNSUPPORTED_LEVEL"):
         platform._validate_heading_contract(
-            [{"type": "heading", "level": 4, "text": "不支持"}]
+            [{"type": "heading", "level": 3, "text": "不支持"}]
         )
 
     class _TokenEditor(FakeLocator):
         async def evaluate(self, script, *_args):
             if "const tokens" in script:
-                return [
-                    {"kind": "heading", "tag": "h2", "text": "一级"},
-                    {"kind": "heading", "tag": "h3", "text": "二级"},
-                ]
+                return [{"kind": "heading", "tag": "h2", "text": "一级"}]
             return await super().evaluate(script, *_args)
 
     editor = _TokenEditor(tag="body")
     platform._resolve_content_editor = AsyncMock(return_value=(editor, "iframe"))
     asyncio.run(
         platform._verify_heading_nodes(
-            [
-                {"kind": "heading", "tag": "h2", "text": "一级"},
-                {"kind": "heading", "tag": "h3", "text": "二级"},
-            ]
+            [{"kind": "heading", "tag": "h2", "text": "一级"}]
         )
     )
 
 
-def test_heading_experiment_applies_format_and_requires_h2_dom_node() -> None:
+def test_heading_experiment_inserts_platform_header_widget_and_requires_h2_token() -> None:
     from tests.test_regression import FakeFrame, FakePage
 
     class _FormattingEditor(FakeLocator):
@@ -938,17 +999,16 @@ def test_heading_experiment_applies_format_and_requires_h2_dom_node() -> None:
             self.tag_after_format = "p"
 
         async def evaluate(self, script, *args):
-            if "createRange" in script:
-                return True
-            if "execCommand" in script:
-                self.tag_after_format = args[0]
+            if "instance.insertContent(markup)" in script:
+                assert "wxeditor-title" in args[0]
+                self.tag_after_format = "h2"
                 return True
             if "const tokens" in script:
                 return [
                     {
                         "kind": "heading",
                         "tag": self.tag_after_format,
-                        "text": self.text,
+                        "text": "真实标题",
                     }
                 ]
             return await super().evaluate(script, *args)
@@ -973,14 +1033,12 @@ def test_heading_experiment_applies_format_and_requires_h2_dom_node() -> None:
     assert editor.tag_after_format == "h2"
 
 
-def test_heading_experiment_rejects_format_true_when_dom_stays_paragraph() -> None:
+def test_heading_experiment_rejects_widget_insert_when_dom_stays_paragraph() -> None:
     from tests.test_regression import FakeFrame, FakePage
 
     class _ParagraphEditor(FakeLocator):
         async def evaluate(self, script, *_args):
-            if "createRange" in script:
-                return True
-            if "execCommand" in script:
+            if "instance.insertContent(markup)" in script:
                 return True
             if "const tokens" in script:
                 return [{"kind": "heading", "tag": "p", "text": "标题"}]
@@ -1190,7 +1248,11 @@ def test_tinymce_structured_block_escapes_text_and_commits_model() -> None:
         )
     )
 
-    assert captured["markup"] == "<h2>A &lt; B &amp; C</h2>"
+    assert "wxeditor-title wxeditor-title_06" in captured["markup"]
+    assert "wxeditor-title-number" in captured["markup"]
+    assert "wxeditor-text-con mceEditable" in captured["markup"]
+    assert "&nbsp;A &lt; B &amp; C" in captured["markup"]
+    assert "<h2>" not in captured["markup"]
     assert "instance.insertContent(markup)" in captured["script"]
     assert "instance.save()" in captured["script"]
     assert "root.insertAdjacentHTML('beforeend', markup)" in captured["script"]

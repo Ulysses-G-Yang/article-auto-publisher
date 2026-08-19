@@ -136,7 +136,7 @@ def build_acceptance_app(platforms: Iterable[str], confirmation: str):
             declarations[platform] = PlatformFormatDeclaration(
                 platform,
                 FEATURE_KEYS,
-                frozenset({2, 3}),
+                frozenset({2}),
             )
         else:
             declarations[platform] = FEATURE_KEYS

@@ -2174,6 +2174,7 @@ class RegressionTests(DatabaseTestCase):
         platform.page = FakePage("iframe")
         platform.simulator.random_delay = AsyncMock()
         platform._collapse_editor_selection_at_end = AsyncMock()
+        platform._remove_delayed_duplicate_images = AsyncMock()
         platform._upload_image = AsyncMock(side_effect=[
             {
                 "success": True,

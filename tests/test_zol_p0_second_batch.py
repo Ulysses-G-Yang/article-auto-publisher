@@ -678,6 +678,7 @@ def test_first_image_prefix_mismatch_stops_before_second_upload() -> None:
     platform.page = FakePage("contenteditable")
     platform.simulator.random_delay = AsyncMock()
     platform._collapse_editor_selection_at_end = AsyncMock()
+    platform._remove_delayed_duplicate_images = AsyncMock()
     platform._upload_image = AsyncMock(
         return_value={
             "success": True,
@@ -943,6 +944,7 @@ def test_second_image_checks_existing_prefix_before_new_upload() -> None:
     platform.page = FakePage("contenteditable")
     platform.simulator.random_delay = AsyncMock()
     platform._collapse_editor_selection_at_end = AsyncMock()
+    platform._remove_delayed_duplicate_images = AsyncMock()
     platform._upload_image = AsyncMock(
         return_value={
             "success": True,
@@ -1038,6 +1040,22 @@ def test_tinymce_structured_block_escapes_text_and_commits_model() -> None:
     assert "instance.save()" in captured["script"]
     assert "root.insertAdjacentHTML('beforeend', markup)" in captured["script"]
     assert "inputType: 'insertHTML'" in captured["script"]
+
+
+def test_delayed_same_src_image_clone_is_removed_fail_closed() -> None:
+    platform = ZOLPlatform()
+    platform._editor_image_src_fingerprints = AsyncMock(
+        side_effect=[["first", "first"], ["first"]]
+    )
+    editor = FakeLocator(tag="body")
+    images = FakeLocator(tag="img", count=2)
+    editor.locator = lambda _selector: images
+    platform._resolve_content_editor = AsyncMock(return_value=(editor, "iframe"))
+    platform._commit_editor_dom_change = AsyncMock()
+
+    asyncio.run(platform._remove_delayed_duplicate_images(1))
+
+    platform._commit_editor_dom_change.assert_awaited_once()
 
 
 def test_expected_text_tokens_keep_three_paragraph_boundaries() -> None:

@@ -1174,6 +1174,46 @@ class ZOLPlatform(BasePlatform):
             if token.get("kind") == "image"
         ]
 
+    async def _remove_delayed_duplicate_images(self, expected_count: int) -> None:
+        """移除 ZOL 异步生成的同 src 克隆；未知额外图片一律拒绝。"""
+
+        actual = await self._editor_image_src_fingerprints()
+        if len(actual) == expected_count:
+            return
+        if len(actual) < expected_count:
+            raise ContentValidationError(
+                "ZOL_IMAGE_DOM_VERIFY_FAILED: 已插入正文图片数量减少"
+            )
+        seen: set[str] = set()
+        duplicate_indexes: list[int] = []
+        for index, fingerprint in enumerate(actual):
+            if fingerprint in seen:
+                duplicate_indexes.append(index)
+            else:
+                seen.add(fingerprint)
+        remove_count = len(actual) - expected_count
+        if len(duplicate_indexes) < remove_count:
+            raise ContentValidationError(
+                "ZOL_IMAGE_DOM_VERIFY_FAILED: 出现无法确认身份的额外正文图片"
+            )
+        editor, editor_kind = await self._resolve_content_editor()
+        if editor_kind == "textarea":
+            raise ContentValidationError(
+                "ZOL_IMAGE_DOM_VERIFY_FAILED: 文本编辑器无法校正重复图片"
+            )
+        image_nodes = editor.locator("img")
+        if await image_nodes.count() != len(actual):
+            raise ContentValidationError(
+                "ZOL_IMAGE_DOM_VERIFY_FAILED: 正文图片节点数量发生变化"
+            )
+        for index in sorted(duplicate_indexes[-remove_count:], reverse=True):
+            await image_nodes.nth(index).evaluate("img => img.remove()")
+        await self._commit_editor_dom_change(editor, editor_kind)
+        if len(await self._editor_image_src_fingerprints()) != expected_count:
+            raise ContentValidationError(
+                "ZOL_IMAGE_DOM_VERIFY_FAILED: 重复图片校正后数量仍不一致"
+            )
+
     @staticmethod
     def _expected_content_tokens(
         content_blocks: list[dict],
@@ -1752,6 +1792,9 @@ class ZOLPlatform(BasePlatform):
                     if observed_image_fingerprints:
                         # 在产生下一次真实上传副作用前，先确认已有图文前缀仍完整。
                         # 若图片后的换行或格式化破坏了旧内容，立即 fail closed。
+                        await self._remove_delayed_duplicate_images(
+                            len(observed_image_fingerprints)
+                        )
                         await self._verify_content_prefix(
                             content_blocks[:block_index],
                             observed_image_fingerprints,

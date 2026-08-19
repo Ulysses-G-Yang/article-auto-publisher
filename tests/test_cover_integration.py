@@ -234,6 +234,68 @@ def test_baijiahao_cover_chooses_local_upload_over_body_cropper() -> None:
     assert result is local_upload
 
 
+def test_baijiahao_cover_preview_accepts_react_cleared_file_input() -> None:
+    platform = _make_baijiahao(_FakePage([]))
+    modal = Mock()
+    platform._cover_preview_state = AsyncMock(
+        return_value={
+            "selected_files": 0,
+            "visual_count": 15,
+            "visual_hash": 978689830,
+            "confirm_count": 1,
+        }
+    )
+
+    result = run(
+        platform._wait_for_cover_preview(
+            modal,
+            {
+                "selected_files": 0,
+                "visual_count": 14,
+                "visual_hash": 3315740119,
+                "confirm_count": 0,
+            },
+        )
+    )
+
+    assert result is True
+
+
+def test_baijiahao_cover_preview_rejects_visual_change_without_confirm() -> None:
+    platform = _make_baijiahao(_FakePage([]))
+    modal = Mock()
+    platform._cover_preview_state = AsyncMock(
+        return_value={
+            "selected_files": 0,
+            "visual_count": 15,
+            "visual_hash": 978689830,
+            "confirm_count": 0,
+        }
+    )
+
+    with patch("platforms.baijiahao.asyncio.sleep", new=AsyncMock()):
+        result = run(
+            platform._wait_for_cover_preview(
+                modal,
+                {
+                    "selected_files": 0,
+                    "visual_count": 14,
+                    "visual_hash": 3315740119,
+                    "confirm_count": 0,
+                },
+            )
+        )
+
+    assert result is False
+
+
+def test_baijiahao_cover_confirm_label_accepts_platform_counter() -> None:
+    assert BaijiahaoPlatform._is_cover_confirm_label("确定 (1)") is True
+    assert BaijiahaoPlatform._is_cover_confirm_label("确认") is True
+    assert BaijiahaoPlatform._is_cover_confirm_label("确定  ( 1 )") is False
+    assert BaijiahaoPlatform._is_cover_confirm_label("发布") is False
+
+
 def test_baijiahao_cover_preview_failure_closes_modal_before_continuing() -> None:
     page = _FakePage([])
     platform = _make_baijiahao(page)

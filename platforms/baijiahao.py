@@ -1261,9 +1261,10 @@ class BaijiahaoPlatform(BasePlatform):
     async def set_cover(self, image_path: str) -> dict:
         """通过「选择封面」弹窗上传本地图片设为封面（3:2 预览后确定）。
 
-        2026-08-20 只读真实探测确认：编辑器存在唯一「选择封面」入口；弹窗
-        明确包含「正文/本地上传」页签、一个 ``accept=image/*`` 文件控件和
-        「封面预览（3:2）」。真实上传仍必须以预览就绪且弹窗关闭为成功判据。
+        2026-08-20 真实探测确认：编辑器存在唯一「选择封面」入口；已有
+        正文图片时弹窗会同时挂载 cropper 与 local-upload 两个 image input。
+        上传后 React 会清空 ``input.files``，确认文案为「确定 (N)」；因此
+        必须以视觉指纹变化、唯一启用确认动作与弹窗完整关闭为判据。
         """
 
         self._require_page_alive("百家号设置封面")
@@ -1441,15 +1442,21 @@ class BaijiahaoPlatform(BasePlatform):
                     hash ^= char.codePointAt(0);
                     hash = Math.imul(hash, 16777619) >>> 0;
                 }
-                const input = root.querySelector('input[type="file"][accept*="image"]');
+                const inputs = Array.from(root.querySelectorAll(
+                    'input[type="file"][accept*="image"]'
+                ));
                 const confirms = Array.from(root.querySelectorAll(
                     'button, [role="button"], [class*="btn" i]'
                 )).filter((element) => visible(element)
-                    && ['确认', '确定'].includes((element.innerText || '').trim())
+                    && /^(?:确认|确定)(?:\s*\(\d+\))?$/.test(
+                        (element.innerText || '').replace(/\s+/g, ' ').trim()
+                    )
                     && !element.disabled
                     && element.getAttribute('aria-disabled') !== 'true');
                 return {
-                    selected_files: input?.files?.length || 0,
+                    selected_files: inputs.reduce(
+                        (total, input) => total + (input.files?.length || 0), 0
+                    ),
                     visual_count: parts.length,
                     visual_hash: hash,
                     confirm_count: confirms.length,
@@ -1479,11 +1486,10 @@ class BaijiahaoPlatform(BasePlatform):
                     or int(baseline.get("visual_count") or 0) == 0
                 )
             )
-            if (
-                int(state.get("selected_files") or 0) == 1
-                and int(state.get("confirm_count") or 0) >= 1
-                and visual_changed
-            ):
+            # 真实 React 流程在接收文件后会立即清空 input.files。这里
+            # 不把瞬时 FileList 当成成功证据，而要求冻结素材导致可见
+            # 预览指纹变化，且当前封面弹窗只有一个可执行确认动作。
+            if visual_changed and int(state.get("confirm_count") or 0) == 1:
                 return True
             await asyncio.sleep(0.5)
         return False
@@ -1496,9 +1502,7 @@ class BaijiahaoPlatform(BasePlatform):
             if not dialogs:
                 return True
             topmost = dialogs[-1]
-            candidate = await self._unique_visible_text("确认", topmost)
-            if candidate is None:
-                candidate = await self._unique_visible_text("确定", topmost)
+            candidate = await self._unique_cover_confirm_action(topmost)
             if candidate is None:
                 return False
             try:
@@ -1509,6 +1513,24 @@ class BaijiahaoPlatform(BasePlatform):
             await candidate.click(timeout=5000)
             await asyncio.sleep(1)
         return not await self._visible_items(self.page.locator(".cheetah-modal"))
+
+    @staticmethod
+    def _is_cover_confirm_label(value: object) -> bool:
+        normalized = re.sub(r"\s+", " ", str(value or "")).strip()
+        return bool(re.fullmatch(r"(?:确认|确定)(?:\s*\(\d+\))?", normalized))
+
+    async def _unique_cover_confirm_action(self, root):
+        actions = root.locator('button, [role="button"], [class*="btn" i]')
+        matches = []
+        for action in await self._visible_items(actions):
+            try:
+                label = await action.inner_text()
+                enabled = await action.is_enabled()
+            except Exception:
+                continue
+            if enabled and self._is_cover_confirm_label(label):
+                matches.append(action)
+        return matches[0] if len(matches) == 1 else None
 
     async def _dismiss_cover_dialogs(self) -> bool:
         """失败时只点击顶层弹窗内唯一「取消」，保证后续不会点穿遮罩。"""

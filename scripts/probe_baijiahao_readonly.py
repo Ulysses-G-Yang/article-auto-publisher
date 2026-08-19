@@ -1,7 +1,9 @@
-"""百家号账号与内容管理页的只读结构探测。
+"""百家号账号与内容管理页的安全结构探测。
 
 本工具只复用已登记的 VALID 账号 Profile，导航到百家号内容管理页并读取
-脱敏后的控件结构。它不会输入、选择文件、创建或保存草稿，也不会点击发布。
+脱敏后的控件结构。默认不输入或选文件；显式使用
+``--inspect-cover-upload`` 时，只向已打开的唯一草稿封面弹窗选择一次
+受控图片、记录脱敏状态后点击取消。任何模式都不创建、保存或发布内容。
 """
 
 from __future__ import annotations
@@ -12,6 +14,7 @@ import json
 import sqlite3
 import sys
 import tempfile
+import uuid
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qsl, quote, urlsplit
@@ -26,6 +29,9 @@ for candidate in (PROJECT_ROOT, SRC_ROOT):
 from account_sessions.leases import AccountProfileLease
 from account_sessions.models import PlatformAccount
 from account_sessions.runtime_paths import default_database_path
+from content_studio.assets import AssetStore
+from content_studio.runtime_paths import default_asset_root
+from content_studio.runtime_paths import default_database_path as default_content_database_path
 from platforms.baijiahao import BaijiahaoPlatform
 
 MANAGE_URL = "https://baijiahao.baidu.com/builder/rc/manage"
@@ -86,6 +92,29 @@ def _load_account(account_id: str, *, allow_error_state: bool = False) -> Platfo
         session_status=str(row["session_status"]),
         persist_login=bool(row["persist_login"]),
     )
+
+
+def _load_controlled_asset(asset_id: str) -> Path:
+    """只解析 Content Studio 受控图片；调用方不得输出物理路径。"""
+
+    try:
+        normalized_id = str(uuid.UUID(asset_id))
+    except (TypeError, ValueError, AttributeError) as exc:
+        raise ProbeError("CONTENT_ASSET_ID_INVALID") from exc
+    path = default_content_database_path()
+    if not path.is_file():
+        raise ProbeError("CONTENT_DATABASE_NOT_FOUND")
+    with sqlite3.connect(_sqlite_uri(path), uri=True) as connection:
+        row = connection.execute(
+            "SELECT storage_path FROM content_assets WHERE asset_id = ?",
+            (normalized_id,),
+        ).fetchone()
+    if row is None:
+        raise ProbeError("CONTENT_ASSET_NOT_FOUND")
+    try:
+        return AssetStore(default_asset_root()).resolve(str(row[0]))
+    except Exception as exc:  # noqa: BLE001
+        raise ProbeError("CONTENT_ASSET_UNAVAILABLE") from exc
 
 
 def _safe_location(value: str) -> dict[str, str]:
@@ -421,8 +450,14 @@ async def run_probe(
     identity_structure: bool = False,
     find_title: str | None = None,
     open_found_draft: bool = False,
+    inspect_cover_asset_id: str | None = None,
 ) -> dict[str, Any]:
     account = _load_account(account_id, allow_error_state=identity_structure)
+    cover_asset_path = (
+        _load_controlled_asset(inspect_cover_asset_id)
+        if inspect_cover_asset_id
+        else None
+    )
     platform = BaijiahaoPlatform(
         profile_dir=account.profile_path,
         strict_profile_lock=True,
@@ -528,6 +563,67 @@ async def run_probe(
                 click_result = raw_click if isinstance(raw_click, dict) else {}
                 if click_result.get("status") == "MARKER_CLICKED":
                     await asyncio.sleep(5)
+            cover_upload_probe: dict[str, Any] | None = None
+            if cover_asset_path is not None:
+                if click_result is None or click_result.get("status") != "MARKER_CLICKED":
+                    raise ProbeError("COVER_PICKER_NOT_OPENED")
+                modal = await platform._wait_for_cover_modal()
+                if modal is None:
+                    raise ProbeError("COVER_MODAL_NOT_READY")
+                cover_input = await platform._wait_for_unique_cover_input(modal)
+                if cover_input is None:
+                    raise ProbeError("COVER_INPUT_AMBIGUOUS")
+                baseline = await platform._cover_preview_state(modal)
+                await cover_input.set_input_files(str(cover_asset_path), timeout=15000)
+                samples: list[dict[str, Any]] = []
+                previous: dict[str, Any] | None = None
+                for _ in range(40):
+                    refreshed = await platform._wait_for_cover_modal(timeout_seconds=1)
+                    if refreshed is None:
+                        state = {"modal_present": False}
+                    else:
+                        modal = refreshed
+                        state = {
+                            "modal_present": True,
+                            **await platform._cover_preview_state(modal),
+                        }
+                    state["dialogs"] = await platform.page.evaluate(
+                        r"""() => {
+                            const visible = (element) => {
+                                const rect = element.getBoundingClientRect();
+                                const style = getComputedStyle(element);
+                                return rect.width > 0 && rect.height > 0
+                                    && style.display !== 'none'
+                                    && style.visibility !== 'hidden';
+                            };
+                            return Array.from(document.querySelectorAll('.cheetah-modal'))
+                                .filter(visible)
+                                .map((root) => ({
+                                    has_cover_preview: (root.innerText || '')
+                                        .includes('封面预览'),
+                                    has_local_upload: (root.innerText || '')
+                                        .includes('本地上传'),
+                                    buttons: Array.from(root.querySelectorAll(
+                                        'button, [role="button"], [class*="btn" i]'
+                                    )).filter(visible).map((button) => ({
+                                        text: (button.innerText || '').replace(/\s+/g, ' ')
+                                            .trim().slice(0, 24),
+                                        enabled: !button.disabled
+                                            && button.getAttribute('aria-disabled') !== 'true',
+                                    })).filter((item) => item.text).slice(0, 12),
+                                }));
+                        }"""
+                    )
+                    if state != previous:
+                        samples.append(state)
+                        previous = state
+                    await asyncio.sleep(0.5)
+                cleanup_ok = await platform._dismiss_cover_dialogs()
+                cover_upload_probe = {
+                    "baseline": baseline,
+                    "samples": samples[:20],
+                    "cleanup_ok": cleanup_ok,
+                }
             if open_editor_menu:
                 selectors = {
                     "INSERT": ".edui-for-bjhInsertionDrawer",
@@ -539,6 +635,15 @@ async def run_probe(
                     raise ProbeError("EDITOR_MENU_AMBIGUOUS")
                 await menu.click()
                 await asyncio.sleep(1)
+            if cover_upload_probe is not None:
+                return {
+                    "status": "OK",
+                    "location": _safe_location(platform.page.url),
+                    "click_result": click_result,
+                    "cover_upload_probe": cover_upload_probe,
+                    "cookie_signal_before": cookie_signal_before,
+                    "cookie_signal_after": cookie_signal_after,
+                }
             payload = _sanitize(await platform.page.evaluate(PROBE_SCRIPT))
             exact_title_matches = None
             exact_title_link_shapes: list[dict[str, Any]] = []
@@ -615,6 +720,7 @@ async def run_probe(
                 "exact_title_matches": exact_title_matches,
                 "exact_title_link_shapes": exact_title_link_shapes,
                 "format_menu_candidates": format_menu_candidates,
+                "cover_upload_probe": cover_upload_probe,
                 "cookie_signal_before": cookie_signal_before,
                 "cookie_signal_after": cookie_signal_after,
                 **payload,
@@ -665,6 +771,14 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="与 --find-title 同用；只读打开唯一草稿编辑页，不输入或保存",
     )
+    parser.add_argument(
+        "--inspect-cover-upload",
+        metavar="ASSET_ID",
+        help=(
+            "仅在已打开的唯一草稿封面弹窗中选择一次受控图片、记录脱敏预览状态，"
+            "随后取消弹窗；不确认、不保存"
+        ),
+    )
     return parser.parse_args()
 
 
@@ -672,6 +786,18 @@ async def _main() -> int:
     args = parse_args()
     if args.open_found_draft and not args.find_title:
         print(json.dumps({"status": "FIND_TITLE_REQUIRED"}, ensure_ascii=False))
+        return 2
+    if args.inspect_cover_upload and not (
+        args.open_found_draft
+        and args.find_title
+        and args.click_marker == "COVER_PICKER"
+    ):
+        print(
+            json.dumps(
+                {"status": "COVER_UPLOAD_PROBE_SCOPE_INVALID"},
+                ensure_ascii=False,
+            )
+        )
         return 2
     try:
         result = await run_probe(
@@ -683,6 +809,7 @@ async def _main() -> int:
             identity_structure=args.identity_structure,
             find_title=args.find_title,
             open_found_draft=args.open_found_draft,
+            inspect_cover_asset_id=args.inspect_cover_upload,
         )
     except ProbeError as exc:
         result = {"status": str(exc)}

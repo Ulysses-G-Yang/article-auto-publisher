@@ -12,6 +12,7 @@ from loguru import logger
 from human.simulator import HumanSimulator
 from models.database import Database
 from config import get_config
+from platforms.content_validation import safe_media_error
 from platforms.media_progress import safe_media_progress
 
 
@@ -301,15 +302,29 @@ class BasePlatform(ABC):
         默认实现不执行任何操作（草稿保存即视为完成），各平台可覆盖。"""
         return ""
 
+    async def apply_cover(self, cover: dict | None = None) -> dict:
+        """应用冻结封面；平台未实现时明确报告，不得静默忽略用户选择。"""
+
+        strategy = str((cover or {}).get("strategy") or "NONE")
+        if strategy == "NONE":
+            return {"success": True, "cover_status": "not_required"}
+        return {
+            "success": False,
+            "cover_status": "unsupported",
+            "error_code": "PLATFORM_COVER_UNSUPPORTED",
+            "error": f"{self.platform_name} 尚未实现封面投递",
+        }
+
     # ==================== 完整发布流水线 ====================
 
     async def publish(self, title: str, content_blocks: list,
-                      images: list, topic: str = "",
+                       images: list, topic: str = "",
                       community: str = "", selection_query: str = "",
                       selection_override: dict = None,
-                      task_id: int = 0, db: Database = None,
-                      auto_login: bool = True,
-                      delivery_mode: str | None = None) -> dict:
+                       task_id: int = 0, db: Database = None,
+                       auto_login: bool = True,
+                       delivery_mode: str | None = None,
+                       cover: dict | None = None) -> dict:
         """执行完整发布流水线
 
         auto_login=False 时（用于后台队列 worker）：若未登录直接优雅失败，
@@ -419,7 +434,44 @@ class BasePlatform(ABC):
                     )
                     await self.simulator.random_delay()
 
-            # 6. 模拟滚动检查。页面可能在选择弹窗、平台跳转或用户操作时关闭，
+            # 6. 应用冻结封面。未实现/失败时仍允许保存正文草稿，但结果必须
+            # 进入 WITH_WARNINGS，不能把“正文成功”冒充“完整 Word 成功”。
+            try:
+                cover_result = await self.apply_cover(cover)
+            except Exception as exc:
+                if self._exception_means_browser_closed(exc):
+                    raise BrowserLifecycleError(
+                        f"BROWSER_CONTEXT_CLOSED: {self.platform_name} 设置封面时页面已关闭"
+                    ) from exc
+                cover_result = {
+                    "success": False,
+                    "cover_status": "failed",
+                    "error_code": getattr(exc, "error_code", None)
+                    or "PLATFORM_COVER_FAILED",
+                    "error": safe_media_error(
+                        str(exc),
+                        fallback="平台封面设置失败",
+                    ),
+                }
+            if not isinstance(cover_result, dict):
+                cover_result = {
+                    "success": False,
+                    "cover_status": "failed",
+                    "error_code": "PLATFORM_COVER_UNVERIFIED",
+                    "error": "平台没有返回可验证的封面结果",
+                }
+            if not cover_result.get("success", False):
+                cover_result["error"] = safe_media_error(
+                    cover_result.get("error"),
+                    fallback="平台封面结果未验证",
+                )
+                db.add_task_log(
+                    task_id,
+                    "WARN",
+                    f"封面未完整设置: {cover_result['error']}",
+                )
+
+            # 7. 模拟滚动检查。页面可能在选择弹窗、平台跳转或用户操作时关闭，
             # 必须先检查生命周期，不能再调用 page.mouse.wheel 触发重复错误。
             await self._safe_simulate_scroll(stage="发布前滚动检查")
             await self._safe_random_mouse_movement(stage="发布前鼠标检查")
@@ -466,6 +518,10 @@ class BasePlatform(ABC):
                 "failed_images": content_result.get("failed_images", []),
                 "media_error": content_result.get("media_error"),
                 "media_error_code": content_result.get("media_error_code"),
+                "cover_strategy": str((cover or {}).get("strategy") or "NONE"),
+                "cover_status": cover_result.get("cover_status", "failed"),
+                "cover_error": cover_result.get("error"),
+                "cover_error_code": cover_result.get("error_code"),
             }
 
         except Exception as e:

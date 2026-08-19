@@ -390,6 +390,7 @@ def test_plan_freezes_cover_and_hash_changes_with_cover(tmp_path: Path) -> None:
         first_context, _ = await service.get_plan_execution_context(
             first_plan["plan_id"], LOCAL_WEB_CONTEXT
         )
+        first_resolved = await service.resolve_delivery_payload(first_context["version_id"])
         changed = await service.patch_draft(
             draft["draft_id"],
             PatchDraftRequest(
@@ -405,17 +406,45 @@ def test_plan_freezes_cover_and_hash_changes_with_cover(tmp_path: Path) -> None:
         second_plan = await service.create_delivery_plan(
             draft["draft_id"], changed["revision"], LOCAL_WEB_CONTEXT
         )
+        second_context, _ = await service.get_plan_execution_context(
+            second_plan["plan_id"], LOCAL_WEB_CONTEXT
+        )
+        second_resolved = await service.resolve_delivery_payload(second_context["version_id"])
         first_public = await service.get_delivery_plan(
             first_plan["plan_id"], LOCAL_WEB_CONTEXT
         )
         await service.database.dispose()
         await account_db.dispose()
-        return first_plan, second_plan, first_public, first_context
+        return (
+            first_plan,
+            second_plan,
+            first_public,
+            first_context,
+            first_resolved,
+            second_resolved,
+        )
 
-    first_plan, second_plan, first_public, first_context = run(scenario())
+    (
+        first_plan,
+        second_plan,
+        first_public,
+        first_context,
+        first_resolved,
+        second_resolved,
+    ) = run(scenario())
     assert first_plan["cover"]["strategy"] == "FIRST_BODY_IMAGE"
     assert first_context["cover"] == first_plan["cover"]
     assert second_plan["cover"]["strategy"] == "EXPLICIT"
     assert first_plan["content_version"] != second_plan["content_version"]
     assert first_public["cover"] == first_plan["cover"]
     assert "storage_path" not in json.dumps(first_public, ensure_ascii=False)
+    first_cover = first_resolved[3]
+    second_cover = second_resolved[3]
+    assert first_cover["strategy"] == "FIRST_BODY_IMAGE"
+    assert first_cover["asset_id"] == first_plan["cover"]["asset_id"]
+    assert first_cover["filename"] == "one.png"
+    assert Path(str(first_cover["local_path"])).is_file()
+    assert second_cover["strategy"] == "EXPLICIT"
+    assert second_cover["asset_id"] == second_plan["cover"]["asset_id"]
+    assert second_cover["filename"] == "two.png"
+    assert Path(str(second_cover["local_path"])).is_file()

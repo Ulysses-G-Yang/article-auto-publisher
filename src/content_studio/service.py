@@ -725,8 +725,8 @@ class ContentStudioService:
     async def resolve_delivery_payload(
         self,
         version_id: str,
-    ) -> tuple[str, list[dict], list[dict]]:
-        """按不可变版本引用解析图文，账号域不保存内容或本机路径副本。"""
+    ) -> tuple[str, list[dict], list[dict], dict]:
+        """按不可变版本解析标题、正文、图片和封面；路径只在执行期短暂存在。"""
 
         async with self.database.session() as session:
             version = await session.get(ContentVersion, version_id)
@@ -735,6 +735,13 @@ class ContentStudioService:
             schema_version, document, projection = _validated_stored_version(version)
             draft_id = version.draft_id
             title = version.title
+            cover_strategy = version.cover_strategy
+            cover_asset_id = version.cover_asset_id
+            cover_asset = None
+            if cover_asset_id:
+                cover_asset = await session.get(ContentAsset, cover_asset_id)
+                if cover_asset is None or cover_asset.draft_id != draft_id:
+                    raise ContentAssetError("冻结版本封面资产不存在或不属于当前草稿")
         if schema_version == 2:
             if document is None:
                 raise DraftValidationError("v2 内容版本缺少 document，无法解析投递内容")
@@ -745,7 +752,27 @@ class ContentStudioService:
             draft_id,
             platform_blocks,
         )
-        return title, platform_blocks, images
+        cover: dict[str, object | None] = {
+            "strategy": cover_strategy,
+            "asset_id": cover_asset_id,
+            "local_path": None,
+            "filename": None,
+            "media_type": None,
+            "width": None,
+            "height": None,
+        }
+        if cover_asset is not None:
+            cover_path = self.asset_store.resolve(cover_asset.storage_path)
+            cover.update(
+                {
+                    "local_path": str(cover_path),
+                    "filename": cover_asset.original_filename,
+                    "media_type": cover_asset.media_type,
+                    "width": cover_asset.width,
+                    "height": cover_asset.height,
+                }
+            )
+        return title, platform_blocks, images, cover
 
     async def set_plan_target_result(
         self,

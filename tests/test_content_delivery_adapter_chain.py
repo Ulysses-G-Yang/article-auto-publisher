@@ -179,7 +179,7 @@ def test_frozen_content_version_reaches_real_adapter_validation(
     )
     studio = _make_studio(tmp_path, accounts)
 
-    async def scenario() -> tuple[dict, str, list[dict]]:
+    async def scenario() -> tuple[dict, str, list[dict], dict]:
         await accounts.initialize()
         account = PlatformAccount(
             account_id=account_id,
@@ -231,8 +231,10 @@ def test_frozen_content_version_reaches_real_adapter_validation(
                 blocks=[{"type": "text", "text": "不应投递的新正文", "position": 0}],
             ),
         )
-        frozen_title, frozen_blocks, _images = await studio.resolve_delivery_payload(
-            plan_context["version_id"]
+        frozen_title, frozen_blocks, _images, frozen_cover = (
+            await studio.resolve_delivery_payload(
+                plan_context["version_id"]
+            )
         )
 
         delivery = DeliveryService(
@@ -261,13 +263,15 @@ def test_frozen_content_version_reaches_real_adapter_validation(
         completed = await delivery.execute_operation(
             queued["operation_id"], LOCAL_WEB_CONTEXT
         )
-        return completed, frozen_title, frozen_blocks
+        return completed, frozen_title, frozen_blocks, frozen_cover
 
     try:
-        completed, frozen_title, frozen_blocks = asyncio.run(scenario())
+        completed, frozen_title, frozen_blocks, frozen_cover = asyncio.run(scenario())
         assert completed["status"] == "DRAFT_SAVED"
         assert frozen_title == "冻结版本标题"
         assert frozen_blocks[0]["text"] == FROZEN_BODY
+        assert frozen_cover["strategy"] == "NONE"
+        assert frozen_cover["local_path"] is None
         assert adapter.written_title == "冻结版本标题"
         assert adapter.draft_calls == 1
         if platform_name == "xiaoheihe":

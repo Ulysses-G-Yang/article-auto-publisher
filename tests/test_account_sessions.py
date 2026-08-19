@@ -699,6 +699,242 @@ def test_media_incomplete_with_saved_draft_is_with_warnings_not_failed(
     run(database.dispose())
 
 
+def test_frozen_cover_payload_reaches_platform_without_public_path_exposure(
+    tmp_path: Path,
+) -> None:
+    """账号域必须把内容域冻结封面原样交给适配器，操作 API 不回显本机路径。"""
+
+    class FakePlatform:
+        platform_name = "xiaoheihe"
+        context = None
+
+        def __init__(self) -> None:
+            self.publish_kwargs: dict = {}
+
+        async def initialize(self) -> None:
+            return None
+
+        async def check_login(self) -> bool:
+            return True
+
+        async def fetch_identity_payload(self) -> dict:
+            return {"ok": True, "user_id": "10001234", "display_name": "夜航员"}
+
+        async def publish(self, **kwargs) -> dict:
+            self.publish_kwargs = kwargs
+            return {
+                "success": True,
+                "draft_url": "https://example.invalid/drafts/cover-ok",
+                "post_url": "",
+                "media_status": "not_required",
+                "cover_status": "completed",
+            }
+
+        async def cleanup(self) -> None:
+            return None
+
+    cover_path = tmp_path / "controlled-assets" / "cover.png"
+    cover_path.parent.mkdir(parents=True)
+    cover_path.write_bytes(b"test-cover")
+    cover = {
+        "strategy": "EXPLICIT",
+        "asset_id": "cover-asset-id",
+        "local_path": str(cover_path),
+        "filename": "cover.png",
+        "media_type": "image/png",
+        "width": 1200,
+        "height": 800,
+    }
+
+    async def resolve_content(_version_id: str):
+        return (
+            "冻结封面标题",
+            [{"type": "text", "text": "正文", "position": 0}],
+            [],
+            cover,
+        )
+
+    database = AccountDatabase(sqlite_database_url(tmp_path))
+    fake = FakePlatform()
+    accounts = AccountSessionService(
+        database,
+        seed_legacy_profiles=False,
+        platform_factory=lambda _account: fake,
+        allowed_profile_roots=(tmp_path / "runtime" / "profiles",),
+    )
+    run(accounts.initialize())
+    account = run(insert_account(database, make_profile(tmp_path, "xiaoheihe", "cover-ok")))
+    delivery = DeliveryService(
+        accounts,
+        platform_factory=lambda _account: fake,
+        public_publish_enabled=False,
+        content_resolver=resolve_content,
+    )
+    request = DeliveryRequest.model_validate(delivery_payload(account.account_id))
+    queued = run(
+        delivery.request_delivery(
+            request,
+            LOCAL_WEB_CONTEXT,
+            frozen_content_hash="frozen-cover-hash",
+            content_reference="frozen-cover-version",
+        )
+    )
+    completed = run(delivery.execute_operation(queued["operation_id"], LOCAL_WEB_CONTEXT))
+
+    assert completed["status"] == "DRAFT_SAVED"
+    assert fake.publish_kwargs["cover"] == cover
+    assert str(cover_path) not in str(completed)
+    run(database.dispose())
+
+
+def test_unsupported_frozen_cover_is_saved_with_explicit_warning(tmp_path: Path) -> None:
+    """正文草稿存在但平台不支持封面时，不得伪装成完整 Word 成功。"""
+
+    class FakePlatform:
+        platform_name = "xiaoheihe"
+        context = None
+
+        async def initialize(self) -> None:
+            return None
+
+        async def check_login(self) -> bool:
+            return True
+
+        async def fetch_identity_payload(self) -> dict:
+            return {"ok": True, "user_id": "10001234", "display_name": "夜航员"}
+
+        async def publish(self, **_kwargs) -> dict:
+            return {
+                "success": True,
+                "draft_url": "https://example.invalid/drafts/cover-warning",
+                "post_url": "",
+                "media_status": "completed",
+                "cover_status": "unsupported",
+                "cover_error_code": "PLATFORM_COVER_UNSUPPORTED",
+                "cover_error": (
+                    r"当前平台尚未实现封面投递: D:\Secret Folder\cover.png"
+                ),
+            }
+
+        async def cleanup(self) -> None:
+            return None
+
+    async def resolve_content(_version_id: str):
+        return (
+            "冻结封面标题",
+            [{"type": "text", "text": "正文", "position": 0}],
+            [],
+            {
+                "strategy": "FIRST_BODY_IMAGE",
+                "asset_id": "cover-asset-id",
+                "local_path": str(tmp_path / "controlled-assets" / "cover.png"),
+            },
+        )
+
+    database = AccountDatabase(sqlite_database_url(tmp_path))
+    fake = FakePlatform()
+    accounts = AccountSessionService(
+        database,
+        seed_legacy_profiles=False,
+        platform_factory=lambda _account: fake,
+        allowed_profile_roots=(tmp_path / "runtime" / "profiles",),
+    )
+    run(accounts.initialize())
+    account = run(
+        insert_account(database, make_profile(tmp_path, "xiaoheihe", "cover-warning"))
+    )
+    delivery = DeliveryService(
+        accounts,
+        platform_factory=lambda _account: fake,
+        public_publish_enabled=False,
+        content_resolver=resolve_content,
+    )
+    request = DeliveryRequest.model_validate(delivery_payload(account.account_id))
+    queued = run(
+        delivery.request_delivery(
+            request,
+            LOCAL_WEB_CONTEXT,
+            frozen_content_hash="unsupported-cover-hash",
+            content_reference="unsupported-cover-version",
+        )
+    )
+    completed = run(delivery.execute_operation(queued["operation_id"], LOCAL_WEB_CONTEXT))
+
+    assert completed["status"] == "DRAFT_SAVED_WITH_WARNINGS"
+    assert completed["draft_url"].endswith("/drafts/cover-warning")
+    assert completed["error_code"] == "PLATFORM_COVER_UNSUPPORTED"
+    assert "封面" in (completed["error_message"] or "")
+    assert "Secret Folder" not in (completed["error_message"] or "")
+    assert "D:\\" not in (completed["error_message"] or "")
+    run(database.dispose())
+
+
+def test_invalid_cover_resolver_payload_fails_closed_before_platform_publish(
+    tmp_path: Path,
+) -> None:
+    class FakePlatform:
+        platform_name = "xiaoheihe"
+        context = None
+        publish_called = False
+
+        async def initialize(self) -> None:
+            return None
+
+        async def check_login(self) -> bool:
+            return True
+
+        async def fetch_identity_payload(self) -> dict:
+            return {"ok": True, "user_id": "10001234", "display_name": "夜航员"}
+
+        async def publish(self, **_kwargs) -> dict:
+            self.publish_called = True
+            raise AssertionError("非法封面载荷不得进入平台")
+
+        async def cleanup(self) -> None:
+            return None
+
+    async def resolve_content(_version_id: str):
+        return "标题", [{"type": "text", "text": "正文"}], [], {
+            "strategy": "EXPLICIT",
+            "asset_id": "missing",
+            "local_path": None,
+        }
+
+    database = AccountDatabase(sqlite_database_url(tmp_path))
+    fake = FakePlatform()
+    accounts = AccountSessionService(
+        database,
+        seed_legacy_profiles=False,
+        platform_factory=lambda _account: fake,
+        allowed_profile_roots=(tmp_path / "runtime" / "profiles",),
+    )
+    run(accounts.initialize())
+    account = run(
+        insert_account(database, make_profile(tmp_path, "xiaoheihe", "cover-invalid"))
+    )
+    delivery = DeliveryService(
+        accounts,
+        platform_factory=lambda _account: fake,
+        public_publish_enabled=False,
+        content_resolver=resolve_content,
+    )
+    request = DeliveryRequest.model_validate(delivery_payload(account.account_id))
+    queued = run(
+        delivery.request_delivery(
+            request,
+            LOCAL_WEB_CONTEXT,
+            frozen_content_hash="invalid-cover-hash",
+            content_reference="invalid-cover-version",
+        )
+    )
+
+    with pytest.raises(AccountUnavailableError) as exc_info:
+        run(delivery.execute_operation(queued["operation_id"], LOCAL_WEB_CONTEXT))
+    assert exc_info.value.error_code == "CONTENT_VERSION_COVER_UNAVAILABLE"
+    assert fake.publish_called is False
+    run(database.dispose())
+
+
 def test_media_incomplete_without_draft_still_fails(tmp_path: Path) -> None:
     """图片未完整且草稿也没保存：整体判失败，杜绝假成功。"""
 

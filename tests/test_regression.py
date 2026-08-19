@@ -2073,6 +2073,7 @@ class RegressionTests(DatabaseTestCase):
         self.assertTrue(result["success"])
         self.assertEqual(result["selection_status"], "needs_selection")
         self.assertEqual(result["draft_url"], "https://example.test/draft")
+        self.assertEqual(result["cover_status"], "not_required")
 
     def test_selection_query_parses_keyword_json(self):
         value = '[{"word": "显示器", "weight": 1.2}, {"word": "桌面", "weight": 1.0}, {"word": "输出", "weight": 0.8}]'

@@ -43,6 +43,7 @@ from account_sessions.security import (
     delivery_fingerprint,
     safe_error_message,
 )
+from platforms.content_validation import safe_media_error
 from platforms.media_progress import safe_media_progress
 
 SESSION_INVALIDATING_ERROR_CODES = frozenset({"LOGIN_REQUIRED", "SESSION_EXPIRED"})
@@ -78,7 +79,13 @@ class DeliveryService:
         *,
         platform_factory: Callable[[PlatformAccount], Any] | None = None,
         public_publish_enabled: bool | None = None,
-        content_resolver: Callable[[str], Awaitable[tuple[str, list[dict], list[dict]]]]
+        content_resolver: Callable[
+            [str],
+            Awaitable[
+                tuple[str, list[dict], list[dict]]
+                | tuple[str, list[dict], list[dict], dict]
+            ],
+        ]
         | None = None,
         delivery_event_sink: Callable[..., Awaitable[Any]] | None = None,
     ) -> None:
@@ -225,13 +232,39 @@ class DeliveryService:
                         "内容版本解析器不可用",
                         error_code="CONTENT_VERSION_UNAVAILABLE",
                     )
-                resolved_title, content_blocks, images = await self.content_resolver(
-                    operation.content_reference
-                )
+                resolved = await self.content_resolver(operation.content_reference)
+                if not isinstance(resolved, tuple) or len(resolved) not in {3, 4}:
+                    raise AccountUnavailableError(
+                        "内容版本解析结果不符合投递契约",
+                        error_code="CONTENT_VERSION_PAYLOAD_INVALID",
+                    )
+                if len(resolved) == 4:
+                    resolved_title, content_blocks, images, cover = resolved
+                else:
+                    resolved_title, content_blocks, images = resolved
+                    cover = {"strategy": "NONE", "asset_id": None}
+                if not isinstance(cover, dict):
+                    raise AccountUnavailableError(
+                        "内容版本封面载荷不符合投递契约",
+                        error_code="CONTENT_VERSION_COVER_INVALID",
+                    )
+                cover_strategy = str(cover.get("strategy") or "NONE").upper()
+                if cover_strategy not in {"NONE", "FIRST_BODY_IMAGE", "EXPLICIT"}:
+                    raise AccountUnavailableError(
+                        "内容版本封面策略不受支持",
+                        error_code="CONTENT_VERSION_COVER_INVALID",
+                    )
+                if cover_strategy != "NONE" and not cover.get("local_path"):
+                    raise AccountUnavailableError(
+                        "内容版本封面素材不可用",
+                        error_code="CONTENT_VERSION_COVER_UNAVAILABLE",
+                    )
+                cover = {**cover, "strategy": cover_strategy}
             else:
                 resolved_title = operation.title
                 content_blocks = [{"type": "text", "text": operation.body}]
                 images = []
+                cover = {"strategy": "NONE", "asset_id": None}
             with self.accounts._lease(account, purpose=operation.mode):
                 await platform.initialize()
                 # 即使账号页曾显示 VALID，也必须在同一 Profile 租约内
@@ -246,6 +279,7 @@ class DeliveryService:
                     title=resolved_title,
                     content_blocks=content_blocks,
                     images=images,
+                    cover=cover,
                     task_id=0,
                     db=buffered_log,
                     auto_login=False,
@@ -264,14 +298,23 @@ class DeliveryService:
                     error_code=result.get("error_code") or "DELIVERY_FAILED",
                 )
             media_incomplete = result.get("media_status") in {"partial", "failed"}
+            cover_strategy = str(cover.get("strategy") or "NONE").upper()
+            cover_status = result.get("cover_status")
+            cover_incomplete = (
+                cover_strategy != "NONE" and cover_status != "completed"
+            )
+            if cover_incomplete:
+                result.setdefault("cover_status", "unverified")
+                result.setdefault("cover_error_code", "PLATFORM_COVER_UNVERIFIED")
+                result.setdefault("cover_error", "平台未确认封面设置成功")
             if media_incomplete and not result.get("draft_url"):
                 # 草稿都没保存下来，才整体判失败
                 raise AccountUnavailableError(
                     "图片未完整写入平台且草稿未保存",
                     error_code=(result.get("media_error_code") or "PLATFORM_MEDIA_INCOMPLETE"),
                 )
-            if media_incomplete:
-                # 草稿已保存但图片未完整：如实标记「已保存（图片未完整）」，
+            if media_incomplete or cover_incomplete:
+                # 草稿已保存但正文图片或封面未完整：如实标记 WITH_WARNINGS，
                 # 绝不伪装成完整成功，也绝不把已保存的草稿抹成失败。
                 return await self._mark_completed_with_warnings(
                     operation_id,
@@ -634,7 +677,7 @@ class DeliveryService:
         result: dict,
         logs: list[tuple[str, str]],
     ) -> dict:
-        """草稿已保存但图片未完整写入：状态置为 *_WITH_WARNINGS，保留草稿链接。
+        """草稿已保存但正文媒体或封面未完整：保留链接并标记 WITH_WARNINGS。
 
         图片失败信息写入 error_message（业务可读，不伪装成功）；PlatformArticle
         桥接照常执行（草稿确实存在），status 由桥接侧记录为 UNMAPPED 草稿。
@@ -657,14 +700,28 @@ class DeliveryService:
             )
             operation.article_mapping_error_code = None
             operation.article_mapping_last_attempt_at = None
-            operation.error_code = result.get("media_error_code") or "PLATFORM_MEDIA_INCOMPLETE"
-            operation.error_message = (
-                result.get("media_error")
-                or (
-                    "图片未完整写入平台"
-                    f"（{result.get('uploaded_images', 0)}"
-                    f"/{result.get('expected_images', 0)}）"
+            operation.error_code = (
+                result.get("media_error_code")
+                or result.get("cover_error_code")
+                or "PLATFORM_MEDIA_INCOMPLETE"
+            )
+            warning_parts: list[str] = []
+            if result.get("media_status") in {"partial", "failed"}:
+                warning_parts.append(
+                    result.get("media_error")
+                    or (
+                        "图片未完整写入平台"
+                        f"（{result.get('uploaded_images', 0)}"
+                        f"/{result.get('expected_images', 0)}）"
+                    )
                 )
+            if result.get("cover_status") not in {None, "completed", "not_required"}:
+                warning_parts.append(
+                    result.get("cover_error") or "平台未确认封面设置成功"
+                )
+            operation.error_message = safe_media_error(
+                "；".join(str(part) for part in warning_parts),
+                fallback="平台媒体或封面未完整写入",
             )
             operation.completed_at = now
             _append_buffered_logs(session, operation, account, access, logs)
@@ -675,7 +732,7 @@ class DeliveryService:
                     action="DELIVERY_COMPLETED_WITH_WARNINGS",
                     level="WARN",
                     message=(
-                        f"草稿已保存，但图片未完整写入: {operation.error_message}"
+                        f"草稿已保存，但媒体或封面未完整: {operation.error_message}"
                     ),
                     operation_id=operation_id,
                 )

@@ -256,3 +256,56 @@ def test_smzdm_non_2xx_save_response_is_result_unknown() -> None:
         with pytest.raises(DraftResultUnknownError):
             asyncio.run(platform.save_draft("同名草稿"))
     platform._find_unique_exact_draft.assert_not_awaited()
+
+
+class _BaijiaSaveButtons:
+    def __init__(self) -> None:
+        self.button = FakeLocator()
+
+    async def count(self) -> int:
+        return 1
+
+    def nth(self, _index: int):
+        return self.button
+
+
+class _BaijiaSavePage:
+    def __init__(self) -> None:
+        self.buttons = _BaijiaSaveButtons()
+        self.response_callback = None
+
+    def is_closed(self) -> bool:
+        return False
+
+    def on(self, event: str, callback) -> None:
+        assert event == "response"
+        self.response_callback = callback
+
+    def remove_listener(self, event: str, _callback) -> None:
+        assert event == "response"
+        self.response_callback = None
+
+    def get_by_text(self, text: str, *, exact: bool):
+        assert (text, exact) == ("存草稿", True)
+        return self.buttons
+
+    async def evaluate(self, _script: str):
+        raise RuntimeError("execution context was destroyed by navigation")
+
+
+def test_baijia_save_toast_navigation_race_still_uses_persisted_reopen() -> None:
+    platform = BaijiahaoPlatform()
+    platform.page = _BaijiaSavePage()
+    platform._preflight_title = "唯一标题"
+    platform._expected_persisted_blocks = [{"type": "text", "text": "正文"}]
+    platform._find_unique_exact_draft = AsyncMock(
+        return_value="https://baijiahao.baidu.com/builder/rc/edit?type=news&article_id=123"
+    )
+    platform._verify_persisted_draft = AsyncMock()
+
+    with patch("platforms.baijiahao.asyncio.sleep", new=AsyncMock()):
+        result = asyncio.run(platform.save_draft("唯一标题"))
+
+    assert "article_id=123" in result
+    platform._find_unique_exact_draft.assert_awaited_once_with("唯一标题")
+    platform._verify_persisted_draft.assert_awaited_once()

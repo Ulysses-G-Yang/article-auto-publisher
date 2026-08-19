@@ -6,7 +6,7 @@ from __future__ import annotations
 import asyncio
 import sys
 from pathlib import Path
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock, patch
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 SRC_ROOT = PROJECT_ROOT / "src"
@@ -157,25 +157,123 @@ def test_weibo_set_cover_fails_when_dialog_has_no_images() -> None:
 
 
 def test_baijiahao_set_cover_success_flow() -> None:
-    page = _FakePage(["clicked", False])
+    page = _FakePage([])
     platform = _make_baijiahao(page)
+    trigger = AsyncMock()
+    modal = Mock()
+    modal.locator.return_value = page.file_input
+    platform._unique_visible_text = AsyncMock(return_value=trigger)
+    platform._wait_for_cover_modal = AsyncMock(return_value=modal)
+    platform._cover_preview_state = AsyncMock(
+        return_value={"selected_files": 0, "visual_count": 0, "visual_hash": 0}
+    )
+    platform._wait_for_cover_preview = AsyncMock(return_value=True)
+    platform._confirm_cover_dialogs = AsyncMock(return_value=True)
 
     result = run(platform.set_cover(r"C:\tmp\cover.png"))
 
     assert result["success"] is True
     assert result["cover_status"] == "completed"
-    assert page.file_chooser.files == [r"C:\tmp\cover.png"]
+    assert result["safe_to_continue"] is True
+    trigger.click.assert_awaited_once()
+    assert page.file_input.set_files == [r"C:\tmp\cover.png"]
 
 
 def test_baijiahao_set_cover_fails_when_button_missing() -> None:
-    page = _FakePage(["not-found"])
+    page = _FakePage([])
     platform = _make_baijiahao(page)
+    platform._unique_visible_text = AsyncMock(return_value=None)
+    platform._dismiss_cover_dialogs = AsyncMock(return_value=True)
 
     result = run(platform.set_cover(r"C:\tmp\cover.png"))
 
     assert result["success"] is False
     assert result["error_code"] == "BAIJIAHAO_COVER_TRIGGER_NOT_FOUND"
     assert "按钮未找到" in result["error"]
+
+
+def test_baijiahao_cover_preview_failure_closes_modal_before_continuing() -> None:
+    page = _FakePage([])
+    platform = _make_baijiahao(page)
+    trigger = AsyncMock()
+    modal = Mock()
+    modal.locator.return_value = page.file_input
+    platform._unique_visible_text = AsyncMock(return_value=trigger)
+    platform._wait_for_cover_modal = AsyncMock(return_value=modal)
+    platform._cover_preview_state = AsyncMock(return_value={})
+    platform._wait_for_cover_preview = AsyncMock(return_value=False)
+    platform._dismiss_cover_dialogs = AsyncMock(return_value=True)
+
+    result = run(platform.set_cover(r"D:\Secret Folder\cover.png"))
+
+    assert result["success"] is False
+    assert result["safe_to_continue"] is True
+    assert result["error_code"] == "BAIJIAHAO_COVER_PREVIEW_NOT_READY"
+    assert "D:\\Secret Folder" not in str(result)
+    platform._dismiss_cover_dialogs.assert_awaited_once()
+
+
+def test_baijiahao_cover_stuck_is_not_safe_to_continue() -> None:
+    platform = _make_baijiahao(_FakePage([]))
+    platform._dismiss_cover_dialogs = AsyncMock(return_value=False)
+
+    result = run(platform._cover_failure("UPLOAD_FAILED", "上传失败"))
+
+    assert result["safe_to_continue"] is False
+    assert result["cover_status"] == "unverified"
+    assert result["error_code"] == "BAIJIAHAO_COVER_DIALOG_STUCK"
+
+
+def test_base_pipeline_stops_before_save_when_cover_modal_cannot_close() -> None:
+    class _Log:
+        def add_task_log(self, *_args) -> None:
+            return None
+
+    platform = _make_baijiahao(_FakePage([]))
+    platform.check_login = AsyncMock(return_value=True)
+    platform.preflight_delivery = AsyncMock()
+    platform.navigate_to_editor = AsyncMock()
+    platform.fill_title = AsyncMock()
+    platform.fill_content = AsyncMock(
+        return_value={
+            "text_ok": True,
+            "media_status": "completed",
+            "expected_images": 1,
+            "uploaded_images": 1,
+            "failed_images": [],
+        }
+    )
+    platform.apply_cover = AsyncMock(
+        return_value={
+            "success": False,
+            "cover_status": "unverified",
+            "safe_to_continue": False,
+            "error_code": "BAIJIAHAO_COVER_DIALOG_STUCK",
+            "error": "封面弹窗无法安全关闭",
+        }
+    )
+    platform.save_draft = AsyncMock()
+
+    with (
+        patch.object(platform, "_safe_simulate_scroll", new=AsyncMock()),
+        patch.object(platform, "_safe_random_mouse_movement", new=AsyncMock()),
+    ):
+        result = run(
+            platform.publish(
+                title="不可点穿遮罩",
+                content_blocks=[{"type": "text", "text": "正文", "position": 0}],
+                images=[],
+                cover={"strategy": "FIRST_BODY_IMAGE"},
+                delivery_mode="DRAFT",
+                auto_login=False,
+                task_id=0,
+                db=_Log(),
+            )
+        )
+
+    assert result["success"] is False
+    assert result["error_code"] == "BAIJIAHAO_COVER_DIALOG_STUCK"
+    platform.save_draft.assert_not_awaited()
 
 
 def test_baijiahao_apply_cover_uses_exact_frozen_asset(tmp_path: Path) -> None:

@@ -1267,134 +1267,222 @@ class BaijiahaoPlatform(BasePlatform):
         """
 
         self._require_page_alive("百家号设置封面")
-        clicked = await self.page.evaluate(
-            """() => {
-                const nodes = Array.from(document.querySelectorAll('*'));
-                const target = nodes.find(el => {
-                    const t = (el.innerText || '').trim();
-                    return t === '选择封面' && el.children.length === 0;
-                });
-                if (!target) return 'not-found';
-                target.click();
-                return 'clicked';
-            }"""
-        )
-        if clicked != "clicked":
-            return {
-                "success": False,
-                "cover_status": "failed",
-                "error_code": "BAIJIAHAO_COVER_TRIGGER_NOT_FOUND",
-                "error": "百家号「选择封面」按钮未找到",
-            }
-        await self.simulator.random_delay(1, 2)
-
-        # 弹窗出现后点「点击本地上传」触发系统文件选择，用 filechooser 上传
-        # （只允许调用方传入的冻结封面，不再从正文块猜测或替换素材）。
         try:
-            async with self.page.expect_file_chooser(timeout=15000) as fc_info:
-                upload_clicked = await self.page.evaluate(
-                    """() => {
-                        const nodes = Array.from(document.querySelectorAll('*'));
-                        const target = nodes.find(el => {
-                            const t = (el.innerText || '').trim();
-                            return t === '点击本地上传' && el.children.length === 0;
-                        });
-                        if (!target) return 'not-found';
-                        const clickable = target.closest(
-                            '[class*="btn" i], [role="button"], [class*="upload" i], label, div'
-                        );
-                        if (clickable && clickable !== target) {
-                            clickable.click();
-                            return 'clicked';
-                        }
-                        target.click();
-                        return 'clicked';
-                    }"""
+            trigger = await self._unique_visible_text("选择封面", self.page)
+            if trigger is None:
+                return await self._cover_failure(
+                    "BAIJIAHAO_COVER_TRIGGER_NOT_FOUND",
+                    "百家号「选择封面」按钮未找到或候选不唯一",
                 )
-            file_chooser = await fc_info.value
-            await file_chooser.set_files(image_path)
-        except TimeoutError:
-            return {
-                "success": False,
-                "cover_status": "failed",
-                "error_code": "BAIJIAHAO_COVER_FILE_CHOOSER_NOT_TRIGGERED",
-                "error": f"百家号封面未触发文件选择（upload={upload_clicked}）",
-            }
+            await trigger.click(timeout=5000)
+            modal = await self._wait_for_cover_modal()
+            if modal is None:
+                return await self._cover_failure(
+                    "BAIJIAHAO_COVER_MODAL_NOT_READY",
+                    "百家号封面弹窗未唯一就绪",
+                )
+
+            # 真实 DOM 已确认弹窗内有唯一隐藏 image file input。直接向这个
+            # 受限控件传入冻结素材，避免点击装饰性上传区后等待一个不会触发的
+            # filechooser，也绝不回退到页面上的视频/其他 file input。
+            inputs = modal.locator('input[type="file"][accept*="image"]')
+            if await inputs.count() != 1:
+                return await self._cover_failure(
+                    "BAIJIAHAO_COVER_INPUT_AMBIGUOUS",
+                    "百家号封面图片控件不存在或候选不唯一",
+                )
+            baseline = await self._cover_preview_state(modal)
+            await inputs.first.set_input_files(str(image_path), timeout=15000)
+            if not await self._wait_for_cover_preview(modal, baseline):
+                return await self._cover_failure(
+                    "BAIJIAHAO_COVER_PREVIEW_NOT_READY",
+                    "百家号封面素材已选择，但 3:2 预览未就绪",
+                )
+            if not await self._confirm_cover_dialogs():
+                return await self._cover_failure(
+                    "BAIJIAHAO_COVER_RESULT_UNVERIFIED",
+                    "百家号封面确认流程未完整关闭",
+                )
         except Exception as exc:
             if self._exception_means_browser_closed(exc):
                 raise BrowserLifecycleError(
                     "BROWSER_CONTEXT_CLOSED: 百家号设置封面时页面已关闭"
                 ) from exc
-            return {
-                "success": False,
-                "cover_status": "failed",
-                "error_code": "BAIJIAHAO_COVER_UPLOAD_FAILED",
-                "error": safe_media_error(exc, fallback="百家号封面上传失败"),
-            }
-        await self.simulator.random_delay(3, 5)
-
-        # 等待封面预览出现后点「确定」（可见按钮中最后一个；可能有图片确认+封面确定两步）
-        confirmed = await self.page.evaluate(
-            """() => {
-                const nodes = Array.from(
-                    document.querySelectorAll('button, [role="button"], [class*="btn" i]')
-                );
-                const visible = nodes.filter(
-                    (el) => (el.innerText || '').trim() === '确定'
-                        && el.offsetParent !== null
-                );
-                const target = visible[visible.length - 1] || null;
-                if (target) { target.click(); return 'clicked'; }
-                return 'no-confirm';
-            }"""
-        )
-        await self.simulator.random_delay(2, 3)
-
-        # 成功判据：封面上传弹窗关闭（弹窗含两步：图片「确认」→ 封面「确定」）
-        dialog_closed = False
-        for _ in range(6):
-            dialog_open = await self.page.evaluate(
-                """() => {
-                    const nodes = Array.from(document.querySelectorAll('*'));
-                    return nodes.some(el => {
-                        const t = (el.innerText || '').trim();
-                        return t === '点击本地上传'
-                            && el.children.length === 0
-                            && el.offsetParent !== null;
-                    });
-                }"""
+            return await self._cover_failure(
+                "BAIJIAHAO_COVER_UPLOAD_FAILED",
+                safe_media_error(exc, fallback="百家号封面上传失败"),
             )
-            if not dialog_open:
-                dialog_closed = True
-                break
-            # 弹窗仍在：依次点可见的「确认」/「确定」（最后一个可见按钮）
-            await self.page.evaluate(
-                """() => {
-                    const nodes = Array.from(
-                        document.querySelectorAll('button, [role="button"], [class*="btn" i]')
-                    );
-                    const visible = nodes.filter(
-                        (el) => ['确认', '确定'].includes((el.innerText || '').trim())
-                            && el.offsetParent !== null
-                    );
-                    const target = visible[visible.length - 1] || null;
-                    if (target) target.click();
-                }"""
-            )
-            await self.simulator.random_delay(2, 3)
-        if not dialog_closed:
-            return {
-                "success": False,
-                "cover_status": "unverified",
-                "error_code": "BAIJIAHAO_COVER_RESULT_UNVERIFIED",
-                "error": f"百家号封面上传弹窗未关闭（confirm={confirmed}）",
-            }
+
         logger.info("百家号封面已设置（冻结封面素材）")
         return {
             "success": True,
             "cover_status": "completed",
+            "safe_to_continue": True,
             "error_code": None,
             "error": "",
+        }
+
+    @staticmethod
+    async def _visible_items(locator) -> list:
+        return [
+            locator.nth(index)
+            for index in range(await locator.count())
+            if await locator.nth(index).is_visible()
+        ]
+
+    async def _unique_visible_text(self, text: str, root):
+        candidates = await self._visible_items(root.get_by_text(text, exact=True))
+        return candidates[0] if len(candidates) == 1 else None
+
+    async def _wait_for_cover_modal(self, *, timeout_seconds: float = 10):
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout_seconds
+        while loop.time() < deadline:
+            self._require_page_alive("百家号等待封面弹窗")
+            candidates = []
+            for modal in await self._visible_items(
+                self.page.locator(".cheetah-modal")
+            ):
+                text = re.sub(r"\s+", "", str(await modal.inner_text()))
+                if "封面预览" in text and "本地上传" in text:
+                    candidates.append(modal)
+            if len(candidates) == 1:
+                return candidates[0]
+            if len(candidates) > 1:
+                return None
+            await asyncio.sleep(0.25)
+        return None
+
+    @staticmethod
+    async def _cover_preview_state(modal) -> dict:
+        state = await modal.evaluate(
+            r"""root => {
+                const visible = (element) => {
+                    const rect = element.getBoundingClientRect();
+                    const style = getComputedStyle(element);
+                    return rect.width > 0 && rect.height > 0
+                        && style.display !== 'none' && style.visibility !== 'hidden';
+                };
+                const parts = [];
+                for (const image of root.querySelectorAll('img')) {
+                    if (visible(image) && image.complete && image.naturalWidth > 0) {
+                        parts.push(`img:${image.currentSrc || image.src || ''}`);
+                    }
+                }
+                for (const canvas of root.querySelectorAll('canvas')) {
+                    if (!visible(canvas) || !canvas.width || !canvas.height) continue;
+                    let sample = `${canvas.width}x${canvas.height}`;
+                    try { sample += `:${canvas.toDataURL().slice(0, 512)}`; }
+                    catch (_) { /* cross-origin canvas: dimensions remain evidence */ }
+                    parts.push(`canvas:${sample}`);
+                }
+                for (const element of root.querySelectorAll('*')) {
+                    if (!visible(element)) continue;
+                    const background = getComputedStyle(element).backgroundImage || '';
+                    if (background && background !== 'none') parts.push(`bg:${background}`);
+                }
+                let hash = 2166136261;
+                for (const char of parts.sort().join('|')) {
+                    hash ^= char.codePointAt(0);
+                    hash = Math.imul(hash, 16777619) >>> 0;
+                }
+                const input = root.querySelector('input[type="file"][accept*="image"]');
+                const confirms = Array.from(root.querySelectorAll(
+                    'button, [role="button"], [class*="btn" i]'
+                )).filter((element) => visible(element)
+                    && ['确认', '确定'].includes((element.innerText || '').trim())
+                    && !element.disabled
+                    && element.getAttribute('aria-disabled') !== 'true');
+                return {
+                    selected_files: input?.files?.length || 0,
+                    visual_count: parts.length,
+                    visual_hash: hash,
+                    confirm_count: confirms.length,
+                };
+            }"""
+        )
+        return state if isinstance(state, dict) else {}
+
+    async def _wait_for_cover_preview(self, modal, baseline: dict) -> bool:
+        for _ in range(40):
+            self._require_page_alive("百家号等待封面预览")
+            try:
+                state = await self._cover_preview_state(modal)
+            except Exception:
+                # 上传后平台可能重建整个 modal；只重新解析同一个封面弹窗，
+                # 不能沿用失效句柄，更不能扩大到页面级 file input。
+                modal = await self._wait_for_cover_modal(timeout_seconds=1)
+                if modal is None:
+                    await asyncio.sleep(0.5)
+                    continue
+                state = await self._cover_preview_state(modal)
+            visual_changed = (
+                int(state.get("visual_count") or 0) > 0
+                and (
+                    int(state.get("visual_hash") or 0)
+                    != int(baseline.get("visual_hash") or 0)
+                    or int(baseline.get("visual_count") or 0) == 0
+                )
+            )
+            if (
+                int(state.get("selected_files") or 0) == 1
+                and int(state.get("confirm_count") or 0) >= 1
+                and visual_changed
+            ):
+                return True
+            await asyncio.sleep(0.5)
+        return False
+
+    async def _confirm_cover_dialogs(self) -> bool:
+        """只在当前可见 cheetah modal 内完成「确认→确定」两步。"""
+
+        for _ in range(5):
+            dialogs = await self._visible_items(self.page.locator(".cheetah-modal"))
+            if not dialogs:
+                return True
+            topmost = dialogs[-1]
+            candidate = await self._unique_visible_text("确认", topmost)
+            if candidate is None:
+                candidate = await self._unique_visible_text("确定", topmost)
+            if candidate is None:
+                return False
+            try:
+                if not await candidate.is_enabled():
+                    return False
+            except AttributeError:
+                pass
+            await candidate.click(timeout=5000)
+            await asyncio.sleep(1)
+        return not await self._visible_items(self.page.locator(".cheetah-modal"))
+
+    async def _dismiss_cover_dialogs(self) -> bool:
+        """失败时只点击顶层弹窗内唯一「取消」，保证后续不会点穿遮罩。"""
+
+        for _ in range(5):
+            dialogs = await self._visible_items(self.page.locator(".cheetah-modal"))
+            if not dialogs:
+                return True
+            cancel = await self._unique_visible_text("取消", dialogs[-1])
+            if cancel is None:
+                return False
+            try:
+                await cancel.click(timeout=3000)
+            except Exception:
+                return False
+            await asyncio.sleep(0.5)
+        return not await self._visible_items(self.page.locator(".cheetah-modal"))
+
+    async def _cover_failure(self, error_code: str, error: str) -> dict:
+        try:
+            clean = await self._dismiss_cover_dialogs()
+        except Exception:
+            clean = False
+        return {
+            "success": False,
+            "cover_status": "failed" if clean else "unverified",
+            "safe_to_continue": clean,
+            "error_code": error_code if clean else "BAIJIAHAO_COVER_DIALOG_STUCK",
+            "error": safe_media_error(error, fallback="百家号封面上传失败"),
         }
 
     async def select_topic(
@@ -1462,27 +1550,6 @@ class BaijiahaoPlatform(BasePlatform):
                     "DRAFT_RESULT_UNKNOWN: 百家号精确存草稿按钮不存在或不唯一"
                 )
             await visible[0].click(timeout=5000)
-            await asyncio.sleep(12)
-            notices = await self.page.evaluate(
-                r"""() => Array.from(document.querySelectorAll(
-                    '[role="alert"], [class*="message"], [class*="toast"], '
-                    + '[class*="notice"], [class*="error"]'
-                )).filter((element) => element.offsetParent !== null)
-                    .map((element) => (element.innerText || element.textContent || '')
-                        .replace(/\s+/g, ' ').trim())
-                    .filter((text) => text && text.length <= 160)
-                    .slice(0, 12)"""
-            )
-            safe_notices = [
-                safe_media_error(item, fallback="")
-                for item in notices
-                if isinstance(item, str)
-            ]
-            logger.info(
-                "百家号存草稿响应证据: responses={} notices={}",
-                save_responses,
-                safe_notices,
-            )
         except DraftResultUnknownError:
             raise
         except Exception as exc:
@@ -1498,6 +1565,38 @@ class BaijiahaoPlatform(BasePlatform):
                 self.page.remove_listener("response", capture_save_response)
             except Exception:
                 pass
+
+        # 点击后可能立即导航到作品页，原页面 execution context 会被销毁。
+        # toast 只是辅助证据，读取失败绝不能阻断下面权威的草稿箱搜索与重开。
+        await asyncio.sleep(12)
+        safe_notices: list[str] = []
+        try:
+            notices = await self.page.evaluate(
+                r"""() => Array.from(document.querySelectorAll(
+                    '[role="alert"], [class*="message"], [class*="toast"], '
+                    + '[class*="notice"], [class*="error"]'
+                )).filter((element) => element.offsetParent !== null)
+                    .map((element) => (element.innerText || element.textContent || '')
+                        .replace(/\s+/g, ' ').trim())
+                    .filter((text) => text && text.length <= 160)
+                    .slice(0, 12)"""
+            )
+            safe_notices = [
+                safe_media_error(item, fallback="")
+                for item in notices
+                if isinstance(item, str)
+            ]
+        except Exception as exc:
+            if self._exception_means_browser_closed(exc):
+                raise DraftResultUnknownError(
+                    "DRAFT_RESULT_UNKNOWN: 百家号存草稿后浏览器已关闭"
+                ) from exc
+            logger.info("百家号存草稿提示读取不可用，继续草稿箱核验")
+        logger.info(
+            "百家号存草稿响应证据: responses={} notices={}",
+            save_responses,
+            safe_notices,
+        )
 
         try:
             edit_url = await self._find_unique_exact_draft(expected_title)

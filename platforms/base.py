@@ -470,6 +470,16 @@ class BasePlatform(ABC):
                     "WARN",
                     f"封面未完整设置: {cover_result['error']}",
                 )
+                if cover_result.get("safe_to_continue") is False:
+                    return {
+                        "success": False,
+                        "error_code": cover_result.get("error_code")
+                        or "PLATFORM_COVER_UI_NOT_CLEAN",
+                        "error": cover_result["error"],
+                        "cover_status": cover_result.get(
+                            "cover_status", "unverified"
+                        ),
+                    }
 
             # 7. 模拟滚动检查。页面可能在选择弹窗、平台跳转或用户操作时关闭，
             # 必须先检查生命周期，不能再调用 page.mouse.wheel 触发重复错误。

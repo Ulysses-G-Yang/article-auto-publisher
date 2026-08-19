@@ -927,7 +927,7 @@ class BaijiahaoPlatform(BasePlatform):
                             continue;
                         }
                         const sentinelText = (node.textContent || '').replace(
-                            /[\s\p{Cf}\p{Cc}\uFFFC]/gu,
+                            /[\s\p{M}\p{Cf}\p{Cc}\uFFFC]/gu,
                             '',
                         );
                         const touchesImage = Boolean(

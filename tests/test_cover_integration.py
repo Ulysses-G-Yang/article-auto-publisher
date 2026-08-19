@@ -161,9 +161,11 @@ def test_baijiahao_set_cover_success_flow() -> None:
     platform = _make_baijiahao(page)
     trigger = AsyncMock()
     modal = Mock()
-    modal.locator.return_value = page.file_input
     platform._unique_visible_text = AsyncMock(return_value=trigger)
     platform._wait_for_cover_modal = AsyncMock(return_value=modal)
+    platform._wait_for_unique_cover_input = AsyncMock(
+        return_value=page.file_input.first
+    )
     platform._cover_preview_state = AsyncMock(
         return_value={"selected_files": 0, "visual_count": 0, "visual_hash": 0}
     )
@@ -197,9 +199,11 @@ def test_baijiahao_cover_preview_failure_closes_modal_before_continuing() -> Non
     platform = _make_baijiahao(page)
     trigger = AsyncMock()
     modal = Mock()
-    modal.locator.return_value = page.file_input
     platform._unique_visible_text = AsyncMock(return_value=trigger)
     platform._wait_for_cover_modal = AsyncMock(return_value=modal)
+    platform._wait_for_unique_cover_input = AsyncMock(
+        return_value=page.file_input.first
+    )
     platform._cover_preview_state = AsyncMock(return_value={})
     platform._wait_for_cover_preview = AsyncMock(return_value=False)
     platform._dismiss_cover_dialogs = AsyncMock(return_value=True)

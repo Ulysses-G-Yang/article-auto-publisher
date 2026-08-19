@@ -1285,14 +1285,14 @@ class BaijiahaoPlatform(BasePlatform):
             # 真实 DOM 已确认弹窗内有唯一隐藏 image file input。直接向这个
             # 受限控件传入冻结素材，避免点击装饰性上传区后等待一个不会触发的
             # filechooser，也绝不回退到页面上的视频/其他 file input。
-            inputs = modal.locator('input[type="file"][accept*="image"]')
-            if await inputs.count() != 1:
+            cover_input = await self._wait_for_unique_cover_input(modal)
+            if cover_input is None:
                 return await self._cover_failure(
                     "BAIJIAHAO_COVER_INPUT_AMBIGUOUS",
                     "百家号封面图片控件不存在或候选不唯一",
                 )
             baseline = await self._cover_preview_state(modal)
-            await inputs.first.set_input_files(str(image_path), timeout=15000)
+            await cover_input.set_input_files(str(image_path), timeout=15000)
             if not await self._wait_for_cover_preview(modal, baseline):
                 return await self._cover_failure(
                     "BAIJIAHAO_COVER_PREVIEW_NOT_READY",
@@ -1350,6 +1350,31 @@ class BaijiahaoPlatform(BasePlatform):
                 return candidates[0]
             if len(candidates) > 1:
                 return None
+            await asyncio.sleep(0.25)
+        return None
+
+    async def _wait_for_unique_cover_input(
+        self, modal, *, timeout_seconds: float = 10
+    ):
+        """等待 React 在唯一封面 modal 中延迟挂载 image file input。"""
+
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout_seconds
+        current = modal
+        while loop.time() < deadline:
+            self._require_page_alive("百家号等待封面图片控件")
+            try:
+                inputs = current.locator('input[type="file"][accept*="image"]')
+                count = await inputs.count()
+                if count == 1:
+                    return inputs.first
+                if count > 1:
+                    return None
+            except Exception:
+                pass
+            refreshed = await self._wait_for_cover_modal(timeout_seconds=1)
+            if refreshed is not None:
+                current = refreshed
             await asyncio.sleep(0.25)
         return None
 
@@ -1672,8 +1697,91 @@ class BaijiahaoPlatform(BasePlatform):
         # 浏览器可能拦截该弹窗，导致平台已保存成功但验证器误报结果未知。
         # 作品行还提供同源预览链接，其 id 与编辑器 article_id 相同；只从
         # 唯一匹配行提取该稳定 ID，再由持久化核验函数主动打开编辑页。
-        return self._edit_url_from_preview_href(
-            str(matches[0].get("preview_href") or "")
+        preview_href = str(matches[0].get("preview_href") or "")
+        if preview_href:
+            return self._edit_url_from_preview_href(preview_href)
+        return await self._open_exact_draft_via_modify(title)
+
+    async def _open_exact_draft_via_modify(self, title: str) -> str:
+        """点击唯一草稿行的 React“修改”动作，只捕获同源编辑页地址。
+
+        百家号新版作品行不再提供 ``/builder/preview/s`` 链接。这里不猜
+        React 私有属性，也不拼接未知 ID；只允许标题精确匹配的唯一草稿行、
+        唯一“修改”动作和最终通过 ``_safe_draft_url`` 的同源编辑页。
+        """
+
+        if self.context is None:
+            raise DraftResultUnknownError(
+                "DRAFT_RESULT_UNKNOWN: 百家号缺少草稿重开浏览器上下文"
+            )
+        before_page_ids = {id(page) for page in self.context.pages}
+        click_result = await self.page.evaluate(
+            """title => {
+                const visible = (el) => !!(
+                    el && (el.offsetWidth || el.offsetHeight
+                        || el.getClientRects().length)
+                );
+                const text = (el) => (el?.innerText || el?.textContent || '')
+                    .replace(/\\s+/g, ' ').trim();
+                const rows = Array.from(document.querySelectorAll(
+                    'div[class*="articleItem"]'
+                )).filter((row) => {
+                    if (!visible(row)) return false;
+                    const exactTitle = Array.from(row.querySelectorAll(
+                        'a, span, p, div, h1, h2, h3, h4'
+                    )).some((el) => visible(el) && text(el) === title
+                        && !Array.from(el.children).some(
+                            (child) => text(child) === title
+                        ));
+                    return exactTitle;
+                });
+                if (rows.length !== 1) {
+                    return {status: 'ROW_NOT_UNIQUE', rows: rows.length};
+                }
+                const actions = Array.from(rows[0].querySelectorAll(
+                    'button, a, [role="button"], span'
+                )).filter((el) => visible(el) && text(el) === '修改'
+                    && !Array.from(el.children).some(
+                        (child) => text(child) === '修改'
+                    ));
+                if (actions.length !== 1) {
+                    return {status: 'ACTION_NOT_UNIQUE', actions: actions.length};
+                }
+                actions[0].click();
+                return {status: 'CLICKED'};
+            }""",
+            title,
+        )
+        if not isinstance(click_result, dict) or click_result.get("status") != "CLICKED":
+            raise DraftResultUnknownError(
+                "DRAFT_RESULT_UNKNOWN: 百家号唯一草稿修改动作不可用"
+            )
+
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + 12
+        while loop.time() < deadline:
+            self._require_page_alive("百家号等待草稿修改页")
+            new_pages = [
+                page
+                for page in self.context.pages
+                if id(page) not in before_page_ids and not page.is_closed()
+            ]
+            candidates = new_pages or [self.page]
+            if len(new_pages) <= 1:
+                for candidate in candidates:
+                    try:
+                        edit_url = self._safe_draft_url(str(candidate.url or ""))
+                    except DraftResultUnknownError:
+                        continue
+                    if candidate is not self.page:
+                        try:
+                            await candidate.close()
+                        except Exception:
+                            pass
+                    return edit_url
+            await asyncio.sleep(0.25)
+        raise DraftResultUnknownError(
+            "DRAFT_RESULT_UNKNOWN: 百家号修改动作未打开唯一同源编辑页"
         )
 
     @classmethod

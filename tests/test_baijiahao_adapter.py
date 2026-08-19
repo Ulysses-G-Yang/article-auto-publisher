@@ -261,6 +261,57 @@ def test_unique_draft_uses_preview_id_instead_of_clicking_react_action() -> None
     platform._search_works.assert_awaited_once_with("唯一标题")
 
 
+def test_unique_draft_uses_scoped_modify_when_preview_link_is_absent() -> None:
+    platform = BaijiahaoPlatform()
+    platform.page = SimpleNamespace()
+    platform._open_works_page = AsyncMock()
+    platform._search_works = AsyncMock()
+    platform._matching_work_rows = AsyncMock(
+        return_value=[{"index": 0, "preview_href": ""}]
+    )
+    platform._open_exact_draft_via_modify = AsyncMock(
+        return_value=(
+            "https://baijiahao.baidu.com/builder/rc/edit?"
+            "type=news&article_id=react-draft"
+        )
+    )
+
+    result = asyncio.run(platform._find_unique_exact_draft("唯一标题"))
+
+    assert "article_id=react-draft" in result
+    platform._open_exact_draft_via_modify.assert_awaited_once_with("唯一标题")
+
+
+def test_scoped_modify_accepts_only_one_new_same_origin_editor_page() -> None:
+    original = SimpleNamespace(
+        url="https://baijiahao.baidu.com/builder/rc/content",
+        is_closed=lambda: False,
+    )
+    popup = SimpleNamespace(
+        url=(
+            "https://baijiahao.baidu.com/builder/rc/edit?"
+            "type=news&article_id=react-draft"
+        ),
+        is_closed=lambda: False,
+        close=AsyncMock(),
+    )
+    context = SimpleNamespace(pages=[original])
+
+    async def click_and_open(*_args):
+        context.pages.append(popup)
+        return {"status": "CLICKED"}
+
+    original.evaluate = AsyncMock(side_effect=click_and_open)
+    platform = BaijiahaoPlatform()
+    platform.page = original
+    platform.context = context
+
+    result = asyncio.run(platform._open_exact_draft_via_modify("唯一标题"))
+
+    assert "article_id=react-draft" in result
+    popup.close.assert_awaited_once()
+
+
 @pytest.mark.parametrize(
     "value",
     [

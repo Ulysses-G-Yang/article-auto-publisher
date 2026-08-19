@@ -14,7 +14,7 @@ import sys
 import tempfile
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote, urlsplit
+from urllib.parse import parse_qsl, quote, urlsplit
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 SRC_ROOT = PROJECT_ROOT / "src"
@@ -161,6 +161,12 @@ PROBE_SCRIPT = r"""() => {
         visible: visible(element),
         aria_label: compact(element.getAttribute('aria-label')),
         placeholder: compact(element.getAttribute('placeholder')),
+        modal_ancestor_class: compact(element.closest('.cheetah-modal')?.className),
+        parent_classes: Array.from({length: 5}, (_, index) => {
+            let parent = element;
+            for (let step = 0; step <= index; step += 1) parent = parent?.parentElement;
+            return compact(parent?.className);
+        }).filter(Boolean),
     })).filter((item) => item.type === 'file').slice(0, 20);
     const editors = Array.from(document.querySelectorAll('[contenteditable="true"]')).map(
         (element) => ({
@@ -487,18 +493,10 @@ async def run_probe(
                     "identity_responses": identity_responses,
                 }
             if find_title:
-                await platform.page.goto(
-                    "https://baijiahao.baidu.com/builder/rc/content",
-                    wait_until="domcontentloaded",
-                    timeout=30000,
-                )
-                search = platform.page.locator(
-                    'input[placeholder*="输入标题关键字"]'
-                ).first
-                await search.wait_for(state="visible", timeout=20000)
-                await search.fill(find_title)
-                await search.press("Enter")
-                await asyncio.sleep(3)
+                # 与生产核验共用“草稿 Tab + 防抖搜索”路径；真实页面按 Enter
+                # 会触发表单默认行为并清空正确结果，探测工具不得另造一套逻辑。
+                await platform._open_works_page()
+                await platform._search_works(find_title)
             elif editor:
                 await platform.navigate_to_editor()
             else:
@@ -533,39 +531,25 @@ async def run_probe(
                 await asyncio.sleep(1)
             payload = _sanitize(await platform.page.evaluate(PROBE_SCRIPT))
             exact_title_matches = None
+            exact_title_link_shapes: list[dict[str, Any]] = []
             if find_title:
-                exact_title_matches = await platform.page.evaluate(
-                    """title => {
-                        const visible = (el) => !!(
-                            el && (el.offsetWidth || el.offsetHeight
-                                || el.getClientRects().length)
-                        );
-                        const text = (el) => (el?.innerText || el?.textContent || '')
-                            .replace(/\\s+/g, ' ').trim();
-                        const leaves = Array.from(document.querySelectorAll(
-                            'a, span, p, div, h1, h2, h3, h4'
-                        )).filter((el) => visible(el) && text(el) === title
-                            && !Array.from(el.children).some(
-                                (child) => text(child) === title
-                            ));
-                        const rows = [];
-                        for (const leaf of leaves) {
-                            let row = leaf;
-                            while (row && row !== document.body) {
-                                const hasModify = Array.from(row.querySelectorAll(
-                                    'button, a, [role="button"], span'
-                                )).some((el) => visible(el) && text(el) === '修改');
-                                if (hasModify) break;
-                                row = row.parentElement;
-                            }
-                            if (row && row !== document.body && !rows.includes(row)) {
-                                rows.push(row);
-                            }
+                matches = await platform._matching_work_rows(find_title)
+                exact_title_matches = len(matches)
+                for match in matches[:5]:
+                    parsed = urlsplit(str(match.get("preview_href") or ""))
+                    query_items = parse_qsl(parsed.query, keep_blank_values=True)
+                    exact_title_link_shapes.append(
+                        {
+                            "scheme": parsed.scheme,
+                            "hostname": parsed.hostname or "",
+                            "path": parsed.path,
+                            "fragment_present": bool(parsed.fragment),
+                            "query": [
+                                {"key": key[:80], "value_length": len(value)}
+                                for key, value in query_items[:20]
+                            ],
                         }
-                        return rows.length;
-                    }""",
-                    find_title,
-                )
+                    )
             format_menu_candidates = []
             if open_editor_menu == "FORMAT":
                 format_menu_candidates = await platform.page.evaluate(
@@ -619,6 +603,7 @@ async def run_probe(
                 "screenshot_path": screenshot_path,
                 "identity_responses": identity_responses,
                 "exact_title_matches": exact_title_matches,
+                "exact_title_link_shapes": exact_title_link_shapes,
                 "format_menu_candidates": format_menu_candidates,
                 "cookie_signal_before": cookie_signal_before,
                 "cookie_signal_after": cookie_signal_after,

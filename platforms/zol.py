@@ -1341,6 +1341,47 @@ class ZOLPlatform(BasePlatform):
                 "ZOL_CONTENT_CURSOR_FAILED: 无法定位正文末尾"
             ) from exc
 
+    async def _commit_editor_dom_change(self, editor, editor_kind: str) -> None:
+        """把图片插件造成的 DOM 变化同步进 TinyMCE/表单模型。"""
+
+        if editor_kind == "textarea":
+            return
+        try:
+            await editor.evaluate(
+                """
+                (root) => {
+                    root.dispatchEvent(new InputEvent('input', {
+                        bubbles: true,
+                        inputType: 'insertReplacementText'
+                    }));
+                    root.dispatchEvent(new Event('change', {bubbles: true}));
+                    try {
+                        const view = root.ownerDocument.defaultView;
+                        const frame = view && view.frameElement;
+                        const tiny = view && view.parent && view.parent.tinymce;
+                        const instance = tiny && frame && frame.id
+                            ? tiny.get(frame.id)
+                            : (tiny && tiny.activeEditor);
+                        if (instance && instance.getBody() === root) {
+                            instance.nodeChanged();
+                            instance.setDirty(true);
+                            instance.save();
+                        }
+                    } catch (_) {
+                        // DOM input/change 仍是主同步信号；TinyMCE API 是同源增强。
+                    }
+                }
+                """
+            )
+        except Exception as exc:
+            if self._exception_means_browser_closed(exc):
+                raise BrowserLifecycleError(
+                    "BROWSER_CONTEXT_CLOSED: ZOL 同步正文模型时页面已关闭"
+                ) from exc
+            raise ContentValidationError(
+                "ZOL_CONTENT_MODEL_SYNC_FAILED: 正文模型同步失败"
+            ) from exc
+
     async def _apply_heading_block(
         self,
         editor,
@@ -1550,6 +1591,9 @@ class ZOLPlatform(BasePlatform):
                                 )
                             uploaded_images += 1
                             observed_image_fingerprints.append(fingerprint)
+                            editor, editor_kind = await self._resolve_content_editor()
+                            await self._commit_editor_dom_change(editor, editor_kind)
+                            await asyncio.sleep(0.3)
                             await self._verify_content_prefix(
                                 content_blocks[: block_index + 1],
                                 observed_image_fingerprints,

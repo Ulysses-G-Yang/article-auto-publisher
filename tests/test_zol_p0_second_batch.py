@@ -976,6 +976,25 @@ def test_second_image_checks_existing_prefix_before_new_upload() -> None:
     platform._upload_image.assert_awaited_once()
 
 
+def test_image_dom_change_is_committed_to_tinymce_model() -> None:
+    captured = {}
+
+    class _Editor(FakeLocator):
+        async def evaluate(self, script, *_args):
+            captured["script"] = script
+
+    asyncio.run(
+        ZOLPlatform()._commit_editor_dom_change(_Editor(tag="body"), "iframe")
+    )
+
+    script = captured["script"]
+    assert "InputEvent('input'" in script
+    assert "new Event('change'" in script
+    assert "instance.nodeChanged()" in script
+    assert "instance.setDirty(true)" in script
+    assert "instance.save()" in script
+
+
 def test_expected_text_tokens_keep_three_paragraph_boundaries() -> None:
     blocks = [
         {"type": "text", "text": "第一段"},

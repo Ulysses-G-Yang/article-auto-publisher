@@ -1052,6 +1052,9 @@ class ZOLPlatform(BasePlatform):
                     const blockTags = new Set([
                         'P', 'DIV', 'LI', 'BLOCKQUOTE', 'PRE'
                     ]);
+                    const ignoredUiTags = new Set([
+                        'BUTTON', 'SCRIPT', 'STYLE', 'NOSCRIPT', 'TEMPLATE'
+                    ]);
                     const textOf = (node) => (
                         node.innerText !== undefined
                             ? node.innerText
@@ -1065,6 +1068,18 @@ class ZOLPlatform(BasePlatform):
                                 kind: 'image',
                                 src: node.getAttribute('src') || ''
                             });
+                            return;
+                        }
+                        if (
+                            ignoredUiTags.has(node.tagName)
+                            || node.getAttribute('contenteditable') === 'false'
+                        ) {
+                            // 图片组件会在正文 DOM 中附带“删除/预览”等操作控件。
+                            // 这些文本不是文章内容；若不可编辑包装器包含正文图片，
+                            // 仍保留图片 marker，绝不能把整张图片一起跳过。
+                            for (const image of node.querySelectorAll('img')) {
+                                visit(image);
+                            }
                             return;
                         }
                         if (/^h[1-6]$/.test(tag)) {

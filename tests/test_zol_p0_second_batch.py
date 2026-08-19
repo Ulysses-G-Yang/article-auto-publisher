@@ -889,6 +889,29 @@ def test_content_token_shape_exposes_only_bounded_structure() -> None:
     assert "secret" not in shape
 
 
+def test_dom_reader_excludes_editor_ui_chrome_without_dropping_images() -> None:
+    captured = {}
+
+    class _Editor(FakeLocator):
+        async def evaluate(self, script, *_args):
+            if "const tokens" in script:
+                captured["script"] = script
+                return [
+                    {"kind": "text", "text": "正文"},
+                    {"kind": "image", "src": "https://cdn.invalid/body.png"},
+                ]
+            return await super().evaluate(script, *_args)
+
+    tokens = asyncio.run(
+        ZOLPlatform()._read_editor_dom_tokens(_Editor(tag="body"), "iframe")
+    )
+
+    assert [token["kind"] for token in tokens] == ["text", "image"]
+    assert "ignoredUiTags" in captured["script"]
+    assert "contenteditable') === 'false'" in captured["script"]
+    assert "node.querySelectorAll('img')" in captured["script"]
+
+
 def test_expected_text_tokens_keep_three_paragraph_boundaries() -> None:
     blocks = [
         {"type": "text", "text": "第一段"},

@@ -59,6 +59,33 @@ class _FakeFileChooser:
         self.files.append(path)
 
 
+class _RoleInput:
+    def __init__(self, role: str) -> None:
+        self.role = role
+
+    async def evaluate(self, _script: str) -> str:
+        return self.role
+
+
+class _RoleInputs:
+    def __init__(self, *items: _RoleInput) -> None:
+        self.items = items
+
+    async def count(self) -> int:
+        return len(self.items)
+
+    def nth(self, index: int) -> _RoleInput:
+        return self.items[index]
+
+
+class _RoleModal:
+    def __init__(self, inputs: _RoleInputs) -> None:
+        self.inputs = inputs
+
+    def locator(self, _selector: str) -> _RoleInputs:
+        return self.inputs
+
+
 class _FakePage:
     """evaluate 按调用顺序消费预设返回值。"""
 
@@ -192,6 +219,19 @@ def test_baijiahao_set_cover_fails_when_button_missing() -> None:
     assert result["success"] is False
     assert result["error_code"] == "BAIJIAHAO_COVER_TRIGGER_NOT_FOUND"
     assert "按钮未找到" in result["error"]
+
+
+def test_baijiahao_cover_chooses_local_upload_over_body_cropper() -> None:
+    platform = _make_baijiahao(_FakePage([]))
+    cropper = _RoleInput("BODY_CROPPER")
+    local_upload = _RoleInput("LOCAL_UPLOAD")
+    modal = _RoleModal(_RoleInputs(cropper, local_upload))
+
+    result = run(
+        platform._wait_for_unique_cover_input(modal, timeout_seconds=0.1)
+    )
+
+    assert result is local_upload
 
 
 def test_baijiahao_cover_preview_failure_closes_modal_before_continuing() -> None:

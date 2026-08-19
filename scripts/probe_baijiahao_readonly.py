@@ -420,6 +420,7 @@ async def run_probe(
     open_editor_menu: str | None = None,
     identity_structure: bool = False,
     find_title: str | None = None,
+    open_found_draft: bool = False,
 ) -> dict[str, Any]:
     account = _load_account(account_id, allow_error_state=identity_structure)
     platform = BaijiahaoPlatform(
@@ -493,10 +494,19 @@ async def run_probe(
                     "identity_responses": identity_responses,
                 }
             if find_title:
-                # 与生产核验共用“草稿 Tab + 防抖搜索”路径；真实页面按 Enter
-                # 会触发表单默认行为并清空正确结果，探测工具不得另造一套逻辑。
-                await platform._open_works_page()
-                await platform._search_works(find_title)
+                if open_found_draft:
+                    edit_url = await platform._find_unique_exact_draft(find_title)
+                    await platform.page.goto(
+                        edit_url,
+                        wait_until="domcontentloaded",
+                        timeout=30000,
+                    )
+                    await platform._wait_for_editor_ready(timeout_seconds=45)
+                else:
+                    # 与生产核验共用“草稿 Tab + 防抖搜索”路径；真实页面按 Enter
+                    # 会触发表单默认行为并清空正确结果，探测工具不得另造一套逻辑。
+                    await platform._open_works_page()
+                    await platform._search_works(find_title)
             elif editor:
                 await platform.navigate_to_editor()
             else:
@@ -532,7 +542,7 @@ async def run_probe(
             payload = _sanitize(await platform.page.evaluate(PROBE_SCRIPT))
             exact_title_matches = None
             exact_title_link_shapes: list[dict[str, Any]] = []
-            if find_title:
+            if find_title and not open_found_draft:
                 matches = await platform._matching_work_rows(find_title)
                 exact_title_matches = len(matches)
                 for match in matches[:5]:
@@ -650,11 +660,19 @@ def parse_args() -> argparse.Namespace:
         "--find-title",
         help="只读搜索一个精确标题并返回唯一作品行数量，不点击修改或删除",
     )
+    parser.add_argument(
+        "--open-found-draft",
+        action="store_true",
+        help="与 --find-title 同用；只读打开唯一草稿编辑页，不输入或保存",
+    )
     return parser.parse_args()
 
 
 async def _main() -> int:
     args = parse_args()
+    if args.open_found_draft and not args.find_title:
+        print(json.dumps({"status": "FIND_TITLE_REQUIRED"}, ensure_ascii=False))
+        return 2
     try:
         result = await run_probe(
             args.account_id,
@@ -664,6 +682,7 @@ async def _main() -> int:
             open_editor_menu=args.open_editor_menu,
             identity_structure=args.identity_structure,
             find_title=args.find_title,
+            open_found_draft=args.open_found_draft,
         )
     except ProbeError as exc:
         result = {"status": str(exc)}

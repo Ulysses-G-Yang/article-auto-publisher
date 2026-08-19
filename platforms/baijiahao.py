@@ -1369,7 +1369,37 @@ class BaijiahaoPlatform(BasePlatform):
                 if count == 1:
                     return inputs.first
                 if count > 1:
-                    return None
+                    local_uploads = []
+                    for index in range(count):
+                        candidate = inputs.nth(index)
+                        role = await candidate.evaluate(
+                            r"""input => {
+                                let node = input.parentElement;
+                                while (node) {
+                                    const tokens = typeof node.className === 'string'
+                                        ? node.className.split(/\s+/).filter(Boolean)
+                                        : [];
+                                    if (tokens.some((token) =>
+                                        token.startsWith('FeEditorApp-')
+                                        && token.endsWith('-upload'))) {
+                                        return 'LOCAL_UPLOAD';
+                                    }
+                                    if (tokens.some((token) =>
+                                        token.startsWith('FeEditorApp-')
+                                        && token.endsWith('-cropper'))) {
+                                        return 'BODY_CROPPER';
+                                    }
+                                    node = node.parentElement;
+                                }
+                                return 'UNKNOWN';
+                            }"""
+                        )
+                        if role == "LOCAL_UPLOAD":
+                            local_uploads.append(candidate)
+                    if len(local_uploads) == 1:
+                        return local_uploads[0]
+                    if len(local_uploads) > 1:
+                        return None
             except Exception:
                 pass
             refreshed = await self._wait_for_cover_modal(timeout_seconds=1)

@@ -312,6 +312,7 @@ class ZhihuPlatform(BasePlatform):
                         "error": "文章图片块没有唯一对应本地文件",
                     }
                 )
+            await self._dismiss_media_overlay()
             content_started = True
             await self._validate_dom_prefix(
                 content_blocks[: block_index + 1],
@@ -396,6 +397,26 @@ class ZhihuPlatform(BasePlatform):
             raise ContentValidationError(
                 "ZHIHU_HEADING_APPLY_FAILED: 二级标题样式未能应用"
             ) from exc
+
+    async def _dismiss_media_overlay(self) -> None:
+        """图片上传后关闭模态层；未关闭时拒绝继续写后续正文。"""
+
+        try:
+            await self.page.keyboard.press("Escape")
+            backdrop = self.page.locator(".Modal-backdrop").first
+            for _ in range(6):
+                if await backdrop.count() == 0 or not await backdrop.is_visible():
+                    return
+                await asyncio.sleep(0.25)
+        except Exception as exc:
+            if self._exception_means_browser_closed(exc):
+                raise BrowserLifecycleError(
+                    "BROWSER_CONTEXT_CLOSED: 知乎关闭图片上传层时页面已关闭"
+                ) from exc
+            raise ContentValidationError(
+                "ZHIHU_MEDIA_OVERLAY_STUCK: 图片上传层状态无法确认"
+            ) from exc
+        raise ContentValidationError("ZHIHU_MEDIA_OVERLAY_STUCK: 图片上传层未关闭，禁止继续写入")
 
     @staticmethod
     def _image_path_for_block(block: dict, images: list[dict]) -> str | None:

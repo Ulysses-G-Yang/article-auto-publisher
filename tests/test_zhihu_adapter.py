@@ -458,6 +458,8 @@ class _FakeEditorPage:
         return True
 
     def locator(self, selector: str):
+        if selector == ".Modal-backdrop":
+            return _FakeLocator(self, count=0, visible=False)
         if "textarea" in selector or "placeholder" in selector:
             return self.title
         return self.body
@@ -613,6 +615,15 @@ def test_dom_reader_walks_nested_draftjs_blocks_instead_of_collapsing_parent() -
     assert "if (node.matches('[data-block=\"true\"]'))" in source
     assert "for (const child of node.children) visit(child);" in source
     assert "if (images.length) {" in source
+
+
+def test_media_overlay_must_be_gone_before_next_content_block() -> None:
+    page = _FakeEditorPage()
+    platform = _make_delivery_platform(page)
+
+    run(platform._dismiss_media_overlay())
+
+    assert page.selected_all is False
 
 
 def test_media_error_never_exposes_physical_path(monkeypatch) -> None:

@@ -232,6 +232,21 @@ def test_expected_tokens_preserve_word_text_heading_image_order() -> None:
     ]
 
 
+def test_dom_reader_ignores_baijiahao_image_caption_and_blank_sentinels() -> None:
+    editor = _Item()
+    editor.evaluate = AsyncMock(return_value=[])
+    platform = BaijiahaoPlatform()
+    platform.page = object()
+    platform._current_body_editor = AsyncMock(return_value=editor)
+
+    assert asyncio.run(platform._read_editor_dom_tokens()) == []
+
+    script = editor.evaluate.await_args.args[0]
+    assert "className.includes('bjh-image-caption')" in script
+    assert "node.querySelector('br') && !sentinelText" in script
+    assert "\\u200C\\u200D" in script
+
+
 def test_current_body_editor_reacquires_after_transient_iframe_rebuild() -> None:
     body = _Item()
     body.count = AsyncMock(return_value=1)

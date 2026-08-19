@@ -774,7 +774,7 @@ class BaijiahaoPlatform(BasePlatform):
         try:
             editor = await self._current_body_editor()
             applied = await editor.evaluate(
-                """root => {
+                r"""root => {
                     const doc = root.ownerDocument;
                     const selection = doc.getSelection();
                     let node = selection && selection.anchorNode;
@@ -875,12 +875,24 @@ class BaijiahaoPlatform(BasePlatform):
         editor = await self._current_body_editor()
         try:
             raw = await editor.evaluate(
-                """root => {
+                r"""root => {
                     const tokens = [];
                     for (const node of root.children) {
+                        const className = typeof node.className === 'string'
+                            ? node.className : '';
+                        if (className.includes('bjh-image-caption')) {
+                            continue;
+                        }
                         const images = node.querySelectorAll('img');
                         if (images.length) {
                             for (const _image of images) tokens.push({kind: 'image'});
+                            continue;
+                        }
+                        const sentinelText = (node.textContent || '').replace(
+                            /[\s\u200B\u200C\u200D\u2060\uFEFF]/g,
+                            '',
+                        );
+                        if (node.querySelector('br') && !sentinelText) {
                             continue;
                         }
                         const text = node.innerText || node.textContent || '';

@@ -242,6 +242,18 @@ PROBE_SCRIPT = r"""() => {
             y: Math.round(rect.y),
         };
     }).slice(0, 30);
+    const bodyChildShapes = document.body && document.body.isContentEditable
+        ? Array.from(document.body.children).map((element) => ({
+            tag: element.tagName.toLowerCase(),
+            class_name: compact(
+                typeof element.className === 'string' ? element.className : ''
+            ),
+            text_length: compact(element.innerText || element.textContent).length,
+            has_image: Boolean(element.querySelector('img')),
+            has_break: Boolean(element.querySelector('br')),
+            child_count: element.children.length,
+        })).slice(0, 80)
+        : [];
     return {
         actions,
         inputs,
@@ -249,6 +261,7 @@ PROBE_SCRIPT = r"""() => {
         toolbar_controls: toolbarControls,
         spatial_controls: spatialControls,
         image_icon_candidates: imageIconCandidates,
+        body_child_shapes: bodyChildShapes,
         document_state: document.readyState,
         body_child_count: document.body ? document.body.children.length : 0,
         body_text_length: document.body ? compact(document.body.innerText).length : 0,
@@ -303,6 +316,7 @@ def _sanitize(payload: Any) -> dict[str, Any]:
             "toolbar_controls": [],
             "spatial_controls": [],
             "image_icon_candidates": [],
+            "body_child_shapes": [],
             "document_state": "unknown",
             "body_child_count": 0,
             "body_text_length": 0,
@@ -327,6 +341,9 @@ def _sanitize(payload: Any) -> dict[str, Any]:
         else [],
         "image_icon_candidates": payload.get("image_icon_candidates", [])[:30]
         if isinstance(payload.get("image_icon_candidates"), list)
+        else [],
+        "body_child_shapes": payload.get("body_child_shapes", [])[:80]
+        if isinstance(payload.get("body_child_shapes"), list)
         else [],
         "document_state": str(payload.get("document_state") or "unknown"),
         "body_child_count": int(payload.get("body_child_count") or 0),

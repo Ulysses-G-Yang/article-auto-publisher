@@ -1230,14 +1230,35 @@ class BaijiahaoPlatform(BasePlatform):
             )
         )
 
-    async def set_cover(self) -> dict:
+    async def apply_cover(self, cover: dict | None = None) -> dict:
+        """把内容版本冻结的封面素材交给百家号封面弹窗。"""
+
+        strategy = str((cover or {}).get("strategy") or "NONE").upper()
+        if strategy == "NONE":
+            return {"success": True, "cover_status": "not_required"}
+        if strategy not in {"FIRST_BODY_IMAGE", "EXPLICIT"}:
+            return {
+                "success": False,
+                "cover_status": "failed",
+                "error_code": "BAIJIAHAO_COVER_STRATEGY_INVALID",
+                "error": "百家号收到不受支持的封面策略",
+            }
+        local_path = str((cover or {}).get("local_path") or "")
+        if not local_path or not Path(local_path).is_file():
+            return {
+                "success": False,
+                "cover_status": "failed",
+                "error_code": "BAIJIAHAO_COVER_ASSET_UNAVAILABLE",
+                "error": "百家号封面素材不可用",
+            }
+        return await self.set_cover(local_path)
+
+    async def set_cover(self, image_path: str) -> dict:
         """通过「选择封面」弹窗上传本地图片设为封面（3:2 预览后确定）。
 
-        2026-08 真实验收结论：**自动化环境下封面上传不生效**——
-        「点击本地上传」可触发 filechooser，set_files 后封面预览始终为空
-        （弹窗保持「暂无标题」），点「确定」不关闭弹窗；换图重试一致。
-        判定为百度侧对自动化环境的图片上传限制，如实失败、绝不假成功。
-        用户手动操作可正常设置封面。
+        2026-08-20 只读真实探测确认：编辑器存在唯一「选择封面」入口；弹窗
+        明确包含「正文/本地上传」页签、一个 ``accept=image/*`` 文件控件和
+        「封面预览（3:2）」。真实上传仍必须以预览就绪且弹窗关闭为成功判据。
         """
 
         self._require_page_alive("百家号设置封面")
@@ -1254,22 +1275,16 @@ class BaijiahaoPlatform(BasePlatform):
             }"""
         )
         if clicked != "clicked":
-            return {"success": False, "error": "百家号「选择封面」按钮未找到"}
+            return {
+                "success": False,
+                "cover_status": "failed",
+                "error_code": "BAIJIAHAO_COVER_TRIGGER_NOT_FOUND",
+                "error": "百家号「选择封面」按钮未找到",
+            }
         await self.simulator.random_delay(1, 2)
 
         # 弹窗出现后点「点击本地上传」触发系统文件选择，用 filechooser 上传
-        # （隐藏控件直接 set_input_files 无效，2026-08 实测上传不落图）
-        first_image = ""
-        try:
-            blocks = getattr(self, "_content_blocks", []) or []
-            for block in blocks:
-                if block.get("type") == "image" and block.get("local_path"):
-                    first_image = str(block["local_path"])
-                    break
-        except Exception:  # noqa: BLE001
-            pass
-        if not first_image:
-            return {"success": False, "error": "百家号封面缺少本地图片素材"}
+        # （只允许调用方传入的冻结封面，不再从正文块猜测或替换素材）。
         try:
             async with self.page.expect_file_chooser(timeout=15000) as fc_info:
                 upload_clicked = await self.page.evaluate(
@@ -1292,11 +1307,24 @@ class BaijiahaoPlatform(BasePlatform):
                     }"""
                 )
             file_chooser = await fc_info.value
-            await file_chooser.set_files(first_image)
+            await file_chooser.set_files(image_path)
         except TimeoutError:
             return {
                 "success": False,
+                "cover_status": "failed",
+                "error_code": "BAIJIAHAO_COVER_FILE_CHOOSER_NOT_TRIGGERED",
                 "error": f"百家号封面未触发文件选择（upload={upload_clicked}）",
+            }
+        except Exception as exc:
+            if self._exception_means_browser_closed(exc):
+                raise BrowserLifecycleError(
+                    "BROWSER_CONTEXT_CLOSED: 百家号设置封面时页面已关闭"
+                ) from exc
+            return {
+                "success": False,
+                "cover_status": "failed",
+                "error_code": "BAIJIAHAO_COVER_UPLOAD_FAILED",
+                "error": safe_media_error(exc, fallback="百家号封面上传失败"),
             }
         await self.simulator.random_delay(3, 5)
 
@@ -1352,10 +1380,17 @@ class BaijiahaoPlatform(BasePlatform):
         if not dialog_closed:
             return {
                 "success": False,
+                "cover_status": "unverified",
+                "error_code": "BAIJIAHAO_COVER_RESULT_UNVERIFIED",
                 "error": f"百家号封面上传弹窗未关闭（confirm={confirmed}）",
             }
-        logger.info("百家号封面已设置（本地首图）")
-        return {"success": True, "error": ""}
+        logger.info("百家号封面已设置（冻结封面素材）")
+        return {
+            "success": True,
+            "cover_status": "completed",
+            "error_code": None,
+            "error": "",
+        }
 
     async def select_topic(
         self,

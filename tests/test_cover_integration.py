@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 import sys
 from pathlib import Path
+from unittest.mock import AsyncMock
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 SRC_ROOT = PROJECT_ROOT / "src"
@@ -158,34 +159,127 @@ def test_weibo_set_cover_fails_when_dialog_has_no_images() -> None:
 def test_baijiahao_set_cover_success_flow() -> None:
     page = _FakePage(["clicked", False])
     platform = _make_baijiahao(page)
-    platform._content_blocks = [
-        {"type": "text", "text": "正文"},
-        {"type": "image", "local_path": r"C:\tmp\cover.png", "position": 1},
-    ]
 
-    result = run(platform.set_cover())
+    result = run(platform.set_cover(r"C:\tmp\cover.png"))
 
     assert result["success"] is True
+    assert result["cover_status"] == "completed"
     assert page.file_chooser.files == [r"C:\tmp\cover.png"]
 
 
 def test_baijiahao_set_cover_fails_when_button_missing() -> None:
     page = _FakePage(["not-found"])
     platform = _make_baijiahao(page)
-    platform._content_blocks = []
 
-    result = run(platform.set_cover())
+    result = run(platform.set_cover(r"C:\tmp\cover.png"))
 
     assert result["success"] is False
+    assert result["error_code"] == "BAIJIAHAO_COVER_TRIGGER_NOT_FOUND"
     assert "按钮未找到" in result["error"]
 
 
-def test_baijiahao_set_cover_fails_without_image_material() -> None:
-    page = _FakePage(["clicked"])
+def test_baijiahao_apply_cover_uses_exact_frozen_asset(tmp_path: Path) -> None:
+    page = _FakePage([])
     platform = _make_baijiahao(page)
-    platform._content_blocks = [{"type": "text", "text": "只有文字"}]
+    cover_path = tmp_path / "cover.png"
+    cover_path.write_bytes(b"cover")
+    platform.set_cover = AsyncMock(
+        return_value={"success": True, "cover_status": "completed"}
+    )
 
-    result = run(platform.set_cover())
+    result = run(
+        platform.apply_cover(
+            {
+                "strategy": "EXPLICIT",
+                "asset_id": "frozen-cover",
+                "local_path": str(cover_path),
+            }
+        )
+    )
+
+    assert result["cover_status"] == "completed"
+    platform.set_cover.assert_awaited_once_with(str(cover_path))
+
+
+def test_baijiahao_apply_cover_fails_closed_when_asset_is_missing(tmp_path: Path) -> None:
+    platform = _make_baijiahao(_FakePage([]))
+    platform.set_cover = AsyncMock()
+
+    result = run(
+        platform.apply_cover(
+            {
+                "strategy": "FIRST_BODY_IMAGE",
+                "asset_id": "missing-cover",
+                "local_path": str(tmp_path / "missing.png"),
+            }
+        )
+    )
 
     assert result["success"] is False
-    assert "缺少本地图片素材" in result["error"]
+    assert result["error_code"] == "BAIJIAHAO_COVER_ASSET_UNAVAILABLE"
+    platform.set_cover.assert_not_awaited()
+
+
+def test_baijiahao_apply_cover_none_is_not_required() -> None:
+    platform = _make_baijiahao(_FakePage([]))
+    platform.set_cover = AsyncMock()
+
+    result = run(platform.apply_cover({"strategy": "NONE"}))
+
+    assert result == {"success": True, "cover_status": "not_required"}
+    platform.set_cover.assert_not_awaited()
+
+
+def test_baijiahao_base_pipeline_dispatches_exact_frozen_cover(tmp_path: Path) -> None:
+    class _Log:
+        entries: list[tuple[str, str]] = []
+
+        def add_task_log(self, _task_id: int, level: str, message: str) -> None:
+            self.entries.append((level, message))
+
+    platform = _make_baijiahao(_FakePage([]))
+    cover_path = tmp_path / "frozen-cover.png"
+    cover_path.write_bytes(b"cover")
+    platform.check_login = AsyncMock(return_value=True)
+    platform.preflight_delivery = AsyncMock()
+    platform.navigate_to_editor = AsyncMock()
+    platform.fill_title = AsyncMock()
+    platform.fill_content = AsyncMock(
+        return_value={
+            "text_ok": True,
+            "media_status": "completed",
+            "expected_images": 1,
+            "uploaded_images": 1,
+            "failed_images": [],
+        }
+    )
+    platform.set_cover = AsyncMock(
+        return_value={"success": True, "cover_status": "completed"}
+    )
+    platform.save_draft = AsyncMock(
+        return_value="https://baijiahao.baidu.com/builder/preview/s?id=cover-test"
+    )
+    platform._safe_simulate_scroll = AsyncMock()
+    platform._safe_random_mouse_movement = AsyncMock()
+
+    result = run(
+        platform.publish(
+            title="冻结封面流水线",
+            content_blocks=[{"type": "text", "text": "正文", "position": 0}],
+            images=[],
+            cover={
+                "strategy": "EXPLICIT",
+                "asset_id": "frozen-cover-id",
+                "local_path": str(cover_path),
+            },
+            delivery_mode="DRAFT",
+            auto_login=False,
+            task_id=0,
+            db=_Log(),
+        )
+    )
+
+    assert result["success"] is True
+    assert result["cover_status"] == "completed"
+    platform.set_cover.assert_awaited_once_with(str(cover_path))
+    platform.save_draft.assert_awaited_once_with("冻结封面流水线")

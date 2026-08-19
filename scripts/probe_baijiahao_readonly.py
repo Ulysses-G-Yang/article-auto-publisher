@@ -275,6 +275,7 @@ CLICK_MARKER_SCRIPT = r"""(marker) => {
         CONTENT_MANAGE: '内容管理',
         WORKS_MANAGE: '作品管理',
         DRAFT_TAB: '草稿',
+        COVER_PICKER: '选择封面',
     };
     const expected = labels[marker];
     if (!expected) return {status: 'MARKER_NOT_ALLOWED', count: 0};
@@ -637,8 +638,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--account-id", required=True)
     parser.add_argument(
         "--click-marker",
-        choices=("CONTENT_MANAGE", "WORKS_MANAGE", "DRAFT_TAB"),
-        help="仅点击一个唯一的只读导航入口；不允许其他动作",
+        choices=("CONTENT_MANAGE", "WORKS_MANAGE", "DRAFT_TAB", "COVER_PICKER"),
+        help="仅点击一个唯一的只读导航或封面弹窗入口；不选择素材或确认",
     )
     parser.add_argument(
         "--open-editor-menu",

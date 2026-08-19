@@ -1,0 +1,29 @@
+{
+  "mode": "CSA",
+  "task": "ArticleOps multi-platform rich-content draft acceptance",
+  "objective": "Complete stable image-rich DRAFT acceptance per platform with persisted reopen checks; public publish remains disabled.",
+  "branch": "feat/zhihu-real-delivery",
+  "head": "fb290126cc5b9103f38d4f1185e943c14a424633",
+  "constraints": [
+    "Do not touch uv.lock, data, cookies, tokens, or profile contents",
+    "No public publish and no automatic retry after side effects",
+    "Use Python 3.12 environment and SSH push",
+    "Commit and push each focused verified batch"
+  ],
+  "completed": [
+    "Baijiahao local cover input selected by real DOM role",
+    "React-cleared FileList and counted confirm label handled",
+    "Word DRAFT saved with 7 ordered body images and first-image cover",
+    "Unique-title reopen verified title, full text/image order, one persisted cover image",
+    "Operation 50fc0033-0e6f-4b1a-8029-ddd25431e12b finished DRAFT_SAVED and mapping SUCCEEDED",
+    "Full suite passed: 718 passed, 2 skipped"
+  ],
+  "active_files": [
+    "platforms/baijiahao.py",
+    "scripts/probe_baijiahao_readonly.py",
+    "tests/test_cover_integration.py",
+    "docs/acceptance/BAIJIAHAO_COVER_PROBE_20260820.md"
+  ],
+  "next_action": "Audit and complete Xiaohongshu cover selection and persisted-cover DRAFT acceptance using the already verified full Word body path.",
+  "next_platform": "xiaohongshu"
+}

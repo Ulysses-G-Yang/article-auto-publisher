@@ -1225,6 +1225,27 @@ class ZOLPlatform(BasePlatform):
                 return False
         return True
 
+    @staticmethod
+    def _content_token_shape(tokens: list[dict], *, limit: int = 16) -> str:
+        """返回不含正文、URL 或指纹的有限 DOM 结构摘要。"""
+
+        shape: list[str] = []
+        for token in tokens[:limit]:
+            kind = token.get("kind")
+            if kind == "image":
+                shape.append("I")
+            elif kind == "heading":
+                text = token.get("text")
+                shape.append(f"H{token.get('tag', '?')}:{len(text) if isinstance(text, str) else 0}")
+            elif kind == "text":
+                text = token.get("text")
+                shape.append(f"T:{len(text) if isinstance(text, str) else 0}")
+            else:
+                shape.append("?")
+        if len(tokens) > limit:
+            shape.append(f"+{len(tokens) - limit}")
+        return ",".join(shape) or "EMPTY"
+
     async def _verify_content_prefix(
         self,
         content_blocks: list[dict],
@@ -1240,7 +1261,9 @@ class ZOLPlatform(BasePlatform):
         )
         if not self._content_tokens_match(expected, actual):
             raise ContentValidationError(
-                "ZOL_CONTENT_PREFIX_VERIFY_FAILED: 图片后正文前缀与 DOM 回读不一致"
+                "ZOL_CONTENT_PREFIX_VERIFY_FAILED: 图片后正文前缀与 DOM 回读不一致; "
+                f"expected={self._content_token_shape(expected)}; "
+                f"actual={self._content_token_shape(actual)}"
             )
 
     async def _verify_heading_nodes(self, expected_headings: list[dict]) -> None:

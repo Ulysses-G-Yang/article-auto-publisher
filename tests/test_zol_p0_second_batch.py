@@ -875,6 +875,20 @@ def test_image_src_fingerprint_drift_does_not_break_structural_match() -> None:
     assert not ZOLPlatform._content_tokens_match(expected, actual[:-1])
 
 
+def test_content_token_shape_exposes_only_bounded_structure() -> None:
+    tokens = [
+        {"kind": "text", "text": "敏感正文"},
+        {"kind": "heading", "tag": "h2", "text": "敏感标题"},
+        {"kind": "image", "fingerprint": "https://secret.invalid/token"},
+    ]
+
+    shape = ZOLPlatform._content_token_shape(tokens, limit=2)
+
+    assert shape == "T:4,Hh2:4,+1"
+    assert "敏感" not in shape
+    assert "secret" not in shape
+
+
 def test_expected_text_tokens_keep_three_paragraph_boundaries() -> None:
     blocks = [
         {"type": "text", "text": "第一段"},

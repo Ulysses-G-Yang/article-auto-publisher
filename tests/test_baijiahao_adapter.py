@@ -171,8 +171,9 @@ def test_heading_formats_only_current_ueditor_block_without_opening_menu() -> No
     editor.evaluate.assert_awaited_once()
     script = editor.evaluate.await_args.args[0]
     assert "block.parentElement !== root" in script
-    assert "block.style.fontSize = '21px'" in script
+    assert "block.style.fontSize = fontSize" in script
     assert "InputEvent('input'" in script
+    assert editor.evaluate.await_args.args[1] == "21px"
 
 
 def test_heading_fails_closed_when_current_root_block_is_not_identifiable() -> None:
@@ -184,6 +185,21 @@ def test_heading_fails_closed_when_current_root_block_is_not_identifiable() -> N
 
     with pytest.raises(ContentValidationError, match="BAIJIAHAO_HEADING_APPLY_FAILED"):
         asyncio.run(platform._apply_h2_to_current_block())
+
+
+def test_body_style_reset_removes_inherited_heading_size() -> None:
+    editor = _Item()
+    editor.evaluate = AsyncMock(return_value=True)
+    platform = BaijiahaoPlatform()
+    platform.page = object()
+    platform._current_body_editor = AsyncMock(return_value=editor)
+
+    asyncio.run(platform._apply_body_to_current_block())
+
+    script, font_size = editor.evaluate.await_args.args
+    assert font_size is None
+    assert "block.style.removeProperty('font-size')" in script
+    assert "child.style.removeProperty('font-size')" in script
 
 
 def test_appinfo_identity_requires_matching_stable_ids_and_name() -> None:

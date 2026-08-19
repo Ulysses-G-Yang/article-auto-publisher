@@ -633,6 +633,8 @@ class BaijiahaoPlatform(BasePlatform):
                         await self.page.keyboard.press("Enter")
                 if block_type == "heading":
                     await self._apply_h2_to_current_block()
+                else:
+                    await self._apply_body_to_current_block()
                 content_started = True
                 continue
 
@@ -772,9 +774,41 @@ class BaijiahaoPlatform(BasePlatform):
         """
 
         try:
-            editor = await self._current_body_editor()
-            applied = await editor.evaluate(
-                r"""root => {
+            applied = await self._set_current_block_font_size("21px")
+            if applied is not True:
+                raise RuntimeError("当前标题段落无法唯一定位")
+        except Exception as exc:
+            if self._exception_means_browser_closed(exc):
+                raise BrowserLifecycleError(
+                    "BROWSER_CONTEXT_CLOSED: 百家号设置标题样式时页面已关闭"
+                ) from exc
+            raise ContentValidationError(
+                "BAIJIAHAO_HEADING_APPLY_FAILED: 二级标题样式未能应用"
+            ) from exc
+
+    async def _apply_body_to_current_block(self) -> None:
+        """清除 Enter 从上一标题段继承的字号，恢复平台正文样式。"""
+
+        try:
+            applied = await self._set_current_block_font_size(None)
+            if applied is not True:
+                raise RuntimeError("当前正文段落无法唯一定位")
+        except Exception as exc:
+            if self._exception_means_browser_closed(exc):
+                raise BrowserLifecycleError(
+                    "BROWSER_CONTEXT_CLOSED: 百家号恢复正文样式时页面已关闭"
+                ) from exc
+            raise ContentValidationError(
+                "BAIJIAHAO_BODY_STYLE_RESET_FAILED: 正文样式未能恢复"
+            ) from exc
+
+    async def _set_current_block_font_size(self, font_size: str | None) -> bool:
+        """只修改当前选区所属的根级段落字号。"""
+
+        editor = await self._current_body_editor()
+        return bool(
+            await editor.evaluate(
+                r"""(root, fontSize) => {
                     const doc = root.ownerDocument;
                     const selection = doc.getSelection();
                     let node = selection && selection.anchorNode;
@@ -789,26 +823,30 @@ class BaijiahaoPlatform(BasePlatform):
                             || !(block.innerText || block.textContent || '').trim()) {
                         return false;
                     }
-                    block.style.fontSize = '21px';
+                    if (fontSize) {
+                        block.style.fontSize = fontSize;
+                    } else {
+                        block.style.removeProperty('font-size');
+                        for (const child of block.querySelectorAll('[style]')) {
+                            child.style.removeProperty('font-size');
+                            if (!child.getAttribute('style')) {
+                                child.removeAttribute('style');
+                            }
+                        }
+                    }
                     root.dispatchEvent(new InputEvent('input', {
                         bubbles: true,
                         composed: true,
                         inputType: 'formatFontSize',
                     }));
                     doc.dispatchEvent(new Event('selectionchange', {bubbles: true}));
-                    return block.style.fontSize === '21px';
-                }"""
+                    return fontSize
+                        ? block.style.fontSize === fontSize
+                        : block.style.fontSize === '';
+                }""",
+                font_size,
             )
-            if applied is not True:
-                raise RuntimeError("当前标题段落无法唯一定位")
-        except Exception as exc:
-            if self._exception_means_browser_closed(exc):
-                raise BrowserLifecycleError(
-                    "BROWSER_CONTEXT_CLOSED: 百家号设置标题样式时页面已关闭"
-                ) from exc
-            raise ContentValidationError(
-                "BAIJIAHAO_HEADING_APPLY_FAILED: 二级标题样式未能应用"
-            ) from exc
+        )
 
     async def _create_paragraph_after_image(self) -> None:
         editor = await self._current_body_editor()

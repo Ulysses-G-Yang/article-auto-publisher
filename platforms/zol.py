@@ -1495,15 +1495,32 @@ class ZOLPlatform(BasePlatform):
                     const instance = tiny && frame && frame.id
                         ? tiny.get(frame.id)
                         : (tiny && tiny.activeEditor);
-                    if (!instance || instance.getBody() !== root) return false;
-                    instance.focus();
-                    instance.selection.select(root, true);
-                    instance.selection.collapse(false);
-                    instance.insertContent(markup);
-                    instance.nodeChanged();
-                    instance.setDirty(true);
-                    instance.save();
-                    return true;
+                    if (instance && instance.getBody() === root) {
+                        instance.focus();
+                        instance.selection.select(root, true);
+                        instance.selection.collapse(false);
+                        instance.insertContent(markup);
+                        instance.nodeChanged();
+                        instance.setDirty(true);
+                        instance.save();
+                        return true;
+                    }
+                    root.focus();
+                    const doc = root.ownerDocument;
+                    const range = doc.createRange();
+                    range.selectNodeContents(root);
+                    range.collapse(false);
+                    const selection = doc.getSelection();
+                    if (!selection) return false;
+                    selection.removeAllRanges();
+                    selection.addRange(range);
+                    const inserted = doc.execCommand('insertHTML', false, markup);
+                    root.dispatchEvent(new InputEvent('input', {
+                        bubbles: true,
+                        inputType: 'insertHTML'
+                    }));
+                    root.dispatchEvent(new Event('change', {bubbles: true}));
+                    return inserted === true;
                 }
                 """,
                 markup,

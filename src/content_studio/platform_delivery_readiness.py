@@ -238,21 +238,27 @@ PLATFORM_DELIVERY_READINESS: tuple[PlatformDeliveryReadiness, ...] = (
     _build_platform(
         "xiaoheihe",
         facet_overrides={
+            "account_session": (
+                ReadinessStatus.REAL_VERIFIED,
+                "account_active_valid_during_word_draft_acceptance",
+                _XHH_WORD_DATE,
+                _XHH_WORD_EVIDENCE,
+            ),
             "editor_entry": (
                 ReadinessStatus.REAL_VERIFIED,
-                "real_editor_entry_reached_draft_only_attempt",
+                "real_editor_entry_passed",
                 _XHH_WORD_DATE,
                 _XHH_WORD_EVIDENCE,
             ),
             "text_draft": (
-                ReadinessStatus.RETEST_REQUIRED,
-                "text_precheck_passed_real_run_failed_before_draft_save_waiting_rerun",
+                ReadinessStatus.REAL_VERIFIED,
+                "real_reopen_verified_22_text_and_heading_blocks",
                 _XHH_WORD_DATE,
                 _XHH_WORD_EVIDENCE,
             ),
             "body_images": (
-                ReadinessStatus.RETEST_REQUIRED,
-                "real_run_failed_after_image_processing_waiting_rerun",
+                ReadinessStatus.REAL_VERIFIED,
+                "real_reopen_verified_7_ordered_body_images",
                 _XHH_WORD_DATE,
                 _XHH_WORD_EVIDENCE,
             ),
@@ -263,8 +269,8 @@ PLATFORM_DELIVERY_READINESS: tuple[PlatformDeliveryReadiness, ...] = (
                 _XHH_WORD_EVIDENCE,
             ),
             "draft_verification": (
-                ReadinessStatus.RETEST_REQUIRED,
-                "real_run_stopped_before_draftbox_verification_waiting_rerun",
+                ReadinessStatus.REAL_VERIFIED,
+                "unique_draft_card_and_persisted_dom_verified",
                 _XHH_WORD_DATE,
                 _XHH_WORD_EVIDENCE,
             ),

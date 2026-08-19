@@ -38,12 +38,12 @@
 
 | 能力项 | 状态 | page_state | last_real_check | evidence_refs |
 |---|---|---|---|---|
-| account_session | `REAL_VERIFIED` | `account_active_valid` | 2026-08-17 | `codex_handoff_20260817.md` |
-| editor_entry | `REAL_VERIFIED` | `real_editor_entry_reached_draft_only_attempt` | 2026-08-19 | `docs/acceptance/XIAOHEIHE_WORD_DRAFT_20260819.md`, `codex_handoff_20260817.md` |
-| text_draft | `RETEST_REQUIRED` | `text_precheck_passed_real_run_failed_before_draft_save_waiting_rerun` | 2026-08-19 | `docs/acceptance/XIAOHEIHE_WORD_DRAFT_20260819.md`, `codex_handoff_20260817.md` |
-| body_images | `RETEST_REQUIRED` | `real_run_failed_after_image_processing_waiting_rerun` | 2026-08-19 | `docs/acceptance/XIAOHEIHE_WORD_DRAFT_20260819.md`, `codex_handoff_20260817.md` |
+| account_session | `REAL_VERIFIED` | `account_active_valid_during_word_draft_acceptance` | 2026-08-19 | `docs/acceptance/XIAOHEIHE_WORD_DRAFT_20260819.md`, `codex_handoff_20260817.md` |
+| editor_entry | `REAL_VERIFIED` | `real_editor_entry_passed` | 2026-08-19 | `docs/acceptance/XIAOHEIHE_WORD_DRAFT_20260819.md`, `codex_handoff_20260817.md` |
+| text_draft | `REAL_VERIFIED` | `real_reopen_verified_22_text_and_heading_blocks` | 2026-08-19 | `docs/acceptance/XIAOHEIHE_WORD_DRAFT_20260819.md`, `codex_handoff_20260817.md` |
+| body_images | `REAL_VERIFIED` | `real_reopen_verified_7_ordered_body_images` | 2026-08-19 | `docs/acceptance/XIAOHEIHE_WORD_DRAFT_20260819.md`, `codex_handoff_20260817.md` |
 | cover | `RETEST_REQUIRED` | `real_run_stopped_before_cover_verification_waiting_rerun` | 2026-08-19 | `docs/acceptance/XIAOHEIHE_WORD_DRAFT_20260819.md`, `codex_handoff_20260817.md` |
-| draft_verification | `RETEST_REQUIRED` | `real_run_stopped_before_draftbox_verification_waiting_rerun` | 2026-08-19 | `docs/acceptance/XIAOHEIHE_WORD_DRAFT_20260819.md`, `codex_handoff_20260817.md` |
+| draft_verification | `REAL_VERIFIED` | `unique_draft_card_and_persisted_dom_verified` | 2026-08-19 | `docs/acceptance/XIAOHEIHE_WORD_DRAFT_20260819.md`, `codex_handoff_20260817.md` |
 | public_publish | `DISABLED` | `global_publish_gate_closed` | — | `AGENTS.md`, `codex_handoff_20260817.md` |
 
 ### 中关村在线 `zol`
@@ -114,9 +114,10 @@
 |---|---:|---|
 | 知乎 | `true` | 账号、编辑器、文字草稿、正文图片、草稿核对均为 `REAL_VERIFIED` |
 | ZOL | `true` | 唯一草稿重开后 22 个文字/章节块、7 张正文图片和 29 个有序节点完全一致 |
-| 小黑盒 / smzdm / 百家号 | `false` | 修复后尚未完成同一版本的真实重验收；百家号封面还有明确失败记录 |
+| 小黑盒 | `true` | 唯一草稿重开后 22 个文字/标题块、7 张正文图片和 29 个有序节点完全一致 |
+| smzdm / 百家号 | `false` | 修复后尚未完成同一版本的真实重验收；百家号封面还有明确失败记录 |
 | 小红书 | `false` | 文字草稿已验收，但正文图片为 `REAL_FAILED` |
 
-当前六个平台的 `can_run_complete_word_draft()` 均为 `false`：知乎与 ZOL 的带图草稿已经通过，但封面尚未真实验收，所以完整 Word 一键草稿仍未完成。
+当前六个平台的 `can_run_complete_word_draft()` 均为 `false`：知乎、ZOL 与小黑盒的带图草稿已经通过，但封面尚未真实验收，所以完整 Word 一键草稿仍未完成。
 
 这些函数没有接入 `DeliveryService`、CLI、Web 或 MCP。下一次真实验收完成后，先补证据文件和日期，再更新矩阵并晋级状态；不得因为代码或单元测试变化自动晋级为 `REAL_VERIFIED`。

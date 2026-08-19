@@ -1378,12 +1378,18 @@ class BaijiahaoPlatform(BasePlatform):
             raise DraftResultUnknownError(
                 "DRAFT_RESULT_UNKNOWN: 百家号缺少冻结内容核验快照"
             )
-        save_responses: list[dict[str, str | int]] = []
+        save_responses: list[dict[str, object]] = []
 
         async def capture_save_response(response) -> None:
             try:
                 evidence = self._safe_save_response_evidence(response)
                 if evidence is not None and len(save_responses) < 40:
+                    if evidence.get("path") == "/pcui/article/save":
+                        try:
+                            payload = await response.json()
+                        except Exception:
+                            payload = None
+                        evidence["json"] = self._safe_save_response_payload(payload)
                     save_responses.append(evidence)
             except Exception:
                 return
@@ -1454,7 +1460,7 @@ class BaijiahaoPlatform(BasePlatform):
             ) from exc
 
     @staticmethod
-    def _safe_save_response_evidence(response) -> dict[str, str | int] | None:
+    def _safe_save_response_evidence(response) -> dict[str, object] | None:
         """仅保留同源 POST 路径和状态码，不记录查询参数或响应正文。"""
 
         parsed = urlsplit(str(response.url or ""))
@@ -1464,6 +1470,34 @@ class BaijiahaoPlatform(BasePlatform):
         ):
             return None
         return {"path": parsed.path[:180], "status": int(response.status)}
+
+    @staticmethod
+    def _safe_save_response_payload(payload) -> dict:
+        """投影保存响应的业务码和结构，不返回正文、URL 或凭据字段。"""
+
+        if not isinstance(payload, dict):
+            return {"type": type(payload).__name__}
+        result: dict = {"top_level_keys": sorted(str(key)[:80] for key in payload)[:80]}
+        for key in ("errno", "error_code", "code", "status", "success"):
+            value = payload.get(key)
+            if isinstance(value, (bool, int)) or (
+                isinstance(value, str) and len(value) <= 40
+            ):
+                result[key] = value
+        for key in ("errmsg", "error_msg", "message", "msg"):
+            value = payload.get(key)
+            if isinstance(value, str):
+                result[key] = safe_media_error(value, fallback="")[:160]
+        data = payload.get("data")
+        if isinstance(data, dict):
+            result["data_keys"] = sorted(str(key)[:80] for key in data)[:120]
+            result["candidate_ids"] = [
+                {"key": str(key)[:80], "length": len(str(value))}
+                for key, value in data.items()
+                if str(key).lower() in {"id", "nid", "article_id", "draft_id"}
+                and isinstance(value, (str, int))
+            ][:20]
+        return result
 
     async def _find_unique_exact_draft(self, title: str) -> str:
         await self._open_works_page()

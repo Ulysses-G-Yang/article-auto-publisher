@@ -363,3 +363,27 @@ def test_save_response_observer_records_only_same_origin_post_paths() -> None:
 
     assert captured == {"path": "/builder/api/draft/save", "status": 200}
     assert rejected is None
+
+
+def test_save_response_payload_exposes_only_business_code_and_structure() -> None:
+    result = BaijiahaoPlatform._safe_save_response_payload(
+        {
+            "errno": 0,
+            "errmsg": "保存成功",
+            "token": "must-not-leak",
+            "data": {
+                "nid": "123456789",
+                "title": "must-not-leak",
+                "content": "must-not-leak",
+            },
+        }
+    )
+
+    assert result == {
+        "top_level_keys": ["data", "errmsg", "errno", "token"],
+        "errno": 0,
+        "errmsg": "保存成功",
+        "data_keys": ["content", "nid", "title"],
+        "candidate_ids": [{"key": "nid", "length": 9}],
+    }
+    assert "must-not-leak" not in str(result)

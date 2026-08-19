@@ -1382,23 +1382,87 @@ class ZOLPlatform(BasePlatform):
                 "ZOL_CONTENT_MODEL_SYNC_FAILED: 正文模型同步失败"
             ) from exc
 
+    async def _append_editor_block_anchor(self, editor, editor_kind: str) -> None:
+        """追加独立空段并把 TinyMCE 选区放入其中，避免 Enter 命中图片。"""
+
+        if editor_kind not in {"iframe", "contenteditable"}:
+            raise ContentValidationError(
+                "ZOL_CONTENT_ANCHOR_FAILED: 富文本编辑器类型未确认"
+            )
+        try:
+            anchored = await editor.evaluate(
+                """
+                (root) => {
+                    const doc = root.ownerDocument;
+                    const paragraph = doc.createElement('p');
+                    const br = doc.createElement('br');
+                    br.setAttribute('data-mce-bogus', '1');
+                    paragraph.appendChild(br);
+                    root.appendChild(paragraph);
+                    root.focus();
+                    const range = doc.createRange();
+                    range.setStart(paragraph, 0);
+                    range.collapse(true);
+                    const selection = doc.getSelection();
+                    if (!selection) return false;
+                    selection.removeAllRanges();
+                    selection.addRange(range);
+                    try {
+                        const view = doc.defaultView;
+                        const frame = view && view.frameElement;
+                        const tiny = view && view.parent && view.parent.tinymce;
+                        const instance = tiny && frame && frame.id
+                            ? tiny.get(frame.id)
+                            : (tiny && tiny.activeEditor);
+                        if (instance && instance.getBody() === root) {
+                            instance.focus();
+                            instance.selection.setRng(range);
+                            instance.nodeChanged();
+                        }
+                    } catch (_) {
+                        // 原生 Range 已设置；TinyMCE API 是同源增强。
+                    }
+                    return selection.rangeCount === 1 && selection.isCollapsed;
+                }
+                """
+            )
+            if anchored is False:
+                raise ContentValidationError(
+                    "ZOL_CONTENT_ANCHOR_FAILED: 独立正文块选区未确认"
+                )
+        except ContentValidationError:
+            raise
+        except Exception as exc:
+            if self._exception_means_browser_closed(exc):
+                raise BrowserLifecycleError(
+                    "BROWSER_CONTEXT_CLOSED: ZOL 创建正文块时页面已关闭"
+                ) from exc
+            raise ContentValidationError(
+                "ZOL_CONTENT_ANCHOR_FAILED: 无法创建独立正文块"
+            ) from exc
+
     async def _apply_heading_block(
         self,
         editor,
         text: str,
         level: int,
         expected_headings: list[dict],
+        *,
+        selection_prepared: bool = False,
     ):
         if level not in {2, 3}:
             raise ContentValidationError(
                 "ZOL_HEADING_UNSUPPORTED_LEVEL: 实验路径只允许 H2/H3"
             )
-        editor, editor_kind = await self._click_editor(editor)
+        if selection_prepared:
+            editor_kind = "iframe"
+        else:
+            editor, editor_kind = await self._click_editor(editor)
+            await self._collapse_editor_selection_at_end(editor, editor_kind)
         if editor_kind != "iframe":
             raise ContentValidationError(
                 "ZOL_HEADING_EDITOR_UNSUPPORTED: TinyMCE iframe 未确认"
             )
-        await self._collapse_editor_selection_at_end(editor, editor_kind)
         await self.page.keyboard.insert_text(text)
         formatted = await editor.evaluate(
             """
@@ -1528,11 +1592,12 @@ class ZOLPlatform(BasePlatform):
                 block_text = (block.get("text") or "").strip()
                 if btype == "heading" and block_text:
                     editor, editor_kind = await self._click_editor(editor)
-                    await self._collapse_editor_selection_at_end(editor, editor_kind)
+                    if previous_kind == "image":
+                        await self._append_editor_block_anchor(editor, editor_kind)
+                    else:
+                        await self._collapse_editor_selection_at_end(editor, editor_kind)
                     if previous_kind == "text":
                         await self.page.keyboard.press("Enter")
-                        await self.page.keyboard.press("Enter")
-                    elif previous_kind == "image":
                         await self.page.keyboard.press("Enter")
                     editor, editor_kind = await self._apply_heading_block(
                         editor,
@@ -1545,6 +1610,7 @@ class ZOLPlatform(BasePlatform):
                                 "text": normalize_for_comparison(block_text),
                             }
                         ],
+                        selection_prepared=True,
                     )
                     expected_headings_seen.append(
                         {
@@ -1556,11 +1622,12 @@ class ZOLPlatform(BasePlatform):
                     previous_kind = "text"
                 elif btype == "text" and block_text:
                     editor, editor_kind = await self._click_editor(editor)
-                    await self._collapse_editor_selection_at_end(editor, editor_kind)
+                    if previous_kind == "image":
+                        await self._append_editor_block_anchor(editor, editor_kind)
+                    else:
+                        await self._collapse_editor_selection_at_end(editor, editor_kind)
                     if previous_kind == "text":
                         await self.page.keyboard.press("Enter")
-                        await self.page.keyboard.press("Enter")
-                    elif previous_kind == "image":
                         await self.page.keyboard.press("Enter")
                     block_lines = block_text.splitlines() or [block_text]
                     for index, line in enumerate(block_lines):
@@ -1571,7 +1638,6 @@ class ZOLPlatform(BasePlatform):
                     previous_kind = "text"
                 elif btype == "image":
                     editor, editor_kind = await self._click_editor(editor)
-                    await self._collapse_editor_selection_at_end(editor, editor_kind)
                     if observed_image_fingerprints:
                         # 在产生下一次真实上传副作用前，先确认已有图文前缀仍完整。
                         # 若图片后的换行或格式化破坏了旧内容，立即 fail closed。
@@ -1579,6 +1645,7 @@ class ZOLPlatform(BasePlatform):
                             content_blocks[:block_index],
                             observed_image_fingerprints,
                         )
+                    await self._append_editor_block_anchor(editor, editor_kind)
                     image_file = self._image_path_for_block(block, images)
                     if image_file:
                         upload_result = await self._upload_image(image_file) or {}

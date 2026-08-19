@@ -995,6 +995,25 @@ def test_image_dom_change_is_committed_to_tinymce_model() -> None:
     assert "instance.save()" in script
 
 
+def test_image_and_following_content_use_independent_dom_block_anchor() -> None:
+    captured = {}
+
+    class _Editor(FakeLocator):
+        async def evaluate(self, script, *_args):
+            captured["script"] = script
+            return True
+
+    asyncio.run(
+        ZOLPlatform()._append_editor_block_anchor(_Editor(tag="body"), "iframe")
+    )
+
+    script = captured["script"]
+    assert "doc.createElement('p')" in script
+    assert "root.appendChild(paragraph)" in script
+    assert "range.setStart(paragraph, 0)" in script
+    assert "instance.selection.setRng(range)" in script
+
+
 def test_expected_text_tokens_keep_three_paragraph_boundaries() -> None:
     blocks = [
         {"type": "text", "text": "第一段"},

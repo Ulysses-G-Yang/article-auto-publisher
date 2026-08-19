@@ -38,6 +38,8 @@ class XiaoheihePlatform(BasePlatform):
     BODY_FIELD = ".article__edit-content--inner [contenteditable='true'], .article__edit-content--inner .ProseMirror"
     SAVE_DRAFT_BTN = "button.editor-publish__save-draft"           # 保存草稿
     DRAFT_BOX_BTN = "button.editor-publish__btn.sub-btn.margin-left"  # 草稿箱
+    DRAFTS_URL = "https://www.xiaoheihe.cn/creator/draft"
+    DRAFT_VERIFY_ATTEMPTS = 3
     PUBLISH_NOW_BTN = "button.editor-publish__btn.main-btn"        # 发布
     IMAGE_LOCAL_UPLOAD = (
         ".editor-model__image-model .model-image__local-box "
@@ -417,7 +419,7 @@ class XiaoheihePlatform(BasePlatform):
     async def fill_title(self, title: str):
         """填写文章标题（真实字段：.editor-title__container 内的 contenteditable ProseMirror）"""
         self._raise_if_page_closed("小黑盒填写标题")
-        expected = " ".join((title or "").split())[:30]
+        expected = self._normalize_platform_title(title)
         locator = self.page.locator(self.TITLE_FIELD).first
         try:
             if await locator.count() == 0 or not await locator.is_visible():
@@ -440,6 +442,11 @@ class XiaoheihePlatform(BasePlatform):
                 raise BrowserLifecycleError("BROWSER_CONTEXT_CLOSED: 小黑盒填写标题时页面已关闭") from e
             logger.error("小黑盒标题输入失败: {}", e)
             raise SelectorError("小黑盒标题输入框未找到或验证失败") from e
+
+    @staticmethod
+    def _normalize_platform_title(title: str | None) -> str:
+        """按平台实际输入规则规范化标题，供填写和草稿箱核对共用。"""
+        return " ".join(str(title or "").split())[:30]
 
     async def fill_content(self, content_blocks: list, images: list):
         """填写正文（真实字段：.article__edit-content--inner 内的 contenteditable ProseMirror）"""
@@ -1234,19 +1241,31 @@ class XiaoheihePlatform(BasePlatform):
                 logger.warning("小黑盒返回编辑器失败: {}", exc)
 
     async def save_draft(self, title: str = "") -> str:
-        """保存草稿并返回草稿箱 URL；保存失败返回空串（绝不以当前页 URL 冒充成功）
+        """保存草稿并返回草稿箱 URL；无法证明新草稿存在时返回空串。
 
-        真实保存按钮：button.editor-publish__save-draft
-        保存后去「草稿箱」(button.editor-publish__btn.sub-btn.margin-left) 验证标题是否出现，
-        以草稿箱真实存在该草稿作为成功判据（直接回应「账号/草稿箱里都找不到」的投诉）。
+        保存成功的唯一业务证据是：保存点击前在同一浏览器 Context 读取到的
+        草稿实体快照中不存在的、可见的具体草稿卡片，在保存后出现且标题精确匹配。
+        页面全局文本、同名旧卡片和空标题都不能作为成功证据。
         """
         self._raise_if_page_closed("小黑盒保存草稿")
+        expected_title = self._normalize_platform_title(title)
+        if not expected_title:
+            logger.warning("小黑盒保存草稿拒绝：平台标题为空")
+            return ""
+
         # 若在编辑器外（被话题选择等带偏），先回到编辑器
         if "creator/editor" not in (self.page.url or ""):
             await self._back_to_editor()
 
         if "creator/editor" not in (self.page.url or ""):
             logger.error("小黑盒保存草稿失败：不在编辑器页面，url={}", self.page.url)
+            return ""
+
+        # 必须在保存按钮点击前建立可靠 baseline；明确可见的空草稿箱是
+        # 合法基线，只有无法证明页面结构/空态时才 fail closed。
+        baseline = await self._collect_draft_baseline()
+        if baseline is None:
+            logger.warning("小黑盒保存草稿拒绝：保存前无法取得可靠草稿箱基线")
             return ""
 
         # 点击真实保存草稿按钮
@@ -1256,56 +1275,302 @@ class XiaoheihePlatform(BasePlatform):
             await self.page.click(self.SAVE_DRAFT_BTN, timeout=8000)
         except Exception as e:
             if self._exception_means_browser_closed(e):
-                raise BrowserLifecycleError("BROWSER_CONTEXT_CLOSED: 小黑盒点击保存草稿时页面已关闭") from e
+                raise BrowserLifecycleError(
+                    "BROWSER_CONTEXT_CLOSED: 小黑盒点击保存草稿时页面已关闭"
+                ) from e
             logger.error("小黑盒点击保存草稿按钮失败: {}", e)
             return ""
 
         await self.simulator.random_delay(2, 4)
 
-        # 验证：进入草稿箱，确认标题存在
-        return await self._verify_draft_in_drafts(title)
+        # 验证：进入草稿箱，确认保存后出现了 baseline 之外的新卡片
+        return await self._verify_draft_in_drafts(expected_title, baseline)
 
-    async def _verify_draft_in_drafts(self, title: str) -> str:
-        """前往草稿箱，确认刚写的草稿存在，返回草稿箱 URL；不存在返回空串"""
+    @staticmethod
+    def _is_drafts_route(url: str | None) -> bool:
+        """只接受草稿箱路由，避免被导航/编辑器/登录页的文本误判。"""
+        return "/creator/draft" in str(url or "")
+
+    async def _snapshot_draft_state(
+        self,
+        page,
+    ) -> tuple[list[dict[str, str]], bool]:
+        """读取可见的具体草稿卡片，不扫描 document.body 全局文本。
+
+        页面结构可能随平台前端版本变化，因此这里只接受两类可追踪实体：
+        带 `data-draft-id` 的具体条目，或指向 `/creator/editor/draft/` 的具体
+        草稿链接。返回值只保留不透明实体键和规范化标题，绝不把原始 DOM 暴露给
+        日志、API 或调用方。
+        """
+        self._raise_if_page_closed("读取小黑盒草稿卡片")
+        if page is None or not self._is_drafts_route(getattr(page, "url", "")):
+            return [], False
+        try:
+            raw_candidates = await page.evaluate(
+                """
+                () => {
+                    const draftLinkSelector = "a[href*='/creator/editor/draft/']";
+                    const candidateSelector = `${draftLinkSelector}, [data-draft-id]`;
+                    const rootSelector = [
+                        "[data-draft-id]",
+                        "[class*='draft-card']",
+                        "[class*='draft-item']",
+                        "[class*='draft-list-item']",
+                        "article",
+                        "li",
+                    ].join(",");
+                    const listRootSelector = [
+                        "[data-draft-list]",
+                        "[data-testid='draft-list']",
+                        "[role='list'][aria-label='草稿箱']",
+                        "ul[aria-label='草稿箱']",
+                        ".draft-list",
+                        ".draft-list-container",
+                        ".drafts-list",
+                    ].join(",");
+                    const emptyStateSelector = [
+                        "[data-draft-empty]",
+                        ".draft-empty",
+                        ".empty-draft",
+                        "[role='status']",
+                    ].join(",");
+                    const genericLabels = new Set([
+                        "草稿", "草稿箱", "编辑", "继续编辑", "打开", "删除",
+                    ]);
+                    const emptyLabels = new Set([
+                        "暂无草稿", "暂无草稿内容", "还没有草稿", "没有草稿",
+                    ]);
+
+                    const visible = (element) => {
+                        if (!element || element.nodeType !== Node.ELEMENT_NODE) return false;
+                        if (element.hidden || element.getAttribute("aria-hidden") === "true") {
+                            return false;
+                        }
+                        const style = window.getComputedStyle(element);
+                        if (style.display === "none" || style.visibility === "hidden" ||
+                            Number(style.opacity) === 0) return false;
+                        const rect = element.getBoundingClientRect();
+                        return rect.width > 0 && rect.height > 0;
+                    };
+
+                    const normalize = (value) => String(value || "")
+                        .replace(/\\s+/g, " ").trim().slice(0, 30);
+
+                    const isConcreteDraftHref = (href) => {
+                        try {
+                            const path = new URL(href, window.location.href).pathname;
+                            return /\\/creator\\/editor\\/draft\\/[^/]+\\/?$/.test(path);
+                        } catch (_error) {
+                            return false;
+                        }
+                    };
+
+                    const readText = (element) => {
+                        if (!element) return "";
+                        const values = [];
+                        for (const attribute of ["data-title", "title", "aria-label"]) {
+                            const value = normalize(element.getAttribute(attribute));
+                            if (value) values.push(value);
+                        }
+                        const titleNode = element.matches(
+                            "[data-title], [class*='title'], [class*='name'], "
+                            "h1, h2, h3, h4, h5, h6"
+                        ) ? element : element.querySelector(
+                            "[data-title], [class*='title'], [class*='name'], "
+                            "h1, h2, h3, h4, h5, h6"
+                        );
+                        if (titleNode) {
+                            const value = normalize(titleNode.textContent);
+                            if (value) values.push(value);
+                        }
+                        const firstLine = normalize((element.innerText || "").split("\\n")[0]);
+                        if (firstLine) values.push(firstLine);
+                        return values.find((value) => !genericLabels.has(value)) || "";
+                    };
+
+                    const seen = new Set();
+                    const result = [];
+                    for (const element of document.querySelectorAll(candidateSelector)) {
+                        if (!visible(element)) continue;
+                        const link = element.matches(draftLinkSelector)
+                            ? element
+                            : element.querySelector(draftLinkSelector);
+                        const href = link ? String(link.getAttribute("href") || "") : "";
+                        const draftId = String(
+                            element.getAttribute("data-draft-id") ||
+                            (link && link.getAttribute("data-draft-id")) || ""
+                        ).trim();
+                        if (!draftId && !href) continue;
+                        if (href && !isConcreteDraftHref(href)) continue;
+
+                        const root = element.closest(rootSelector) || element;
+                        if (!visible(root)) continue;
+                        const opaque = draftId ? `data:${draftId}` : `href:${href}`;
+                        if (seen.has(opaque)) continue;
+                        const title = readText(root) || readText(element);
+                        if (!title) continue;
+                        seen.add(opaque);
+                        result.push({opaque, title});
+                    }
+                    const hasVisibleListRoot = Array.from(
+                        document.querySelectorAll(listRootSelector)
+                    ).some(visible);
+                    const hasVisibleEmptyState = Array.from(
+                        document.querySelectorAll(emptyStateSelector)
+                    ).some((element) => visible(element) && emptyLabels.has(
+                        normalize(element.innerText)
+                    ));
+                    return {
+                        candidates: result,
+                        reliable: result.length > 0 || hasVisibleListRoot || hasVisibleEmptyState,
+                    };
+                }
+                """
+            )
+        except BrowserLifecycleError:
+            raise
+        except Exception as exc:
+            if self._exception_means_browser_closed(exc):
+                raise BrowserLifecycleError(
+                    "BROWSER_CONTEXT_CLOSED: 读取小黑盒草稿卡片时页面已关闭"
+                ) from exc
+            logger.warning(
+                "小黑盒草稿卡片读取失败：error_type={}",
+                type(exc).__name__,
+            )
+            return [], False
+
+        reliable = False
+        if isinstance(raw_candidates, dict):
+            reliable = raw_candidates.get("reliable") is True
+            raw_candidates = raw_candidates.get("candidates")
+        elif isinstance(raw_candidates, list):
+            # 旧测试桩/兼容调用只返回候选列表；非空列表仍能证明结构，
+            # 空列表没有足够证据，避免把任意空页面当成空草稿箱。
+            reliable = bool(raw_candidates)
+        if not isinstance(raw_candidates, list):
+            return [], False
+        candidates = []
+        seen = set()
+        for item in raw_candidates:
+            if not isinstance(item, dict):
+                continue
+            opaque = item.get("opaque")
+            title = self._normalize_platform_title(item.get("title"))
+            if not isinstance(opaque, str) or not opaque or not title:
+                continue
+            if opaque in seen:
+                continue
+            seen.add(opaque)
+            candidates.append({"opaque": opaque[:512], "title": title})
+        return candidates, reliable or bool(candidates)
+
+    async def _snapshot_draft_candidates(self, page) -> list[dict[str, str]]:
+        """兼容性投影：只返回安全的具体草稿候选，不暴露可靠性细节。"""
+        candidates, _reliable = await self._snapshot_draft_state(page)
+        return candidates
+
+    async def _collect_draft_baseline(self) -> list[dict[str, str]] | None:
+        """在同一 Context 的独立页面读取保存前草稿卡片快照并始终关闭页面。"""
+        context = self.context
+        new_page = getattr(context, "new_page", None) if context is not None else None
+        if not callable(new_page):
+            logger.warning("小黑盒保存草稿拒绝：当前 Context 不支持独立草稿箱页面")
+            return None
+        baseline_page = None
+        try:
+            baseline_page = await new_page()
+            await baseline_page.goto(self.DRAFTS_URL, wait_until="domcontentloaded")
+            if not self._is_drafts_route(getattr(baseline_page, "url", "")):
+                logger.warning("小黑盒保存草稿拒绝：草稿箱页面路由未确认")
+                return None
+            await self.simulator.random_delay(1, 2)
+            candidates, reliable = await self._snapshot_draft_state(baseline_page)
+            return candidates if reliable else None
+        except BrowserLifecycleError:
+            raise
+        except Exception as exc:
+            if self._exception_means_browser_closed(exc):
+                raise BrowserLifecycleError(
+                    "BROWSER_CONTEXT_CLOSED: 读取保存前草稿箱时页面已关闭"
+                ) from exc
+            logger.warning(
+                "小黑盒保存前草稿箱读取失败：error_type={}",
+                type(exc).__name__,
+            )
+            return None
+        finally:
+            if baseline_page is not None:
+                try:
+                    await baseline_page.close()
+                except Exception as exc:
+                    if self._exception_means_browser_closed(exc):
+                        logger.debug("小黑盒保存前草稿箱页面已关闭")
+                    else:
+                        logger.debug(
+                            "小黑盒关闭保存前草稿箱页面失败：error_type={}",
+                            type(exc).__name__,
+                        )
+
+    @staticmethod
+    def _has_new_matching_draft(
+        baseline: list[dict[str, str]],
+        current: list[dict[str, str]],
+        expected_title: str,
+    ) -> bool:
+        """只接受 baseline 之外的唯一新实体，且平台标题必须精确匹配。"""
+        if current is None or not current or not expected_title:
+            return False
+        baseline_keys = {
+            item.get("opaque")
+            for item in baseline
+            if isinstance(item, dict) and item.get("opaque")
+        }
+        matches = [
+            item for item in current
+            if isinstance(item, dict)
+            and item.get("opaque") not in baseline_keys
+            and item.get("title") == expected_title
+        ]
+        return len(matches) == 1
+
+    async def _verify_draft_in_drafts(
+        self,
+        expected_title: str,
+        baseline: list[dict[str, str]],
+    ) -> str:
+        """保存后轮询具体草稿卡片，确认新实体出现；失败返回空串。"""
         try:
             self._raise_if_page_closed("小黑盒验证草稿箱")
-            draft_box = self.page.locator(self.DRAFT_BOX_BTN, has_text="草稿箱").first
-            if await draft_box.count() > 0:
-                await draft_box.click(timeout=5000)
-                await self.simulator.random_delay(3, 5)
-            else:
-                # 直接导航草稿箱
-                await self.page.goto("https://www.xiaoheihe.cn/creator/draft", wait_until="domcontentloaded")
-                await self.simulator.random_delay(3, 5)
+            await self.page.goto(self.DRAFTS_URL, wait_until="domcontentloaded")
+            await self.simulator.random_delay(3, 5)
+        except BrowserLifecycleError:
+            raise
         except Exception as e:
             if self._exception_means_browser_closed(e):
-                raise BrowserLifecycleError("BROWSER_CONTEXT_CLOSED: 打开小黑盒草稿箱时页面已关闭") from e
-            logger.error("小黑盒打开草稿箱失败: {}", e)
+                raise BrowserLifecycleError(
+                    "BROWSER_CONTEXT_CLOSED: 打开小黑盒草稿箱时页面已关闭"
+                ) from e
+            logger.error("小黑盒打开草稿箱失败：error_type={}", type(e).__name__)
             return ""
 
         drafts_url = self.page.url
-        if "/creator/draft" not in (drafts_url or ""):
-            logger.error("小黑盒草稿箱路由验证失败: {}", drafts_url)
+        if not self._is_drafts_route(drafts_url):
+            logger.error("小黑盒草稿箱路由验证失败")
             return ""
 
-        if title:
-            keyword = title[:12]
-            try:
-                found = await self.page.evaluate("(kw) => (document.body.innerText || '').includes(kw)", keyword)
-                if found:
-                    return drafts_url
-                # 再等一会，草稿可能异步出现
-                await self.simulator.random_delay(3, 5)
-                found = await self.page.evaluate("(kw) => (document.body.innerText || '').includes(kw)", keyword)
-                if found:
-                    return drafts_url
-            except Exception:
-                pass
-            logger.error("小黑盒草稿箱未找到标题包含「{}」的草稿", keyword)
-            return ""
-
-        # 无标题可校验，乐观返回草稿箱 URL
-        return drafts_url
+        for attempt in range(self.DRAFT_VERIFY_ATTEMPTS):
+            current, reliable = await self._snapshot_draft_state(self.page)
+            if reliable and self._has_new_matching_draft(
+                baseline,
+                current,
+                expected_title,
+            ):
+                return drafts_url
+            if attempt + 1 < self.DRAFT_VERIFY_ATTEMPTS:
+                await self.simulator.random_delay(2, 4)
+        logger.warning("小黑盒草稿箱未确认保存后新增的匹配草稿卡片")
+        return ""
 
     async def publish_now(self, title: str = "") -> str:
         """点击「发布」按钮真正发布文章，返回发布后的文章 URL；失败返回空串"""

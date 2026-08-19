@@ -62,12 +62,12 @@
 
 | 能力项 | 状态 | page_state | last_real_check | evidence_refs |
 |---|---|---|---|---|
-| account_session | `REAL_VERIFIED` | `account_active_valid` | 2026-08-17 | `codex_handoff_20260817.md` |
-| editor_entry | `REAL_VERIFIED` | `real_acceptance_passed` | 2026-08-17 | `codex_handoff_20260817.md` |
-| text_draft | `REAL_VERIFIED` | `real_acceptance_passed` | 2026-08-17 | `codex_handoff_20260817.md` |
-| body_images | `REAL_VERIFIED` | `real_acceptance_passed` | 2026-08-17 | `codex_handoff_20260817.md` |
-| cover | `RETEST_REQUIRED` | `no_prior_real_run` | — | `codex_handoff_20260817.md` |
-| draft_verification | `REAL_VERIFIED` | `real_acceptance_passed` | 2026-08-17 | `codex_handoff_20260817.md`, `docs/PLATFORM_DRAFTBOX_AUDIT.md` |
+| account_session | `REAL_VERIFIED` | `account_active_valid_during_word_draft_acceptance` | 2026-08-19 | `docs/acceptance/ZHIHU_WORD_DRAFT_20260819.md`, `codex_handoff_20260817.md` |
+| editor_entry | `REAL_VERIFIED` | `real_draftjs_editor_entry_passed` | 2026-08-19 | `docs/acceptance/ZHIHU_WORD_DRAFT_20260819.md`, `codex_handoff_20260817.md` |
+| text_draft | `REAL_VERIFIED` | `real_reopen_verified_22_text_and_heading_blocks` | 2026-08-19 | `docs/acceptance/ZHIHU_WORD_DRAFT_20260819.md`, `codex_handoff_20260817.md` |
+| body_images | `REAL_VERIFIED` | `real_reopen_verified_7_ordered_body_images` | 2026-08-19 | `docs/acceptance/ZHIHU_WORD_DRAFT_20260819.md`, `codex_handoff_20260817.md` |
+| cover | `RETEST_REQUIRED` | `cover_control_not_independently_verified` | 2026-08-19 | `docs/acceptance/ZHIHU_WORD_DRAFT_20260819.md`, `codex_handoff_20260817.md` |
+| draft_verification | `REAL_VERIFIED` | `unique_api_draft_id_and_29_ordered_tokens_reopened` | 2026-08-19 | `docs/acceptance/ZHIHU_WORD_DRAFT_20260819.md`, `codex_handoff_20260817.md` |
 | public_publish | `DISABLED` | `global_publish_gate_closed` | — | `AGENTS.md`, `codex_handoff_20260817.md` |
 
 ### 什么值得买 `smzdm`

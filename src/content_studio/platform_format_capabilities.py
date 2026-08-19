@@ -101,15 +101,20 @@ class PlatformFormatCapabilities:
         return self._declarations
 
 
-# 2026-08-19：小黑盒已有交错插图、稳定图片数量增长，以及 ``# ``→H2、
-# ``## ``→H3 的真实编辑器 DOM 回读证据。其他 heading level 仍保持关闭。
+# 2026-08-19：小黑盒与知乎均已用同一份 v2 Word 内容完成交错插图、
+# 标题映射和保存后重开 DOM 核验。未真实证明的 heading level 仍保持关闭。
 DEFAULT_PLATFORM_FORMAT_CAPABILITIES = PlatformFormatCapabilities(
     {
         "xiaoheihe": PlatformFormatDeclaration(
             "xiaoheihe",
             frozenset({"heading", "image_order"}),
             frozenset({2, 3}),
-        )
+        ),
+        "zhihu": PlatformFormatDeclaration(
+            "zhihu",
+            frozenset({"heading", "image_order"}),
+            frozenset({2}),
+        ),
     }
 )
 

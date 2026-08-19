@@ -62,6 +62,11 @@ _ZOL_WORD_EVIDENCE = (
     "docs/acceptance/ZOL_WORD_DRAFT_20260819.md",
     "codex_handoff_20260817.md",
 )
+_ZHIHU_WORD_DATE = date(2026, 8, 19)
+_ZHIHU_WORD_EVIDENCE = (
+    "docs/acceptance/ZHIHU_WORD_DRAFT_20260819.md",
+    "codex_handoff_20260817.md",
+)
 _XHS_EVIDENCE = (
     "codex_handoff_20260817.md",
     "docs/XIAOHONGSHU_RISK_CONTROL.md",
@@ -319,10 +324,44 @@ PLATFORM_DELIVERY_READINESS: tuple[PlatformDeliveryReadiness, ...] = (
     ),
     _build_platform(
         "zhihu",
-        real_verified=frozenset(
-            {"editor_entry", "text_draft", "body_images", "draft_verification"}
-        ),
-        no_prior_run=frozenset({"cover"}),
+        facet_overrides={
+            "account_session": (
+                ReadinessStatus.REAL_VERIFIED,
+                "account_active_valid_during_word_draft_acceptance",
+                _ZHIHU_WORD_DATE,
+                _ZHIHU_WORD_EVIDENCE,
+            ),
+            "editor_entry": (
+                ReadinessStatus.REAL_VERIFIED,
+                "real_draftjs_editor_entry_passed",
+                _ZHIHU_WORD_DATE,
+                _ZHIHU_WORD_EVIDENCE,
+            ),
+            "text_draft": (
+                ReadinessStatus.REAL_VERIFIED,
+                "real_reopen_verified_22_text_and_heading_blocks",
+                _ZHIHU_WORD_DATE,
+                _ZHIHU_WORD_EVIDENCE,
+            ),
+            "body_images": (
+                ReadinessStatus.REAL_VERIFIED,
+                "real_reopen_verified_7_ordered_body_images",
+                _ZHIHU_WORD_DATE,
+                _ZHIHU_WORD_EVIDENCE,
+            ),
+            "cover": (
+                ReadinessStatus.RETEST_REQUIRED,
+                "cover_control_not_independently_verified",
+                _ZHIHU_WORD_DATE,
+                _ZHIHU_WORD_EVIDENCE,
+            ),
+            "draft_verification": (
+                ReadinessStatus.REAL_VERIFIED,
+                "unique_api_draft_id_and_29_ordered_tokens_reopened",
+                _ZHIHU_WORD_DATE,
+                _ZHIHU_WORD_EVIDENCE,
+            ),
+        },
     ),
     _build_platform("smzdm"),
     _build_platform(

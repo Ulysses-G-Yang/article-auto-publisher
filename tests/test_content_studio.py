@@ -293,7 +293,7 @@ def test_platform_format_capabilities_are_explicit_and_fail_closed() -> None:
         PlatformFormatCapabilities({"xiaoheihe": {"not_a_real_feature"}})
 
 
-def test_default_capabilities_match_real_xiaoheihe_heading_and_image_evidence() -> None:
+def test_default_capabilities_match_real_xiaoheihe_and_zhihu_evidence() -> None:
     assert DEFAULT_PLATFORM_FORMAT_CAPABILITIES.get("xiaoheihe").supported == {
         "heading",
         "image_order",
@@ -302,8 +302,13 @@ def test_default_capabilities_match_real_xiaoheihe_heading_and_image_evidence() 
         2,
         3,
     }
+    assert DEFAULT_PLATFORM_FORMAT_CAPABILITIES.get("zhihu").supported == {
+        "heading",
+        "image_order",
+    }
+    assert DEFAULT_PLATFORM_FORMAT_CAPABILITIES.get("zhihu").heading_levels == {2}
     for platform in DELIVERY_PLATFORMS:
-        if platform != "xiaoheihe":
+        if platform not in {"xiaoheihe", "zhihu"}:
             assert not DEFAULT_PLATFORM_FORMAT_CAPABILITIES.get(platform).supported
 
 

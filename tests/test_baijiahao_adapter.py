@@ -22,6 +22,7 @@ class _Item:
         self.text = text
         self.click = AsyncMock()
         self.set_input_files = AsyncMock()
+        self.parent: _Item | None = None
 
     async def is_visible(self) -> bool:
         return self.visible
@@ -31,6 +32,13 @@ class _Item:
 
     async def inner_text(self) -> str:
         return self.text
+
+    def locator(self, selector: str) -> _Item:
+        assert selector == ".."
+        return self.parent or self
+
+    async def wait_for(self, *, state: str, timeout: int) -> None:
+        assert (state, timeout) == ("hidden", 5000)
 
 
 class _Collection:
@@ -153,13 +161,18 @@ def test_heading_uses_exact_dropdown_item_instead_of_page_wide_text() -> None:
     trigger = _Item()
     title = _Item(text=" 标题 ")
     body = _Item(text="正文")
+    title_parent = _Item()
+    body_parent = _Item()
+    title.parent = title_parent
+    body.parent = body_parent
     platform = BaijiahaoPlatform()
     platform.page = _FormatPage(trigger, [title, body])
 
     asyncio.run(platform._apply_h2_to_current_block())
 
     trigger.click.assert_awaited_once()
-    title.click.assert_awaited_once()
+    title_parent.click.assert_awaited_once()
+    title.click.assert_not_awaited()
     body.click.assert_not_awaited()
 
 

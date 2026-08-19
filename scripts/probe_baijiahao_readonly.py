@@ -165,6 +165,9 @@ PROBE_SCRIPT = r"""() => {
     const editors = Array.from(document.querySelectorAll('[contenteditable="true"]')).map(
         (element) => ({
             tag: element.tagName.toLowerCase(),
+            class_name: compact(
+                typeof element.className === 'string' ? element.className : ''
+            ),
             visible: visible(element),
             aria_label: compact(element.getAttribute('aria-label')),
             placeholder: compact(

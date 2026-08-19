@@ -787,12 +787,13 @@ class BaijiahaoPlatform(BasePlatform):
                     continue
                 label = normalize_for_comparison(await option.inner_text())
                 if label == "标题":
-                    candidates.append(option)
+                    candidates.append(option.locator(".."))
             if len(candidates) != 1:
                 raise RuntimeError(
                     f"标题格式选项不唯一: candidates={len(candidates)}"
                 )
             await candidates[0].click(timeout=5000)
+            await options.first.wait_for(state="hidden", timeout=5000)
         except Exception as exc:
             if self._exception_means_browser_closed(exc):
                 raise BrowserLifecycleError(

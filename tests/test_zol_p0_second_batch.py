@@ -11,7 +11,7 @@ import copy
 import hashlib
 from io import BytesIO
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 from PIL import Image, ImageDraw
@@ -97,11 +97,13 @@ def test_new_draft_requires_total_increment_and_unique_exact_title_entity() -> N
 def test_zol_preflight_runs_before_auto_saving_editor_navigation() -> None:
     platform = ZOLPlatform()
     draft_page = AsyncMock()
+    platform.page = SimpleNamespace(on=Mock(), remove_listener=Mock())
     platform._prepare_draft_verification_page = AsyncMock(return_value=draft_page)
 
     asyncio.run(platform.preflight_delivery("  唯一标题  "))
 
     platform._prepare_draft_verification_page.assert_awaited_once_with("唯一标题")
+    platform.page.on.assert_called_once_with("response", platform._autosave_listener)
     draft_page.close.assert_awaited_once()
 
 
@@ -379,17 +381,68 @@ def test_save_verification_page_is_closed_after_response_proof_failure() -> None
     assert draft_page.closed is True
 
 
-def test_existing_same_title_blocks_before_click() -> None:
+def test_existing_same_title_after_editor_entry_is_unknown_and_never_clicked() -> None:
     platform, draft_page = _save_platform(
         responses=[_SaveResponse({"errcode": 0, "data": {"draftId": "new-id"}})],
         card_states=[[_SaveCard("新草稿")]],
     )
 
-    with pytest.raises(DraftBaselineError, match="DRAFT_BASELINE_UNAVAILABLE"):
+    with pytest.raises(DraftResultUnknownError, match="DRAFT_RESULT_UNKNOWN"):
         asyncio.run(platform.save_draft("新草稿"))
 
     assert platform.page.control.click_count == 0
     assert draft_page.closed is True
+
+
+def test_autosave_same_entity_multiple_times_is_verified_without_click() -> None:
+    platform, draft_page = _save_platform(
+        responses=[],
+        card_states=[
+            [_SaveCard("自动保存草稿", {"data-draft-id": "same-id"})],
+            [_SaveCard("自动保存草稿", {"data-draft-id": "same-id"})],
+        ],
+    )
+    platform._autosave_responses = [
+        _SaveResponse({"errcode": 0, "data": {"draftId": "same-id"}}),
+        _SaveResponse({"errcode": 0, "data": {"draftId": "same-id"}}),
+    ]
+
+    result = asyncio.run(platform.save_draft("自动保存草稿"))
+
+    assert result.endswith("/draft")
+    assert platform.page.control.click_count == 0
+    assert draft_page.closed is True
+
+
+def test_autosave_multiple_entities_is_unknown_and_never_clicked() -> None:
+    platform, draft_page = _save_platform(responses=[], card_states=[])
+    platform._autosave_responses = [
+        _SaveResponse({"errcode": 0, "data": {"draftId": "first-id"}}),
+        _SaveResponse({"errcode": 0, "data": {"draftId": "second-id"}}),
+    ]
+
+    with pytest.raises(DraftResultUnknownError, match="多个草稿实体"):
+        asyncio.run(platform.save_draft("重复自动保存"))
+
+    assert platform.page.control.click_count == 0
+    assert platform.context.new_page_count == 0
+    assert draft_page.closed is False
+
+
+def test_autosave_proof_does_not_require_visible_manual_save_control() -> None:
+    platform, _draft_page = _save_platform(
+        responses=[],
+        card_states=[
+            [_SaveCard("自动保存草稿", {"data-draft-id": "auto-id"})],
+            [_SaveCard("自动保存草稿", {"data-draft-id": "auto-id"})],
+        ],
+    )
+    platform.page.control = FakeLocator(count=0, visible=False)
+    platform._autosave_responses = [
+        _SaveResponse({"errcode": 0, "data": {"draftId": "auto-id"}})
+    ]
+
+    assert asyncio.run(platform.save_draft("自动保存草稿")).endswith("/draft")
 
 
 def test_preview_response_is_ignored_before_unique_save_response() -> None:

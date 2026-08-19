@@ -94,6 +94,39 @@ class ZOLPlatform(BasePlatform):
         self.last_login_error = ""
         self.enable_heading_experiment = enable_heading_experiment
         self._draft_baseline: _ZOLDraftSnapshot | None = None
+        self._autosave_responses: list[object] = []
+        self._autosave_listener = None
+
+    def _stop_autosave_observer(self) -> None:
+        """移除当前页面的自动保存监听器，不影响已收集的响应证据。"""
+
+        listener = self._autosave_listener
+        self._autosave_listener = None
+        if listener is None or self.page is None:
+            return
+        try:
+            self.page.remove_listener("response", listener)
+        except Exception:
+            logger.debug("ZOL 自动保存响应监听器清理失败")
+
+    def _start_autosave_observer(self) -> None:
+        """从进入编辑器前开始收集有限的草稿保存响应。"""
+
+        self._stop_autosave_observer()
+        self._autosave_responses = []
+
+        def collect(response) -> None:
+            if self._is_draft_save_response(response):
+                self._autosave_responses.append(response)
+
+        self.page.on("response", collect)
+        self._autosave_listener = collect
+
+    async def cleanup(self):
+        """先移除页面监听器，再关闭持久化浏览器上下文。"""
+
+        self._stop_autosave_observer()
+        await super().cleanup()
 
     @staticmethod
     def _host(url: str) -> str:
@@ -2550,9 +2583,61 @@ class ZOLPlatform(BasePlatform):
             raise DraftBaselineError("DRAFT_BASELINE_UNAVAILABLE: 草稿标题为空")
         draft_page = await self._prepare_draft_verification_page(expected_title)
         try:
-            return None
+            self._start_autosave_observer()
         finally:
             await draft_page.close()
+
+    async def _unique_draft_id_from_responses(
+        self,
+        responses: list[object],
+        *,
+        allow_empty: bool,
+    ) -> str | None:
+        """把多次自动保存折叠为唯一草稿实体，禁止跨实体歧义。"""
+
+        if not responses:
+            if allow_empty:
+                return None
+            raise DraftResultUnknownError(
+                "DRAFT_RESULT_UNKNOWN: 未观察到草稿保存响应"
+            )
+
+        response_ids = {
+            await self._parse_draft_save_response(response)
+            for response in responses
+        }
+        if len(response_ids) != 1:
+            raise DraftResultUnknownError(
+                "DRAFT_RESULT_UNKNOWN: 自动保存产生了多个草稿实体"
+            )
+        return next(iter(response_ids))
+
+    async def _open_draft_verification_page(self):
+        """打开独立草稿页；调用方负责关闭。"""
+
+        if self.context is None:
+            raise DraftResultUnknownError(
+                "DRAFT_RESULT_UNKNOWN: 无法创建独立草稿核验页面"
+            )
+        draft_page = None
+        transferred = False
+        try:
+            draft_page = await self.context.new_page()
+            await self._navigate_draft_verification_page(draft_page)
+            transferred = True
+            return draft_page
+        except DraftResultUnknownError:
+            raise
+        except Exception as exc:
+            raise DraftResultUnknownError(
+                "DRAFT_RESULT_UNKNOWN: 独立草稿核验页面无法打开"
+            ) from exc
+        finally:
+            if draft_page is not None and not transferred:
+                try:
+                    await draft_page.close()
+                except Exception:
+                    logger.warning("ZOL 草稿核验页打开失败后关闭失败")
 
     async def _collect_draft_save_response(self, control) -> str:
         """点击一次后收集有限候选，只接受唯一明确成功的保存响应。"""
@@ -2575,24 +2660,12 @@ class ZOLPlatform(BasePlatform):
             except Exception:
                 logger.debug("ZOL 保存响应监听器清理失败")
 
-        successful_ids = []
-        for response in responses:
-            status = getattr(response, "status", None)
-            if not isinstance(status, int) or not 200 <= status < 300:
-                continue
-            try:
-                payload = await response.json()
-            except Exception:
-                continue
-            if not self._response_success(payload):
-                continue
-            successful_ids.append(self._response_id(payload))
-
-        if len(successful_ids) != 1 or not successful_ids[0]:
-            raise DraftResultUnknownError(
-                "DRAFT_RESULT_UNKNOWN: 保存成功响应不唯一或缺少白名单草稿 ID"
-            )
-        return successful_ids[0]
+        response_id = await self._unique_draft_id_from_responses(
+            responses,
+            allow_empty=False,
+        )
+        assert response_id is not None
+        return response_id
 
     async def _verify_saved_draft_card(
         self,
@@ -2624,12 +2697,7 @@ class ZOLPlatform(BasePlatform):
         )
 
     async def save_draft(self, title: str = "") -> str:
-        """只点击一次保存，并用保存响应与独立草稿卡片双重证明结果。
-
-        编辑器进入不再依赖不稳定的草稿列表基线。点击前只验证唯一控件；
-        点击后响应、白名单 ID 或唯一标题卡片任一缺失，都必须返回结果未知，
-        上层禁止自动重试。
-        """
+        """优先证明编辑器自动保存；仅在无副作用证据时点击一次保存。"""
         self._require_page_alive("ZOL 保存草稿")
         current_url = self.page.url or ""
         if not self._is_blog_editor_url(current_url):
@@ -2644,18 +2712,41 @@ class ZOLPlatform(BasePlatform):
         if not expected_title:
             raise SelectorError("ZOL_DRAFT_TITLE_MISSING: 保存草稿缺少标题")
 
-        control = self.page.locator(self.DRAFT_SAVE_SELECTOR)
-        if await control.count() != 1 or not await control.is_visible():
-            raise SelectorError(
-                "ZOL_DRAFT_SAVE_CONTROL_UNAVAILABLE: 未找到唯一可见存草稿控件"
-            )
-
         clicked = False
         draft_page = None
         try:
-            draft_page = await self._prepare_draft_verification_page(expected_title)
-            clicked = True
-            response_id = await self._collect_draft_save_response(control)
+            # 当前 ZOL 编辑器会在标题/正文变化后自动保存。先等待有界时间，
+            # 再按草稿实体 ID 去重；同一 ID 多次响应是同一实体的连续版本，
+            # 不同 ID 则说明一次投递产生了多个草稿，必须停止且禁止重试。
+            await asyncio.sleep(self.DRAFT_RESPONSE_WAIT_SECONDS)
+            autosave_id = await self._unique_draft_id_from_responses(
+                list(self._autosave_responses),
+                allow_empty=True,
+            )
+            draft_page = await self._open_draft_verification_page()
+
+            if autosave_id is not None:
+                response_id = autosave_id
+            else:
+                # 即使网络监听未获得可用响应，只要草稿箱已出现同名实体，
+                # 就证明编辑器发生了未观测副作用；此时绝不能再点击保存。
+                existing = await self._matching_draft_cards(
+                    draft_page,
+                    expected_title,
+                )
+                if existing:
+                    raise DraftResultUnknownError(
+                        "DRAFT_RESULT_UNKNOWN: 检测到未观测的自动保存草稿"
+                    )
+
+                control = self.page.locator(self.DRAFT_SAVE_SELECTOR)
+                if await control.count() != 1 or not await control.is_visible():
+                    raise SelectorError(
+                        "ZOL_DRAFT_SAVE_CONTROL_UNAVAILABLE: 未找到唯一可见存草稿控件"
+                    )
+                clicked = True
+                response_id = await self._collect_draft_save_response(control)
+
             await self.simulator.random_delay(2, 5)
             await self._verify_saved_draft_card(
                 draft_page,
@@ -2689,6 +2780,7 @@ class ZOLPlatform(BasePlatform):
                 "DRAFT_RESULT_UNKNOWN: 保存动作已触发但结果无法证明"
             ) from exc
         finally:
+            self._stop_autosave_observer()
             if draft_page is not None:
                 try:
                     await draft_page.close()

@@ -240,10 +240,10 @@ DRAFT_LIST_PROBE_SCRIPT = r"""() => {
         && element.getClientRects().length > 0;
     const interactiveSelector = 'button, a, [role="button"], [role="link"]';
     const listContainers = Array.from(document.querySelectorAll(
-        '[role="list"], ul, ol'
+        '.draft-drawer .draft-list'
     )).filter(visible);
     const itemCandidates = Array.from(document.querySelectorAll(
-        '[role="listitem"], article, li'
+        '.draft-drawer .draft-list .draft-item'
     )).filter(visible);
     // 只保留最内层候选，避免把整个列表容器错误统计为一项。
     const items = itemCandidates.filter((element) => !itemCandidates.some(
@@ -255,10 +255,9 @@ DRAFT_LIST_PROBE_SCRIPT = r"""() => {
         || element.textContent
     );
     const labelLength = (item) => {
-        const heading = item.querySelector('h1, h2, h3, h4, h5, h6, [role="heading"]');
-        const label = (heading && visible(heading) ? shortText(heading) : '')
-            || shortText(item.getAttribute('aria-label') || '');
-        return label.length;
+        const info = item.querySelector('.draft-info');
+        const firstLine = compact(info ? (info.innerText || '').split('\n')[0] : '');
+        return firstLine.length;
     };
     const safeAction = (text) => {
         const normalized = compact(text);
@@ -784,10 +783,24 @@ async def run_probe(
             if probe_draft_list:
                 if origin != CREATOR_ORIGIN or path != CREATOR_PUBLISH_PATH:
                     return build_probe_result("UNEXPECTED_ORIGIN")
-                entry_payload = await platform.page.evaluate(DRAFT_LIST_ENTRY_SCRIPT)
-                entry_status = classify_draft_entry_payload(entry_payload)
-                if entry_status != "DRAFT_LIST_ENTRY_CLICKED":
-                    return build_draft_list_result(entry_status, entry_payload)
+                entry = platform.page.locator(".draft-title-box")
+                if await entry.count() != 1 or not await entry.is_visible():
+                    return build_draft_list_result(
+                        "DRAFT_LIST_ENTRY_MISSING", {"entry_count": await entry.count()}
+                    )
+                await entry.click(timeout=15000)
+                tabs = platform.page.get_by_text(re.compile(r"^长文笔记\(\d+\)$"))
+                visible_tabs = []
+                for index in range(await tabs.count()):
+                    tab = tabs.nth(index)
+                    if await tab.is_visible():
+                        visible_tabs.append(tab)
+                if len(visible_tabs) != 1:
+                    return build_draft_list_result(
+                        "DRAFT_LIST_ENTRY_AMBIGUOUS",
+                        {"entry_count": len(visible_tabs)},
+                    )
+                await visible_tabs[0].click(timeout=15000)
                 draft_status, draft_payload = await wait_for_draft_list(platform.page)
                 if draft_status == "UNEXPECTED_ORIGIN":
                     return build_probe_result(draft_status)

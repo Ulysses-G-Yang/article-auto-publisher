@@ -78,6 +78,7 @@ _BAIJIAHAO_WORD_EVIDENCE = (
     "codex_handoff_20260817.md",
 )
 _XHS_EVIDENCE = (
+    "docs/acceptance/XIAOHONGSHU_SINGLE_IMAGE_DRAFT_20260820.md",
     "codex_handoff_20260817.md",
     "docs/XIAOHONGSHU_RISK_CONTROL.md",
 )
@@ -457,8 +458,32 @@ PLATFORM_DELIVERY_READINESS: tuple[PlatformDeliveryReadiness, ...] = (
     ),
     _build_platform(
         "xiaohongshu",
-        real_verified=frozenset({"editor_entry", "text_draft", "draft_verification"}),
-        real_failed=frozenset({"body_images"}),
+        facet_overrides={
+            "editor_entry": (
+                ReadinessStatus.REAL_VERIFIED,
+                "real_longform_tiptap_entry_passed",
+                date(2026, 8, 20),
+                _XHS_EVIDENCE,
+            ),
+            "text_draft": (
+                ReadinessStatus.REAL_VERIFIED,
+                "real_reopen_verified_text_before_and_after_image",
+                date(2026, 8, 20),
+                _XHS_EVIDENCE,
+            ),
+            "body_images": (
+                ReadinessStatus.REAL_VERIFIED,
+                "real_reopen_verified_single_body_image_in_order",
+                date(2026, 8, 20),
+                _XHS_EVIDENCE,
+            ),
+            "draft_verification": (
+                ReadinessStatus.REAL_VERIFIED,
+                "unique_title_and_text_image_text_reopened",
+                date(2026, 8, 20),
+                _XHS_EVIDENCE,
+            ),
+        },
         no_prior_run=frozenset({"cover"}),
     ),
 )

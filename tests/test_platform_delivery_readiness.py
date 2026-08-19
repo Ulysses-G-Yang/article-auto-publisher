@@ -85,12 +85,12 @@ def test_matrix_validation_checks_existing_relative_evidence_and_public_gate() -
                     assert facet.last_real_check is not None
 
 
-def test_unrerun_platform_facts_are_not_promoted() -> None:
+def test_platform_facts_follow_current_real_acceptance_evidence() -> None:
     by_platform = readiness_by_platform()
 
     assert by_platform["zhihu"].facets["body_images"].status is ReadinessStatus.REAL_VERIFIED
     assert by_platform["xiaohongshu"].facets["text_draft"].status is ReadinessStatus.REAL_VERIFIED
-    assert by_platform["xiaohongshu"].facets["body_images"].status is ReadinessStatus.REAL_FAILED
+    assert by_platform["xiaohongshu"].facets["body_images"].status is ReadinessStatus.REAL_VERIFIED
     assert by_platform["baijiahao"].facets["cover"].status is ReadinessStatus.REAL_FAILED
 
 def test_zol_word_draft_is_promoted_only_after_persisted_reopen_evidence() -> None:
@@ -198,7 +198,7 @@ def test_baijiahao_word_draft_is_promoted_after_persisted_reopen_evidence() -> N
         ("zol", True),
         ("smzdm", True),
         ("baijiahao", True),
-        ("xiaohongshu", False),
+        ("xiaohongshu", True),
         ("unknown", False),
     ],
 )

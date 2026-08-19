@@ -17,6 +17,8 @@ fail closed；公开发布始终关闭。
 from __future__ import annotations
 
 import asyncio
+import copy
+import hashlib
 import re
 from collections.abc import Mapping, Sequence
 from pathlib import Path
@@ -26,6 +28,8 @@ from loguru import logger
 from platforms.base import (
     BasePlatform,
     BrowserLifecycleError,
+    DraftBaselineError,
+    DraftResultUnknownError,
     LoginRequiredError,
     PlatformAutomationError,
     SelectorError,
@@ -38,9 +42,19 @@ LOGIN_URL = "https://creator.xiaohongshu.com/login"
 IDENTITY_NAME_KEYS = {"nickname", "user_name", "screen_name", "name"}
 IDENTITY_UID_KEYS = {"user_id", "sec_uid", "uid"}
 
-# Current read-only probe found no body image input; do not guess a selector.
-# Replace only after a new approved probe provides explicit evidence.
-VERIFIED_BODY_IMAGE_INPUT_SELECTOR: str | None = None
+# 2026-08-20 真实只读探测：点击长文 TipTap 工具栏中唯一 SVG 指纹按钮后，
+# 页面才动态创建正文图片 FileChooser；不存在可安全复用的静态 file input。
+XHS_EDITOR_SELECTOR = "div.tiptap.ProseMirror"
+XHS_TOOLBAR_BUTTON_SELECTOR = ".edit-page.new-ui button.menu-item"
+VERIFIED_BODY_IMAGE_ICON_FINGERPRINT = (
+    "75d8717d8ac60eb26ac4490c408d1ee766029f5cf293b8adc1dc36d89bce11f2"
+)
+VERIFIED_BODY_IMAGE_ACCEPT = frozenset({
+    "image/jpeg",
+    "image/jpg",
+    "image/png",
+    "image/webp",
+})
 
 
 def choose_verified_body_image_index(
@@ -94,6 +108,8 @@ class XiaohongshuPlatform(BasePlatform):
         super().__init__(**kwargs)
         self.last_login_error = ""
         self._identity_payload: dict[str, str | int | bool] | None = None
+        self._expected_persisted_blocks: list[dict] | None = None
+        self._preflight_title = ""
 
     async def initialize(self):
         await super().initialize()
@@ -361,6 +377,71 @@ class XiaohongshuPlatform(BasePlatform):
                 ) from exc
             raise SelectorError("小红书长文编辑器未找到标题输入框") from exc
 
+    async def preflight_delivery(self, title: str) -> None:
+        """保存前证明不存在同名长文草稿，避免结果未知后产生重复副作用。"""
+
+        self._require_page_alive("小红书草稿基线检查")
+        expected_title = " ".join(str(title or "").split())
+        if not expected_title:
+            raise DraftBaselineError("DRAFT_BASELINE_FAILED: 小红书标题不能为空")
+        try:
+            await self.page.goto(
+                "https://creator.xiaohongshu.com/publish/publish",
+                wait_until="domcontentloaded",
+                timeout=30000,
+            )
+            await self._open_long_draft_drawer()
+            matches = await self._matching_long_draft_cards(expected_title)
+        except DraftBaselineError:
+            raise
+        except Exception as exc:
+            if self._exception_means_browser_closed(exc):
+                raise BrowserLifecycleError(
+                    "BROWSER_CONTEXT_CLOSED: 小红书草稿基线检查时页面已关闭"
+                ) from exc
+            raise DraftBaselineError(
+                "DRAFT_BASELINE_FAILED: 小红书无法确认同名长文草稿基线"
+            ) from exc
+        if matches:
+            raise DraftBaselineError(
+                "DRAFT_BASELINE_FAILED: 小红书已存在同名草稿，禁止自动重复创建"
+            )
+        self._preflight_title = expected_title
+
+    async def _open_long_draft_drawer(self) -> None:
+        """使用真实鼠标事件打开草稿抽屉并切换到长文笔记。"""
+
+        entry = self.page.locator(".draft-title-box")
+        if await entry.count() != 1 or not await entry.is_visible():
+            raise DraftBaselineError("DRAFT_BASELINE_FAILED: 小红书草稿箱入口不唯一")
+        await entry.click(timeout=15000)
+        tabs = self.page.get_by_text(re.compile(r"^长文笔记\(\d+\)$"))
+        visible_tabs = []
+        for index in range(await tabs.count()):
+            tab = tabs.nth(index)
+            if await tab.is_visible():
+                visible_tabs.append(tab)
+        if len(visible_tabs) != 1:
+            raise DraftBaselineError("DRAFT_BASELINE_FAILED: 小红书长文草稿分类不唯一")
+        await visible_tabs[0].click(timeout=15000)
+        await self.page.wait_for_selector(
+            ".draft-drawer .draft-list",
+            state="visible",
+            timeout=15000,
+        )
+
+    async def _matching_long_draft_cards(self, title: str) -> list:
+        """返回标题行精确匹配的草稿卡；不读取正文或资源地址。"""
+
+        cards = self.page.locator(".draft-drawer .draft-list .draft-item")
+        matches = []
+        for index in range(await cards.count()):
+            card = cards.nth(index)
+            lines = [line.strip() for line in (await card.inner_text()).splitlines()]
+            if title in lines:
+                matches.append(card)
+        return matches
+
     async def _draft_box_count(self) -> int | None:
         """读取发布页侧栏「草稿箱(N)」计数。
 
@@ -447,7 +528,7 @@ class XiaohongshuPlatform(BasePlatform):
             raise SelectorError("小红书标题输入框未找到或填写失败") from exc
 
     async def fill_content(self, content_blocks: list, images: list):
-        """填写正文：键盘逐段写入 TipTap 编辑器，回读并有序校验。"""
+        """按冻结图文块顺序写入 TipTap；图片失败后停止且不自动重试。"""
 
         self._require_page_alive("小红书填写正文")
         editor = self.page.locator("div.tiptap.ProseMirror").first
@@ -469,14 +550,21 @@ class XiaohongshuPlatform(BasePlatform):
             pass
         await self.simulator.random_delay(0.3, 0.8)
 
-        first_text = True
+        expected_images = sum(
+            1 for block in content_blocks if block.get("type") == "image"
+        )
+        uploaded_images = 0
+        failed_images: list[dict[str, str]] = []
+        wrote_any = False
+        previous_was_image = False
+
         for block in content_blocks:
             btype = block.get("type")
             if btype in ("text", "heading") and block.get("text"):
                 text = str(block["text"]).strip()
                 if not text:
                     continue
-                if not first_text:
+                if wrote_any and not previous_was_image:
                     await self.page.keyboard.press("Enter")
                     # 分段间留足节奏，降低风控敏感度
                     await self.simulator.random_delay(0.8, 1.5)
@@ -488,36 +576,32 @@ class XiaohongshuPlatform(BasePlatform):
                     if i < len(lines) - 1:
                         await self.page.keyboard.press("Enter")
                         await self.simulator.random_delay(0.8, 1.5)
-                first_text = False
-
-        actual_text = await editor.inner_text()
-        expected_count = ensure_valid_content(
-            content_blocks,
-            actual_text,
-            platform="小红书",
-            phase="输入后",
-        )
-        logger.info("小红书正文文字输入并验证成功: {} 个文本段落", expected_count)
-
-        expected_images = sum(
-            1 for block in content_blocks if block.get("type") == "image"
-        )
-        uploaded_images = 0
-        failed_images = []
-        for block in content_blocks:
-            if block.get("type") == "image":
+                wrote_any = True
+                previous_was_image = False
+            elif btype == "image":
                 img_path = block.get("local_path")
                 if not img_path and images:
-                    for img in images:
-                        if img.get("position_index") == block.get("position"):
-                            img_path = img.get("local_path")
-                            break
-                    if not img_path:
-                        img_path = images[0].get("local_path")
+                    matches = [
+                        img.get("local_path")
+                        for img in images
+                        if img.get("position_index") == block.get("position")
+                        and img.get("local_path")
+                    ]
+                    if len(matches) == 1:
+                        img_path = matches[0]
                 if img_path:
+                    if wrote_any and not previous_was_image:
+                        await self.page.keyboard.press("Enter")
+                        await self.simulator.random_delay(0.8, 1.5)
                     upload_result = await self._upload_image(img_path) or {}
                     if upload_result.get("success"):
                         uploaded_images += 1
+                        wrote_any = True
+                        previous_was_image = True
+                        # 图片节点后创建下一段，确保后续文字不会落到图片前面。
+                        await editor.click()
+                        await self.page.keyboard.press("Control+End")
+                        await self.page.keyboard.press("Enter")
                     else:
                         failed_images.append(
                             {
@@ -528,21 +612,25 @@ class XiaohongshuPlatform(BasePlatform):
                                 ),
                             }
                         )
+                        break
                     # 每张图片之间放慢节奏，避免触发平台风控
                     await self.simulator.random_delay(2.5, 4.5)
                 else:
                     failed_images.append(
                         {"filename": "", "error": "文章图片块没有对应本地文件"}
                     )
+                    break
 
+        editor = self.page.locator(XHS_EDITOR_SELECTOR).first
         actual_text = await editor.inner_text()
-        ensure_valid_content(
+        expected_count = ensure_valid_content(
             content_blocks,
             actual_text,
             platform="小红书",
-            phase="图片处理后",
+            phase="图文写入后",
         )
         logger.info("小红书正文输入并最终验证成功: {} 个文本段落", expected_count)
+        self._expected_persisted_blocks = copy.deepcopy(content_blocks)
 
         if expected_images == 0:
             media_status = "not_required"
@@ -574,24 +662,47 @@ class XiaohongshuPlatform(BasePlatform):
         }
 
     async def _upload_image(self, image_path: str) -> dict:
-        """Upload only through a body input backed by real probe evidence.
-
-        The current read-only probe found zero file inputs on the landing page.
-        Until a user-approved probe of an existing draft freezes an explicit
-        selector, this method fails closed and never chooses a cover input.
-        """
+        """通过已验证工具栏按钮捕获临时 FileChooser，单次上传正文图片。"""
 
         self._require_page_alive("小红书上传图片")
-        target_input = await self._get_verified_body_image_input()
-        if target_input is None:
+        image_button = await self._get_verified_body_image_button()
+        if image_button is None:
             return {
                 "success": False,
-                "error_code": "XHS_BODY_IMAGE_INPUT_UNVERIFIED",
-                "error": "小红书正文图片控件尚未通过真实探测，已安全停止",
+                "error_code": "XHS_BODY_IMAGE_BUTTON_UNVERIFIED",
+                "error": "小红书正文图片按钮不符合已验证指纹，已安全停止",
             }
         try:
             before = await self._editor_image_count()
-            await target_input.set_input_files(str(image_path), timeout=20000)
+            async with self.page.expect_file_chooser(timeout=5000) as pending:
+                await image_button.click(timeout=5000)
+            chooser = await pending.value
+            metadata = await chooser.element.evaluate(
+                """(el) => ({
+                    type: String(el.type || '').toLowerCase(),
+                    accept: String(el.accept || '').toLowerCase(),
+                    multiple: Boolean(el.multiple),
+                    cover: Boolean(el.closest('[class*=cover], [data-cover]')),
+                })"""
+            )
+            accepted = {
+                item.strip()
+                for item in str(metadata.get("accept") or "").split(",")
+                if item.strip()
+            }
+            if (
+                metadata.get("type") != "file"
+                or metadata.get("multiple") is True
+                or metadata.get("cover") is True
+                or not accepted
+                or not accepted.issubset(VERIFIED_BODY_IMAGE_ACCEPT)
+            ):
+                return {
+                    "success": False,
+                    "error_code": "XHS_BODY_FILE_CHOOSER_UNVERIFIED",
+                    "error": "小红书文件选择器属性与正文图片证据不一致",
+                }
+            await chooser.set_files(str(Path(image_path).resolve()), timeout=20000)
             observed = before
             for _ in range(15):
                 await asyncio.sleep(1)
@@ -618,17 +729,26 @@ class XiaohongshuPlatform(BasePlatform):
                 "error": safe_media_error(exc, fallback="小红书图片上传失败"),
             }
 
-    async def _get_verified_body_image_input(self):
-        """Return only a selector frozen by real DOM evidence."""
+    async def _get_verified_body_image_button(self):
+        """返回 SVG path 指纹唯一匹配的可见正文图片按钮。"""
 
-        selector = VERIFIED_BODY_IMAGE_INPUT_SELECTOR
-        if not selector:
-            return None
         try:
-            base = self.page.locator(selector)
-            if await base.count() != 1:
+            editor = self.page.locator(XHS_EDITOR_SELECTOR).first
+            if await editor.count() != 1 or not await editor.is_visible():
                 return None
-            return base.first
+            buttons = self.page.locator(XHS_TOOLBAR_BUTTON_SELECTOR)
+            matches = []
+            for index in range(await buttons.count()):
+                button = buttons.nth(index)
+                if not await button.is_visible():
+                    continue
+                paths = await button.locator("svg path").evaluate_all(
+                    "(nodes) => nodes.map((node) => node.getAttribute('d') || '')"
+                )
+                digest = hashlib.sha256("|".join(paths).encode("utf-8")).hexdigest()
+                if digest == VERIFIED_BODY_IMAGE_ICON_FINGERPRINT:
+                    matches.append(button)
+            return matches[0] if len(matches) == 1 else None
         except Exception:
             return None
 
@@ -768,7 +888,10 @@ class XiaohongshuPlatform(BasePlatform):
                 after,
                 captured.get("status"),
             )
+            await self._verify_saved_long_draft(title)
             return "https://creator.xiaohongshu.com/publish/publish"
+        except DraftResultUnknownError:
+            raise
         except BrowserLifecycleError:
             raise
         except Exception as exc:
@@ -778,6 +901,57 @@ class XiaohongshuPlatform(BasePlatform):
                 ) from exc
             logger.error("小红书草稿验证失败: {}", exc)
             return ""
+
+    async def _verify_saved_long_draft(self, title: str) -> None:
+        """重开唯一同名草稿，验证标题、文字与正文图片数量。"""
+
+        expected_title = " ".join(str(title or "").split())
+        if expected_title != getattr(self, "_preflight_title", ""):
+            raise DraftResultUnknownError(
+                "DRAFT_RESULT_UNKNOWN: 小红书缺少与本次一致的标题基线"
+            )
+        blocks = self._expected_persisted_blocks
+        if blocks is None:
+            raise DraftResultUnknownError(
+                "DRAFT_RESULT_UNKNOWN: 小红书缺少冻结内容核验快照"
+            )
+        await self._open_long_draft_drawer()
+        matches = await self._matching_long_draft_cards(expected_title)
+        if len(matches) != 1:
+            raise DraftResultUnknownError(
+                "DRAFT_RESULT_UNKNOWN: 小红书未找到唯一同名长文草稿"
+            )
+        actions = matches[0].locator(".draft-actions .btn").filter(
+            has_text=re.compile(r"^编辑$")
+        )
+        if await actions.count() != 1:
+            raise DraftResultUnknownError(
+                "DRAFT_RESULT_UNKNOWN: 小红书草稿编辑入口不唯一"
+            )
+        await actions.click(timeout=15000)
+        await self.page.wait_for_selector(
+            XHS_EDITOR_SELECTOR,
+            state="visible",
+            timeout=20000,
+        )
+        persisted_title = await self.page.locator("textarea.d-text").first.input_value()
+        if " ".join(persisted_title.split()) != expected_title:
+            raise DraftResultUnknownError(
+                "DRAFT_RESULT_UNKNOWN: 小红书草稿重开后标题不一致"
+            )
+        editor = self.page.locator(XHS_EDITOR_SELECTOR).first
+        ensure_valid_content(
+            blocks,
+            await editor.inner_text(),
+            platform="小红书",
+            phase="草稿重开后",
+        )
+        expected_images = sum(1 for block in blocks if block.get("type") == "image")
+        actual_images = await self._editor_image_count()
+        if actual_images != expected_images:
+            raise DraftResultUnknownError(
+                "DRAFT_RESULT_UNKNOWN: 小红书草稿重开后正文图片数量不一致"
+            )
 
     async def publish_now(self, title: str = "") -> str:
         self._not_implemented("公开发布")

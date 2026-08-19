@@ -10,17 +10,52 @@ from platforms.xiaohongshu import (
 
 
 class FakeUploadPage:
-    def __init__(self) -> None:
+    def __init__(self, chooser=None) -> None:
         self.locator_calls: list[str] = []
+        self.chooser = chooser
 
     def locator(self, selector: str):
         self.locator_calls.append(selector)
         raise AssertionError("fail-closed path must not locate an unverified input")
 
+    def expect_file_chooser(self, **_kwargs):
+        chooser = self.chooser
 
-class FakeInput:
-    def __init__(self, error: Exception | None = None) -> None:
-        self.set_input_files = AsyncMock(side_effect=error)
+        class Pending:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_args):
+                return None
+
+            @property
+            async def value(self):
+                return chooser
+
+        return Pending()
+
+
+class FakeElement:
+    def __init__(self, metadata=None) -> None:
+        self.metadata = metadata or {
+            "type": "file",
+            "accept": "image/jpeg,image/jpg,image/png,image/webp",
+            "multiple": False,
+            "cover": False,
+        }
+
+    async def evaluate(self, _script):
+        return self.metadata
+
+
+class FakeChooser:
+    def __init__(self, error: Exception | None = None, metadata=None) -> None:
+        self.element = FakeElement(metadata)
+        self.set_files = AsyncMock(side_effect=error)
+
+
+class FakeButton:
+    click = AsyncMock()
 
 
 class FakeKeyboard:
@@ -101,33 +136,35 @@ def test_upload_does_not_fallback_to_first_input() -> None:
     platform.page = FakeUploadPage()
     result = run(platform._upload_image(r"D:\secret\photo.png"))
     assert result["success"] is False
-    assert result["error_code"] == "XHS_BODY_IMAGE_INPUT_UNVERIFIED"
-    assert platform.page.locator_calls == []
+    assert result["error_code"] == "XHS_BODY_IMAGE_BUTTON_UNVERIFIED"
+    assert platform.page.locator_calls == ["div.tiptap.ProseMirror"]
+    assert not any("input" in selector for selector in platform.page.locator_calls)
 
 
 def test_image_count_not_increasing_is_failure() -> None:
     platform = XiaohongshuPlatform()
-    platform.page = FakeUploadPage()
-    target = FakeInput()
-    platform._get_verified_body_image_input = AsyncMock(return_value=target)
+    chooser = FakeChooser()
+    platform.page = FakeUploadPage(chooser)
+    platform._get_verified_body_image_button = AsyncMock(return_value=FakeButton())
     platform._editor_image_count = AsyncMock(return_value=0)
     with patch("platforms.xiaohongshu.asyncio.sleep", new=AsyncMock()):
         result = run(platform._upload_image("photo.png"))
     assert result["success"] is False
     assert result["error_code"] == "XHS_EDITOR_IMAGE_COUNT_UNCHANGED"
-    target.set_input_files.assert_awaited_once()
+    chooser.set_files.assert_awaited_once()
 
 
 def test_upload_exception_redacts_physical_path_and_token() -> None:
     platform = XiaohongshuPlatform()
     platform.page = FakeUploadPage()
-    target = FakeInput(
+    chooser = FakeChooser(
         RuntimeError(
             r"set_input_files D:\secret\private\photo.png "
             "token=abcdefghijklmnopqrstuv"
         )
     )
-    platform._get_verified_body_image_input = AsyncMock(return_value=target)
+    platform.page = FakeUploadPage(chooser)
+    platform._get_verified_body_image_button = AsyncMock(return_value=FakeButton())
     platform._editor_image_count = AsyncMock(return_value=0)
     result = run(platform._upload_image("photo.png"))
     serialized = repr(result)
@@ -175,7 +212,7 @@ def test_media_status_failed() -> None:
     )
     assert result["media_status"] == "failed"
     assert result["uploaded_images"] == 0
-    assert len(result["failed_images"]) == 2
+    assert len(result["failed_images"]) == 1
 
 def test_two_body_candidates_are_ambiguous() -> None:
     evidence = [
@@ -195,22 +232,17 @@ def test_two_body_candidates_are_ambiguous() -> None:
     assert choose_verified_body_image_index(evidence) is None
 
 
-def test_repeated_verified_selector_is_rejected() -> None:
-    class RepeatedBase:
-        first = object()
-
-        async def count(self) -> int:
-            return 2
-
-    class RepeatedPage:
-        def locator(self, _selector: str) -> RepeatedBase:
-            return RepeatedBase()
-
+def test_unverified_file_chooser_metadata_fails_closed() -> None:
     platform = XiaohongshuPlatform()
-    platform.page = RepeatedPage()
-    with patch(
-        "platforms.xiaohongshu.VERIFIED_BODY_IMAGE_INPUT_SELECTOR",
-        "input.body-image",
-    ):
-        result = run(platform._get_verified_body_image_input())
-    assert result is None
+    chooser = FakeChooser(metadata={
+        "type": "file",
+        "accept": "image/png",
+        "multiple": False,
+        "cover": True,
+    })
+    platform.page = FakeUploadPage(chooser)
+    platform._get_verified_body_image_button = AsyncMock(return_value=FakeButton())
+    platform._editor_image_count = AsyncMock(return_value=0)
+    result = run(platform._upload_image("photo.png"))
+    assert result["error_code"] == "XHS_BODY_FILE_CHOOSER_UNVERIFIED"
+    chooser.set_files.assert_not_awaited()

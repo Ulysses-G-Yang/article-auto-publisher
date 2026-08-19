@@ -31,14 +31,16 @@
 7. **探测先行、改动最小**：任何新的真实操作前，先用只读探测确认页面结构；
    代码改动只限于必要的最小适配层，失败不得自动重试。
 
-## 3. 当前状态（2026-08-17）
+## 3. 当前状态（2026-08-20）
 
 - 账号链路：登录（扫码）/ 会话检测 / 身份捕获已接入，目录
   `account_enabled=True`（`src/account_sessions/platform_catalog.py`）。
 - 文字草稿链路：**已验收**；草稿保存和草稿箱计数验证可以如实报告文字草稿结果。
-- 图片链路：**待真实验收**。本轮授权只读探测落地发布页得到
-  `file_input_count=0`、无正文编辑器图片控件；不得自动创建新创作或猜测 selector。
-  `platforms/xiaohongshu.py` 已删除危险 fallback，未获证据时直接 fail closed。
+- 图片链路：**单图正文草稿已真实验收**。真实编辑器没有常驻 file input；点击
+  已冻结 SVG 指纹的正文图片工具栏按钮后才产生临时 FileChooser。适配器验证
+  `accept/multiple/cover` 属性后只调用一次 `set_files`，并以 TipTap 正文图片数
+  稳定增加为成功。2026-08-20 已重开唯一标题草稿，确认顺序为
+  `文字 → 图片 → 文字`、正文图片数为 1。
 - 公开发布：**关闭**。不得通过配置、适配器或测试打开公开发布。
 - 适配器文件：`platforms/xiaohongshu.py`；身份提取：`src/account_sessions/identity.py`
   `_extract_xiaohongshu`；平台工厂：`src/account_sessions/account_service.py`。
@@ -59,8 +61,9 @@
 5. `LOGIN_REQUIRED`、`CHALLENGE`、`PROFILE_IN_USE`、`MANUAL_HANDOFF_TIMEOUT`、
    `UNEXPECTED_ORIGIN` 均 fail closed 且不自动重试；成功等待只报告 `EDITOR_READY`。
    固定落地页没有正文图片控件时报告 `LANDING_NO_INPUT`，不得自动创建草稿。
-6. 只有能证明控件属于正文编辑器且 accept 含 image 的唯一候选，才允许冻结 selector；
-   封面控件、歧义控件和缺失证据一律拒绝。本轮不冻结生产 selector。
+6. 正文图片入口以唯一 SVG path SHA-256 指纹定位；点击产生的 FileChooser 必须
+   是单文件、图片 MIME 白名单且不属于封面区域。指纹不唯一、属性漂移、封面
+   控件或图片数量未增加一律拒绝，禁止回退第一个 file input。
 7. 真实草稿验收必须由用户明确选择账号、内容和 DRAFT 模式；失败不自动重试。
 8. 图片成功判据是正文编辑器图片数量稳定增加；文字草稿已验收不等于图片已验收。
 9. 公开发布始终关闭；每次涉及小红的操作后，在本文件「操作记录」追加一行。
@@ -69,3 +72,7 @@
 
 - 2026-08-17 / Codex：复用现有账号租约执行一次发布页只读 DOM 探测；落地页无 file input，未登录、未点击、未输入、未选文件、未保存；图片待真实验收，公开发布关闭。
 - 2026-08-17 / Codex：仅实现同上下文人工交接只读探测模式与测试；本轮未启动浏览器、未执行真实探测；图片待真实验收，公开发布关闭。
+- 2026-08-20 / Codex：复用账号 `jayoma` 的隔离 Profile，只读确认长文工具栏
+  图片按钮及动态 FileChooser；随后按用户授权执行一次 DRAFT-only 单图验收。
+  保存后重开唯一标题草稿，确认 `文字 → 图片 → 文字`、图片数 1；未公开发布、
+  未自动重试、未清理或记录 Cookie。

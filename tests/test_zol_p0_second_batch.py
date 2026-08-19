@@ -1014,6 +1014,30 @@ def test_image_and_following_content_use_independent_dom_block_anchor() -> None:
     assert "instance.selection.setRng(range)" in script
 
 
+def test_tinymce_structured_block_escapes_text_and_commits_model() -> None:
+    captured = {}
+
+    class _Editor(FakeLocator):
+        async def evaluate(self, script, *args):
+            captured["script"] = script
+            captured["markup"] = args[0]
+            return True
+
+    asyncio.run(
+        ZOLPlatform()._insert_tinymce_block(
+            _Editor(tag="body"),
+            "iframe",
+            block_type="heading",
+            text="A < B & C",
+            level=2,
+        )
+    )
+
+    assert captured["markup"] == "<h2>A &lt; B &amp; C</h2>"
+    assert "instance.insertContent(markup)" in captured["script"]
+    assert "instance.save()" in captured["script"]
+
+
 def test_expected_text_tokens_keep_three_paragraph_boundaries() -> None:
     blocks = [
         {"type": "text", "text": "第一段"},

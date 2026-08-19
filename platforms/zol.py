@@ -1,6 +1,7 @@
 """中关村在线（ZOL）创作者中心自动化"""
 import asyncio
 import hashlib
+import html
 import os
 import re
 import time
@@ -1322,6 +1323,21 @@ class ZOLPlatform(BasePlatform):
                     range.collapse(false);
                     selection.removeAllRanges();
                     selection.addRange(range);
+                    try {
+                        const view = root.ownerDocument.defaultView;
+                        const frame = view && view.frameElement;
+                        const tiny = view && view.parent && view.parent.tinymce;
+                        const instance = tiny && frame && frame.id
+                            ? tiny.get(frame.id)
+                            : (tiny && tiny.activeEditor);
+                        if (instance && instance.getBody() === root) {
+                            instance.focus();
+                            instance.selection.setRng(range);
+                            instance.nodeChanged();
+                        }
+                    } catch (_) {
+                        // 原生 Range 已设置；TinyMCE API 是同源增强。
+                    }
                     return selection.rangeCount === 1 && selection.isCollapsed;
                 }
                 """
@@ -1439,6 +1455,72 @@ class ZOLPlatform(BasePlatform):
                 ) from exc
             raise ContentValidationError(
                 "ZOL_CONTENT_ANCHOR_FAILED: 无法创建独立正文块"
+            ) from exc
+
+    async def _insert_tinymce_block(
+        self,
+        editor,
+        editor_kind: str,
+        *,
+        block_type: str,
+        text: str,
+        level: int | None = None,
+    ) -> None:
+        """通过 TinyMCE 模型插入已转义的文本/标题块。"""
+
+        if editor_kind != "iframe":
+            raise ContentValidationError(
+                "ZOL_STRUCTURED_EDITOR_UNSUPPORTED: TinyMCE iframe 未确认"
+            )
+        if block_type == "heading":
+            if level not in {2, 3}:
+                raise ContentValidationError(
+                    "ZOL_HEADING_UNSUPPORTED_LEVEL: 实验路径只允许 H2/H3"
+                )
+            tag = f"h{level}"
+        elif block_type == "text":
+            tag = "p"
+        else:
+            raise ContentValidationError(
+                "ZOL_STRUCTURED_BLOCK_INVALID: 正文块类型无效"
+            )
+        markup = f"<{tag}>{html.escape(text, quote=False)}</{tag}>"
+        try:
+            inserted = await editor.evaluate(
+                """
+                (root, markup) => {
+                    const view = root.ownerDocument.defaultView;
+                    const frame = view && view.frameElement;
+                    const tiny = view && view.parent && view.parent.tinymce;
+                    const instance = tiny && frame && frame.id
+                        ? tiny.get(frame.id)
+                        : (tiny && tiny.activeEditor);
+                    if (!instance || instance.getBody() !== root) return false;
+                    instance.focus();
+                    instance.selection.select(root, true);
+                    instance.selection.collapse(false);
+                    instance.insertContent(markup);
+                    instance.nodeChanged();
+                    instance.setDirty(true);
+                    instance.save();
+                    return true;
+                }
+                """,
+                markup,
+            )
+            if inserted is not True:
+                raise ContentValidationError(
+                    "ZOL_STRUCTURED_BLOCK_INSERT_FAILED: TinyMCE 模型写入未确认"
+                )
+        except ContentValidationError:
+            raise
+        except Exception as exc:
+            if self._exception_means_browser_closed(exc):
+                raise BrowserLifecycleError(
+                    "BROWSER_CONTEXT_CLOSED: ZOL 写入结构化正文时页面已关闭"
+                ) from exc
+            raise ContentValidationError(
+                "ZOL_STRUCTURED_BLOCK_INSERT_FAILED: 结构化正文写入失败"
             ) from exc
 
     async def _apply_heading_block(
@@ -1576,6 +1658,7 @@ class ZOLPlatform(BasePlatform):
             token for token in expected_tokens if token.get("kind") == "heading"
         ]
         expected_headings_seen: list[dict] = []
+        use_tinymce_blocks = has_images and has_headings
 
         # 没有图片和标题时保留原 fill 快速路径；有图片或实验标题时仍按原始块顺序输入，
         # 规范化只用于读回比较，不得改变冻结内容的写入文本或排版。
@@ -1590,7 +1673,26 @@ class ZOLPlatform(BasePlatform):
             for block_index, block in enumerate(content_blocks):
                 btype = block.get("type")
                 block_text = (block.get("text") or "").strip()
-                if btype == "heading" and block_text:
+                if use_tinymce_blocks and btype in {"text", "heading"} and block_text:
+                    editor, editor_kind = await self._resolve_content_editor()
+                    await self._insert_tinymce_block(
+                        editor,
+                        editor_kind,
+                        block_type=btype,
+                        text=block_text,
+                        level=block.get("level"),
+                    )
+                    if btype == "heading":
+                        expected_headings_seen.append(
+                            {
+                                "kind": "heading",
+                                "tag": f"h{block.get('level')}",
+                                "text": normalize_for_comparison(block_text),
+                            }
+                        )
+                        await self._verify_heading_nodes(expected_headings_seen)
+                    previous_kind = "text"
+                elif btype == "heading" and block_text:
                     editor, editor_kind = await self._click_editor(editor)
                     if previous_kind == "image":
                         await self._append_editor_block_anchor(editor, editor_kind)
@@ -1645,7 +1747,10 @@ class ZOLPlatform(BasePlatform):
                             content_blocks[:block_index],
                             observed_image_fingerprints,
                         )
-                    await self._append_editor_block_anchor(editor, editor_kind)
+                    if use_tinymce_blocks:
+                        await self._collapse_editor_selection_at_end(editor, editor_kind)
+                    else:
+                        await self._append_editor_block_anchor(editor, editor_kind)
                     image_file = self._image_path_for_block(block, images)
                     if image_file:
                         upload_result = await self._upload_image(image_file) or {}

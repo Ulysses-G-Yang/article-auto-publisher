@@ -392,6 +392,7 @@ async def run_probe(
     editor: bool = False,
     open_editor_menu: str | None = None,
     identity_structure: bool = False,
+    find_title: str | None = None,
 ) -> dict[str, Any]:
     account = _load_account(account_id, allow_error_state=identity_structure)
     platform = BaijiahaoPlatform(
@@ -464,7 +465,20 @@ async def run_probe(
                     "login_error_code": str(platform.last_login_error).split(":", 1)[0],
                     "identity_responses": identity_responses,
                 }
-            if editor:
+            if find_title:
+                await platform.page.goto(
+                    "https://baijiahao.baidu.com/builder/rc/content",
+                    wait_until="domcontentloaded",
+                    timeout=30000,
+                )
+                search = platform.page.locator(
+                    'input[placeholder*="输入标题关键字"]'
+                ).first
+                await search.wait_for(state="visible", timeout=20000)
+                await search.fill(find_title)
+                await search.press("Enter")
+                await asyncio.sleep(3)
+            elif editor:
                 await platform.navigate_to_editor()
             else:
                 await platform.page.goto(
@@ -497,6 +511,68 @@ async def run_probe(
                 await menu.click()
                 await asyncio.sleep(1)
             payload = _sanitize(await platform.page.evaluate(PROBE_SCRIPT))
+            exact_title_matches = None
+            if find_title:
+                exact_title_matches = await platform.page.evaluate(
+                    """title => {
+                        const visible = (el) => !!(
+                            el && (el.offsetWidth || el.offsetHeight
+                                || el.getClientRects().length)
+                        );
+                        const text = (el) => (el?.innerText || el?.textContent || '')
+                            .replace(/\\s+/g, ' ').trim();
+                        const leaves = Array.from(document.querySelectorAll(
+                            'a, span, p, div, h1, h2, h3, h4'
+                        )).filter((el) => visible(el) && text(el) === title
+                            && !Array.from(el.children).some(
+                                (child) => text(child) === title
+                            ));
+                        const rows = [];
+                        for (const leaf of leaves) {
+                            let row = leaf;
+                            while (row && row !== document.body) {
+                                const hasModify = Array.from(row.querySelectorAll(
+                                    'button, a, [role="button"], span'
+                                )).some((el) => visible(el) && text(el) === '修改');
+                                if (hasModify) break;
+                                row = row.parentElement;
+                            }
+                            if (row && row !== document.body && !rows.includes(row)) {
+                                rows.push(row);
+                            }
+                        }
+                        return rows.length;
+                    }""",
+                    find_title,
+                )
+            format_menu_candidates = []
+            if open_editor_menu == "FORMAT":
+                format_menu_candidates = await platform.page.evaluate(
+                    """() => {
+                        const visible = (el) => !!(
+                            el && (el.offsetWidth || el.offsetHeight
+                                || el.getClientRects().length)
+                        );
+                        const text = (el) => (el?.innerText || el?.textContent || '')
+                            .replace(/\\s+/g, ' ').trim();
+                        return Array.from(document.querySelectorAll('*'))
+                            .filter((el) => visible(el)
+                                && ['标题', '正文', '说明'].includes(text(el))
+                                && !Array.from(el.children).some(
+                                    (child) => text(child) === text(el)
+                                ))
+                            .map((el) => ({
+                                text: text(el),
+                                tag: el.tagName.toLowerCase(),
+                                class_name: typeof el.className === 'string'
+                                    ? el.className.slice(0, 180) : '',
+                                parent_class_name: el.parentElement
+                                    && typeof el.parentElement.className === 'string'
+                                    ? el.parentElement.className.slice(0, 180) : '',
+                                role: el.getAttribute('role') || '',
+                            })).slice(0, 20);
+                    }"""
+                )
             frames = []
             for frame in platform.page.frames:
                 frame_payload: dict[str, Any] = {
@@ -521,6 +597,8 @@ async def run_probe(
                 "click_result": click_result,
                 "screenshot_path": screenshot_path,
                 "identity_responses": identity_responses,
+                "exact_title_matches": exact_title_matches,
+                "format_menu_candidates": format_menu_candidates,
                 "cookie_signal_before": cookie_signal_before,
                 "cookie_signal_after": cookie_signal_after,
                 **payload,
@@ -562,6 +640,10 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="仅记录同源 JSON 的候选键名、类型与长度，不记录字段值",
     )
+    parser.add_argument(
+        "--find-title",
+        help="只读搜索一个精确标题并返回唯一作品行数量，不点击修改或删除",
+    )
     return parser.parse_args()
 
 
@@ -575,6 +657,7 @@ async def _main() -> int:
             editor=args.editor,
             open_editor_menu=args.open_editor_menu,
             identity_structure=args.identity_structure,
+            find_title=args.find_title,
         )
     except ProbeError as exc:
         result = {"status": str(exc)}

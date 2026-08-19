@@ -10,9 +10,16 @@ from platforms.base import DraftBaselineError, DraftResultUnknownError
 
 
 class _Item:
-    def __init__(self, *, visible: bool = True, enabled: bool = True) -> None:
+    def __init__(
+        self,
+        *,
+        visible: bool = True,
+        enabled: bool = True,
+        text: str = "",
+    ) -> None:
         self.visible = visible
         self.enabled = enabled
+        self.text = text
         self.click = AsyncMock()
         self.set_input_files = AsyncMock()
 
@@ -21,6 +28,9 @@ class _Item:
 
     async def is_enabled(self) -> bool:
         return self.enabled
+
+    async def inner_text(self) -> str:
+        return self.text
 
 
 class _Collection:
@@ -70,6 +80,19 @@ class _ImagePage:
         raise AssertionError(f"unexpected selector: {selector}")
 
 
+class _FormatPage:
+    def __init__(self, trigger: _Item, options: list[_Item]) -> None:
+        self.trigger = _Collection([trigger])
+        self.options = _Collection(options)
+
+    def locator(self, selector: str) -> _Collection:
+        if selector == ".edui-for-customfontsize:visible":
+            return self.trigger
+        if selector == "div[class*='dropdownItem']:visible":
+            return self.options
+        raise AssertionError(f"unexpected selector: {selector}")
+
+
 def _build_image_platform(page: _ImagePage) -> BaijiahaoPlatform:
     platform = BaijiahaoPlatform()
     platform.page = page
@@ -112,6 +135,20 @@ def test_image_mapping_never_falls_back_to_first_unrelated_image() -> None:
     images = [{"position_index": 1, "local_path": "wrong.png"}]
 
     assert BaijiahaoPlatform._image_path_for_block(block, images) is None
+
+
+def test_heading_uses_exact_dropdown_item_instead_of_page_wide_text() -> None:
+    trigger = _Item()
+    title = _Item(text=" 标题 ")
+    body = _Item(text="正文")
+    platform = BaijiahaoPlatform()
+    platform.page = _FormatPage(trigger, [title, body])
+
+    asyncio.run(platform._apply_h2_to_current_block())
+
+    trigger.click.assert_awaited_once()
+    title.click.assert_awaited_once()
+    body.click.assert_not_awaited()
 
 
 def test_appinfo_identity_requires_matching_stable_ids_and_name() -> None:

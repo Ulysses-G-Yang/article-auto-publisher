@@ -750,12 +750,15 @@ class BaijiahaoPlatform(BasePlatform):
             if len(visible) != 1:
                 raise RuntimeError("标题格式入口不唯一")
             await visible[0].click(timeout=5000)
-            options = self.page.get_by_text("标题", exact=True)
-            candidates = [
-                options.nth(index)
-                for index in range(await options.count())
-                if await options.nth(index).is_visible()
-            ]
+            options = self.page.locator("div[class*='dropdownItem']:visible")
+            candidates = []
+            for index in range(await options.count()):
+                option = options.nth(index)
+                if not await option.is_visible():
+                    continue
+                label = " ".join((await option.inner_text()).split())
+                if label == "标题":
+                    candidates.append(option)
             if len(candidates) != 1:
                 raise RuntimeError("标题格式选项不唯一")
             await candidates[0].click(timeout=5000)

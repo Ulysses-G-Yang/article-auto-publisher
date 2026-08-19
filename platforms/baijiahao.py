@@ -352,6 +352,33 @@ class BaijiahaoPlatform(BasePlatform):
             'input[placeholder*="输入标题关键字"]'
         ).first
         await search.wait_for(state="visible", timeout=20000)
+        await self._select_draft_tab()
+        await search.wait_for(state="visible", timeout=20000)
+
+    async def _select_draft_tab(self) -> None:
+        """进入唯一的草稿子页，防止在默认作品列表中误判保存结果。"""
+
+        tabs = self.page.get_by_role("tab", name="草稿", exact=True)
+        visible = [
+            tabs.nth(index)
+            for index in range(await tabs.count())
+            if await tabs.nth(index).is_visible()
+        ]
+        if len(visible) != 1:
+            raise DraftBaselineError(
+                "DRAFT_BASELINE_FAILED: 百家号草稿标签不存在或不唯一"
+            )
+        tab = visible[0]
+        await tab.click(timeout=5000)
+        for _ in range(30):
+            selected = str(await tab.get_attribute("aria-selected") or "").lower()
+            class_name = str(await tab.get_attribute("class") or "").lower()
+            if selected == "true" or "active" in class_name:
+                return
+            await asyncio.sleep(0.1)
+        raise DraftBaselineError(
+            "DRAFT_BASELINE_FAILED: 百家号草稿标签点击后未激活"
+        )
 
     async def _search_works(self, title: str) -> None:
         search = self.page.locator(
@@ -1351,7 +1378,18 @@ class BaijiahaoPlatform(BasePlatform):
             raise DraftResultUnknownError(
                 "DRAFT_RESULT_UNKNOWN: 百家号缺少冻结内容核验快照"
             )
+        save_responses: list[dict[str, str | int]] = []
+
+        async def capture_save_response(response) -> None:
+            try:
+                evidence = self._safe_save_response_evidence(response)
+                if evidence is not None and len(save_responses) < 40:
+                    save_responses.append(evidence)
+            except Exception:
+                return
+
         try:
+            self.page.on("response", capture_save_response)
             buttons = self.page.get_by_text("存草稿", exact=True)
             visible = [
                 buttons.nth(index)
@@ -1363,7 +1401,27 @@ class BaijiahaoPlatform(BasePlatform):
                     "DRAFT_RESULT_UNKNOWN: 百家号精确存草稿按钮不存在或不唯一"
                 )
             await visible[0].click(timeout=5000)
-            await self.simulator.random_delay(2, 4)
+            await asyncio.sleep(12)
+            notices = await self.page.evaluate(
+                r"""() => Array.from(document.querySelectorAll(
+                    '[role="alert"], [class*="message"], [class*="toast"], '
+                    + '[class*="notice"], [class*="error"]'
+                )).filter((element) => element.offsetParent !== null)
+                    .map((element) => (element.innerText || element.textContent || '')
+                        .replace(/\s+/g, ' ').trim())
+                    .filter((text) => text && text.length <= 160)
+                    .slice(0, 12)"""
+            )
+            safe_notices = [
+                safe_media_error(item, fallback="")
+                for item in notices
+                if isinstance(item, str)
+            ]
+            logger.info(
+                "百家号存草稿响应证据: responses={} notices={}",
+                save_responses,
+                safe_notices,
+            )
         except DraftResultUnknownError:
             raise
         except Exception as exc:
@@ -1374,6 +1432,11 @@ class BaijiahaoPlatform(BasePlatform):
             raise DraftResultUnknownError(
                 "DRAFT_RESULT_UNKNOWN: 百家号存草稿点击结果无法确认"
             ) from exc
+        finally:
+            try:
+                self.page.remove_listener("response", capture_save_response)
+            except Exception:
+                pass
 
         try:
             edit_url = await self._find_unique_exact_draft(expected_title)
@@ -1389,6 +1452,18 @@ class BaijiahaoPlatform(BasePlatform):
             raise DraftResultUnknownError(
                 "DRAFT_RESULT_UNKNOWN: 百家号持久化草稿核验失败"
             ) from exc
+
+    @staticmethod
+    def _safe_save_response_evidence(response) -> dict[str, str | int] | None:
+        """仅保留同源 POST 路径和状态码，不记录查询参数或响应正文。"""
+
+        parsed = urlsplit(str(response.url or ""))
+        if (
+            parsed.hostname != "baijiahao.baidu.com"
+            or str(response.request.method or "").upper() != "POST"
+        ):
+            return None
+        return {"path": parsed.path[:180], "status": int(response.status)}
 
     async def _find_unique_exact_draft(self, title: str) -> str:
         await self._open_works_page()

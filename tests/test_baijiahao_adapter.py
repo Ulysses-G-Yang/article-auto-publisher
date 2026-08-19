@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -55,6 +56,28 @@ class _Collection:
     @property
     def first(self) -> _Item:
         return self.items[0]
+
+
+class _DraftTab(_Item):
+    def __init__(self, *, selected_after_click: bool = True) -> None:
+        super().__init__()
+        self.selected_after_click = selected_after_click
+
+    async def get_attribute(self, name: str) -> str | None:
+        if name == "aria-selected":
+            return "true" if self.selected_after_click else "false"
+        if name == "class":
+            return "cheetah-tabs-tab"
+        return None
+
+
+class _DraftTabPage:
+    def __init__(self, tabs: list[_DraftTab]) -> None:
+        self.tabs = _Collection(tabs)
+
+    def get_by_role(self, role: str, *, name: str, exact: bool) -> _Collection:
+        assert (role, name, exact) == ("tab", "草稿", True)
+        return self.tabs
 
 
 class _Modal(_Item):
@@ -139,6 +162,16 @@ def test_image_upload_opens_exact_body_modal_and_uses_its_image_input() -> None:
         r"D:\secret folder\photo.png", timeout=15000
     )
     confirm.click.assert_awaited_once()
+
+
+def test_draft_tab_requires_one_visible_selected_tab() -> None:
+    tab = _DraftTab()
+    platform = BaijiahaoPlatform()
+    platform.page = _DraftTabPage([tab])
+
+    asyncio.run(platform._select_draft_tab())
+
+    tab.click.assert_awaited_once_with(timeout=5000)
 
 
 def test_image_upload_fails_closed_without_exact_body_trigger() -> None:
@@ -310,3 +343,23 @@ def test_draft_url_keeps_only_valid_same_origin_editor_url() -> None:
     assert BaijiahaoPlatform._safe_draft_url(
         "https://baijiahao.baidu.com/builder/rc/edit?type=news&id=123#ignored"
     ) == "https://baijiahao.baidu.com/builder/rc/edit?type=news&id=123"
+
+
+def test_save_response_observer_records_only_same_origin_post_paths() -> None:
+    captured = BaijiahaoPlatform._safe_save_response_evidence(
+        SimpleNamespace(
+            url="https://baijiahao.baidu.com/builder/api/draft/save?token=secret",
+            status=200,
+            request=SimpleNamespace(method="POST"),
+        )
+    )
+    rejected = BaijiahaoPlatform._safe_save_response_evidence(
+        SimpleNamespace(
+            url="https://evil.example/upload?token=secret",
+            status=200,
+            request=SimpleNamespace(method="POST"),
+        )
+    )
+
+    assert captured == {"path": "/builder/api/draft/save", "status": 200}
+    assert rejected is None

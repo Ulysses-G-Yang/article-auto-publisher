@@ -53,8 +53,35 @@ class ZOLPlatform(BasePlatform):
     TOPIC_BUTTON = "button:has-text('选择话题')"
     TOPIC_MODAL = ".ant-modal-wrap:visible"
     DRAFT_LIST_API_MARKER = "/api/v1/creator.content.getlist"
+    DRAFT_SAVE_API_HOSTS = frozenset({"post.zol.com.cn", "open-api.zol.com.cn"})
+    DRAFT_SAVE_API_PREFIX = "/api/v1/creator.content."
+    DRAFT_SAVE_API_EXCLUDED_ACTIONS = frozenset(
+        {
+            "getlist",
+            "preview",
+            "previewwap",
+            "publish",
+            "submit",
+            "delete",
+            "remove",
+        }
+    )
     DRAFT_SAVE_SELECTOR = ".draft-btns .foot-item:has(.foot-item-text:text-is('存草稿'))"
-    DRAFT_RESULT_POLL_DELAYS = (0, 1, 2, 3, 4)
+    DRAFT_RESPONSE_WAIT_SECONDS = 5.0
+    DRAFT_RESPONSE_POLL_INTERVAL = 0.1
+    DRAFT_CARD_POLL_DELAYS = (0, 1, 2, 3, 4)
+    DRAFT_CARD_SELECTORS = (
+        ".article-card",
+        ".draft-item",
+        "li.draft-item",
+    )
+    DRAFT_CARD_ID_ATTRIBUTES = (
+        "data-draft-id",
+        "data-content-id",
+        "data-article-id",
+        "data-id",
+    )
+    DRAFT_RESPONSE_ID_KEYS = ("draftId", "contentId", "articleId", "id")
 
     def __init__(self, *, enable_heading_experiment: bool = False, **kwargs):
         super().__init__(**kwargs)
@@ -458,6 +485,90 @@ class ZOLPlatform(BasePlatform):
         except Exception:
             return False
 
+    @classmethod
+    def _is_draft_save_response(cls, response) -> bool:
+        """只匹配 ZOL 创作者中心内容接口，排除预览、发布与统计请求。"""
+
+        try:
+            request = response.request
+            method = str(getattr(request, "method", "")).upper()
+            if method not in {"POST", "PUT", "PATCH"}:
+                return False
+            parsed = urlparse(str(getattr(response, "url", "")))
+            if parsed.hostname not in cls.DRAFT_SAVE_API_HOSTS:
+                return False
+            path = parsed.path.rstrip("/")
+            if not path.startswith(cls.DRAFT_SAVE_API_PREFIX):
+                return False
+            action = path[len(cls.DRAFT_SAVE_API_PREFIX):].casefold()
+            return action not in cls.DRAFT_SAVE_API_EXCLUDED_ACTIONS
+        except Exception:
+            return False
+
+    @classmethod
+    def _response_success(cls, payload: object) -> bool:
+        """只接受明确的 errcode/code 成功值，不把任意 JSON 当作成功。"""
+
+        if not isinstance(payload, dict):
+            return False
+        checks: list[bool] = []
+        if "errcode" in payload:
+            checks.append(payload["errcode"] in {0, "0"})
+        if "code" in payload:
+            checks.append(payload["code"] in {0, "0", 200, "200", "success", "SUCCESS"})
+        return bool(checks) and all(checks)
+
+    @classmethod
+    def _response_id_from_mapping(cls, value: object) -> str | None:
+        if not isinstance(value, dict):
+            return None
+        candidates = []
+        for key in cls.DRAFT_RESPONSE_ID_KEYS:
+            candidate = cls._scalar_draft_id(value.get(key))
+            if candidate:
+                candidates.append(candidate)
+        unique = set(candidates)
+        if len(unique) != 1:
+            return None
+        return candidates[0]
+
+    @classmethod
+    def _response_id(cls, payload: object) -> str | None:
+        """按 data 对象优先、顶层回退提取有限白名单 ID，禁止递归猜测。"""
+
+        if not isinstance(payload, dict):
+            return None
+        data_id = cls._response_id_from_mapping(payload.get("data"))
+        if data_id:
+            return data_id
+        return cls._response_id_from_mapping(payload)
+
+    @classmethod
+    async def _parse_draft_save_response(cls, response) -> str:
+        """解析保存响应；调用方已点击时所有失败都属于结果未知。"""
+
+        status = getattr(response, "status", None)
+        if not isinstance(status, int) or not 200 <= status < 300:
+            raise DraftResultUnknownError(
+                "DRAFT_RESULT_UNKNOWN: 保存响应 HTTP 状态未确认成功"
+            )
+        try:
+            payload = await response.json()
+        except Exception as exc:
+            raise DraftResultUnknownError(
+                "DRAFT_RESULT_UNKNOWN: 保存响应 JSON 无法解析"
+            ) from exc
+        if not cls._response_success(payload):
+            raise DraftResultUnknownError(
+                "DRAFT_RESULT_UNKNOWN: 保存响应未返回明确成功码"
+            )
+        response_id = cls._response_id(payload)
+        if not response_id:
+            raise DraftResultUnknownError(
+                "DRAFT_RESULT_UNKNOWN: 保存响应缺少白名单草稿 ID"
+            )
+        return response_id
+
     @staticmethod
     def _scalar_draft_id(value: object) -> str | None:
         if isinstance(value, bool) or not isinstance(value, (str, int)):
@@ -607,24 +718,6 @@ class ZOLPlatform(BasePlatform):
                 f"ZOL_EDITOR_ROUTE_ERROR: ZOL 编辑器跳转失败，当前 URL: {current_url}"
             )
 
-        # 创作者中心的保存结果必须有 API 草稿基线；旧博客入口没有同一
-        # 契约，保留旧路由识别但不伪造 creator 草稿基线。
-        if host == self.CREATOR_HOST:
-            # 先建立草稿基线；失败时不允许标题或正文输入。读取草稿页后
-            # 回到编辑器，后续 probe 确认仍在同一业务路由。
-            self._draft_baseline = await self._fetch_draft_snapshot()
-            await self.page.goto(
-                editor_url,
-                wait_until="domcontentloaded",
-                timeout=15000,
-            )
-            await self.simulator.random_delay(1, 2)
-            self._require_page_alive("ZOL 返回博客编辑器")
-            current_url = self.page.url or ""
-            if not self._is_blog_editor_url(current_url):
-                raise PlatformAccessError(
-                    "ZOL_EDITOR_ROUTE_ERROR: 读取草稿基线后未能返回编辑器"
-                )
         probe = await self._editor_probe_count()
         if probe == 0:
             raise SelectorError(f"ZOL_EDITOR_SELECTOR_ERROR: 编辑器结构探测失败，当前 URL: {current_url}")
@@ -1938,13 +2031,199 @@ class ZOLPlatform(BasePlatform):
             },
         }
 
-    async def save_draft(self, title: str = "") -> str:
-        """只点击一次保存并用草稿 API 证明新增实体。
+    async def _draft_card_stable_id(self, card) -> str | None:
+        """从单张可见草稿卡片的白名单属性读取稳定 ID。"""
 
-        页面文本、正文 ``innerText`` 和当前编辑器 URL 都不能证明保存
-        成功。点击前必须已经由 ``navigate_to_editor`` 建立可靠基线；
-        点击后任何响应、数量或实体证据缺失都统一抛出
-        ``DRAFT_RESULT_UNKNOWN``，上层不得自动重试。
+        values = []
+        try:
+            for attribute in self.DRAFT_CARD_ID_ATTRIBUTES:
+                value = await card.get_attribute(attribute)
+                normalized = self._scalar_draft_id(value)
+                if normalized:
+                    values.append(normalized)
+        except Exception as exc:
+            raise DraftResultUnknownError(
+                "DRAFT_RESULT_UNKNOWN: 草稿卡片 ID 无法读取"
+            ) from exc
+        unique = set(values)
+        if len(unique) > 1:
+            raise DraftResultUnknownError(
+                "DRAFT_RESULT_UNKNOWN: 草稿卡片 ID 不唯一"
+            )
+        return values[0] if values else None
+
+    async def _visible_draft_cards(self, draft_page) -> list:
+        """只读取明确的草稿卡片，不扫描 body、tab 或导航文本。"""
+
+        for selector in self.DRAFT_CARD_SELECTORS:
+            try:
+                locator = draft_page.locator(selector)
+                count = await locator.count()
+                visible = []
+                for index in range(min(count, 100)):
+                    candidate = locator.nth(index)
+                    if await candidate.is_visible():
+                        visible.append(candidate)
+                if visible:
+                    return visible
+            except Exception as exc:
+                raise DraftResultUnknownError(
+                    "DRAFT_RESULT_UNKNOWN: 草稿卡片结构无法读取"
+                ) from exc
+        return []
+
+    async def _matching_draft_cards(self, draft_page, expected_title: str) -> list:
+        """按可见卡片内的独立文本行精确匹配标题。"""
+
+        matches = []
+        for card in await self._visible_draft_cards(draft_page):
+            try:
+                raw_text = await card.inner_text()
+            except Exception as exc:
+                raise DraftResultUnknownError(
+                    "DRAFT_RESULT_UNKNOWN: 草稿卡片标题无法读取"
+                ) from exc
+            lines = {
+                normalize_for_comparison(line)
+                for line in str(raw_text).splitlines()
+                if normalize_for_comparison(line)
+            }
+            if expected_title in lines:
+                matches.append(card)
+        return matches
+
+    async def _navigate_draft_verification_page(self, draft_page) -> None:
+        draft_url = self.platform_cfg.get(
+            "draft_url", "https://post.zol.com.cn/v2/manage/works/draft"
+        )
+        try:
+            await draft_page.goto(
+                draft_url,
+                wait_until="domcontentloaded",
+                timeout=15000,
+            )
+            wait_for_load_state = getattr(draft_page, "wait_for_load_state", None)
+            if callable(wait_for_load_state):
+                await wait_for_load_state("domcontentloaded", timeout=15000)
+            wait_for_timeout = getattr(draft_page, "wait_for_timeout", None)
+            if callable(wait_for_timeout):
+                await wait_for_timeout(500)
+        except Exception as exc:
+            raise DraftResultUnknownError(
+                "DRAFT_RESULT_UNKNOWN: 独立草稿页无法稳定打开"
+            ) from exc
+
+    async def _prepare_draft_verification_page(self, expected_title: str):
+        """点击前打开独立页面，阻止覆盖已有同名草稿。"""
+
+        if self.context is None:
+            raise DraftBaselineError(
+                "DRAFT_BASELINE_UNAVAILABLE: 无法创建独立草稿基线页面"
+            )
+        draft_page = None
+        transferred = False
+        try:
+            draft_page = await self.context.new_page()
+            await self._navigate_draft_verification_page(draft_page)
+            matches = await self._matching_draft_cards(draft_page, expected_title)
+            if matches:
+                raise DraftBaselineError(
+                    "DRAFT_BASELINE_UNAVAILABLE: 草稿箱已存在同名草稿"
+                )
+            transferred = True
+            return draft_page
+        except DraftBaselineError:
+            raise
+        except DraftResultUnknownError as exc:
+            raise DraftBaselineError(
+                "DRAFT_BASELINE_UNAVAILABLE: 草稿基线页面无法确认"
+            ) from exc
+        except Exception as exc:
+            raise DraftBaselineError(
+                "DRAFT_BASELINE_UNAVAILABLE: 草稿基线页面无法打开"
+            ) from exc
+        finally:
+            if draft_page is not None and not transferred:
+                try:
+                    await draft_page.close()
+                except Exception:
+                    logger.warning("ZOL 草稿基线页关闭失败，业务结果保持原状态")
+
+    async def _collect_draft_save_response(self, control) -> str:
+        """点击一次后收集有限候选，只接受唯一明确成功的保存响应。"""
+
+        responses = []
+
+        def collect(response) -> None:
+            if self._is_draft_save_response(response):
+                responses.append(response)
+
+        self.page.on("response", collect)
+        try:
+            await control.click(timeout=5000)
+            deadline = asyncio.get_running_loop().time() + self.DRAFT_RESPONSE_WAIT_SECONDS
+            while asyncio.get_running_loop().time() < deadline:
+                await asyncio.sleep(self.DRAFT_RESPONSE_POLL_INTERVAL)
+        finally:
+            try:
+                self.page.remove_listener("response", collect)
+            except Exception:
+                logger.debug("ZOL 保存响应监听器清理失败")
+
+        successful_ids = []
+        for response in responses:
+            status = getattr(response, "status", None)
+            if not isinstance(status, int) or not 200 <= status < 300:
+                continue
+            try:
+                payload = await response.json()
+            except Exception:
+                continue
+            if not self._response_success(payload):
+                continue
+            successful_ids.append(self._response_id(payload))
+
+        if len(successful_ids) != 1 or not successful_ids[0]:
+            raise DraftResultUnknownError(
+                "DRAFT_RESULT_UNKNOWN: 保存成功响应不唯一或缺少白名单草稿 ID"
+            )
+        return successful_ids[0]
+
+    async def _verify_saved_draft_card(
+        self,
+        draft_page,
+        response_id: str,
+        expected_title: str,
+    ) -> None:
+        """轮询独立草稿页，要求唯一标题行并核对卡片 ID。"""
+
+        for delay in self.DRAFT_CARD_POLL_DELAYS:
+            if delay:
+                await asyncio.sleep(delay)
+            await self._navigate_draft_verification_page(draft_page)
+            matches = await self._matching_draft_cards(draft_page, expected_title)
+            if len(matches) > 1:
+                raise DraftResultUnknownError(
+                    "DRAFT_RESULT_UNKNOWN: 保存后草稿标题不唯一"
+                )
+            if len(matches) != 1:
+                continue
+            card_id = await self._draft_card_stable_id(matches[0])
+            if card_id is not None and card_id != response_id:
+                raise DraftResultUnknownError(
+                    "DRAFT_RESULT_UNKNOWN: 草稿卡片 ID 与保存响应不一致"
+                )
+            return
+        raise DraftResultUnknownError(
+            "DRAFT_RESULT_UNKNOWN: 保存后草稿卡片在有界轮询内无法证明"
+        )
+
+    async def save_draft(self, title: str = "") -> str:
+        """只点击一次保存，并用保存响应与独立草稿卡片双重证明结果。
+
+        编辑器进入不再依赖不稳定的草稿列表基线。点击前只验证唯一控件；
+        点击后响应、白名单 ID 或唯一标题卡片任一缺失，都必须返回结果未知，
+        上层禁止自动重试。
         """
         self._require_page_alive("ZOL 保存草稿")
         current_url = self.page.url or ""
@@ -1956,11 +2235,6 @@ class ZOLPlatform(BasePlatform):
             raise DraftBaselineError(
                 "DRAFT_BASELINE_UNAVAILABLE: 旧博客入口没有 creator 草稿 API 契约"
             )
-        if self._draft_baseline is None:
-            raise DraftBaselineError(
-                "DRAFT_BASELINE_UNAVAILABLE: 保存前未建立 ZOL 草稿基线"
-            )
-
         expected_title = normalize_for_comparison(title)
         if not expected_title:
             raise SelectorError("ZOL_DRAFT_TITLE_MISSING: 保存草稿缺少标题")
@@ -1972,37 +2246,26 @@ class ZOLPlatform(BasePlatform):
             )
 
         clicked = False
+        draft_page = None
         try:
+            draft_page = await self._prepare_draft_verification_page(expected_title)
             clicked = True
-            await control.click(timeout=5000)
+            response_id = await self._collect_draft_save_response(control)
             await self.simulator.random_delay(2, 5)
-            for delay in self.DRAFT_RESULT_POLL_DELAYS:
-                if delay:
-                    await asyncio.sleep(delay)
-                try:
-                    after = await self._fetch_draft_snapshot()
-                except DraftBaselineError:
-                    continue
-                draft_id = self._new_draft_id_for_title(
-                    self._draft_baseline,
-                    after,
-                    expected_title,
-                )
-                if not draft_id:
-                    continue
-                self._draft_baseline = after
-                draft_url = self.platform_cfg.get(
-                    "draft_url", "https://post.zol.com.cn/v2/manage/works/draft"
-                )
-                draft_fingerprint = hashlib.sha256(draft_id.encode()).hexdigest()[:8]
-                logger.info(
-                    "ZOL 草稿实体验证成功: draft_id_fingerprint={}",
-                    draft_fingerprint,
-                )
-                return draft_url
-            raise DraftResultUnknownError(
-                "DRAFT_RESULT_UNKNOWN: 保存后草稿实体在有界轮询内无法证明"
+            await self._verify_saved_draft_card(
+                draft_page,
+                response_id,
+                expected_title,
             )
+            draft_url = self.platform_cfg.get(
+                "draft_url", "https://post.zol.com.cn/v2/manage/works/draft"
+            )
+            draft_fingerprint = hashlib.sha256(response_id.encode()).hexdigest()[:8]
+            logger.info(
+                "ZOL 草稿实体验证成功: draft_id_fingerprint={}",
+                draft_fingerprint,
+            )
+            return draft_url
         except asyncio.CancelledError as exc:
             if clicked:
                 exc.error_code = "DRAFT_RESULT_UNKNOWN"
@@ -2020,3 +2283,9 @@ class ZOLPlatform(BasePlatform):
             raise DraftResultUnknownError(
                 "DRAFT_RESULT_UNKNOWN: 保存动作已触发但结果无法证明"
             ) from exc
+        finally:
+            if draft_page is not None:
+                try:
+                    await draft_page.close()
+                except Exception:
+                    logger.warning("ZOL 草稿核验页关闭失败，业务结果保持原状态")

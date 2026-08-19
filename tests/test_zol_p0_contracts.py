@@ -176,9 +176,26 @@ def test_image_upload_re_resolves_rebuilt_iframe_before_next_text_block() -> Non
         page.frame_body = replacement_body
         page.frame = FakeFrame(page, replacement_body)
         page.iframe_handle.content_frame = AsyncMock(return_value=page.frame)
-        return {"success": True, "filename": "image.png"}
+        return {
+            "success": True,
+            "filename": "image.png",
+            "image_src_fingerprint": "image-fingerprint",
+        }
 
     platform._upload_image = AsyncMock(side_effect=replace_iframe_after_upload)
+    platform._read_editor_dom_tokens = AsyncMock(
+        side_effect=[
+            [
+                {"kind": "text", "text": "前文"},
+                {"kind": "image", "fingerprint": "image-fingerprint"},
+            ],
+            [
+                {"kind": "text", "text": "前文"},
+                {"kind": "image", "fingerprint": "image-fingerprint"},
+                {"kind": "text", "text": "后文"},
+            ],
+        ]
+    )
 
     result = asyncio.run(
         platform.fill_content(

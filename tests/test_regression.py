@@ -2102,7 +2102,10 @@ class RegressionTests(DatabaseTestCase):
         platform.simulator.random_delay = AsyncMock()
         platform._upload_image = AsyncMock(return_value={
             "success": False,
-            "error": r"set_input_files D:\secret\private\image.png token=abcdef123456789012345678901234",
+            "error": (
+                r"set_input_files D:\secret\private\image.png "
+                "token=abcdef123456789012345678901234"
+            ),
         })
         result = asyncio.run(platform.fill_content([
             {"type": "text", "text": "正文段"},
@@ -2120,16 +2123,19 @@ class RegressionTests(DatabaseTestCase):
         platform._upload_image = AsyncMock(return_value={
             "success": False,
             "error_code": "ZOL_IMAGE_UPLOAD_FAILED",
-            "error": r"set_input_files D:\secret\private\image.png cookie=abcdef123456789012345678901234",
+            "error": (
+                r"set_input_files D:\secret\private\image.png "
+                "cookie=abcdef123456789012345678901234"
+            ),
         })
-        result = asyncio.run(platform.fill_content([
-            {"type": "text", "text": "正文段"},
-            {"type": "image", "position": 1},
-        ], [{"position_index": 1, "local_path": "D:/test/image.png"}]))
-        serialized = repr(result["failed_images"])
+        with self.assertRaises(ContentValidationError) as caught:
+            asyncio.run(platform.fill_content([
+                {"type": "text", "text": "正文段"},
+                {"type": "image", "position": 1},
+            ], [{"position_index": 1, "local_path": "D:/test/image.png"}]))
+        serialized = str(caught.exception)
         self.assertNotIn(r"D:\secret", serialized)
         self.assertNotIn("abcdef123456", serialized)
-        self.assertEqual(result["failed_images"][0]["filename"], "image.png")
     def test_zol_topic_match_rejects_ambiguous_candidates(self):
         self.assertEqual(
             ZOLPlatform._pick_topic_candidate(["显示器分屏", "显示器推荐"], "显示器"),
@@ -2153,16 +2159,14 @@ class RegressionTests(DatabaseTestCase):
             "error_code": "ZOL_IMAGE_UPLOAD_CONTROL_NOT_FOUND",
             "error": "未找到图片按钮",
         })
-        result = asyncio.run(platform.fill_content([
-            {"type": "text", "text": "正文段"},
-            {"type": "image", "position": 1},
-        ], [{"position_index": 1, "local_path": "D:/test/image.png"}]))
-        self.assertTrue(result["text_ok"])
-        self.assertEqual(result["expected_images"], 1)
-        self.assertEqual(result["uploaded_images"], 0)
-        self.assertEqual(result["media_status"], "failed")
-        self.assertEqual(result["media_error_code"], "ZOL_IMAGES_ALL_FAILED")
-        self.assertEqual(result["failed_images"][0]["error_code"], "ZOL_IMAGE_UPLOAD_CONTROL_NOT_FOUND")
+        with self.assertRaisesRegex(
+            ContentValidationError,
+            "ZOL_IMAGE_UPLOAD_CONTROL_NOT_FOUND",
+        ):
+            asyncio.run(platform.fill_content([
+                {"type": "text", "text": "正文段"},
+                {"type": "image", "position": 1},
+            ], [{"position_index": 1, "local_path": "D:/test/image.png"}]))
 
     def test_zol_partial_image_failure_is_not_reported_as_complete(self):
         platform = ZOLPlatform()
@@ -2174,21 +2178,50 @@ class RegressionTests(DatabaseTestCase):
                 "filename": "one.png",
                 "image_src_fingerprint": "one-fingerprint",
             },
-            {"success": False, "error_code": "ZOL_IMAGE_UPLOAD_VERIFY_FAILED", "error": "数量未增加"},
+            {
+                "success": False,
+                "error_code": "ZOL_IMAGE_UPLOAD_VERIFY_FAILED",
+                "error": "数量未增加",
+            },
         ])
         platform._verify_content_prefix = AsyncMock()
-        result = asyncio.run(platform.fill_content([
-            {"type": "text", "text": "正文段"},
-            {"type": "image", "position": 1},
-            {"type": "image", "position": 2},
-        ], [
-            {"position_index": 1, "local_path": "D:/test/one.png"},
-            {"position_index": 2, "local_path": "D:/test/two.png"},
-        ]))
-        self.assertEqual(result["media_status"], "partial")
-        self.assertEqual(result["media_error_code"], "ZOL_IMAGES_PARTIAL")
-        self.assertEqual(result["uploaded_images"], 1)
-        self.assertEqual(len(result["failed_images"]), 1)
+        with self.assertRaisesRegex(
+            ContentValidationError,
+            "ZOL_IMAGE_UPLOAD_VERIFY_FAILED",
+        ):
+            asyncio.run(platform.fill_content([
+                {"type": "text", "text": "正文段"},
+                {"type": "image", "position": 1},
+                {"type": "image", "position": 2},
+            ], [
+                {"position_index": 1, "local_path": "D:/test/one.png"},
+                {"position_index": 2, "local_path": "D:/test/two.png"},
+            ]))
+        self.assertEqual(platform._upload_image.await_count, 2)
+
+    def test_zol_first_image_failure_stops_remaining_uploads(self):
+        platform = ZOLPlatform()
+        platform.page = FakePage("iframe")
+        platform.simulator.random_delay = AsyncMock()
+        platform._upload_image = AsyncMock(return_value={
+            "success": False,
+            "error_code": "ZOL_IMAGE_UPLOAD_CONTROL_NOT_FOUND",
+            "error": "未找到图片按钮",
+        })
+
+        with self.assertRaisesRegex(
+            ContentValidationError,
+            "ZOL_IMAGE_UPLOAD_CONTROL_NOT_FOUND",
+        ):
+            asyncio.run(platform.fill_content([
+                {"type": "text", "text": "正文段"},
+                {"type": "image", "position": 1},
+                {"type": "image", "position": 2},
+            ], [
+                {"position_index": 1, "local_path": "D:/test/one.png"},
+                {"position_index": 2, "local_path": "D:/test/two.png"},
+            ]))
+        platform._upload_image.assert_awaited_once()
 
 
 if __name__ == "__main__":

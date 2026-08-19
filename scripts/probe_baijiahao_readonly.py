@@ -30,6 +30,17 @@ from platforms.baijiahao import BaijiahaoPlatform
 
 MANAGE_URL = "https://baijiahao.baidu.com/builder/rc/manage"
 ALLOWED_ORIGIN = "https://baijiahao.baidu.com"
+IDENTITY_KEY_MARKERS = (
+    "account",
+    "author",
+    "baijiahao",
+    "creator",
+    "name",
+    "nick",
+    "profile",
+    "uid",
+    "user",
+)
 
 
 class ProbeError(RuntimeError):
@@ -40,7 +51,7 @@ def _sqlite_uri(path: Path) -> str:
     return f"file:///{quote(path.as_posix().lstrip('/'), safe='/:')}?mode=ro"
 
 
-def _load_account(account_id: str) -> PlatformAccount:
+def _load_account(account_id: str, *, allow_error_state: bool = False) -> PlatformAccount:
     path = default_database_path()
     if not path.is_file():
         raise ProbeError("ACCOUNT_DATABASE_NOT_FOUND")
@@ -60,7 +71,9 @@ def _load_account(account_id: str) -> PlatformAccount:
         raise ProbeError("ACCOUNT_NOT_FOUND")
     if row["platform"] != "baijiahao":
         raise ProbeError("ACCOUNT_PLATFORM_MISMATCH")
-    if row["status"] != "ACTIVE" or row["session_status"] != "VALID":
+    if row["status"] != "ACTIVE" or (
+        row["session_status"] != "VALID" and not allow_error_state
+    ):
         raise ProbeError("LOGIN_REQUIRED")
     return PlatformAccount(
         account_id=str(row["account_id"]),
@@ -320,6 +333,57 @@ def _sanitize(payload: Any) -> dict[str, Any]:
     }
 
 
+def _identity_shape(payload: Any) -> list[dict[str, Any]]:
+    candidates: list[dict[str, Any]] = []
+
+    def walk(value: Any, path: str, depth: int) -> None:
+        if depth > 8 or len(candidates) >= 120:
+            return
+        if isinstance(value, dict):
+            for key, item in value.items():
+                clean_key = str(key)[:80]
+                child_path = f"{path}.{clean_key}" if path else clean_key
+                lowered = clean_key.lower()
+                if any(marker in lowered for marker in IDENTITY_KEY_MARKERS):
+                    candidates.append(
+                        {
+                            "path": child_path[:240],
+                            "type": type(item).__name__,
+                            "length": len(item) if isinstance(item, (str, list, dict)) else 0,
+                        }
+                    )
+                walk(item, child_path, depth + 1)
+        elif isinstance(value, list):
+            for index, item in enumerate(value[:20]):
+                walk(item, f"{path}[{index}]", depth + 1)
+
+    walk(payload, "", 0)
+    return candidates
+
+
+def _matching_value_paths(payload: Any, expected: object) -> list[str]:
+    needle = str(expected or "").strip()
+    if not needle:
+        return []
+    matches: list[str] = []
+
+    def walk(value: Any, path: str, depth: int) -> None:
+        if depth > 8 or len(matches) >= 20:
+            return
+        if isinstance(value, dict):
+            for key, item in value.items():
+                child_path = f"{path}.{key}" if path else str(key)
+                walk(item, child_path, depth + 1)
+        elif isinstance(value, list):
+            for index, item in enumerate(value[:40]):
+                walk(item, f"{path}[{index}]", depth + 1)
+        elif str(value or "").strip() == needle:
+            matches.append(path[:240])
+
+    walk(payload, "", 0)
+    return matches
+
+
 async def run_probe(
     account_id: str,
     *,
@@ -327,18 +391,79 @@ async def run_probe(
     screenshot: bool = False,
     editor: bool = False,
     open_editor_menu: str | None = None,
+    identity_structure: bool = False,
 ) -> dict[str, Any]:
-    account = _load_account(account_id)
+    account = _load_account(account_id, allow_error_state=identity_structure)
     platform = BaijiahaoPlatform(
         profile_dir=account.profile_path,
         strict_profile_lock=True,
     )
     lease = AccountProfileLease(account, purpose="BAIJIAHAO_READ_ONLY_PROBE")
+    identity_responses: list[dict[str, Any]] = []
+
+    async def on_response(response) -> None:
+        if not identity_structure or len(identity_responses) >= 80:
+            return
+        try:
+            parsed = urlsplit(response.url)
+            if parsed.hostname not in {"baijiahao.baidu.com", "baidu.com"}:
+                return
+            if response.request.resource_type not in {"xhr", "fetch"}:
+                return
+            payload = await response.json()
+            id_matches = _matching_value_paths(payload, account.platform_user_id)
+            name_matches = _matching_value_paths(payload, account.display_name)
+            if parsed.path == "/user-ui/cms/settingInfo":
+                data = payload.get("data") if isinstance(payload, dict) else None
+                data_keys = [
+                    {
+                        "key": str(key)[:80],
+                        "type": type(item).__name__,
+                        "length": len(item)
+                        if isinstance(item, (str, list, dict))
+                        else 0,
+                    }
+                    for key, item in (data.items() if isinstance(data, dict) else [])
+                ]
+                identity_responses.append(
+                    {
+                        "path": parsed.path[:240],
+                        "method": response.request.method,
+                        "status": int(response.status),
+                        "data_keys": data_keys[:120],
+                        "stored_id_match_paths": id_matches,
+                        "stored_name_match_paths": name_matches,
+                    }
+                )
+            elif id_matches or name_matches:
+                identity_responses.append(
+                    {
+                        "path": parsed.path[:240],
+                        "method": response.request.method,
+                        "status": int(response.status),
+                        "stored_id_match_paths": id_matches,
+                        "stored_name_match_paths": name_matches,
+                    }
+                )
+        except Exception:  # noqa: BLE001
+            return
+
     try:
         with lease:
             await platform.initialize()
-            if not await platform.check_login():
-                raise ProbeError("LOGIN_REQUIRED")
+            if identity_structure:
+                platform.page.on("response", on_response)
+            cookie_signal_before = await platform._has_session_cookie_signal()
+            login_valid = await platform.check_login()
+            cookie_signal_after = await platform._has_session_cookie_signal()
+            if not login_valid:
+                return {
+                    "status": "LOGIN_REQUIRED",
+                    "cookie_signal_before": cookie_signal_before,
+                    "cookie_signal_after": cookie_signal_after,
+                    "login_error_code": str(platform.last_login_error).split(":", 1)[0],
+                    "identity_responses": identity_responses,
+                }
             if editor:
                 await platform.navigate_to_editor()
             else:
@@ -395,9 +520,17 @@ async def run_probe(
                 "frame_locations": frames,
                 "click_result": click_result,
                 "screenshot_path": screenshot_path,
+                "identity_responses": identity_responses,
+                "cookie_signal_before": cookie_signal_before,
+                "cookie_signal_after": cookie_signal_after,
                 **payload,
             }
     finally:
+        if identity_structure and platform.page is not None:
+            try:
+                platform.page.remove_listener("response", on_response)
+            except Exception:  # noqa: BLE001
+                pass
         await platform.cleanup()
 
 
@@ -424,6 +557,11 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="将当前视口截图写入系统临时目录，仅供本地人工核对",
     )
+    parser.add_argument(
+        "--identity-structure",
+        action="store_true",
+        help="仅记录同源 JSON 的候选键名、类型与长度，不记录字段值",
+    )
     return parser.parse_args()
 
 
@@ -436,6 +574,7 @@ async def _main() -> int:
             screenshot=args.screenshot,
             editor=args.editor,
             open_editor_menu=args.open_editor_menu,
+            identity_structure=args.identity_structure,
         )
     except ProbeError as exc:
         result = {"status": str(exc)}
@@ -449,7 +588,11 @@ async def _main() -> int:
             status = "NAVIGATION_TIMEOUT"
         else:
             status = "PROBE_FAILED"
-        result = {"status": status}
+        result = {
+            "status": status,
+            "exception_type": type(exc).__name__,
+            "error_code": str(getattr(exc, "error_code", "") or "")[:80],
+        }
     print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0
 

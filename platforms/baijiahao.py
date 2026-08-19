@@ -46,6 +46,7 @@ IMAGE_TRIGGER_SELECTOR = ".edui-for-insertimage"
 IMAGE_MODAL_SELECTOR = ".cheetah-ui-pro-image-modal"
 IDENTITY_NAME_KEYS = {"nickname", "user_name", "screen_name", "name", "nick"}
 IDENTITY_UID_KEYS = {"uid", "user_id", "bjh_id", "id"}
+IDENTITY_ENDPOINT_PATH = "/builder/app/appinfo"
 
 
 class PlatformNotImplementedError(PlatformAutomationError):
@@ -175,29 +176,28 @@ class BaijiahaoPlatform(BasePlatform):
             pass
 
     async def fetch_identity_payload(self) -> dict[str, str | int | bool]:
-        """返回百家号同源确认的最小平台身份（捕获 + DOM 兜底）。"""
+        """从真实观察到的 appinfo 同源接口读取稳定 ID 与昵称。"""
 
         if isinstance(self._identity_payload, dict) and self._identity_payload.get("ok"):
             return dict(self._identity_payload)
         try:
             async def _on_response(response) -> None:
                 try:
+                    parsed = urlsplit(response.url)
                     if (
-                        response.request.resource_type in ("xhr", "fetch")
-                        and "baidu.com" in response.url
-                        and any(
-                            key in response.url.lower()
-                            for key in ("logininfo", "user", "profile", "account")
-                        )
+                        response.request.resource_type not in ("xhr", "fetch")
+                        or parsed.hostname != "baijiahao.baidu.com"
+                        or parsed.path != IDENTITY_ENDPOINT_PATH
+                        or not 200 <= response.status < 300
                     ):
-                        payload = await response.json()
-                        found = self._extract_identity_from_json(payload)
-                        if found and self._identity_payload is None:
-                            self._identity_payload = {
-                                "ok": True,
-                                "user_id": found[0],
-                                "display_name": found[1],
-                            }
+                        return
+                    found = self._extract_appinfo_identity(await response.json())
+                    if found and self._identity_payload is None:
+                        self._identity_payload = {
+                            "ok": True,
+                            "user_id": found[0],
+                            "display_name": found[1],
+                        }
                 except Exception:  # noqa: BLE001
                     pass
 
@@ -212,6 +212,30 @@ class BaijiahaoPlatform(BasePlatform):
                     if self._identity_payload is not None:
                         break
                     await asyncio.sleep(1)
+                if self._identity_payload is None:
+                    direct = await self.page.evaluate(
+                        """async (path) => {
+                            try {
+                                const response = await fetch(path, {
+                                    method: 'GET',
+                                    credentials: 'include',
+                                    headers: {Accept: 'application/json'},
+                                });
+                                if (!response.ok) return null;
+                                return await response.json();
+                            } catch (_) {
+                                return null;
+                            }
+                        }""",
+                        IDENTITY_ENDPOINT_PATH,
+                    )
+                    found = self._extract_appinfo_identity(direct)
+                    if found:
+                        self._identity_payload = {
+                            "ok": True,
+                            "user_id": found[0],
+                            "display_name": found[1],
+                        }
             finally:
                 try:
                     self.page.remove_listener("response", _on_response)
@@ -229,6 +253,26 @@ class BaijiahaoPlatform(BasePlatform):
         if isinstance(self._identity_payload, dict) and self._identity_payload.get("ok"):
             return dict(self._identity_payload)
         return {"ok": False, "user_id": "", "display_name": ""}
+
+    @staticmethod
+    def _extract_appinfo_identity(payload) -> tuple[str, str] | None:
+        """只接受 ``data.user`` 中同时存在且互相一致的稳定身份。"""
+
+        if not isinstance(payload, dict):
+            return None
+        data = payload.get("data")
+        user = data.get("user") if isinstance(data, dict) else None
+        if not isinstance(user, dict):
+            return None
+        primary_id = str(user.get("userid") or "").strip()
+        secondary_id = str(user.get("id") or "").strip()
+        display_name = str(user.get("name") or "").strip()
+        if primary_id and secondary_id and primary_id != secondary_id:
+            return None
+        user_id = primary_id or secondary_id
+        if not user_id or not display_name:
+            return None
+        return user_id, display_name
 
     @staticmethod
     def _extract_identity_from_json(payload) -> tuple[str, str] | None:

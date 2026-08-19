@@ -114,6 +114,35 @@ def test_image_mapping_never_falls_back_to_first_unrelated_image() -> None:
     assert BaijiahaoPlatform._image_path_for_block(block, images) is None
 
 
+def test_appinfo_identity_requires_matching_stable_ids_and_name() -> None:
+    payload = {
+        "data": {
+            "user": {
+                "id": "stable-5072",
+                "userid": "stable-5072",
+                "name": "真实昵称",
+            }
+        }
+    }
+
+    assert BaijiahaoPlatform._extract_appinfo_identity(payload) == (
+        "stable-5072",
+        "真实昵称",
+    )
+
+
+@pytest.mark.parametrize(
+    "user",
+    [
+        {"id": "one", "userid": "two", "name": "昵称"},
+        {"id": "one", "userid": "one", "name": ""},
+        {"id": "", "userid": "", "name": "昵称"},
+    ],
+)
+def test_appinfo_identity_fails_closed_on_inconsistent_payload(user: dict) -> None:
+    assert BaijiahaoPlatform._extract_appinfo_identity({"data": {"user": user}}) is None
+
+
 def test_expected_tokens_preserve_word_text_heading_image_order() -> None:
     tokens = BaijiahaoPlatform._expected_content_tokens(
         [

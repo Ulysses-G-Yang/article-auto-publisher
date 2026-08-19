@@ -88,7 +88,9 @@ class _FormatPage:
     def locator(self, selector: str) -> _Collection:
         if selector == ".edui-for-customfontsize:visible":
             return self.trigger
-        if selector == "div[class*='dropdownItem']:visible":
+        if selector == (
+            "div[class*='dropdownItem']:visible span[class*='label']:visible"
+        ):
             return self.options
         raise AssertionError(f"unexpected selector: {selector}")
 

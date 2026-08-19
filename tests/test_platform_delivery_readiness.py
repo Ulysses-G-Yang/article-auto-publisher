@@ -104,6 +104,25 @@ def test_handoff_facts_are_not_promoted_after_unrerun_fixes() -> None:
         )
 
 
+def test_xiaoheihe_word_attempt_updates_only_facet_level_evidence() -> None:
+    record = readiness_by_platform()["xiaoheihe"]
+    editor = record.facets["editor_entry"]
+    assert editor.status is ReadinessStatus.REAL_VERIFIED
+    assert editor.last_real_check.isoformat() == "2026-08-19"
+    assert editor.page_state == "real_editor_entry_reached_draft_only_attempt"
+    assert "docs/acceptance/XIAOHEIHE_WORD_DRAFT_20260819.md" in editor.evidence_refs
+
+    for facet_name in ("text_draft", "body_images", "cover", "draft_verification"):
+        facet = record.facets[facet_name]
+        assert facet.status is ReadinessStatus.RETEST_REQUIRED
+        assert facet.last_real_check.isoformat() == "2026-08-19"
+        assert "XIAOHEIHE_WORD_DRAFT_20260819.md" in " ".join(facet.evidence_refs)
+        assert "waiting_rerun" in facet.page_state
+
+    assert not can_run_stable_image_draft("xiaoheihe")
+    assert not can_run_complete_word_draft("xiaoheihe")
+
+
 @pytest.mark.parametrize(
     ("platform", "expected"),
     [

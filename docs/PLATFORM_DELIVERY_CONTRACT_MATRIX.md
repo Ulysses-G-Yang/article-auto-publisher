@@ -1,6 +1,6 @@
 # ArticleOps 六平台投递证据矩阵
 
-更新时间：2026-08-17 真实验收基线（代码清单由当前分支维护）
+更新时间：2026-08-19 真实验收基线（代码清单由当前分支维护）
 
 这份矩阵是只读的验收证据，不是投递开关，也不会被生产执行路径自动读取。代码存在、单元测试通过、页面能打开，都不等于真实平台链路已经可用；只有交接文档明确记录的真实结果才能标记为 `REAL_VERIFIED` 或 `REAL_FAILED`。
 
@@ -39,11 +39,11 @@
 | 能力项 | 状态 | page_state | last_real_check | evidence_refs |
 |---|---|---|---|---|
 | account_session | `REAL_VERIFIED` | `account_active_valid` | 2026-08-17 | `codex_handoff_20260817.md` |
-| editor_entry | `RETEST_REQUIRED` | `code_fixed_waiting_real_rerun` | 2026-08-17 | `codex_handoff_20260817.md` |
-| text_draft | `RETEST_REQUIRED` | `code_fixed_waiting_real_rerun` | 2026-08-17 | `codex_handoff_20260817.md` |
-| body_images | `RETEST_REQUIRED` | `code_fixed_waiting_real_rerun` | 2026-08-17 | `codex_handoff_20260817.md` |
-| cover | `RETEST_REQUIRED` | `code_fixed_waiting_real_rerun` | 2026-08-17 | `codex_handoff_20260817.md` |
-| draft_verification | `RETEST_REQUIRED` | `code_fixed_waiting_real_rerun` | 2026-08-17 | `codex_handoff_20260817.md`, `docs/PLATFORM_DRAFTBOX_AUDIT.md` |
+| editor_entry | `REAL_VERIFIED` | `real_editor_entry_reached_draft_only_attempt` | 2026-08-19 | `docs/acceptance/XIAOHEIHE_WORD_DRAFT_20260819.md`, `codex_handoff_20260817.md` |
+| text_draft | `RETEST_REQUIRED` | `text_precheck_passed_real_run_failed_before_draft_save_waiting_rerun` | 2026-08-19 | `docs/acceptance/XIAOHEIHE_WORD_DRAFT_20260819.md`, `codex_handoff_20260817.md` |
+| body_images | `RETEST_REQUIRED` | `real_run_failed_after_image_processing_waiting_rerun` | 2026-08-19 | `docs/acceptance/XIAOHEIHE_WORD_DRAFT_20260819.md`, `codex_handoff_20260817.md` |
+| cover | `RETEST_REQUIRED` | `real_run_stopped_before_cover_verification_waiting_rerun` | 2026-08-19 | `docs/acceptance/XIAOHEIHE_WORD_DRAFT_20260819.md`, `codex_handoff_20260817.md` |
+| draft_verification | `RETEST_REQUIRED` | `real_run_stopped_before_draftbox_verification_waiting_rerun` | 2026-08-19 | `docs/acceptance/XIAOHEIHE_WORD_DRAFT_20260819.md`, `codex_handoff_20260817.md` |
 | public_publish | `DISABLED` | `global_publish_gate_closed` | — | `AGENTS.md`, `codex_handoff_20260817.md` |
 
 ### 中关村在线 `zol`

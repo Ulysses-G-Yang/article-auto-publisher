@@ -52,6 +52,11 @@ PLATFORM_DISPLAY_NAMES: Mapping[str, str] = MappingProxyType(
 _HANDOFF_DATE = date(2026, 8, 17)
 _HANDOFF_EVIDENCE = ("codex_handoff_20260817.md",)
 _DRAFTBOX_EVIDENCE = ("codex_handoff_20260817.md", "docs/PLATFORM_DRAFTBOX_AUDIT.md")
+_XHH_WORD_DATE = date(2026, 8, 19)
+_XHH_WORD_EVIDENCE = (
+    "docs/acceptance/XIAOHEIHE_WORD_DRAFT_20260819.md",
+    "codex_handoff_20260817.md",
+)
 _XHS_EVIDENCE = (
     "codex_handoff_20260817.md",
     "docs/XIAOHONGSHU_RISK_CONTROL.md",
@@ -143,12 +148,13 @@ def _facet(
     *,
     page_state: str,
     last_real_check: date | None = _HANDOFF_DATE,
+    evidence_refs: tuple[str, ...] | None = None,
 ) -> FacetReadiness:
     return FacetReadiness(
         status=status,
         page_state=page_state,
         last_real_check=last_real_check,
-        evidence_refs=_evidence_for(platform, facet),
+        evidence_refs=evidence_refs or _evidence_for(platform, facet),
         success_criteria=_SUCCESS_CRITERIA[facet],
     )
 
@@ -159,6 +165,9 @@ def _build_platform(
     real_verified: frozenset[str] = frozenset(),
     real_failed: frozenset[str] = frozenset(),
     no_prior_run: frozenset[str] = frozenset(),
+    facet_overrides: Mapping[
+        str, tuple[ReadinessStatus, str, date | None, tuple[str, ...]]
+    ] = MappingProxyType({}),
 ) -> PlatformDeliveryReadiness:
     facets: dict[str, FacetReadiness] = {}
     for facet in FACET_NAMES:
@@ -176,6 +185,16 @@ def _build_platform(
                 ReadinessStatus.DISABLED,
                 page_state="global_publish_gate_closed",
                 last_real_check=None,
+            )
+        elif facet in facet_overrides:
+            status, page_state, last_real_check, evidence_refs = facet_overrides[facet]
+            facets[facet] = _facet(
+                platform,
+                facet,
+                status,
+                page_state=page_state,
+                last_real_check=last_real_check,
+                evidence_refs=evidence_refs,
             )
         elif facet in real_verified:
             facets[facet] = _facet(
@@ -211,7 +230,41 @@ def _build_platform(
 
 
 PLATFORM_DELIVERY_READINESS: tuple[PlatformDeliveryReadiness, ...] = (
-    _build_platform("xiaoheihe"),
+    _build_platform(
+        "xiaoheihe",
+        facet_overrides={
+            "editor_entry": (
+                ReadinessStatus.REAL_VERIFIED,
+                "real_editor_entry_reached_draft_only_attempt",
+                _XHH_WORD_DATE,
+                _XHH_WORD_EVIDENCE,
+            ),
+            "text_draft": (
+                ReadinessStatus.RETEST_REQUIRED,
+                "text_precheck_passed_real_run_failed_before_draft_save_waiting_rerun",
+                _XHH_WORD_DATE,
+                _XHH_WORD_EVIDENCE,
+            ),
+            "body_images": (
+                ReadinessStatus.RETEST_REQUIRED,
+                "real_run_failed_after_image_processing_waiting_rerun",
+                _XHH_WORD_DATE,
+                _XHH_WORD_EVIDENCE,
+            ),
+            "cover": (
+                ReadinessStatus.RETEST_REQUIRED,
+                "real_run_stopped_before_cover_verification_waiting_rerun",
+                _XHH_WORD_DATE,
+                _XHH_WORD_EVIDENCE,
+            ),
+            "draft_verification": (
+                ReadinessStatus.RETEST_REQUIRED,
+                "real_run_stopped_before_draftbox_verification_waiting_rerun",
+                _XHH_WORD_DATE,
+                _XHH_WORD_EVIDENCE,
+            ),
+        },
+    ),
     _build_platform("zol"),
     _build_platform(
         "zhihu",

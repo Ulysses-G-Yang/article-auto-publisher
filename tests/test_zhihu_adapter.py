@@ -606,6 +606,15 @@ def test_dom_token_validation_rejects_misplaced_image() -> None:
         run(platform._validate_dom_exact(blocks, phase="测试"))
 
 
+def test_dom_reader_walks_nested_draftjs_blocks_instead_of_collapsing_parent() -> None:
+    source = Path(PROJECT_ROOT / "platforms" / "zhihu.py").read_text(encoding="utf-8")
+
+    assert "const visit = (node) =>" in source
+    assert "if (node.matches('[data-block=\"true\"]'))" in source
+    assert "for (const child of node.children) visit(child);" in source
+    assert "if (images.length) {" in source
+
+
 def test_media_error_never_exposes_physical_path(monkeypatch) -> None:
     page = _FakeEditorPage()
     platform = _make_delivery_platform(page)

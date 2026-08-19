@@ -440,19 +440,23 @@ class ZhihuPlatform(BasePlatform):
             raw = await editor.evaluate(
                 """root => {
                     const tokens = [];
-                    for (const wrapper of root.children) {
-                        const images = wrapper.querySelectorAll('img');
-                        if (images.length) {
-                            for (const _image of images) tokens.push({kind: 'image'});
-                            continue;
+                    const visit = (node) => {
+                        if (!node || node.nodeType !== Node.ELEMENT_NODE) return;
+                        if (node.tagName.toLowerCase() === 'img') {
+                            tokens.push({kind: 'image'});
+                            return;
                         }
-                        const blocks = wrapper.matches('[data-block="true"]')
-                            ? [wrapper]
-                            : Array.from(wrapper.querySelectorAll('[data-block="true"]'));
-                        for (const block of blocks) {
-                            const text = block.innerText || block.textContent || '';
-                            if (!text.trim()) continue;
-                            const tag = block.tagName.toLowerCase();
+                        if (node.matches('[data-block="true"]')) {
+                            const images = node.querySelectorAll('img');
+                            if (images.length) {
+                                for (const _image of images) {
+                                    tokens.push({kind: 'image'});
+                                }
+                                return;
+                            }
+                            const text = node.innerText || node.textContent || '';
+                            if (!text.trim()) return;
+                            const tag = node.tagName.toLowerCase();
                             if (tag === 'h3') {
                                 tokens.push({kind: 'heading', level: 2, text});
                             } else if (tag === 'h2') {
@@ -460,8 +464,11 @@ class ZhihuPlatform(BasePlatform):
                             } else {
                                 tokens.push({kind: 'text', text});
                             }
+                            return;
                         }
-                    }
+                        for (const child of node.children) visit(child);
+                    };
+                    for (const child of root.children) visit(child);
                     return tokens;
                 }"""
             )

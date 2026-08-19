@@ -46,6 +46,9 @@ from account_sessions.security import (
 from platforms.media_progress import safe_media_progress
 
 SESSION_INVALIDATING_ERROR_CODES = frozenset({"LOGIN_REQUIRED", "SESSION_EXPIRED"})
+RESULT_UNKNOWN_ERROR_CODES = frozenset(
+    {"DRAFT_RESULT_UNKNOWN", "PUBLISH_RESULT_UNKNOWN", "DELIVERY_RESULT_UNKNOWN"}
+)
 ARTICLE_MAPPING_SUCCESS_STATUSES = frozenset(
     {"DRAFT_SAVED", "DRAFT_SAVED_WITH_WARNINGS", "PUBLISHED", "PUBLISHED_WITH_WARNINGS"}
 )
@@ -857,8 +860,10 @@ class DeliveryService:
             operation = await session.get(DeliveryOperation, operation_id)
             if operation is None:
                 return
-            operation.status = "FAILED"
-            operation.error_code = getattr(exc, "error_code", None) or "DELIVERY_FAILED"
+            error_code = getattr(exc, "error_code", None) or "DELIVERY_FAILED"
+            result_unknown = error_code in RESULT_UNKNOWN_ERROR_CODES
+            operation.status = "RESULT_UNKNOWN" if result_unknown else "FAILED"
+            operation.error_code = error_code
             operation.error_message = safe_error_message(exc)
             operation.completed_at = datetime.now(timezone.utc)
             stored_account = await session.get(PlatformAccount, operation.account_id)
@@ -873,8 +878,8 @@ class DeliveryService:
                 activity_for(
                     account,
                     access,
-                    action="DELIVERY_FAILED",
-                    level="ERROR",
+                    action=("DELIVERY_RESULT_UNKNOWN" if result_unknown else "DELIVERY_FAILED"),
+                    level="WARN" if result_unknown else "ERROR",
                     message=operation.error_message,
                     operation_id=operation_id,
                 )

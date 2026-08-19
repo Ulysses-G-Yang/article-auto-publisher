@@ -45,6 +45,18 @@ class SelectorError(PlatformAutomationError):
     error_code = "SELECTOR_ERROR"
 
 
+class DraftBaselineError(PlatformAutomationError):
+    """保存前无法建立可靠草稿基线，禁止继续输入或点击保存。"""
+
+    error_code = "DRAFT_BASELINE_UNAVAILABLE"
+
+
+class DraftResultUnknownError(PlatformAutomationError):
+    """保存动作可能已经发生，但平台未提供可证明的结果。"""
+
+    error_code = "DRAFT_RESULT_UNKNOWN"
+
+
 class BasePlatform(ABC):
     """平台自动化基类，使用系统 Chrome 浏览器"""
 

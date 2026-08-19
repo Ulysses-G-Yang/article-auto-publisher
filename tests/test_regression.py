@@ -2169,9 +2169,14 @@ class RegressionTests(DatabaseTestCase):
         platform.page = FakePage("iframe")
         platform.simulator.random_delay = AsyncMock()
         platform._upload_image = AsyncMock(side_effect=[
-            {"success": True, "filename": "one.png"},
+            {
+                "success": True,
+                "filename": "one.png",
+                "image_src_fingerprint": "one-fingerprint",
+            },
             {"success": False, "error_code": "ZOL_IMAGE_UPLOAD_VERIFY_FAILED", "error": "数量未增加"},
         ])
+        platform._verify_content_prefix = AsyncMock()
         result = asyncio.run(platform.fill_content([
             {"type": "text", "text": "正文段"},
             {"type": "image", "position": 1},

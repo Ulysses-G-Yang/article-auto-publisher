@@ -15,16 +15,22 @@ from content_studio.platform_format_capabilities import (
 )
 
 
-def _fake_app() -> Flask:
+def _fake_app(factory=None) -> Flask:
     app = Flask("acceptance-test")
     app.extensions["content_studio"] = SimpleNamespace(
         service=SimpleNamespace(platform_format_capabilities=None)
     )
+    if factory is not None:
+        account_state = SimpleNamespace(
+            accounts=SimpleNamespace(platform_factory=factory),
+            delivery=SimpleNamespace(platform_factory=factory),
+        )
+        app.extensions["account_sessions"] = account_state
     return app
 
 
 def _fake_create_app() -> Flask:
-    return _fake_app()
+    return _fake_app(lambda _account: "production-platform")
 
 
 @pytest.fixture(autouse=True)
@@ -51,6 +57,8 @@ def test_build_injects_only_selected_platform_capabilities(monkeypatch: pytest.M
 
     assert registry.get("xiaoheihe").supported == FEATURE_KEYS
     assert registry.get("zol").supported == FEATURE_KEYS
+    assert registry.get("zol").heading_levels == frozenset({2, 3})
+    assert registry.get("xiaoheihe").heading_levels == frozenset()
     assert registry.get("zhihu").supported == frozenset()
     assert {
         name: DEFAULT_PLATFORM_FORMAT_CAPABILITIES.get(name).supported
@@ -71,6 +79,63 @@ def test_platform_selection_is_nonempty_known_and_unique(platforms):
 def test_confirmation_word_is_required():
     with pytest.raises(ValueError):
         acceptance.build_acceptance_app(("xiaoheihe",), "PUBLISH")
+
+
+def test_zol_acceptance_factory_isolated_and_production_factory_unchanged(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+):
+    calls = []
+
+    def original_factory(account):
+        calls.append(account.platform)
+        return "production-platform"
+
+    monkeypatch.setattr(
+        acceptance,
+        "_load_create_app",
+        lambda: _fake_app(original_factory),
+        raising=False,
+    )
+    app = acceptance.build_acceptance_app(("zol",), "DRAFT_ONLY")
+    state = app.extensions["account_sessions"]
+    zol_account = SimpleNamespace(platform="zol", profile_path=str(tmp_path / "zol"))
+    other_account = SimpleNamespace(platform="xiaoheihe", profile_path=str(tmp_path / "xhh"))
+
+    zol_platform = state.accounts.platform_factory(zol_account)
+    assert zol_platform.enable_heading_experiment is True
+    assert zol_platform.strict_profile_lock is True
+    assert zol_platform.profile_dir == (tmp_path / "zol").resolve()
+    assert state.delivery.platform_factory(zol_account).enable_heading_experiment is True
+    assert state.accounts.platform_factory(other_account) == "production-platform"
+    assert calls == ["xiaoheihe"]
+
+
+def test_non_zol_acceptance_keeps_original_factory(monkeypatch: pytest.MonkeyPatch):
+    sentinel = object()
+
+    def original_factory(_account):
+        return sentinel
+
+    app = _fake_app(original_factory)
+    monkeypatch.setattr(acceptance, "_load_create_app", lambda: app, raising=False)
+
+    acceptance.build_acceptance_app(("xiaoheihe",), "DRAFT_ONLY")
+
+    state = app.extensions["account_sessions"]
+    assert state.accounts.platform_factory is original_factory
+    assert state.delivery.platform_factory is original_factory
+
+
+def test_production_platform_factory_never_enables_zol_heading_experiment(
+    tmp_path: Path,
+):
+    from account_sessions.account_service import _platform_instance
+
+    account = SimpleNamespace(platform="zol", profile_path=str(tmp_path / "zol"))
+    platform = _platform_instance(account)
+
+    assert platform.enable_heading_experiment is False
 
 
 @pytest.mark.parametrize("raw", ["true", "1", "yes", "on", " TRUE "])

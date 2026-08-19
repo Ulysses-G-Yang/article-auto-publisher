@@ -503,6 +503,140 @@ def test_draft_executor_records_platform_logs_and_success(tmp_path: Path) -> Non
     run(database.dispose())
 
 
+def test_draft_result_unknown_is_persisted_without_automatic_retry(
+    tmp_path: Path,
+) -> None:
+    class FakePlatform:
+        platform_name = "xiaoheihe"
+        context = None
+
+        def __init__(self) -> None:
+            self.publish_calls = 0
+
+        async def initialize(self) -> None:
+            return None
+
+        async def check_login(self) -> bool:
+            return True
+
+        async def fetch_identity_payload(self) -> dict:
+            return {"ok": True, "user_id": "10001234", "display_name": "夜航员"}
+
+        async def publish(self, **_kwargs) -> dict:
+            self.publish_calls += 1
+            return {
+                "success": False,
+                "error_code": "DRAFT_RESULT_UNKNOWN",
+                "error": "保存动作已触发但结果无法证明",
+            }
+
+        async def cleanup(self) -> None:
+            return None
+
+    database = AccountDatabase(sqlite_database_url(tmp_path))
+    fake = FakePlatform()
+    accounts = AccountSessionService(
+        database,
+        seed_legacy_profiles=False,
+        platform_factory=lambda _account: fake,
+        allowed_profile_roots=(tmp_path / "runtime" / "profiles",),
+    )
+    run(accounts.initialize())
+    profile = make_profile(tmp_path, "xiaoheihe", "unknown-result")
+    account = run(insert_account(database, profile))
+    delivery = DeliveryService(
+        accounts,
+        platform_factory=lambda _account: fake,
+        public_publish_enabled=False,
+    )
+    request = DeliveryRequest.model_validate(delivery_payload(account.account_id))
+    queued = run(delivery.request_delivery(request, LOCAL_WEB_CONTEXT))
+
+    with pytest.raises(AccountUnavailableError) as exc_info:
+        run(delivery.execute_operation(queued["operation_id"], LOCAL_WEB_CONTEXT))
+    assert exc_info.value.error_code == "DRAFT_RESULT_UNKNOWN"
+
+    async def load_operation() -> DeliveryOperation:
+        async with database.session() as session:
+            return await session.get(DeliveryOperation, queued["operation_id"])
+
+    stored = run(load_operation())
+    assert stored.status == "RESULT_UNKNOWN"
+    assert stored.error_code == "DRAFT_RESULT_UNKNOWN"
+    activity = run(accounts.list_activity(account.account_id, LOCAL_WEB_CONTEXT))
+    terminal = [row for row in activity if row["action"] == "DELIVERY_RESULT_UNKNOWN"]
+    assert len(terminal) == 1
+    assert terminal[0]["level"] == "WARN"
+    assert terminal[0]["operation_id"] == queued["operation_id"]
+
+    # 终态不能重新进入平台执行；第二次调用只读取已结束执行单。
+    second = run(delivery.execute_operation(queued["operation_id"], LOCAL_WEB_CONTEXT))
+    assert second["status"] == "RESULT_UNKNOWN"
+    assert fake.publish_calls == 1
+    run(database.dispose())
+
+
+def test_cancelled_delivery_is_result_unknown_and_cancel_continues_upward(
+    tmp_path: Path,
+) -> None:
+    class FakePlatform:
+        platform_name = "xiaoheihe"
+        context = None
+
+        async def initialize(self) -> None:
+            return None
+
+        async def check_login(self) -> bool:
+            return True
+
+        async def fetch_identity_payload(self) -> dict:
+            return {"ok": True, "user_id": "10001234", "display_name": "夜航员"}
+
+        async def publish(self, **_kwargs) -> dict:
+            error = asyncio.CancelledError()
+            error.error_code = "DRAFT_RESULT_UNKNOWN"
+            error.safe_message = "DRAFT_RESULT_UNKNOWN: 保存动作已触发，结果未知"
+            raise error
+
+        async def cleanup(self) -> None:
+            return None
+
+    database = AccountDatabase(sqlite_database_url(tmp_path))
+    fake = FakePlatform()
+    accounts = AccountSessionService(
+        database,
+        seed_legacy_profiles=False,
+        platform_factory=lambda _account: fake,
+        allowed_profile_roots=(tmp_path / "runtime" / "profiles",),
+    )
+    run(accounts.initialize())
+    account = run(
+        insert_account(
+            database,
+            make_profile(tmp_path, "xiaoheihe", "cancelled"),
+        )
+    )
+    delivery = DeliveryService(
+        accounts,
+        platform_factory=lambda _account: fake,
+        public_publish_enabled=False,
+    )
+    request = DeliveryRequest.model_validate(delivery_payload(account.account_id))
+    queued = run(delivery.request_delivery(request, LOCAL_WEB_CONTEXT))
+
+    with pytest.raises(asyncio.CancelledError):
+        run(delivery.execute_operation(queued["operation_id"], LOCAL_WEB_CONTEXT))
+
+    async def load_operation() -> DeliveryOperation:
+        async with database.session() as session:
+            return await session.get(DeliveryOperation, queued["operation_id"])
+
+    stored = run(load_operation())
+    assert stored.status == "RESULT_UNKNOWN"
+    assert stored.error_code == "DRAFT_RESULT_UNKNOWN"
+    run(database.dispose())
+
+
 def test_media_incomplete_with_saved_draft_is_with_warnings_not_failed(
     tmp_path: Path,
 ) -> None:

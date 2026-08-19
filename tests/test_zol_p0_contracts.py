@@ -56,31 +56,42 @@ def test_missing_image_position_is_reported_and_never_uploads_first_image() -> N
     platform.simulator.random_delay = AsyncMock()
     platform._upload_image = AsyncMock()
 
-    result = asyncio.run(
-        platform.fill_content(
-            [
-                {"type": "text", "text": "正文"},
-                {"type": "image", "position": 1},
-            ],
-            [{"position_index": 0, "local_path": "D:/fixture/first.png"}],
+    with pytest.raises(ContentValidationError, match="ZOL_IMAGE_FILE_MISSING"):
+        asyncio.run(
+            platform.fill_content(
+                [
+                    {"type": "text", "text": "正文"},
+                    {"type": "image", "position": 1},
+                ],
+                [{"position_index": 0, "local_path": "D:/fixture/first.png"}],
+            )
         )
-    )
 
-    assert result["media_status"] == "failed"
-    assert result["media_error_code"] == "ZOL_IMAGES_ALL_FAILED"
-    assert result["failed_images"][0]["error_code"] == "ZOL_IMAGE_FILE_MISSING"
     platform._upload_image.assert_not_awaited()
 
 
-@pytest.mark.parametrize("level", [None, 1, 2, 3, 4])
-def test_heading_is_fail_closed_for_unverified_and_unsupported_levels(level) -> None:
+@pytest.mark.parametrize("level", [None, 1, 4])
+def test_heading_unknown_or_unsupported_level_is_fail_closed(level) -> None:
     platform = ZOLPlatform()
     block = {"type": "heading", "text": "不会写入"}
     if level is not None:
         block["level"] = level
 
-    with pytest.raises(ContentValidationError, match="ZOL_HEADING_UNVERIFIED"):
+    with pytest.raises(ContentValidationError, match="ZOL_HEADING_UNSUPPORTED_LEVEL"):
         asyncio.run(platform.fill_content([block], []))
+
+
+@pytest.mark.parametrize("level", [2, 3])
+def test_heading_h2_h3_remain_closed_without_experimental_flag(level) -> None:
+    platform = ZOLPlatform()
+
+    with pytest.raises(ContentValidationError, match="ZOL_HEADING_UNVERIFIED"):
+        asyncio.run(
+            platform.fill_content(
+                [{"type": "heading", "level": level, "text": "不会写入"}],
+                [],
+            )
+        )
 
 
 def test_image_order_comparison_rejects_wrong_sequence_without_self_report() -> None:
@@ -89,7 +100,7 @@ def test_image_order_comparison_rejects_wrong_sequence_without_self_report() -> 
     assert ZOLPlatform._image_order_matches([1, 3, 5], None) is False
 
 
-def test_multi_image_success_stays_failed_without_real_dom_order_evidence() -> None:
+def test_multi_image_success_without_dom_fingerprint_stays_failed() -> None:
     platform = ZOLPlatform()
     platform.page = FakePage("contenteditable")
     platform.simulator.random_delay = AsyncMock()
@@ -100,24 +111,52 @@ def test_multi_image_success_stays_failed_without_real_dom_order_evidence() -> N
         ]
     )
 
-    result = asyncio.run(
-        platform.fill_content(
-            [
-                {"type": "image", "position": 1},
-                {"type": "image", "position": 3},
-            ],
-            [
-                {"position_index": 1, "local_path": "D:/fixture/image-1.png"},
-                {"position_index": 3, "local_path": "D:/fixture/image-2.png"},
-            ],
+    with pytest.raises(ContentValidationError, match="ZOL_IMAGE_ORDER_UNVERIFIED"):
+        asyncio.run(
+            platform.fill_content(
+                [
+                    {"type": "image", "position": 1},
+                    {"type": "image", "position": 3},
+                ],
+                [
+                    {"position_index": 1, "local_path": "D:/fixture/image-1.png"},
+                    {"position_index": 3, "local_path": "D:/fixture/image-2.png"},
+                ],
+            )
         )
-    )
 
-    assert result["uploaded_images"] == 2
-    assert result["media_status"] == "failed"
-    assert result["media_error_code"] == "ZOL_IMAGE_ORDER_UNVERIFIED"
-    assert "顺序" in result["media_error"]
-    assert platform._upload_image.await_count == 2
+    assert platform._upload_image.await_count == 1
+
+
+def test_dom_token_comparison_rejects_swapped_images_and_interleaving() -> None:
+    first = {"kind": "image", "fingerprint": "a"}
+    second = {"kind": "image", "fingerprint": "b"}
+    text = {"kind": "text", "text": "正文"}
+
+    assert ZOLPlatform._content_tokens_match([text, first, second], [text, first, second])
+    assert not ZOLPlatform._content_tokens_match([text, first, second], [text, second, first])
+    assert not ZOLPlatform._content_tokens_match([text, first, second], [first, text, second])
+
+
+def test_editor_dom_src_is_reduced_to_non_sensitive_fingerprint() -> None:
+    platform = ZOLPlatform()
+
+    class TokenEditor(FakeLocator):
+        async def evaluate(self, script, *_args):
+            if "const tokens" in script:
+                return [
+                    {"kind": "text", "text": "前文"},
+                    {"kind": "image", "src": "https://cdn.invalid/a.png"},
+                    {"kind": "heading", "tag": "h2", "text": "标题"},
+                ]
+            return await super().evaluate(script, *_args)
+
+    editor = TokenEditor(tag="body")
+    tokens = asyncio.run(platform._read_editor_dom_tokens(editor, "iframe"))
+
+    assert [item["kind"] for item in tokens] == ["text", "image", "heading"]
+    assert "src" not in tokens[1]
+    assert len(tokens[1]["fingerprint"]) == 64
 
 
 def test_image_upload_re_resolves_rebuilt_iframe_before_next_text_block() -> None:

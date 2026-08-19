@@ -121,15 +121,52 @@ def build_acceptance_app(platforms: Iterable[str], confirmation: str):
     # 所有验收门通过后才导入并创建 Flask 应用，失败路径不会初始化路由、
     # 数据库扩展或账号运行时。
     from content_studio.content_document import FEATURE_KEYS
-    from content_studio.platform_format_capabilities import PlatformFormatCapabilities
+    from content_studio.platform_format_capabilities import (
+        PlatformFormatCapabilities,
+        PlatformFormatDeclaration,
+    )
 
     app = _load_create_app()
     content_state = app.extensions.get("content_studio")
     if content_state is None or not hasattr(content_state, "service"):
         raise RuntimeError("Content Studio 运行时未注册")
+    declarations = {}
+    for platform in selected:
+        if platform == "zol":
+            declarations[platform] = PlatformFormatDeclaration(
+                platform,
+                FEATURE_KEYS,
+                frozenset({2, 3}),
+            )
+        else:
+            declarations[platform] = FEATURE_KEYS
     content_state.service.platform_format_capabilities = PlatformFormatCapabilities(
-        {platform: FEATURE_KEYS for platform in selected}
+        declarations
     )
+
+    # 真实验收只在本进程内给选中的 ZOL 注入 heading 实验开关；生产
+    # ``account_service._platform_instance`` 永远不使用该开关。其他平台
+    # 必须继续走应用原有工厂，避免验收入口改变生产适配器行为。
+    if "zol" in selected:
+        account_state = app.extensions.get("account_sessions")
+        if account_state is None or not hasattr(account_state, "accounts"):
+            raise RuntimeError("账号会话运行时未注册")
+        original_factory = account_state.accounts.platform_factory
+
+        def acceptance_platform_factory(account):
+            if getattr(account, "platform", "") == "zol":
+                from platforms.zol import ZOLPlatform
+
+                return ZOLPlatform(
+                    profile_dir=account.profile_path,
+                    strict_profile_lock=True,
+                    enable_heading_experiment=True,
+                )
+            return original_factory(account)
+
+        account_state.accounts.platform_factory = acceptance_platform_factory
+        if hasattr(account_state, "delivery"):
+            account_state.delivery.platform_factory = acceptance_platform_factory
     return app
 
 

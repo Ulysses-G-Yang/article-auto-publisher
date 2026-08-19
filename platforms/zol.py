@@ -1,8 +1,12 @@
 """中关村在线（ZOL）创作者中心自动化"""
 import asyncio
+import hashlib
 import os
 import re
 import time
+from collections import Counter
+from dataclasses import dataclass
+from io import BytesIO
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -11,6 +15,8 @@ from loguru import logger
 from platforms.base import (
     BasePlatform,
     BrowserLifecycleError,
+    DraftBaselineError,
+    DraftResultUnknownError,
     LoginRequiredError,
     PlatformAccessError,
     SelectorError,
@@ -18,8 +24,19 @@ from platforms.base import (
 from platforms.content_validation import (
     ContentValidationError,
     ensure_valid_content,
+    extract_expected_paragraphs,
+    normalize_for_comparison,
     safe_media_error,
 )
+
+
+@dataclass(frozen=True)
+class _ZOLDraftSnapshot:
+    """只保留草稿实体核验所需的非敏感摘要。"""
+
+    total_num: int
+    draft_ids: frozenset[str]
+    title_to_ids: dict[str, frozenset[str]]
 
 
 class ZOLPlatform(BasePlatform):
@@ -32,12 +49,18 @@ class ZOLPlatform(BasePlatform):
     CRITICAL_COOKIES = {"last_userid", "lv", "zol_userid", "zol_sid"}
     IMAGE_BUTTON = "button[title='图片上传'], button[aria-label='图片上传']"
     IMAGE_MODAL = ".ant-modal-wrap:visible"
+    IMAGE_INPUT = "input[type='file'][accept='image'][multiple]"
     TOPIC_BUTTON = "button:has-text('选择话题')"
     TOPIC_MODAL = ".ant-modal-wrap:visible"
+    DRAFT_LIST_API_MARKER = "/api/v1/creator.content.getlist"
+    DRAFT_SAVE_SELECTOR = ".draft-btns .foot-item:has(.foot-item-text:text-is('存草稿'))"
+    DRAFT_RESULT_POLL_DELAYS = (0, 1, 2, 3, 4)
 
-    def __init__(self, **kwargs):
+    def __init__(self, *, enable_heading_experiment: bool = False, **kwargs):
         super().__init__(**kwargs)
         self.last_login_error = ""
+        self.enable_heading_experiment = enable_heading_experiment
+        self._draft_baseline: _ZOLDraftSnapshot | None = None
 
     @staticmethod
     def _host(url: str) -> str:
@@ -423,6 +446,133 @@ class ZOLPlatform(BasePlatform):
 
         raise LoginRequiredError("LOGIN_REQUIRED: ZOL 登录超时（90 秒），请重新扫码或检查安全验证")
 
+    @classmethod
+    def _is_draft_list_response(cls, response) -> bool:
+        """只匹配创作者中心草稿列表 GET，不接受页面文本或其他接口。"""
+
+        try:
+            request = response.request
+            method = str(getattr(request, "method", "")).upper()
+            url = str(getattr(response, "url", ""))
+            return method == "GET" and cls.DRAFT_LIST_API_MARKER in url
+        except Exception:
+            return False
+
+    @staticmethod
+    def _scalar_draft_id(value: object) -> str | None:
+        if isinstance(value, bool) or not isinstance(value, (str, int)):
+            return None
+        normalized = str(value).strip()
+        return normalized or None
+
+    @classmethod
+    def _parse_draft_list_payload(cls, payload: object) -> _ZOLDraftSnapshot:
+        """解析已验证的 getlist JSON，只留下数量、ID 和实体标题映射。"""
+
+        if not isinstance(payload, dict) or payload.get("errcode") != 0:
+            raise DraftBaselineError("DRAFT_BASELINE_UNAVAILABLE: ZOL 草稿列表接口未确认成功")
+        data = payload.get("data")
+        if not isinstance(data, dict):
+            raise DraftBaselineError("DRAFT_BASELINE_UNAVAILABLE: ZOL 草稿列表数据结构无效")
+        total_num = data.get("totalNum")
+        items = data.get("list")
+        if (
+            isinstance(total_num, bool)
+            or not isinstance(total_num, int)
+            or total_num < 0
+            or not isinstance(items, list)
+        ):
+            raise DraftBaselineError("DRAFT_BASELINE_UNAVAILABLE: ZOL 草稿列表分页字段无效")
+
+        draft_ids: set[str] = set()
+        title_to_ids: dict[str, set[str]] = {}
+        for item in items:
+            if not isinstance(item, dict):
+                raise DraftBaselineError(
+                    "DRAFT_BASELINE_UNAVAILABLE: ZOL 草稿实体不是对象"
+                )
+            draft_id = cls._scalar_draft_id(item.get("draftId"))
+            title = item.get("title")
+            if not draft_id:
+                raise DraftBaselineError(
+                    "DRAFT_BASELINE_UNAVAILABLE: ZOL 草稿实体缺少顶层 draftId"
+                )
+            if not isinstance(title, str) or not title:
+                raise DraftBaselineError(
+                    "DRAFT_BASELINE_UNAVAILABLE: ZOL 草稿实体缺少顶层 title"
+                )
+            if draft_id in draft_ids:
+                raise DraftBaselineError(
+                    "DRAFT_BASELINE_UNAVAILABLE: ZOL 草稿实体 draftId 不唯一"
+                )
+            draft_ids.add(draft_id)
+            normalized_title = normalize_for_comparison(title)
+            if normalized_title:
+                title_to_ids.setdefault(normalized_title, set()).add(draft_id)
+
+        if total_num == 0 and items:
+            raise DraftBaselineError("DRAFT_BASELINE_UNAVAILABLE: ZOL 草稿总数与列表不一致")
+        return _ZOLDraftSnapshot(
+            total_num=total_num,
+            draft_ids=frozenset(draft_ids),
+            title_to_ids={
+                title: frozenset(ids) for title, ids in title_to_ids.items()
+            },
+        )
+
+    async def _fetch_draft_snapshot(self) -> _ZOLDraftSnapshot:
+        """导航草稿箱并捕获唯一的 getlist 成功响应。"""
+
+        self._require_page_alive("ZOL 读取草稿基线")
+        draft_url = self.platform_cfg.get(
+            "draft_url", "https://post.zol.com.cn/v2/manage/works/draft"
+        )
+        try:
+            async with self.page.expect_response(
+                self._is_draft_list_response,
+                timeout=15000,
+            ) as response_info:
+                await self.page.goto(
+                    draft_url,
+                    wait_until="domcontentloaded",
+                    timeout=15000,
+                )
+            response = await response_info.value
+            if getattr(response, "status", None) != 200:
+                raise DraftBaselineError(
+                    "DRAFT_BASELINE_UNAVAILABLE: ZOL 草稿列表 HTTP 状态未确认成功"
+                )
+            payload = await response.json()
+            return self._parse_draft_list_payload(payload)
+        except DraftBaselineError:
+            raise
+        except Exception as exc:
+            if self._exception_means_browser_closed(exc):
+                raise BrowserLifecycleError(
+                    "BROWSER_CONTEXT_CLOSED: ZOL 读取草稿列表时页面已关闭"
+                ) from exc
+            raise DraftBaselineError(
+                "DRAFT_BASELINE_UNAVAILABLE: ZOL 草稿列表响应无法确认"
+            ) from exc
+
+    @staticmethod
+    def _new_draft_id_for_title(
+        before: _ZOLDraftSnapshot,
+        after: _ZOLDraftSnapshot,
+        expected_title: str,
+    ) -> str | None:
+        """要求数量增加一条、唯一新 draftId 且该实体精确匹配标题。"""
+
+        if after.total_num != before.total_num + 1:
+            return None
+        new_ids = after.draft_ids - before.draft_ids
+        if len(new_ids) != 1:
+            return None
+        new_id = next(iter(new_ids))
+        if after.title_to_ids.get(expected_title, frozenset()) != {new_id}:
+            return None
+        return new_id
+
     async def navigate_to_editor(self):
         """导航到博客编辑器"""
         self._require_page_alive("ZOL 打开博客编辑器")
@@ -456,6 +606,25 @@ class ZOLPlatform(BasePlatform):
             raise PlatformAccessError(
                 f"ZOL_EDITOR_ROUTE_ERROR: ZOL 编辑器跳转失败，当前 URL: {current_url}"
             )
+
+        # 创作者中心的保存结果必须有 API 草稿基线；旧博客入口没有同一
+        # 契约，保留旧路由识别但不伪造 creator 草稿基线。
+        if host == self.CREATOR_HOST:
+            # 先建立草稿基线；失败时不允许标题或正文输入。读取草稿页后
+            # 回到编辑器，后续 probe 确认仍在同一业务路由。
+            self._draft_baseline = await self._fetch_draft_snapshot()
+            await self.page.goto(
+                editor_url,
+                wait_until="domcontentloaded",
+                timeout=15000,
+            )
+            await self.simulator.random_delay(1, 2)
+            self._require_page_alive("ZOL 返回博客编辑器")
+            current_url = self.page.url or ""
+            if not self._is_blog_editor_url(current_url):
+                raise PlatformAccessError(
+                    "ZOL_EDITOR_ROUTE_ERROR: 读取草稿基线后未能返回编辑器"
+                )
         probe = await self._editor_probe_count()
         if probe == 0:
             raise SelectorError(f"ZOL_EDITOR_SELECTOR_ERROR: 编辑器结构探测失败，当前 URL: {current_url}")
@@ -766,8 +935,239 @@ class ZOLPlatform(BasePlatform):
                 )
                 return fresh, fresh_kind
 
+    async def _read_editor_dom_tokens(self, editor, editor_kind: str) -> list[dict]:
+        """从当前编辑器 DOM 读取文本、标题和图片 marker 的有序序列。
+
+        只读取已解析出的正文节点，不读取页面 body；图片只保留 SHA-256
+        fingerprint，绝不把 src/URL 写入日志、错误消息或返回结果。
+        """
+
+        if editor_kind == "textarea":
+            return []
+        if editor_kind not in {"iframe", "contenteditable"}:
+            raise ContentValidationError("ZOL_CONTENT_DOM_VERIFY_FAILED: 编辑器类型未确认")
+        try:
+            raw_tokens = await editor.evaluate(
+                """
+                (root) => {
+                    const tokens = [];
+                    const blockTags = new Set([
+                        'P', 'DIV', 'LI', 'BLOCKQUOTE', 'PRE'
+                    ]);
+                    const textOf = (node) => (
+                        node.innerText !== undefined
+                            ? node.innerText
+                            : (node.textContent || '')
+                    );
+                    const visit = (node) => {
+                        if (!node || node.nodeType !== Node.ELEMENT_NODE) return;
+                        const tag = node.tagName.toLowerCase();
+                        if (tag === 'img') {
+                            tokens.push({
+                                kind: 'image',
+                                src: node.getAttribute('src') || ''
+                            });
+                            return;
+                        }
+                        if (/^h[1-6]$/.test(tag)) {
+                            tokens.push({
+                                kind: 'heading',
+                                tag,
+                                text: textOf(node)
+                            });
+                            return;
+                        }
+                        const hasImage = Boolean(node.querySelector('img'));
+                        const hasBlockChild = Array.from(node.children).some(
+                            (child) => blockTags.has(child.tagName)
+                                || /^h[1-6]$/i.test(child.tagName)
+                        );
+                        if (blockTags.has(node.tagName) && !hasImage && !hasBlockChild) {
+                            tokens.push({kind: 'text', text: textOf(node)});
+                            return;
+                        }
+                        for (const child of node.childNodes) {
+                            if (child.nodeType === Node.TEXT_NODE) {
+                                const text = child.textContent || '';
+                                if (text.trim()) tokens.push({kind: 'text', text});
+                            } else {
+                                visit(child);
+                            }
+                        }
+                    };
+                    for (const child of root.children) visit(child);
+                    return tokens;
+                }
+                """
+            )
+        except Exception as exc:
+            if self._exception_means_browser_closed(exc):
+                raise BrowserLifecycleError(
+                    "BROWSER_CONTEXT_CLOSED: ZOL 读取正文 DOM 时页面已关闭"
+                ) from exc
+            raise ContentValidationError(
+                "ZOL_CONTENT_DOM_VERIFY_FAILED: 正文 DOM 回读失败"
+            ) from exc
+
+        if not isinstance(raw_tokens, list):
+            raise ContentValidationError("ZOL_CONTENT_DOM_VERIFY_FAILED: 正文 DOM 序列无效")
+        normalized: list[dict] = []
+        for raw in raw_tokens:
+            if not isinstance(raw, dict):
+                raise ContentValidationError("ZOL_CONTENT_DOM_VERIFY_FAILED: DOM token 无效")
+            kind = raw.get("kind")
+            if kind == "image":
+                src = raw.get("src")
+                if not isinstance(src, str) or not src:
+                    raise ContentValidationError(
+                        "ZOL_IMAGE_DOM_VERIFY_FAILED: 正文图片缺少稳定 src"
+                    )
+                normalized.append(
+                    {
+                        "kind": "image",
+                        "fingerprint": hashlib.sha256(src.encode()).hexdigest(),
+                    }
+                )
+                continue
+            if kind == "heading":
+                tag = str(raw.get("tag") or "").lower()
+                text = normalize_for_comparison(raw.get("text"))
+                if tag not in {"h1", "h2", "h3", "h4", "h5", "h6"} or not text:
+                    raise ContentValidationError(
+                        "ZOL_HEADING_DOM_VERIFY_FAILED: 标题 DOM 回读字段无效"
+                    )
+                normalized.append({"kind": "heading", "tag": tag, "text": text})
+                continue
+            if kind == "text":
+                text = normalize_for_comparison(raw.get("text"))
+                if not text:
+                    continue
+                normalized.append({"kind": "text", "text": text})
+                continue
+            raise ContentValidationError("ZOL_CONTENT_DOM_VERIFY_FAILED: DOM token 类型无效")
+        return normalized
+
+    async def _editor_image_src_fingerprints(self) -> list[str]:
+        editor, editor_kind = await self._resolve_content_editor()
+        tokens = await self._read_editor_dom_tokens(editor, editor_kind)
+        return [
+            token["fingerprint"]
+            for token in tokens
+            if token.get("kind") == "image"
+        ]
+
     @staticmethod
-    def _validate_heading_contract(content_blocks: list) -> None:
+    def _expected_content_tokens(
+        content_blocks: list[dict],
+        image_fingerprints: list[str] | None = None,
+    ) -> list[dict]:
+        expected: list[dict] = []
+        image_index = 0
+        for block in content_blocks:
+            block_type = block.get("type")
+            if block_type == "image":
+                if image_fingerprints is not None:
+                    if image_index >= len(image_fingerprints):
+                        raise ContentValidationError(
+                            "ZOL_IMAGE_ORDER_VERIFY_FAILED: 图片指纹数量不足"
+                        )
+                    expected.append(
+                        {
+                            "kind": "image",
+                            "fingerprint": image_fingerprints[image_index],
+                        }
+                    )
+                    image_index += 1
+                continue
+            for paragraph in extract_expected_paragraphs([block]):
+                if block_type == "heading":
+                    expected.append(
+                        {
+                            "kind": "heading",
+                            "tag": f"h{block.get('level')}",
+                            "text": paragraph.comparison_text,
+                        }
+                    )
+                else:
+                    expected.append(
+                        {
+                            "kind": "text",
+                            "text": paragraph.comparison_text,
+                        }
+                    )
+        if image_fingerprints is not None and image_index != len(image_fingerprints):
+            raise ContentValidationError(
+                "ZOL_IMAGE_ORDER_VERIFY_FAILED: 图片指纹数量多于正文图片块"
+            )
+        return expected
+
+    @staticmethod
+    def _content_tokens_match(expected: list[dict], actual: list[dict]) -> bool:
+        return expected == actual
+
+    async def _verify_content_prefix(
+        self,
+        content_blocks: list[dict],
+        image_fingerprints: list[str],
+    ) -> None:
+        """在每张图片成功后立即核对当前已写入的图文前缀。"""
+
+        editor, editor_kind = await self._resolve_content_editor()
+        actual = await self._read_editor_dom_tokens(editor, editor_kind)
+        expected = self._expected_content_tokens(
+            content_blocks,
+            image_fingerprints,
+        )
+        if not self._content_tokens_match(expected, actual):
+            raise ContentValidationError(
+                "ZOL_CONTENT_PREFIX_VERIFY_FAILED: 图片后正文前缀与 DOM 回读不一致"
+            )
+
+    async def _verify_heading_nodes(self, expected_headings: list[dict]) -> None:
+        editor, editor_kind = await self._resolve_content_editor()
+        actual = await self._read_editor_dom_tokens(editor, editor_kind)
+        actual_headings = [
+            token for token in actual if token.get("kind") == "heading"
+        ]
+        if actual_headings != expected_headings:
+            raise ContentValidationError(
+                "ZOL_HEADING_DOM_VERIFY_FAILED: 标题层级或顺序回读不一致"
+            )
+
+    async def _apply_heading_block(
+        self,
+        editor,
+        text: str,
+        level: int,
+        expected_headings: list[dict],
+    ):
+        if level not in {2, 3}:
+            raise ContentValidationError(
+                "ZOL_HEADING_UNSUPPORTED_LEVEL: 实验路径只允许 H2/H3"
+            )
+        editor, editor_kind = await self._click_editor(editor)
+        if editor_kind != "iframe":
+            raise ContentValidationError(
+                "ZOL_HEADING_EDITOR_UNSUPPORTED: TinyMCE iframe 未确认"
+            )
+        await self.page.keyboard.press("Control+End")
+        await self.page.keyboard.insert_text(text)
+        formatted = await editor.evaluate(
+            """
+            (el, tag) => Boolean(
+                el.ownerDocument.execCommand('formatBlock', false, tag)
+            )
+            """,
+            f"h{level}",
+        )
+        if formatted is not True:
+            raise ContentValidationError(
+                "ZOL_HEADING_DOM_VERIFY_FAILED: TinyMCE formatBlock 未确认成功"
+            )
+        await self._verify_heading_nodes(expected_headings)
+        return await self._resolve_content_editor()
+
+    def _validate_heading_contract(self, content_blocks: list) -> None:
         """在没有真实 DOM 证据前拒绝把 heading 静默降级成普通文本。
 
         公共内容层已经保留了 ``heading.level``，但 ZOL 当前尚未有可复核的
@@ -786,12 +1186,17 @@ class ZOLPlatform(BasePlatform):
                 levels.append("unknown")
         if not levels:
             return
-        raise ContentValidationError(
-            "ZOL_HEADING_UNVERIFIED: ZOL 尚无正文标题输入和 DOM 回读证据，"
-            "拒绝将 heading 按普通文本写入（levels="
-            + ",".join(levels)
-            + ")"
-        )
+        if any(level not in {"2", "3"} for level in levels):
+            raise ContentValidationError(
+                "ZOL_HEADING_UNSUPPORTED_LEVEL: 实验路径只允许 H2/H3"
+            )
+        if not self.enable_heading_experiment:
+            raise ContentValidationError(
+                "ZOL_HEADING_UNVERIFIED: ZOL 尚无正文标题输入和 DOM 回读证据，"
+                "拒绝将 heading 按普通文本写入（levels="
+                + ",".join(levels)
+                + ")"
+            )
 
     @staticmethod
     def _image_path_for_block(block: dict, images: list[dict]) -> str | None:
@@ -849,10 +1254,20 @@ class ZOLPlatform(BasePlatform):
         uploaded_images = 0
         failed_images = []
         has_images = expected_images > 0
+        has_headings = any(
+            isinstance(block, dict) and block.get("type") == "heading"
+            for block in content_blocks or []
+        )
+        expected_tokens = self._expected_content_tokens(content_blocks)
+        observed_image_fingerprints: list[str] = []
+        expected_headings = [
+            token for token in expected_tokens if token.get("kind") == "heading"
+        ]
+        expected_headings_seen: list[dict] = []
 
-        # 没有图片时保留原 fill 快速路径；有图片时仍按原始块顺序输入，
+        # 没有图片和标题时保留原 fill 快速路径；有图片或实验标题时仍按原始块顺序输入，
         # 规范化只用于读回比较，不得改变冻结内容的写入文本或排版。
-        if not has_images:
+        if not has_images and not has_headings:
             await self._dismiss_editor_overlays()
             await editor.fill(expected_value)
         else:
@@ -860,10 +1275,36 @@ class ZOLPlatform(BasePlatform):
             await self.page.keyboard.press("Control+A")
             await self.page.keyboard.press("Backspace")
             previous_kind = None
-            for block in content_blocks:
+            for block_index, block in enumerate(content_blocks):
                 btype = block.get("type")
                 block_text = (block.get("text") or "").strip()
-                if btype in ("text", "heading") and block_text:
+                if btype == "heading" and block_text:
+                    if previous_kind == "text":
+                        await self.page.keyboard.press("Enter")
+                        await self.page.keyboard.press("Enter")
+                    elif previous_kind == "image":
+                        await self.page.keyboard.press("Enter")
+                    editor, editor_kind = await self._apply_heading_block(
+                        editor,
+                        block_text,
+                        int(block.get("level")),
+                        expected_headings_seen + [
+                            {
+                                "kind": "heading",
+                                "tag": f"h{block.get('level')}",
+                                "text": normalize_for_comparison(block_text),
+                            }
+                        ],
+                    )
+                    expected_headings_seen.append(
+                        {
+                            "kind": "heading",
+                            "tag": f"h{block.get('level')}",
+                            "text": normalize_for_comparison(block_text),
+                        }
+                    )
+                    previous_kind = "text"
+                elif btype == "text" and block_text:
                     editor, editor_kind = await self._click_editor(editor)
                     await self.page.keyboard.press("Control+End")
                     if previous_kind == "text":
@@ -885,27 +1326,34 @@ class ZOLPlatform(BasePlatform):
                     if image_file:
                         upload_result = await self._upload_image(image_file) or {}
                         if upload_result.get("success"):
-                            # 成功响应只证明上传动作完成，不证明图片在正文
-                            # 中的真实位置；顺序必须由编辑器 DOM 回读确认。
+                            fingerprint = upload_result.get("image_src_fingerprint")
+                            if not isinstance(fingerprint, str) or not fingerprint:
+                                raise ContentValidationError(
+                                    "ZOL_IMAGE_ORDER_UNVERIFIED: "
+                                    "图片上传后未取得正文 DOM 指纹"
+                                )
                             uploaded_images += 1
+                            observed_image_fingerprints.append(fingerprint)
+                            await self._verify_content_prefix(
+                                content_blocks[: block_index + 1],
+                                observed_image_fingerprints,
+                            )
                         else:
-                            failed_images.append({
-                                "filename": Path(str(image_file)).name,
-                                "error": safe_media_error(
-                                    upload_result.get("error"),
-                                    fallback="ZOL 图片上传失败",
-                                ),
-                                "error_code": (
-                                    upload_result.get("error_code")
-                                    or "ZOL_IMAGE_UPLOAD_FAILED"
-                                ),
-                            })
+                            error_code = (
+                                upload_result.get("error_code")
+                                or "ZOL_IMAGE_UPLOAD_FAILED"
+                            )
+                            safe_error = safe_media_error(
+                                upload_result.get("error"),
+                                fallback="ZOL 图片上传失败",
+                            )
+                            raise ContentValidationError(
+                                f"{error_code}: {safe_error}"
+                            )
                     else:
-                        failed_images.append({
-                            "filename": "",
-                            "error": "文章图片块没有对应本地文件",
-                            "error_code": "ZOL_IMAGE_FILE_MISSING",
-                        })
+                        raise ContentValidationError(
+                            "ZOL_IMAGE_FILE_MISSING: 文章图片块没有对应本地文件"
+                        )
                     # 图片弹窗可能重建 iframe；每张图片后都重新解析当前编辑器，
                     # 不沿用上传前的旧 body/iframe locator。
                     editor, editor_kind = await self._resolve_content_editor()
@@ -926,23 +1374,23 @@ class ZOLPlatform(BasePlatform):
             platform="ZOL",
             phase="输入及图片处理后",
         )
-        expected_image_positions = [
-            block.get("position")
-            for block in content_blocks
-            if block.get("type") == "image"
-        ]
+        if has_headings:
+            await self._verify_heading_nodes(expected_headings)
+
+        if uploaded_images == expected_images and expected_images:
+            actual_tokens = await self._read_editor_dom_tokens(editor, editor_kind)
+            expected_with_images = self._expected_content_tokens(
+                content_blocks,
+                observed_image_fingerprints,
+            )
+            if not self._content_tokens_match(expected_with_images, actual_tokens):
+                raise ContentValidationError(
+                    "ZOL_CONTENT_ORDER_VERIFY_FAILED: 正文图文顺序与 DOM 回读不一致"
+                )
         if expected_images == 0:
             media_status = "not_required"
             media_error = None
             media_error_code = None
-        elif (
-            expected_images > 1
-            and uploaded_images == expected_images
-            and not self._image_order_matches(expected_image_positions, None)
-        ):
-            media_status = "failed"
-            media_error = "多图正文已上传，但尚无真实 DOM 回读证据证明图片顺序"
-            media_error_code = "ZOL_IMAGE_ORDER_UNVERIFIED"
         elif uploaded_images == expected_images:
             media_status = "completed"
             media_error = None
@@ -990,8 +1438,162 @@ class ZOLPlatform(BasePlatform):
             )
             return 0
 
+    async def _resolve_body_image_input(self, modal):
+        """只接受当前可见弹窗中的正文多选图片控件。
+
+        ZOL 的封面控件可能先出现在 DOM 中，不能用 ``first`` 或任意
+        ``input[type=file]`` 回退，否则会把正文图片写成封面。正文控件由
+        ``accept=image`` 与 ``multiple`` 两个事实共同限定，且必须唯一。
+        """
+
+        if modal is None or not await modal.is_visible():
+            return None
+        candidates = modal.locator(self.IMAGE_INPUT)
+        if await candidates.count() != 1:
+            return None
+        candidate = candidates.first
+        if not await candidate.is_visible():
+            # hidden input 由 file chooser 使用，visible 不作为合格条件；
+            # 这里保留节点，只要它确实属于可见 modal。
+            return candidate
+        return candidate
+
+    @staticmethod
+    def _new_image_fingerprint(
+        before_fingerprints: list[str],
+        after_fingerprints: list[str],
+    ) -> str | None:
+        """返回恰好新增一张图片的指纹，允许同源图片重复出现。"""
+
+        if len(after_fingerprints) != len(before_fingerprints) + 1:
+            return None
+        new_counts = Counter(after_fingerprints) - Counter(before_fingerprints)
+        if sum(new_counts.values()) != 1:
+            return None
+        return next(iter(new_counts))
+
+    @staticmethod
+    def _dhash_bytes(payload: bytes) -> int | None:
+        """在内存中计算感知哈希；解码失败时返回 ``None``。"""
+
+        try:
+            from PIL import Image
+
+            with Image.open(BytesIO(payload)) as source:
+                image = source.convert("RGB")
+                image.thumbnail((64, 64))
+                canvas = Image.new("RGB", (64, 64), "white")
+                canvas.paste(
+                    image,
+                    ((64 - image.width) // 2, (64 - image.height) // 2),
+                )
+                gray = canvas.convert("L").resize((17, 16))
+                pixels = list(gray.getdata())
+        except Exception:
+            return None
+
+        value = 0
+        for row in range(16):
+            offset = row * 17
+            for column in range(16):
+                value = (value << 1) | int(
+                    pixels[offset + column] > pixels[offset + column + 1]
+                )
+        return value
+
+    @staticmethod
+    def _normalized_image(payload: bytes):
+        """解码并归一化图片，所有中间数据只存在内存。"""
+
+        try:
+            from PIL import Image, ImageOps
+
+            with Image.open(BytesIO(payload)) as source:
+                image = ImageOps.exif_transpose(source).convert("RGBA")
+                canvas = Image.new("RGBA", image.size, "white")
+                canvas.alpha_composite(image)
+                return canvas.convert("RGB").resize((64, 64), Image.Resampling.LANCZOS)
+        except Exception:
+            return None
+
+    @classmethod
+    def _compare_image_bytes(cls, expected: bytes, observed: bytes) -> str | None:
+        """返回稳定错误码；``None`` 表示保守阈值内匹配。"""
+
+        expected_image = cls._normalized_image(expected)
+        observed_image = cls._normalized_image(observed)
+        if expected_image is None or observed_image is None:
+            return "ZOL_IMAGE_CONTENT_UNVERIFIED"
+        from PIL import ImageChops, ImageStat
+
+        difference = ImageChops.difference(expected_image, observed_image)
+        mean_difference = sum(ImageStat.Stat(difference).mean) / 3
+        if mean_difference > 25:
+            return "ZOL_IMAGE_CONTENT_VERIFY_FAILED"
+        return None
+
+    async def _verify_image_content(
+        self,
+        image_path: str,
+        after_fingerprints: list[str],
+        new_fingerprint: str,
+    ) -> dict:
+        """比较本地文件与当前新增正文图片的渲染内容，不记录路径或 URL。"""
+
+        try:
+            editor, editor_kind = await self._resolve_content_editor()
+            if editor_kind == "textarea":
+                return {
+                    "success": False,
+                    "error_code": "ZOL_IMAGE_CONTENT_UNVERIFIED",
+                    "error": "正文编辑器不支持图片内容回读",
+                }
+            image_nodes = editor.locator("img")
+            if await image_nodes.count() != len(after_fingerprints):
+                return {
+                    "success": False,
+                    "error_code": "ZOL_IMAGE_CONTENT_UNVERIFIED",
+                    "error": "正文图片节点数量无法确认",
+                }
+            matching_indexes = [
+                index
+                for index, fingerprint in enumerate(after_fingerprints)
+                if fingerprint == new_fingerprint
+            ]
+            if not matching_indexes:
+                return {
+                    "success": False,
+                    "error_code": "ZOL_IMAGE_CONTENT_UNVERIFIED",
+                    "error": "新增正文图片节点无法定位",
+                }
+            observed = await image_nodes.nth(matching_indexes[-1]).screenshot()
+            expected = Path(image_path).read_bytes()
+            error_code = self._compare_image_bytes(expected, observed)
+            if error_code:
+                return {
+                    "success": False,
+                    "error_code": error_code,
+                    "error": "本地图片与正文渲染内容无法确认一致",
+                }
+            return {"success": True}
+        except BrowserLifecycleError:
+            raise
+        except Exception as exc:
+            if self._exception_means_browser_closed(exc):
+                raise BrowserLifecycleError(
+                    "BROWSER_CONTEXT_CLOSED: ZOL 图片内容验证时页面已关闭"
+                ) from exc
+            return {
+                "success": False,
+                "error_code": "ZOL_IMAGE_CONTENT_UNVERIFIED",
+                "error": safe_media_error(
+                    exc,
+                    fallback="正文图片内容无法确认",
+                ),
+            }
+
     async def _upload_image(self, image_path: str):
-        """通过真实 ZOL 图片弹窗上传一张图片并验证 iframe 图片数量。"""
+        """通过真实 ZOL 图片弹窗上传一张图片并验证正文 DOM 指纹。"""
         image_name = Path(str(image_path)).name
         if not image_path or not os.path.isfile(str(image_path)):
             return {
@@ -1000,7 +1602,8 @@ class ZOLPlatform(BasePlatform):
                 "error": f"图片文件不存在: {image_name}",
             }
 
-        before_count = await self._editor_image_count()
+        before_fingerprints = await self._editor_image_src_fingerprints()
+        before_count = len(before_fingerprints)
         try:
             self._require_page_alive("ZOL 打开图片弹窗")
             # 上一次上传即使已经插入图片，Ant Design 弹窗也可能仍在做关闭动画；
@@ -1017,14 +1620,12 @@ class ZOLPlatform(BasePlatform):
             modal = self.page.locator(self.IMAGE_MODAL).last
             await modal.wait_for(state="visible", timeout=5000)
 
-            file_input = modal.locator(".local_upload input[type='file']").first
-            if await file_input.count() == 0:
-                file_input = modal.locator("input[type='file']").first
-            if await file_input.count() == 0:
+            file_input = await self._resolve_body_image_input(modal)
+            if file_input is None:
                 return {
                     "success": False,
                     "error_code": "ZOL_IMAGE_UPLOAD_CONTROL_NOT_FOUND",
-                    "error": "图片弹窗中未找到本地上传控件",
+                    "error": "图片弹窗中未找到唯一正文图片控件",
                 }
             await file_input.set_input_files(str(Path(image_path).resolve()))
             await self.page.wait_for_timeout(300)
@@ -1050,28 +1651,39 @@ class ZOLPlatform(BasePlatform):
             await insert_button.click(timeout=5000)
 
             deadline = asyncio.get_running_loop().time() + 15
-            after_count = before_count
             while asyncio.get_running_loop().time() < deadline:
-                after_count = await self._editor_image_count()
-                if after_count > before_count:
+                after_fingerprints = await self._editor_image_src_fingerprints()
+                new_fingerprint = self._new_image_fingerprint(
+                    before_fingerprints,
+                    after_fingerprints,
+                )
+                if new_fingerprint is not None:
+                    content_result = await self._verify_image_content(
+                        image_path,
+                        after_fingerprints,
+                        new_fingerprint,
+                    )
+                    if not content_result.get("success"):
+                        return content_result
                     await self._close_image_modal(modal)
                     logger.info(
                         "ZOL 图片上传并验证成功: filename={}, before={}, after={}",
                         image_name,
                         before_count,
-                        after_count,
+                        len(after_fingerprints),
                     )
                     return {
                         "success": True,
                         "filename": image_name,
                         "before_count": before_count,
-                        "after_count": after_count,
+                        "after_count": len(after_fingerprints),
+                        "image_src_fingerprint": new_fingerprint,
                     }
                 await asyncio.sleep(0.5)
             return {
                 "success": False,
                 "error_code": "ZOL_IMAGE_UPLOAD_VERIFY_FAILED",
-                "error": f"图片插入后编辑器数量未增加: before={before_count}, after={after_count}",
+                "error": "图片插入后正文 DOM 未出现恰好一张新图片",
             }
         except BrowserLifecycleError:
             raise
@@ -1100,20 +1712,33 @@ class ZOLPlatform(BasePlatform):
                 return
             close = active.locator("button[aria-label='Close'], .ant-modal-close").first
             if await close.count() > 0:
-                await close.click(force=True)
+                await close.click()
             else:
                 cancel = active.get_by_role("button", name="取 消", exact=True).first
                 if await cancel.count() > 0:
-                    await cancel.click(force=True)
+                    await cancel.click()
+                else:
+                    raise SelectorError(
+                        "ZOL_IMAGE_MODAL_CLOSE_FAILED: 图片弹窗没有可验证关闭控件"
+                    )
             try:
                 await active.wait_for(state="hidden", timeout=3000)
-            except Exception:
-                # 关闭动画偶尔不触发 hidden，下一次按钮点击前仍会再次执行兜底关闭。
-                logger.debug("ZOL 图片弹窗未在预期时间内隐藏")
+            except Exception as exc:
+                raise SelectorError(
+                    "ZOL_IMAGE_MODAL_CLOSE_FAILED: 图片弹窗关闭状态无法确认"
+                ) from exc
+            if await active.is_visible():
+                raise SelectorError(
+                    "ZOL_IMAGE_MODAL_CLOSE_FAILED: 图片弹窗仍处于可见状态"
+                )
         except Exception as exc:
             if self._exception_means_browser_closed(exc):
                 raise BrowserLifecycleError("BROWSER_CONTEXT_CLOSED: ZOL 关闭图片弹窗时页面已关闭") from exc
-            logger.debug("ZOL 关闭图片弹窗失败: {}", exc)
+            if isinstance(exc, SelectorError):
+                raise
+            raise SelectorError(
+                "ZOL_IMAGE_MODAL_CLOSE_FAILED: 图片弹窗关闭失败"
+            ) from exc
 
     @staticmethod
     def _normalize_topic(value: str) -> str:
@@ -1314,70 +1939,84 @@ class ZOLPlatform(BasePlatform):
         }
 
     async def save_draft(self, title: str = "") -> str:
-        """保存草稿并在草稿箱验证真实标题。"""
+        """只点击一次保存并用草稿 API 证明新增实体。
+
+        页面文本、正文 ``innerText`` 和当前编辑器 URL 都不能证明保存
+        成功。点击前必须已经由 ``navigate_to_editor`` 建立可靠基线；
+        点击后任何响应、数量或实体证据缺失都统一抛出
+        ``DRAFT_RESULT_UNKNOWN``，上层不得自动重试。
+        """
         self._require_page_alive("ZOL 保存草稿")
         current_url = self.page.url or ""
         if not self._is_blog_editor_url(current_url):
-            logger.error("ZOL 保存草稿失败：当前页面不是博客编辑器，url={}", self.page.url)
-            return ""
-        if self._host(current_url) == self.CREATOR_HOST:
-            draft_selectors = [
-                ".foot-item:has-text('存草稿')",
-                ".foot-item-text:has-text('存草稿')",
-                "button:has-text('存草稿')",
-                "[role='button']:has-text('存草稿')",
-                "button:has-text('保存草稿')",
-            ]
-            draft_url = self.platform_cfg.get(
-                "draft_url", "https://post.zol.com.cn/v2/manage/works/draft"
+            raise PlatformAccessError(
+                "ZOL_DRAFT_ROUTE_ERROR: 当前页面不是博客编辑器"
             )
-        else:
-            # 兼容旧博客编辑器。
-            draft_selectors = [
-                "button:has-text('保存草稿')",
-                "input[value='保存草稿']",
-                ".draft-btn",
-                "#save_draft",
-                "a:has-text('草稿')",
-            ]
-            draft_url = self.platform_cfg.get(
-                "draft_url", "https://blog.zol.com.cn/post.php?act=draft"
+        if self._host(current_url) != self.CREATOR_HOST:
+            raise DraftBaselineError(
+                "DRAFT_BASELINE_UNAVAILABLE: 旧博客入口没有 creator 草稿 API 契约"
+            )
+        if self._draft_baseline is None:
+            raise DraftBaselineError(
+                "DRAFT_BASELINE_UNAVAILABLE: 保存前未建立 ZOL 草稿基线"
             )
 
-        for sel in draft_selectors:
-            try:
-                await self.page.click(sel, timeout=3000)
-                await self.simulator.random_delay(2, 5)
-                await self.page.goto(draft_url, wait_until="domcontentloaded", timeout=15000)
-                await self.simulator.random_delay(2, 4)
-                self._require_page_alive("ZOL 验证草稿箱")
-                draft_page_url = self.page.url or ""
-                creator_draft = (
-                    self._host(draft_page_url) == self.CREATOR_HOST
-                    and "/v2/manage/works/draft" in draft_page_url
-                )
-                legacy_draft = (
-                    self._host(draft_page_url) == self.BLOG_HOST
-                    and "post.php" in draft_page_url
-                )
-                if not (creator_draft or legacy_draft):
-                    raise PlatformAccessError(
-                        f"ZOL_DRAFT_ROUTE_ERROR: 草稿箱跳转到非博客页面，当前 URL: {draft_page_url}"
-                    )
-                keyword = (title or "")[:30]
-                found = await self.page.evaluate(
-                    "(kw) => (document.body.innerText || '').includes(kw)", keyword
-                ) if keyword else False
-                if found:
-                    logger.info("ZOL 草稿验证成功: {}", keyword)
-                    return draft_page_url
-                logger.warning("ZOL 草稿箱未找到标题: {}", keyword)
-                return ""
-            except Exception as exc:
-                if self._exception_means_browser_closed(exc):
-                    raise BrowserLifecycleError("BROWSER_CONTEXT_CLOSED: ZOL 保存草稿时页面已关闭") from exc
-                logger.debug("ZOL 保存草稿候选按钮失败: selector={}, error={}", sel, exc)
-                continue
+        expected_title = normalize_for_comparison(title)
+        if not expected_title:
+            raise SelectorError("ZOL_DRAFT_TITLE_MISSING: 保存草稿缺少标题")
 
-        # 未匹配到保存按钮或无成功信号 → 如实返回空串，交由 publish() 判定为失败
-        return ""
+        control = self.page.locator(self.DRAFT_SAVE_SELECTOR)
+        if await control.count() != 1 or not await control.is_visible():
+            raise SelectorError(
+                "ZOL_DRAFT_SAVE_CONTROL_UNAVAILABLE: 未找到唯一可见存草稿控件"
+            )
+
+        clicked = False
+        try:
+            clicked = True
+            await control.click(timeout=5000)
+            await self.simulator.random_delay(2, 5)
+            for delay in self.DRAFT_RESULT_POLL_DELAYS:
+                if delay:
+                    await asyncio.sleep(delay)
+                try:
+                    after = await self._fetch_draft_snapshot()
+                except DraftBaselineError:
+                    continue
+                draft_id = self._new_draft_id_for_title(
+                    self._draft_baseline,
+                    after,
+                    expected_title,
+                )
+                if not draft_id:
+                    continue
+                self._draft_baseline = after
+                draft_url = self.platform_cfg.get(
+                    "draft_url", "https://post.zol.com.cn/v2/manage/works/draft"
+                )
+                draft_fingerprint = hashlib.sha256(draft_id.encode()).hexdigest()[:8]
+                logger.info(
+                    "ZOL 草稿实体验证成功: draft_id_fingerprint={}",
+                    draft_fingerprint,
+                )
+                return draft_url
+            raise DraftResultUnknownError(
+                "DRAFT_RESULT_UNKNOWN: 保存后草稿实体在有界轮询内无法证明"
+            )
+        except asyncio.CancelledError as exc:
+            if clicked:
+                exc.error_code = "DRAFT_RESULT_UNKNOWN"
+                exc.safe_message = "DRAFT_RESULT_UNKNOWN: 保存动作已触发，结果未知"
+            raise
+        except DraftResultUnknownError:
+            raise
+        except Exception as exc:
+            if self._exception_means_browser_closed(exc) and not clicked:
+                raise BrowserLifecycleError(
+                    "BROWSER_CONTEXT_CLOSED: ZOL 保存草稿前页面已关闭"
+                ) from exc
+            if not clicked:
+                raise
+            raise DraftResultUnknownError(
+                "DRAFT_RESULT_UNKNOWN: 保存动作已触发但结果无法证明"
+            ) from exc

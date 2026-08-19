@@ -164,6 +164,14 @@ def build_acceptance_app(platforms: Iterable[str], confirmation: str):
                 frozenset({"heading", "image_order"}),
                 frozenset({2}),
             )
+        elif platform == "baijiahao":
+            # 只对本次 DRAFT 验收进程临时放行真实探测到的 UEditor
+            # “标题”样式与正文图片顺序；生产能力仍需保存后重开证据晋级。
+            declarations[platform] = PlatformFormatDeclaration(
+                platform,
+                frozenset({"heading", "image_order"}),
+                frozenset({2}),
+            )
         else:
             declarations[platform] = FEATURE_KEYS
     content_state.service.platform_format_capabilities = PlatformFormatCapabilities(declarations)

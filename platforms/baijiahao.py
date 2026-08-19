@@ -1,7 +1,8 @@
 """百家号（百度创作平台）账号会话适配器。
 
-登录态与身份验证链路（真实扫码 → BDUSS 会话 cookie → 身份捕获/DOM），
-内容投递能力尚未接入：所有投递方法显式拒绝。
+登录态与身份验证链路（真实扫码 → BDUSS 会话 cookie → 身份捕获/DOM）。
+图文投递只支持 DRAFT：正文使用 UEditor iframe，图片必须经正文图片弹窗
+上传并确认；公开发布保持 fail-closed。
 
 真实登录载体（百度 passport，扫码登录为默认 Tab）：
 - 登录页：https://passport.baidu.com/v2/?login
@@ -13,22 +14,36 @@
 from __future__ import annotations
 
 import asyncio
+import copy
+import re
 from pathlib import Path
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from loguru import logger
 
 from platforms.base import (
     BasePlatform,
     BrowserLifecycleError,
+    DraftBaselineError,
+    DraftResultUnknownError,
     LoginRequiredError,
     PlatformAutomationError,
     SelectorError,
 )
-from platforms.content_validation import ensure_valid_content, safe_media_error
+from platforms.content_validation import (
+    ContentValidationError,
+    extract_expected_paragraphs,
+    safe_media_error,
+)
+from platforms.media_progress import safe_media_progress
 
 LOGIN_URL = "https://passport.baidu.com/v2/?login"
 HOME_URL = "https://baijiahao.baidu.com/"
 CREATOR_HOME = "https://baijiahao.baidu.com/builder/rc/edit"
+EDITOR_URL = "https://baijiahao.baidu.com/builder/rc/edit?type=news"
+WORKS_URL = "https://baijiahao.baidu.com/builder/rc/content"
+IMAGE_TRIGGER_SELECTOR = ".edui-for-insertimage"
+IMAGE_MODAL_SELECTOR = ".cheetah-ui-pro-image-modal"
 IDENTITY_NAME_KEYS = {"nickname", "user_name", "screen_name", "name", "nick"}
 IDENTITY_UID_KEYS = {"uid", "user_id", "bjh_id", "id"}
 
@@ -40,7 +55,7 @@ class PlatformNotImplementedError(PlatformAutomationError):
 
 
 class BaijiahaoPlatform(BasePlatform):
-    """百家号账号会话适配器；内容投递能力保持关闭。"""
+    """百家号账号会话与 DRAFT-only 图文投递适配器。"""
 
     platform_name = "baijiahao"
     SESSION_COOKIE_NAMES = frozenset({"BDUSS"})
@@ -51,6 +66,9 @@ class BaijiahaoPlatform(BasePlatform):
         super().__init__(**kwargs)
         self.last_login_error = ""
         self._identity_payload: dict[str, str | int | bool] | None = None
+        self._expected_persisted_blocks: list[dict] | None = None
+        self._preflight_title = ""
+        self._media_progress_state: dict[str, int] | None = None
 
     async def initialize(self):
         await super().initialize()
@@ -249,6 +267,98 @@ class BaijiahaoPlatform(BasePlatform):
             f"PLATFORM_NOT_IMPLEMENTED: 百家号{operation}能力尚未接入"
         )
 
+    async def preflight_delivery(self, title: str) -> None:
+        """在打开新编辑器前证明同名内容不存在，避免重复草稿。"""
+
+        self._require_page_alive("百家号草稿基线检查")
+        expected_title = self._normalize_title(title)
+        if not expected_title:
+            raise DraftBaselineError("DRAFT_BASELINE_FAILED: 百家号标题不能为空")
+        try:
+            await self._open_works_page()
+            await self._search_works(expected_title)
+            matches = await self._matching_work_rows(expected_title)
+        except DraftBaselineError:
+            raise
+        except Exception as exc:
+            if self._exception_means_browser_closed(exc):
+                raise BrowserLifecycleError(
+                    "BROWSER_CONTEXT_CLOSED: 百家号草稿基线检查时页面已关闭"
+                ) from exc
+            raise DraftBaselineError(
+                "DRAFT_BASELINE_FAILED: 百家号无法确认同名内容基线"
+            ) from exc
+        if matches:
+            raise DraftBaselineError(
+                "DRAFT_BASELINE_FAILED: 百家号已存在同名内容，禁止自动创建重复草稿"
+            )
+        self._preflight_title = expected_title
+
+    @staticmethod
+    def _normalize_title(value: str) -> str:
+        return " ".join(str(value or "").split())
+
+    async def _open_works_page(self) -> None:
+        await self.page.goto(
+            WORKS_URL,
+            wait_until="domcontentloaded",
+            timeout=30000,
+        )
+        search = self.page.locator(
+            'input[placeholder*="输入标题关键字"]'
+        ).first
+        await search.wait_for(state="visible", timeout=20000)
+
+    async def _search_works(self, title: str) -> None:
+        search = self.page.locator(
+            'input[placeholder*="输入标题关键字"]'
+        ).first
+        if await search.count() != 1 or not await search.is_visible():
+            raise DraftBaselineError(
+                "DRAFT_BASELINE_FAILED: 百家号作品搜索框不可用"
+            )
+        await search.fill(title)
+        await search.press("Enter")
+        await self.simulator.random_delay(1.5, 2.5)
+
+    async def _matching_work_rows(self, title: str) -> list[dict]:
+        """返回标题精确匹配且同时包含“修改”动作的最小作品行。"""
+
+        result = await self.page.evaluate(
+            """title => {
+                const visible = (el) => !!(
+                    el && (el.offsetWidth || el.offsetHeight
+                        || el.getClientRects().length)
+                );
+                const text = (el) => (el?.innerText || el?.textContent || '')
+                    .replace(/\\s+/g, ' ').trim();
+                const leaves = Array.from(
+                    document.querySelectorAll('a, span, p, div, h1, h2, h3, h4')
+                ).filter((el) => visible(el) && text(el) === title
+                    && !Array.from(el.children).some((child) => text(child) === title));
+                const rows = [];
+                for (const leaf of leaves) {
+                    let row = leaf;
+                    while (row && row !== document.body) {
+                        const actions = Array.from(
+                            row.querySelectorAll('button, a, [role="button"], span')
+                        ).filter(visible).map(text);
+                        if (actions.includes('修改')) break;
+                        row = row.parentElement;
+                    }
+                    if (!row || row === document.body || rows.includes(row)) continue;
+                    rows.push(row);
+                }
+                return rows.map((row, index) => ({index, title}));
+            }""",
+            title,
+        )
+        if not isinstance(result, list):
+            raise DraftBaselineError(
+                "DRAFT_BASELINE_FAILED: 百家号作品列表结构无法验证"
+            )
+        return [item for item in result if isinstance(item, dict)]
+
     async def navigate_to_editor(self):
         """打开百家号图文编辑器（type=news），等待标题和正文都就绪。
 
@@ -415,104 +525,133 @@ class BaijiahaoPlatform(BasePlatform):
         return None
 
     async def fill_content(self, content_blocks: list, images: list):
-        """填写正文（UEditor iframe 内可编辑 body），回读并有序校验。"""
+        """按冻结 ContentVersion 的原始顺序写入 UEditor 图文并回读。"""
 
         self._require_page_alive("百家号填写正文")
-        self._content_blocks = list(content_blocks)
+        self._content_blocks = copy.deepcopy(content_blocks)
+        self._expected_persisted_blocks = copy.deepcopy(content_blocks)
+        expected_images = sum(
+            1 for block in content_blocks
+            if isinstance(block, dict) and block.get("type") == "image"
+        )
+        self._media_progress_state = {
+            "expected_images": expected_images,
+            "uploaded_images": 0,
+            "failed_image_count": 0,
+        }
+        editor = await self._current_body_editor()
         try:
-            editor = await self._body_editor_locator()
-            if editor is None or await editor.count() == 0:
-                raise RuntimeError("正文编辑器不可见")
             await self._focus_editor(editor, "正文")
-            await self.simulator.random_delay(0.5, 1)
-            try:
-                await self.page.keyboard.press("Control+A")
-                await self.page.keyboard.press("Backspace")
-            except Exception:
-                pass
+            await editor.press("Control+A")
+            await editor.press("Backspace")
             await self.simulator.random_delay(0.3, 0.8)
         except Exception as exc:
             if self._exception_means_browser_closed(exc):
                 raise BrowserLifecycleError(
-                    "BROWSER_CONTEXT_CLOSED: 百家号定位正文编辑器时页面已关闭"
+                    "BROWSER_CONTEXT_CLOSED: 百家号清空正文时页面已关闭"
                 ) from exc
-            raise SelectorError("百家号正文编辑器未找到") from exc
+            raise ContentValidationError(
+                "BAIJIAHAO_EDITOR_RESET_FAILED: 正文编辑器无法安全清空"
+            ) from exc
 
-        first_text = True
-        for block in content_blocks:
-            btype = block.get("type")
-            if btype in ("text", "heading") and block.get("text"):
-                text = str(block["text"]).strip()
+        uploaded_images = 0
+        failed_images: list[dict[str, str]] = []
+        content_started = False
+        paragraph_ready_after_image = False
+        for block_index, block in enumerate(content_blocks):
+            if not isinstance(block, dict):
+                raise ContentValidationError(
+                    "BAIJIAHAO_CONTENT_CONTRACT_INVALID: 正文块无效"
+                )
+            block_type = block.get("type")
+            if block_type in {"text", "heading"}:
+                text = str(block.get("text") or "").strip()
                 if not text:
                     continue
-                if not first_text:
-                    await self.page.keyboard.press("Enter")
+                if block_type == "heading" and (
+                    block.get("level") != 2 or "\n" in text or "\r" in text
+                ):
+                    raise ContentValidationError(
+                        "BAIJIAHAO_HEADING_UNSUPPORTED: 仅支持单行二级标题"
+                    )
+                if content_started:
+                    await self._place_body_caret_at_end()
+                    if paragraph_ready_after_image:
+                        paragraph_ready_after_image = False
+                    else:
+                        await self.page.keyboard.press("Enter")
+                await self._place_body_caret_at_end()
                 lines = text.splitlines() or [text]
-                for i, line in enumerate(lines):
+                for line_index, line in enumerate(lines):
                     if line.strip():
                         await self.page.keyboard.insert_text(line.strip())
-                    if i < len(lines) - 1:
+                    if line_index < len(lines) - 1:
                         await self.page.keyboard.press("Enter")
-                first_text = False
+                if block_type == "heading":
+                    await self._apply_h2_to_current_block()
+                content_started = True
+                continue
 
-        actual_text = await editor.inner_text()
-        expected_count = ensure_valid_content(
-            content_blocks,
-            actual_text,
-            platform="百家号",
-            phase="输入后",
-        )
-        logger.info("百家号正文文字输入并验证成功: {} 个文本段落", expected_count)
-
-        expected_images = sum(
-            1 for block in content_blocks if block.get("type") == "image"
-        )
-        uploaded_images = 0
-        failed_images = []
-        for block in content_blocks:
-            if block.get("type") == "image":
-                img_path = block.get("local_path")
-                if not img_path and images:
-                    for img in images:
-                        if img.get("position_index") == block.get("position"):
-                            img_path = img.get("local_path")
-                            break
-                    if not img_path:
-                        img_path = images[0].get("local_path")
-                if img_path:
-                    upload_result = await self._upload_image(img_path) or {}
-                    if upload_result.get("success"):
-                        uploaded_images += 1
-                    else:
-                        failed_images.append(
-                            {
-                                "filename": Path(str(img_path)).name,
-                                "error": safe_media_error(
-                                    upload_result.get("error"),
-                                    fallback="图片上传失败",
-                                ),
-                            }
-                        )
-                    # 每张图片之间放慢节奏，降低风控敏感度
-                    await self.simulator.random_delay(2.5, 4.5)
+            if block_type != "image":
+                raise ContentValidationError(
+                    "BAIJIAHAO_CONTENT_CONTRACT_INVALID: 未知正文块类型"
+                )
+            if content_started:
+                await self._place_body_caret_at_end()
+                if paragraph_ready_after_image:
+                    paragraph_ready_after_image = False
+                else:
+                    await self.page.keyboard.press("Enter")
+            await self._place_body_caret_at_end()
+            image_path = self._image_path_for_block(block, images)
+            if image_path:
+                upload_result = await self._upload_image(image_path) or {}
+                if upload_result.get("success"):
+                    uploaded_images += 1
+                    await self._create_paragraph_after_image()
+                    paragraph_ready_after_image = True
                 else:
                     failed_images.append(
-                        {"filename": "", "error": "文章图片块没有对应本地文件"}
+                        {
+                            "filename": Path(image_path).name,
+                            "error_code": str(
+                                upload_result.get("error_code")
+                                or "PLATFORM_MEDIA_INCOMPLETE"
+                            ),
+                            "error": safe_media_error(
+                                upload_result.get("error"),
+                                fallback="图片上传失败",
+                            ),
+                        }
                     )
+            else:
+                failed_images.append(
+                    {
+                        "filename": "",
+                        "error_code": "IMAGE_PATH_UNRESOLVED",
+                        "error": "文章图片块没有唯一对应本地文件",
+                    }
+                )
+            content_started = True
+            self._media_progress_state.update(
+                uploaded_images=uploaded_images,
+                failed_image_count=len(failed_images),
+            )
+            try:
+                await self._validate_dom_prefix(
+                    content_blocks[: block_index + 1],
+                    phase=f"图片处理后第{block_index + 1}块",
+                )
+            except ContentValidationError as exc:
+                self._attach_media_progress(exc)
+                raise
+            await self.simulator.random_delay(2.5, 4.5)
 
-        # 图片上传可能重建 UEditor iframe，必须重新解析当前 body；旧 iframe
-        # 的 inner_text 不能作为最终完整性证据。
-        editor = await self._body_editor_locator()
-        if editor is None:
-            raise SelectorError("百家号图片处理后正文编辑器未找到")
-        actual_text = await editor.inner_text()
-        ensure_valid_content(
-            content_blocks,
-            actual_text,
-            platform="百家号",
-            phase="图片处理后",
-        )
-        logger.info("百家号正文输入并最终验证成功: {} 个文本段落", expected_count)
+        try:
+            await self._validate_dom_exact(content_blocks, phase="正文最终")
+        except ContentValidationError as exc:
+            self._attach_media_progress(exc)
+            raise
 
         if expected_images == 0:
             media_status = "not_required"
@@ -526,24 +665,6 @@ class BaijiahaoPlatform(BasePlatform):
         else:
             media_status = "partial"
             media_error = f"{expected_images - uploaded_images} 张图片上传失败"
-
-        if failed_images:
-            logger.warning(
-                "百家号图片处理结果: expected={}, uploaded={}, failed={}",
-                expected_images,
-                uploaded_images,
-                len(failed_images),
-            )
-
-        cover_result: dict | None = None
-        if expected_images > 0:
-            # 封面可独立于正文插图：直接用本地首图上传到封面弹窗的 image/* 控件。
-            cover_result = await self.set_cover() or {}
-            if not cover_result.get("success"):
-                logger.warning(
-                    "百家号封面设置失败: {}", cover_result.get("error")
-                )
-
         return {
             "text_ok": True,
             "expected_images": expected_images,
@@ -551,48 +672,367 @@ class BaijiahaoPlatform(BasePlatform):
             "failed_images": failed_images,
             "media_status": media_status,
             "media_error": media_error,
-            "cover": cover_result,
         }
 
-    async def _upload_image(self, image_path: str) -> dict:
-        """通过编辑器文件控件上传图片；以编辑器内图片数量增加为判据。
+    async def _current_body_editor(self):
+        editor = await self._body_editor_locator()
+        if editor is None or await editor.count() == 0 or not await editor.is_visible():
+            raise SelectorError("百家号正文编辑器未找到或当前不可见")
+        return editor
 
-        2026-08 实测：编辑器存在两个文件控件（video/* 与 image/*），
-        必须选择 accept 含 image 的控件，不能取 first（那是视频控件）。
-        """
+    async def _place_body_caret_at_end(self) -> None:
+        editor = await self._current_body_editor()
+        try:
+            await editor.press("Control+End")
+        except Exception as exc:
+            if self._exception_means_browser_closed(exc):
+                raise BrowserLifecycleError(
+                    "BROWSER_CONTEXT_CLOSED: 百家号移动正文光标时页面已关闭"
+                ) from exc
+            raise ContentValidationError(
+                "BAIJIAHAO_CARET_POSITION_FAILED: 正文末尾光标定位失败"
+            ) from exc
+
+    async def _apply_h2_to_current_block(self) -> None:
+        """把 Word H2 映射到百家号字号菜单中的“标题”。"""
+
+        try:
+            trigger = self.page.locator(".edui-for-customfontsize:visible")
+            visible = [
+                trigger.nth(index)
+                for index in range(await trigger.count())
+                if await trigger.nth(index).is_visible()
+            ]
+            if len(visible) != 1:
+                raise RuntimeError("标题格式入口不唯一")
+            await visible[0].click(timeout=5000)
+            options = self.page.get_by_text("标题", exact=True)
+            candidates = [
+                options.nth(index)
+                for index in range(await options.count())
+                if await options.nth(index).is_visible()
+            ]
+            if len(candidates) != 1:
+                raise RuntimeError("标题格式选项不唯一")
+            await candidates[0].click(timeout=5000)
+        except Exception as exc:
+            if self._exception_means_browser_closed(exc):
+                raise BrowserLifecycleError(
+                    "BROWSER_CONTEXT_CLOSED: 百家号设置标题样式时页面已关闭"
+                ) from exc
+            raise ContentValidationError(
+                "BAIJIAHAO_HEADING_APPLY_FAILED: 二级标题样式未能应用"
+            ) from exc
+
+    async def _create_paragraph_after_image(self) -> None:
+        editor = await self._current_body_editor()
+        try:
+            await editor.press("Control+End")
+            await self.page.keyboard.press("ArrowDown")
+            await self.page.keyboard.press("ArrowRight")
+            await self.page.keyboard.press("Enter")
+            tail_ready = bool(
+                await editor.evaluate(
+                    """root => {
+                        const tail = root.lastElementChild;
+                        return !!tail && tail.tagName.toLowerCase() === 'p'
+                            && tail.querySelectorAll('img').length === 0;
+                    }"""
+                )
+            )
+            if not tail_ready:
+                raise RuntimeError("图片后正文段落未建立")
+        except Exception as exc:
+            if self._exception_means_browser_closed(exc):
+                raise BrowserLifecycleError(
+                    "BROWSER_CONTEXT_CLOSED: 百家号图片后创建段落时页面已关闭"
+                ) from exc
+            raise ContentValidationError(
+                "BAIJIAHAO_POST_IMAGE_PARAGRAPH_FAILED: 图片后无法建立正文插入点"
+            ) from exc
+
+    @staticmethod
+    def _image_path_for_block(block: dict, images: list[dict]) -> str | None:
+        direct = block.get("local_path") if isinstance(block, dict) else None
+        if direct:
+            return str(direct)
+        position = block.get("position") if isinstance(block, dict) else None
+        matches = [
+            image
+            for image in images or []
+            if isinstance(image, dict) and image.get("position_index") == position
+        ]
+        if len(matches) != 1:
+            return None
+        local_path = matches[0].get("local_path")
+        return str(local_path) if local_path else None
+
+    @staticmethod
+    def _expected_content_tokens(blocks: list[dict]) -> list[dict]:
+        tokens: list[dict] = []
+        for block in blocks:
+            block_type = block.get("type") if isinstance(block, dict) else None
+            if block_type == "image":
+                tokens.append({"kind": "image"})
+                continue
+            for paragraph in extract_expected_paragraphs([block]):
+                if block_type == "heading":
+                    tokens.append(
+                        {"kind": "heading", "level": 2,
+                         "text": paragraph.comparison_text}
+                    )
+                else:
+                    tokens.append({"kind": "text", "text": paragraph.comparison_text})
+        return tokens
+
+    async def _read_editor_dom_tokens(self) -> list[dict]:
+        editor = await self._current_body_editor()
+        try:
+            raw = await editor.evaluate(
+                """root => {
+                    const tokens = [];
+                    for (const node of root.children) {
+                        const images = node.querySelectorAll('img');
+                        if (images.length) {
+                            for (const _image of images) tokens.push({kind: 'image'});
+                            continue;
+                        }
+                        const text = node.innerText || node.textContent || '';
+                        if (!text.trim()) continue;
+                        const tag = node.tagName.toLowerCase();
+                        const sized = [node, ...node.querySelectorAll('*')].some((el) => {
+                            const inline = parseFloat(el.style?.fontSize || '0');
+                            return Number.isFinite(inline) && inline >= 20;
+                        });
+                        tokens.push({
+                            kind: /^h[1-6]$/.test(tag) || sized ? 'heading' : 'text',
+                            level: /^h[1-6]$/.test(tag) || sized ? 2 : 0,
+                            text,
+                        });
+                    }
+                    return tokens;
+                }"""
+            )
+        except Exception as exc:
+            if self._exception_means_browser_closed(exc):
+                raise BrowserLifecycleError(
+                    "BROWSER_CONTEXT_CLOSED: 百家号读取正文 DOM 时页面已关闭"
+                ) from exc
+            raise ContentValidationError(
+                "BAIJIAHAO_CONTENT_DOM_VERIFY_FAILED: 正文 DOM 回读失败"
+            ) from exc
+        if not isinstance(raw, list):
+            raise ContentValidationError(
+                "BAIJIAHAO_CONTENT_DOM_VERIFY_FAILED: DOM 序列无效"
+            )
+        normalized: list[dict] = []
+        for item in raw:
+            if not isinstance(item, dict):
+                raise ContentValidationError(
+                    "BAIJIAHAO_CONTENT_DOM_VERIFY_FAILED: DOM token 无效"
+                )
+            kind = item.get("kind")
+            if kind == "image":
+                normalized.append({"kind": "image"})
+                continue
+            paragraphs = extract_expected_paragraphs(
+                [{"type": "text", "text": str(item.get("text") or "")}]
+            )
+            for paragraph in paragraphs:
+                if kind == "heading":
+                    normalized.append(
+                        {"kind": "heading", "level": 2,
+                         "text": paragraph.comparison_text}
+                    )
+                elif kind == "text":
+                    normalized.append(
+                        {"kind": "text", "text": paragraph.comparison_text}
+                    )
+                else:
+                    raise ContentValidationError(
+                        "BAIJIAHAO_CONTENT_DOM_VERIFY_FAILED: DOM token 类型无效"
+                    )
+        return normalized
+
+    @staticmethod
+    def _token_shape(tokens: list[dict]) -> str:
+        return ",".join(
+            "I" if token.get("kind") == "image"
+            else f"H2:{len(token.get('text') or '')}"
+            if token.get("kind") == "heading"
+            else f"T:{len(token.get('text') or '')}"
+            for token in tokens[:40]
+        ) or "EMPTY"
+
+    async def _validate_dom_prefix(self, blocks: list[dict], *, phase: str) -> None:
+        expected = self._expected_content_tokens(blocks)
+        actual = await self._read_editor_dom_tokens()
+        if actual[: len(expected)] != expected:
+            raise ContentValidationError(
+                f"CONTENT_VALIDATION_ERROR: 百家号{phase}图文顺序不完整; "
+                f"expected={self._token_shape(expected)}; "
+                f"actual={self._token_shape(actual)}"
+            )
+
+    async def _validate_dom_exact(self, blocks: list[dict], *, phase: str) -> None:
+        expected = self._expected_content_tokens(blocks)
+        actual = await self._read_editor_dom_tokens()
+        if actual != expected:
+            raise ContentValidationError(
+                f"CONTENT_VALIDATION_ERROR: 百家号{phase}图文顺序不完整; "
+                f"expected={self._token_shape(expected)}; "
+                f"actual={self._token_shape(actual)}"
+            )
+
+    @staticmethod
+    def _media_status(expected: int, uploaded: int, failed: int) -> str:
+        if expected == 0:
+            return "not_required"
+        if uploaded == expected:
+            return "completed"
+        if uploaded == 0 and failed:
+            return "failed"
+        if uploaded + failed == expected:
+            return "partial"
+        return "in_progress"
+
+    def _attach_media_progress(self, exc: ContentValidationError) -> None:
+        state = self._media_progress_state
+        if not isinstance(state, dict):
+            return
+        progress = safe_media_progress(
+            {
+                **state,
+                "media_status": self._media_status(
+                    state["expected_images"],
+                    state["uploaded_images"],
+                    state["failed_image_count"],
+                ),
+            }
+        )
+        if progress is not None:
+            exc.media_progress = progress
+
+    async def _upload_image(self, image_path: str) -> dict:
+        """打开正文图片弹窗，单次上传并验证 UEditor 图片稳定增加。"""
 
         self._require_page_alive("百家号上传图片")
         try:
-            image_inputs = self.page.locator(
-                'input[type=file][accept*="image"]'
-            )
-            if await image_inputs.count() == 0:
-                return {"success": False, "error": "百家号图片上传控件未找到"}
-            before = await self.page.evaluate(
-                """() => document.querySelectorAll(
-                    "div[class*='FeEditorApp-'][contenteditable='true'] img"
-                ).length"""
-            )
-            await image_inputs.first.set_input_files(str(image_path), timeout=15000)
-            after = before
-            for _ in range(12):
-                await asyncio.sleep(1)
-                after = await self.page.evaluate(
-                    """() => document.querySelectorAll(
-                        "div[class*='FeEditorApp-'][contenteditable='true'] img"
-                    ).length"""
-                )
-                if after > before:
+            before = await self._count_body_images()
+            triggers = self.page.locator(f"{IMAGE_TRIGGER_SELECTOR}:visible")
+            candidates = [
+                triggers.nth(index)
+                for index in range(await triggers.count())
+                if await triggers.nth(index).is_visible()
+            ]
+            if len(candidates) != 1:
+                return {
+                    "success": False,
+                    "error_code": "BAIJIAHAO_BODY_IMAGE_TRIGGER_AMBIGUOUS",
+                    "error": "百家号正文图片入口不存在或候选不唯一，已安全停止",
+                }
+            await candidates[0].click(timeout=5000)
+            await self.simulator.random_delay(0.5, 1)
+            modals = self.page.locator(f"{IMAGE_MODAL_SELECTOR}:visible")
+            visible_modals = [
+                modals.nth(index)
+                for index in range(await modals.count())
+                if await modals.nth(index).is_visible()
+            ]
+            if len(visible_modals) != 1:
+                return {
+                    "success": False,
+                    "error_code": "BAIJIAHAO_BODY_IMAGE_MODAL_AMBIGUOUS",
+                    "error": "百家号正文图片弹窗不存在或候选不唯一，已安全停止",
+                }
+            modal = visible_modals[0]
+            inputs = modal.locator('input[type="file"][accept*="image"]')
+            if await inputs.count() != 1:
+                return {
+                    "success": False,
+                    "error_code": "BAIJIAHAO_BODY_IMAGE_INPUT_AMBIGUOUS",
+                    "error": "百家号正文图片控件不存在或候选不唯一，已安全停止",
+                }
+            await inputs.first.set_input_files(str(image_path), timeout=15000)
+
+            confirm = modal.get_by_text("确认", exact=True)
+            confirm_button = None
+            for _ in range(40):
+                visible = [
+                    confirm.nth(index)
+                    for index in range(await confirm.count())
+                    if await confirm.nth(index).is_visible()
+                ]
+                enabled = []
+                for candidate in visible:
+                    try:
+                        if await candidate.is_enabled():
+                            enabled.append(candidate)
+                    except AttributeError:
+                        enabled.append(candidate)
+                if len(enabled) == 1:
+                    confirm_button = enabled[0]
                     break
-            if after <= before:
-                return {"success": False, "error": "上传后编辑器图片数量未增加"}
+                await asyncio.sleep(0.5)
+            if confirm_button is None:
+                return {
+                    "success": False,
+                    "error_code": "BAIJIAHAO_BODY_IMAGE_CONFIRM_NOT_READY",
+                    "error": "百家号正文图片上传后确认控件未就绪",
+                }
+            await confirm_button.click(timeout=5000)
+
+            stable_streak = 0
+            observed = before
+            for _ in range(40):
+                await asyncio.sleep(0.5)
+                observed = await self._count_body_images()
+                remote_ready = await self._new_body_images_ready(before)
+                if observed > before and remote_ready:
+                    stable_streak += 1
+                else:
+                    stable_streak = 0
+                if stable_streak >= 3:
+                    break
+            if observed <= before or stable_streak < 3:
+                return {
+                    "success": False,
+                    "error_code": "BAIJIAHAO_EDITOR_IMAGE_COUNT_UNCHANGED",
+                    "error": "上传后百家号正文图片数量未稳定增加",
+                }
             return {"success": True, "error": ""}
         except Exception as exc:
             if self._exception_means_browser_closed(exc):
                 raise BrowserLifecycleError(
                     "BROWSER_CONTEXT_CLOSED: 百家号上传图片时页面已关闭"
                 ) from exc
-            return {"success": False, "error": str(exc)}
+            return {
+                "success": False,
+                "error_code": "BAIJIAHAO_IMAGE_UPLOAD_FAILED",
+                "error": safe_media_error(exc, fallback="百家号图片上传失败"),
+            }
+
+    async def _count_body_images(self) -> int:
+        editor = await self._current_body_editor()
+        return int(await editor.locator("img").count())
+
+    async def _new_body_images_ready(self, before: int) -> bool:
+        editor = await self._current_body_editor()
+        return bool(
+            await editor.evaluate(
+                """(root, before) => {
+                    const images = Array.from(root.querySelectorAll('img')).slice(before);
+                    return images.length > 0 && images.every((image) => {
+                        const src = image.getAttribute('src') || '';
+                        return image.complete && image.naturalWidth > 0
+                            && (src.startsWith('http://')
+                                || src.startsWith('https://')
+                                || src.startsWith('//'));
+                    });
+                }""",
+                before,
+            )
+        )
 
     async def set_cover(self) -> dict:
         """通过「选择封面」弹窗上传本地图片设为封面（3:2 预览后确定）。
@@ -745,62 +1185,166 @@ class BaijiahaoPlatform(BasePlatform):
         }
 
     async def save_draft(self, title: str = "") -> str:
-        """点击「存草稿」，以「保存接口 2xx」验证。
+        """精确点击“存草稿”，再按唯一标题重开并核验冻结图文。"""
 
-        百家号编辑器自动保存且草稿入口在内容管理；保存判据 = 点击存草稿
-        后捕获保存接口 2xx。标题关键字验证在内容管理草稿列表中补充。
-        """
         self._require_page_alive("百家号保存草稿")
-        captured: dict = {}
-
-        async def _on_response(response) -> None:
-            try:
-                if response.request.method in ("POST", "PUT", "PATCH") and (
-                    "save" in response.url.lower()
-                    or "draft" in response.url.lower()
-                    or "article" in response.url.lower()
-                ):
-                    captured["status"] = response.status
-                    try:
-                        body = await response.json()
-                        if isinstance(body, dict):
-                            captured["errno"] = body.get("errno")
-                    except Exception:
-                        pass
-            except Exception:  # noqa: BLE001
-                pass
+        expected_title = self._normalize_title(title)
+        if not expected_title or expected_title != self._preflight_title:
+            raise DraftResultUnknownError(
+                "DRAFT_RESULT_UNKNOWN: 百家号缺少与本次一致的唯一标题基线"
+            )
+        if self._expected_persisted_blocks is None:
+            raise DraftResultUnknownError(
+                "DRAFT_RESULT_UNKNOWN: 百家号缺少冻结内容核验快照"
+            )
+        try:
+            buttons = self.page.get_by_text("存草稿", exact=True)
+            visible = [
+                buttons.nth(index)
+                for index in range(await buttons.count())
+                if await buttons.nth(index).is_visible()
+            ]
+            if len(visible) != 1:
+                raise DraftResultUnknownError(
+                    "DRAFT_RESULT_UNKNOWN: 百家号精确存草稿按钮不存在或不唯一"
+                )
+            await visible[0].click(timeout=5000)
+            await self.simulator.random_delay(2, 4)
+        except DraftResultUnknownError:
+            raise
+        except Exception as exc:
+            if self._exception_means_browser_closed(exc):
+                raise DraftResultUnknownError(
+                    "DRAFT_RESULT_UNKNOWN: 百家号存草稿期间浏览器已关闭"
+                ) from exc
+            raise DraftResultUnknownError(
+                "DRAFT_RESULT_UNKNOWN: 百家号存草稿点击结果无法确认"
+            ) from exc
 
         try:
-            self.page.on("response", _on_response)
-            await self.page.evaluate(
-                """() => {
-                    const nodes = Array.from(
-                        document.querySelectorAll('button, [role=button]')
-                    );
-                    const target = nodes.find((el) =>
-                        (el.innerText || '').replace(/\\s+/g, '').includes('存草稿'));
-                    if (target) target.click();
-                }"""
-            )
-            await self.simulator.random_delay(2, 4)
-            for _ in range(10):
-                if captured.get("status"):
-                    break
-                await asyncio.sleep(1)
-        finally:
-            try:
-                self.page.remove_listener("response", _on_response)
-            except Exception:  # noqa: BLE001
-                pass
+            edit_url = await self._find_unique_exact_draft(expected_title)
+            await self._verify_persisted_draft(expected_title, edit_url)
+            return edit_url
+        except DraftResultUnknownError:
+            raise
+        except Exception as exc:
+            if self._exception_means_browser_closed(exc):
+                raise DraftResultUnknownError(
+                    "DRAFT_RESULT_UNKNOWN: 百家号核验草稿时浏览器已关闭"
+                ) from exc
+            raise DraftResultUnknownError(
+                "DRAFT_RESULT_UNKNOWN: 百家号持久化草稿核验失败"
+            ) from exc
 
-        if not captured.get("status"):
-            logger.error("百家号存草稿未产生任何保存请求")
-            return ""
-        if captured.get("errno") not in (None, 0):
-            logger.error("百家号存草稿接口返回错误: {}", captured)
-            return ""
-        logger.info("百家号存草稿验证成功: 保存接口 {}", captured.get("status"))
-        return "https://baijiahao.baidu.com/builder/rc/edit?type=news"
+    async def _find_unique_exact_draft(self, title: str) -> str:
+        await self._open_works_page()
+        matches: list[dict] = []
+        for attempt in range(6):
+            await self._search_works(title)
+            matches = await self._matching_work_rows(title)
+            if len(matches) == 1:
+                break
+            if attempt + 1 < 6:
+                await self.page.reload(wait_until="domcontentloaded", timeout=30000)
+                await self.simulator.random_delay(1, 2)
+        if len(matches) != 1:
+            raise DraftResultUnknownError(
+                "DRAFT_RESULT_UNKNOWN: 百家号未找到标题精确匹配的唯一草稿"
+            )
+        clicked = await self.page.evaluate(
+            """title => {
+                const visible = (el) => !!(
+                    el && (el.offsetWidth || el.offsetHeight
+                        || el.getClientRects().length)
+                );
+                const text = (el) => (el?.innerText || el?.textContent || '')
+                    .replace(/\\s+/g, ' ').trim();
+                const leaf = Array.from(
+                    document.querySelectorAll('a, span, p, div, h1, h2, h3, h4')
+                ).find((el) => visible(el) && text(el) === title
+                    && !Array.from(el.children).some((child) => text(child) === title));
+                if (!leaf) return false;
+                let row = leaf;
+                while (row && row !== document.body) {
+                    const action = Array.from(
+                        row.querySelectorAll('button, a, [role="button"], span')
+                    ).find((el) => visible(el) && text(el) === '修改');
+                    if (action) { action.click(); return true; }
+                    row = row.parentElement;
+                }
+                return false;
+            }""",
+            title,
+        )
+        if not clicked:
+            raise DraftResultUnknownError(
+                "DRAFT_RESULT_UNKNOWN: 百家号唯一草稿缺少精确修改入口"
+            )
+        await self.page.wait_for_url(
+            re.compile(r"https://baijiahao\.baidu\.com/builder/rc/edit(?:\?|$)"),
+            timeout=20000,
+        )
+        return self._safe_draft_url(self.page.url)
+
+    @staticmethod
+    def _safe_draft_url(value: str) -> str:
+        parts = urlsplit(str(value or ""))
+        if (
+            parts.scheme != "https"
+            or parts.netloc != "baijiahao.baidu.com"
+            or parts.path != "/builder/rc/edit"
+            or parts.username
+            or parts.password
+        ):
+            raise DraftResultUnknownError(
+                "DRAFT_RESULT_UNKNOWN: 百家号草稿编辑地址无效"
+            )
+        safe_query: list[tuple[str, str]] = []
+        for key, item in parse_qsl(parts.query, keep_blank_values=True):
+            if re.search(r"token|cookie|auth|session|bduss", key, re.I):
+                raise DraftResultUnknownError(
+                    "DRAFT_RESULT_UNKNOWN: 百家号草稿编辑地址包含敏感参数"
+                )
+            if len(key) > 80 or len(item) > 256:
+                raise DraftResultUnknownError(
+                    "DRAFT_RESULT_UNKNOWN: 百家号草稿编辑地址参数异常"
+                )
+            safe_query.append((key, item))
+        return urlunsplit(
+            (parts.scheme, parts.netloc, parts.path, urlencode(safe_query), "")
+        )
+
+    async def _verify_persisted_draft(self, title: str, edit_url: str) -> None:
+        blocks = self._expected_persisted_blocks
+        if blocks is None:
+            raise DraftResultUnknownError(
+                "DRAFT_RESULT_UNKNOWN: 百家号缺少冻结内容核验快照"
+            )
+        await self.page.goto(edit_url, wait_until="domcontentloaded", timeout=30000)
+        await self._wait_for_editor_ready(timeout_seconds=45)
+        expected_tokens = self._expected_content_tokens(blocks)
+        actual_tokens: list[dict] = []
+        title_matches = False
+        for attempt in range(20):
+            title_editor = await self._title_editor_locator()
+            if title_editor is not None:
+                actual_title = self._normalize_title(await title_editor.inner_text())
+                title_matches = actual_title == title
+            if title_matches:
+                actual_tokens = await self._read_editor_dom_tokens()
+                if actual_tokens == expected_tokens:
+                    return
+            if attempt + 1 < 20:
+                await asyncio.sleep(1.5)
+        if not title_matches:
+            raise DraftResultUnknownError(
+                "DRAFT_RESULT_UNKNOWN: 百家号草稿重开后标题不一致"
+            )
+        raise DraftResultUnknownError(
+            "DRAFT_RESULT_UNKNOWN: 百家号草稿重开后图文结构不完整; "
+            f"expected={self._token_shape(expected_tokens)}; "
+            f"actual={self._token_shape(actual_tokens)}"
+        )
 
     async def publish_now(self, title: str = "") -> str:
         self._not_implemented("公开发布")

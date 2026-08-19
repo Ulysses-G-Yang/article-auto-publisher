@@ -44,7 +44,16 @@ class FakeLocator:
     async def click(self, **_kwargs) -> None:
         return None
 
-    async def evaluate(self, _script: str):
+    async def press(self, _key: str) -> None:
+        return None
+
+    async def evaluate(self, script: str):
+        if "const tokens" in script:
+            return [
+                {"kind": "text", "level": 0, "text": line}
+                for line in self.text.splitlines()
+                if line.strip()
+            ]
         return True
 
 
@@ -141,7 +150,9 @@ def test_baijia_image_rerender_reads_new_body_and_fails_on_missing_text() -> Non
     platform = BaijiahaoPlatform()
     platform.page = SimpleNamespace(keyboard=FakeKeyboard())
     platform.simulator.random_delay = AsyncMock()
-    platform._body_editor_locator = AsyncMock(side_effect=[old_body, new_body])
+    platform._body_editor_locator = AsyncMock(
+        side_effect=[old_body, old_body, old_body, old_body, new_body, new_body]
+    )
     platform._focus_editor = AsyncMock()
     platform._upload_image = AsyncMock(return_value={"success": True})
 
@@ -156,8 +167,8 @@ def test_baijia_image_rerender_reads_new_body_and_fails_on_missing_text() -> Non
             )
         )
 
-    assert platform._body_editor_locator.await_count == 2
-    new_body.inner_text.assert_awaited_once()
+    assert platform._body_editor_locator.await_count == 6
+    platform._upload_image.assert_awaited_once_with("photo.png")
 
 
 class FakeSaveResponse:

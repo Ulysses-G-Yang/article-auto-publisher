@@ -371,30 +371,19 @@ class ZhihuPlatform(BasePlatform):
 
     async def _place_body_caret_at_end(self) -> None:
         editor = await self._current_body_editor()
-        await editor.evaluate(
-            """root => {
-                root.focus();
-                const blocks = Array.from(
-                    root.querySelectorAll('[data-block="true"]')
-                );
-                const tailBlock = blocks.length ? blocks[blocks.length - 1] : root;
-                const textLeaves = Array.from(
-                    tailBlock.querySelectorAll('[data-text="true"]')
-                );
-                const tail = textLeaves.length
-                    ? textLeaves[textLeaves.length - 1]
-                    : tailBlock;
-                const range = document.createRange();
-                range.selectNodeContents(tail);
-                range.collapse(false);
-                const selection = window.getSelection();
-                selection.removeAllRanges();
-                selection.addRange(range);
-                document.dispatchEvent(
-                    new Event('selectionchange', {bubbles: true})
-                );
-            }"""
-        )
+        try:
+            # Draft.js 维护自己的 SelectionState。直接改 DOM Range 看似移动了
+            # 光标，但不会可靠同步内部状态；真实键盘 End 事件才会让后续
+            # Enter 在文档末尾创建新 block。
+            await editor.press("Control+End")
+        except Exception as exc:
+            if self._exception_means_browser_closed(exc):
+                raise BrowserLifecycleError(
+                    "BROWSER_CONTEXT_CLOSED: 知乎移动正文光标时页面已关闭"
+                ) from exc
+            raise ContentValidationError(
+                "ZHIHU_CARET_POSITION_FAILED: 正文末尾光标定位失败"
+            ) from exc
 
     async def _apply_h2_to_current_block(self) -> None:
         try:

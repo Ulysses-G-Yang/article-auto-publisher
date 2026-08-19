@@ -353,6 +353,10 @@ class _FakeLocator:
             return [dict(item) for item in self.page.dom_tokens]
         return None
 
+    async def press(self, key):
+        self.page.locator_presses.append(key)
+        await self.page.keyboard.press(key)
+
 
 class _FakeRoleButton:
     def __init__(self, page, name):
@@ -442,6 +446,7 @@ class _FakeEditorPage:
         self.selected_all = False
         self.active = None
         self.dom_tokens: list[dict] = []
+        self.locator_presses: list[str] = []
 
     def is_closed(self) -> bool:
         return False
@@ -618,13 +623,12 @@ def test_dom_reader_walks_nested_draftjs_blocks_instead_of_collapsing_parent() -
 
 
 def test_caret_targets_last_draftjs_block_not_contenteditable_root() -> None:
-    source = Path(PROJECT_ROOT / "platforms" / "zhihu.py").read_text(encoding="utf-8")
+    page = _FakeEditorPage()
+    platform = _make_delivery_platform(page)
 
-    assert "root.querySelectorAll('[data-block=\"true\"]')" in source
-    assert "tailBlock.querySelectorAll('[data-text=\"true\"]')" in source
-    assert "range.selectNodeContents(tail);" in source
-    assert "new Event('selectionchange'" in source
-    assert "range.selectNodeContents(root);" not in source
+    run(platform._place_body_caret_at_end())
+
+    assert page.locator_presses == ["Control+End"]
 
 
 def test_media_overlay_must_be_gone_before_next_content_block() -> None:

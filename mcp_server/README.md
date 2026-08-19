@@ -71,13 +71,27 @@ MCP_TASK_DB=<项目 data 目录下的 MCP 任务数据库>
 MCP_TRUSTED_PROXY_IPS=<受控反向代理IP，可选>
 ```
 
+账号级只读 MCP 工具另需在运行 Flask 的同一进程环境中配置：
+
+```text
+ARTICLEOPS_MCP_INTERNAL_TOKEN=<至少 32 个字符的随机值>
+ARTICLEOPS_MCP_ALLOWED_ACCOUNT_IDS=<允许读取的 account_id，逗号分隔>
+```
+
+两项缺一都会使内部账号接口以 `MCP_ACCESS_NOT_CONFIGURED` 失败。token 只在
+MCP Adapter 到 Flask 的两条 `/api/internal/mcp/...` 请求中发送，不会附加到
+旧 REST 接口，也不会写入日志、错误响应或工具结果；账号白名单只在 Flask 端
+解释和执行。请通过安全的进程环境注入，不要写进仓库配置文件。
+
 如需办公内网访问，应绑定内网 IP（或受控环境使用 `0.0.0.0`），并把实际访问 Host 加入 `MCP_ALLOWED_HOSTS`，同时配置防火墙来源白名单。禁止将 8765 端口直接暴露到公网。Host 白名单支持裸域名并自动允许其端口，例如 `collector.mcp.example.com` 会允许 `collector.mcp.example:<port>`。经受控反向代理访问时，将代理源 IP 配置到 `MCP_TRUSTED_PROXY_IPS`，再把业务域名加入 `MCP_ALLOWED_HOSTS`。
 
 ## 工具清单
 
 ### 查询工具
 
-- `list_accounts`：查询 ZOL、小黑盒登录状态和上次登录时间。
+- `list_platform_accounts(platform, usable)`：读取白名单内指定平台的公开账号投影；这是新的账号级只读入口，不触发登录、验证、退出、清 Cookie 或投递。
+- `get_account_activity(account_id, limit)`：读取白名单内单个账号的脱敏活动日志；这是新的账号级只读入口。
+- `[LEGACY] list_accounts`：查询 ZOL、小黑盒登录状态和上次登录时间；旧兼容工具不属于新的账号级工作流。
 - `list_articles`：查询文章标题、关键词、字数、图片数和关联任务。
 - `list_tasks`：查询发布任务状态。
 - `get_task_logs`：查询单个任务日志。

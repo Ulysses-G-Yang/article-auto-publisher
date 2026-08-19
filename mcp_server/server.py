@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -12,6 +12,8 @@ from mcp.server import MCPServer
 from mcp.server.transport_security import TransportSecuritySettings
 from starlette.requests import Request
 from starlette.responses import JSONResponse
+
+from account_sessions.mcp_access import load_internal_access_settings
 
 from . import SERVER_ID, SERVER_VERSION
 from .flask_client import FlaskClient
@@ -30,6 +32,10 @@ class MCPSettings:
     allowed_origins: tuple[str, ...]
     task_db_path: str
     trusted_proxy_ips: tuple[str, ...] = ()
+    # The secret is intentionally excluded from repr/logging.  Missing or
+    # malformed values do not prevent the MCP process from starting; only the
+    # two internal account-read calls fail closed at the Flask boundary.
+    mcp_internal_token: str = field(default="", repr=False)
 
 
 def _normalise_hosts(raw: str) -> tuple[str, ...]:
@@ -119,6 +125,7 @@ def load_settings() -> MCPSettings:
         for item in os.getenv("MCP_TRUSTED_PROXY_IPS", "").split(",")
         if item.strip()
     )
+    internal_access = load_internal_access_settings()
     return MCPSettings(
         flask_base_url=flask_base_url,
         # Keep local development safe by default.  LAN deployment can set
@@ -129,12 +136,16 @@ def load_settings() -> MCPSettings:
         allowed_origins=allowed_origins,
         task_db_path=task_db_path,
         trusted_proxy_ips=trusted_proxy_ips,
+        mcp_internal_token=internal_access.internal_token,
     )
 
 
 def create_server(settings: MCPSettings | None = None) -> MCPServer:
     config = settings or load_settings()
-    client = FlaskClient(config.flask_base_url)
+    client = FlaskClient(
+        config.flask_base_url,
+        internal_token=config.mcp_internal_token or None,
+    )
     store = TaskStore(config.task_db_path)
 
     @asynccontextmanager

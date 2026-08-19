@@ -120,7 +120,20 @@ asyncio.run(main())
 
 MCP 不暴露任意命令、SQL、本地路径、Cookie 内容、浏览器 Profile、密码或 Token。`cleanup_locks` 只清理 Chrome Profile 的 Singleton 锁文件，不杀 Chrome 进程、不删除 Cookie。
 
-本项目保留 `start_login`、`logout_account` 两个账号环境管理工具，因为发布前必须由管理员完成浏览器扫码和账号切换；这些工具只返回状态，不返回凭据。公开发布仍由现有 Flask 平台流程控制，本 MCP 不提供任意平台或任意 URL 发布能力。
+### 7.1 账号级只读边界
+
+新的 `list_platform_accounts` 和 `get_account_activity` 只通过 Flask 的内部
+`/api/internal/mcp/...` 端点工作。Flask 端要求 `Authorization: Bearer <token>`，
+并以 `ARTICLEOPS_MCP_ALLOWED_ACCOUNT_IDS` 做账号级白名单；token 至少 32 个字符，
+缺少 token 或白名单时返回 `MCP_ACCESS_NOT_CONFIGURED`，token 错误返回
+`MCP_ACCESS_DENIED`。活动 `limit` 必须在 1 到 200 之间。
+
+MCP Adapter 只把 token 注入上述两个内部请求，绝不附加到旧 REST 请求。返回值
+只允许 `public_account` 和 `list_activity` 的公开字段，并在 MCP 边界再次脱敏；
+禁止 profile_path、原始 platform_user_id、Cookie、Token。旧的登录、退出、清理、
+发布工具保留作兼容，均标记为 `LEGACY`，不能替代新的只读入口。
+
+本项目保留 `start_login`、`logout_account` 两个 `LEGACY` 账号环境管理工具，因为发布前必须由管理员完成浏览器扫码和账号切换；这些工具只返回状态，不返回凭据。公开发布仍由现有 Flask 平台流程控制，本 MCP 不提供任意平台或任意 URL 发布能力。
 
 ## 8. 工具总览
 

@@ -3,28 +3,46 @@
 from __future__ import annotations
 
 import os
+import re
 import tempfile
 import time
 import uuid
+from collections.abc import Awaitable, Callable
 from pathlib import Path
-from typing import Annotated, Any, Awaitable, Callable, Literal
+from typing import Annotated, Any, Literal
 from urllib.parse import urlsplit
 
 import httpx
 from loguru import logger
 from pydantic import Field
 
+from account_sessions.platform_catalog import ACCOUNT_ENABLED_PLATFORMS
+
 from . import SERVER_ID
 from .flask_client import FlaskClient, FlaskClientError, safe_error_message
 from .task_store import TaskStore
 
 Platform = Literal["zol", "xiaoheihe"]
+InternalPlatform = Literal[
+    "xiaoheihe",
+    "zol",
+    "zhihu",
+    "weibo",
+    "smzdm",
+    "toutiao",
+    "baijiahao",
+    "xiaohongshu",
+    "douyin",
+]
 PositiveTaskId = Annotated[int, Field(gt=0)]
+AccountId = Annotated[str, Field(min_length=1, max_length=128)]
+ActivityLimit = Annotated[int, Field(ge=1, le=200)]
 TaskToken = Annotated[str, Field(min_length=1, max_length=128)]
 SourceDownloadURL = Annotated[str, Field(min_length=1, max_length=2048)]
 OptionalShortText = Annotated[str | None, Field(max_length=200)]
 DEFAULT_FILE_SERVICE_HOSTS = {"dev.sccsai.com"}
 SUPPORTED_PLATFORMS = {"zol", "xiaoheihe"}
+SUPPORTED_ACCOUNT_PLATFORMS = set(ACCOUNT_ENABLED_PLATFORMS)
 MAX_DOWNLOAD_BYTES = 50 * 1024 * 1024
 
 
@@ -69,6 +87,20 @@ def _safe_platform(value: Any) -> str:
     return platform
 
 
+def _safe_internal_platform(value: Any) -> str:
+    platform = str(value or "").strip().lower()
+    if platform not in SUPPORTED_ACCOUNT_PLATFORMS:
+        raise ToolFailure("INVALID_ARGUMENT", "platform 不是已启用的账号平台")
+    return platform
+
+
+def _safe_account_id(value: Any) -> str:
+    account_id = str(value or "").strip()
+    if not account_id or len(account_id) > 128:
+        raise ToolFailure("INVALID_ARGUMENT", "account_id 无效")
+    return account_id
+
+
 def _safe_task_id(value: Any) -> int:
     try:
         task_id = int(value)
@@ -101,6 +133,58 @@ def _safe_account(account: dict[str, Any]) -> dict[str, Any]:
         "platform": platform,
         "status": status,
         "last_login_time": account.get("last_login_time"),
+    }
+
+
+def _safe_internal_account(
+    account: dict[str, Any],
+    *,
+    platform: str,
+) -> dict[str, Any]:
+    """Re-project the already public account response at the MCP boundary."""
+
+    return {
+        "account_id": _safe_text(account.get("account_id"))[:128],
+        "display_name": _safe_text(account.get("display_name")),
+        "masked_platform_user_id": _safe_text(
+            account.get("masked_platform_user_id")
+        ),
+        "status": _safe_text(account.get("status")),
+        "session_status": _safe_text(account.get("session_status")),
+        "persist_login": bool(account.get("persist_login", False)),
+        "heartbeat_enabled": bool(account.get("heartbeat_enabled", False)),
+        "next_heartbeat_at": account.get("next_heartbeat_at"),
+        "last_heartbeat_at": account.get("last_heartbeat_at"),
+        "heartbeat_failures": int(account.get("heartbeat_failures", 0) or 0),
+        "last_heartbeat_error_code": _safe_text(
+            account.get("last_heartbeat_error_code"),
+            default="",
+        )
+        or None,
+        "last_verified_at": account.get("last_verified_at"),
+        "platform": platform,
+    }
+
+
+def _safe_internal_activity(item: dict[str, Any]) -> dict[str, Any]:
+    """Keep activity output aligned with AccountSessionService.list_activity."""
+
+    safe_message = _safe_text(item.get("message"))
+    safe_message = re.sub(
+        r"(?i)\b(cookie|token|secret|password|api[_ -]?key)\s*=\s*\[redacted\]",
+        "[redacted]",
+        safe_message,
+    )
+    return {
+        "id": item.get("id"),
+        "operation_id": _safe_text(item.get("operation_id"), default="") or None,
+        "platform": _safe_text(item.get("platform")),
+        "display_name": _safe_text(item.get("display_name")),
+        "source": _safe_text(item.get("source")),
+        "action": _safe_text(item.get("action")),
+        "level": _safe_text(item.get("level")),
+        "message": safe_message,
+        "created_at": item.get("created_at"),
     }
 
 
@@ -307,8 +391,93 @@ def register_tools(server: Any, client: FlaskClient, store: TaskStore) -> dict[s
     handlers: dict[str, Callable[..., Any]] = {}
 
     @server.tool(
+        name="list_platform_accounts",
+        description=(
+            "按平台读取 MCP 白名单内的账号公开投影；仅查询，不登录、验证、退出、"
+            "清 Cookie 或发布。"
+        ),
+        structured_output=True,
+    )
+    async def list_platform_accounts(
+        platform: InternalPlatform,
+        usable: bool = False,
+    ) -> dict[str, Any]:
+        async def operation() -> dict[str, Any]:
+            checked_platform = _safe_internal_platform(platform)
+            payload = await client.get_platform_accounts(
+                checked_platform,
+                usable=bool(usable),
+            )
+            source_accounts = payload.get("accounts")
+            if not isinstance(source_accounts, list):
+                raise ToolFailure("INTERNAL_ERROR", "Flask 未返回账号公开投影")
+            items = [
+                _safe_internal_account(item, platform=checked_platform)
+                for item in source_accounts
+                if isinstance(item, dict)
+            ]
+            return {
+                "platform": checked_platform,
+                "usable": bool(usable),
+                "count": len(items),
+                "empty": not items,
+                "items": items,
+            }
+
+        return await _execute(
+            "list_platform_accounts",
+            {"platform": platform, "usable": usable},
+            operation,
+        )
+
+    handlers["list_platform_accounts"] = list_platform_accounts
+
+    @server.tool(
+        name="get_account_activity",
+        description=(
+            "读取 MCP 白名单内指定账号的脱敏活动日志；仅查询，不触发任何账号、"
+            "会话或投递动作。"
+        ),
+        structured_output=True,
+    )
+    async def get_account_activity(
+        account_id: AccountId,
+        limit: ActivityLimit = 100,
+    ) -> dict[str, Any]:
+        async def operation() -> dict[str, Any]:
+            checked_account_id = _safe_account_id(account_id)
+            bounded_limit = min(max(int(limit), 1), 200)
+            payload = await client.get_account_activity(
+                checked_account_id,
+                limit=bounded_limit,
+            )
+            source_rows = payload.get("activities")
+            if not isinstance(source_rows, list):
+                raise ToolFailure("INTERNAL_ERROR", "Flask 未返回账号活动日志")
+            items = [
+                _safe_internal_activity(item)
+                for item in source_rows
+                if isinstance(item, dict)
+            ]
+            return {
+                "account_id": checked_account_id,
+                "limit": bounded_limit,
+                "count": len(items),
+                "empty": not items,
+                "activities": items,
+            }
+
+        return await _execute(
+            "get_account_activity",
+            {"account_id": account_id, "limit": limit},
+            operation,
+        )
+
+    handlers["get_account_activity"] = get_account_activity
+
+    @server.tool(
         name="list_accounts",
-        description="查询 ZOL 和小黑盒两个平台的账号登录状态以及上次登录时间。不修改任何数据。",
+        description="[LEGACY] 查询 ZOL 和小黑盒账号登录状态以及上次登录时间。不修改任何数据。",
         structured_output=True,
     )
     async def list_accounts() -> dict[str, Any]:
@@ -331,7 +500,7 @@ def register_tools(server: Any, client: FlaskClient, store: TaskStore) -> dict[s
 
     @server.tool(
         name="list_articles",
-        description="查询已上传文章的标题、关键词、字数、图片数和关联发布任务。不修改任何数据。",
+        description="[LEGACY] 查询已上传文章的标题、关键词、字数、图片数和关联发布任务。不修改任何数据。",
         structured_output=True,
     )
     async def list_articles() -> dict[str, Any]:
@@ -345,7 +514,7 @@ def register_tools(server: Any, client: FlaskClient, store: TaskStore) -> dict[s
 
     @server.tool(
         name="list_tasks",
-        description="查询所有发布任务及其状态、平台和关联文章标题。不修改任何数据。",
+        description="[LEGACY] 查询所有发布任务及其状态、平台和关联文章标题。不修改任何数据。",
         structured_output=True,
     )
     async def list_tasks() -> dict[str, Any]:
@@ -366,7 +535,7 @@ def register_tools(server: Any, client: FlaskClient, store: TaskStore) -> dict[s
 
     @server.tool(
         name="get_task_logs",
-        description="查询指定发布任务的按时间排序执行日志。不修改任何数据。",
+        description="[LEGACY] 查询指定发布任务的按时间排序执行日志。不修改任何数据。",
         structured_output=True,
     )
     async def get_task_logs(task_id: PositiveTaskId) -> dict[str, Any]:
@@ -397,7 +566,7 @@ def register_tools(server: Any, client: FlaskClient, store: TaskStore) -> dict[s
 
     @server.tool(
         name="get_queue_status",
-        description="查询文章发布队列的队列大小、运行状态和待处理任务数。不修改任何数据。",
+        description="[LEGACY] 查询文章发布队列的队列大小、运行状态和待处理任务数。不修改任何数据。",
         structured_output=True,
     )
     async def get_queue_status() -> dict[str, Any]:
@@ -415,7 +584,7 @@ def register_tools(server: Any, client: FlaskClient, store: TaskStore) -> dict[s
 
     @server.tool(
         name="start_login",
-        description="发起 ZOL 或小黑盒登录，在本机打开浏览器等待人工扫码。立即返回异步任务，使用 get_login_result 轮询。",
+        description="[LEGACY] 发起 ZOL 或小黑盒登录，在本机打开浏览器等待人工扫码。立即返回异步任务，使用 get_login_result 轮询。",
         structured_output=True,
     )
     async def start_login(platform: Platform, force: bool = False) -> dict[str, Any]:
@@ -453,7 +622,7 @@ def register_tools(server: Any, client: FlaskClient, store: TaskStore) -> dict[s
 
     @server.tool(
         name="get_login_result",
-        description="轮询 start_login 创建的登录任务，返回等待扫码、登录成功或登录失败状态。",
+        description="[LEGACY] 轮询 start_login 创建的登录任务，返回等待扫码、登录成功或登录失败状态。",
         structured_output=True,
     )
     async def get_login_result(task_id: TaskToken) -> dict[str, Any]:
@@ -495,7 +664,7 @@ def register_tools(server: Any, client: FlaskClient, store: TaskStore) -> dict[s
 
     @server.tool(
         name="publish_article",
-        description="下载 CS_Admin 注入的 docx 文件并通过 Flask 创建 ZOL/小黑盒发布任务。返回异步任务，使用 get_publish_result 轮询。",
+        description="[LEGACY] 下载 CS_Admin 注入的 docx 文件并通过 Flask 创建 ZOL/小黑盒发布任务。返回异步任务，使用 get_publish_result 轮询。",
         structured_output=True,
     )
     async def publish_article(
@@ -561,7 +730,7 @@ def register_tools(server: Any, client: FlaskClient, store: TaskStore) -> dict[s
 
     @server.tool(
         name="get_publish_result",
-        description="轮询 publish_article 创建的发布任务，返回排队、发布中、需人工选择、完成或失败状态。",
+        description="[LEGACY] 轮询 publish_article 创建的发布任务，返回排队、发布中、需人工选择、完成或失败状态。",
         structured_output=True,
     )
     async def get_publish_result(task_id: TaskToken) -> dict[str, Any]:
@@ -632,7 +801,7 @@ def register_tools(server: Any, client: FlaskClient, store: TaskStore) -> dict[s
 
     @server.tool(
         name="resume_task",
-        description="恢复 paused 或 needs_selection 的发布任务；小黑盒需要 community 和 topic，ZOL 需要 topic。",
+        description="[LEGACY] 恢复 paused 或 needs_selection 的发布任务；小黑盒需要 community 和 topic，ZOL 需要 topic。",
         structured_output=True,
     )
     async def resume_task(
@@ -670,7 +839,7 @@ def register_tools(server: Any, client: FlaskClient, store: TaskStore) -> dict[s
 
     @server.tool(
         name="logout_account",
-        description="退出 ZOL 或小黑盒账号，清除该平台 Cookie 并重置登录状态。",
+        description="[LEGACY] 退出 ZOL 或小黑盒账号，清除该平台 Cookie 并重置登录状态。",
         structured_output=True,
     )
     async def logout_account(platform: Platform) -> dict[str, Any]:
@@ -689,7 +858,7 @@ def register_tools(server: Any, client: FlaskClient, store: TaskStore) -> dict[s
 
     @server.tool(
         name="cleanup_locks",
-        description="清理 Chrome Profile 残留锁文件，不杀进程，不影响 Cookie。",
+        description="[LEGACY] 清理 Chrome Profile 残留锁文件，不杀进程，不影响 Cookie。",
         structured_output=True,
     )
     async def cleanup_locks() -> dict[str, Any]:

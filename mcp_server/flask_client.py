@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 from typing import Any
+from urllib.parse import quote
 
 import httpx
 
@@ -19,8 +20,15 @@ class FlaskClientError(RuntimeError):
 
 
 _SENSITIVE_MESSAGE_RE = re.compile(
-    r"(?i)(cookie|token|secret|password|api[_ -]?key)\s*[:=]\s*[^\s,;]+"
+    r"(?i)\b(cookie|token|secret|password|api[_ -]?key)\b\s*[:=]\s*"
+    r"(?:\"[^\"\r\n]*\"|'[^'\r\n]*'|[^,;\r\n]*)"
 )
+_BEARER_MESSAGE_RE = re.compile(r"(?i)\bBearer\s+[^\s,;]+")
+_WINDOWS_PATH_RE = re.compile(
+    r"(?i)(?:\"(?:[A-Z]:[\\/]|\\\\)[^\"\r\n]*\"|"
+    r"(?:[A-Z]:[\\/]|\\\\)[^,;\r\n]+)"
+)
+_POSIX_PATH_RE = re.compile(r"(?<![:\w])/(?!/)[^,;\r\n]+")
 
 
 def safe_error_message(value: Any, fallback: str = "Flask 服务返回错误") -> str:
@@ -29,19 +37,30 @@ def safe_error_message(value: Any, fallback: str = "Flask 服务返回错误") -
     if not isinstance(value, str) or not value.strip():
         return fallback
     message = _SENSITIVE_MESSAGE_RE.sub(r"\1=[redacted]", value.strip())
+    message = _BEARER_MESSAGE_RE.sub("Bearer [redacted]", message)
     # Flask may include local traceback paths in an exception string.  Do not
     # forward those implementation details through the MCP boundary.
-    message = re.sub(r"(?i)\b[A-Z]:\\[^\r\n ]+", "[redacted path]", message)
-    message = re.sub(r"(?i)(?:^|\s)/(?:[^\s/]+/)+[^\s]+", " [redacted path]", message)
+    message = _WINDOWS_PATH_RE.sub("[redacted path]", message)
+    message = _POSIX_PATH_RE.sub("[redacted path]", message)
     return message[:500]
 
 
 class FlaskClient:
     """Async, bounded client for the known Flask endpoints only."""
 
-    def __init__(self, base_url: str, timeout_seconds: float = 30.0):
+    def __init__(
+        self,
+        base_url: str,
+        timeout_seconds: float = 30.0,
+        *,
+        internal_token: str | None = None,
+    ):
         self.base_url = base_url.rstrip("/")
         self.timeout = httpx.Timeout(timeout_seconds, connect=min(timeout_seconds, 10.0))
+        # This secret is intentionally private and is only read by the two
+        # internal MCP account-read methods below.  Legacy endpoints never use
+        # this field or receive an Authorization header.
+        self._internal_token = internal_token.strip() if internal_token else None
         self._client: httpx.AsyncClient | None = None
 
     async def _get_client(self) -> httpx.AsyncClient:
@@ -59,7 +78,11 @@ class FlaskClient:
             self._client = None
 
     @staticmethod
-    def _error_code(status_code: int) -> str:
+    def _error_code(status_code: int, *, internal: bool = False) -> str:
+        if internal and status_code in (401, 403):
+            return "MCP_ACCESS_DENIED"
+        if internal and status_code == 503:
+            return "MCP_ACCESS_NOT_CONFIGURED"
         if status_code == 404:
             return "NOT_FOUND"
         if status_code in (400, 409, 422):
@@ -70,12 +93,14 @@ class FlaskClient:
             return "UNAVAILABLE"
         return "INTERNAL_ERROR"
 
-    @staticmethod
-    def _http_error_message(status_code: int, payload: Any) -> str:
+    def _http_error_message(self, status_code: int, payload: Any) -> str:
         if isinstance(payload, dict):
             detail = payload.get("message") or payload.get("error")
             if isinstance(detail, str) and detail.strip():
-                return safe_error_message(detail)
+                message = safe_error_message(detail)
+                if self._internal_token:
+                    message = message.replace(self._internal_token, "[redacted]")
+                return message
         return {
             400: "Flask 服务拒绝了请求参数",
             404: "Flask 资源不存在",
@@ -98,7 +123,10 @@ class FlaskClient:
 
         if response.status_code >= 400:
             raise FlaskClientError(
-                self._error_code(response.status_code),
+                self._error_code(
+                    response.status_code,
+                    internal=path.startswith("/api/internal/mcp/"),
+                ),
                 self._http_error_message(response.status_code, payload),
                 status_code=response.status_code,
             )
@@ -107,6 +135,50 @@ class FlaskClient:
     async def get_accounts(self) -> list[dict[str, Any]]:
         payload = await self._request("GET", "/api/accounts")
         return payload if isinstance(payload, list) else []
+
+    def _internal_headers(self) -> dict[str, str]:
+        """Return auth only for explicitly scoped internal MCP calls."""
+
+        if not self._internal_token:
+            return {}
+        return {"Authorization": f"Bearer {self._internal_token}"}
+
+    async def get_platform_accounts(
+        self,
+        platform: str,
+        *,
+        usable: bool = False,
+    ) -> dict[str, Any]:
+        """Read the account projection through the internal MCP boundary only."""
+
+        path = f"/api/internal/mcp/platforms/{quote(str(platform), safe='')}/accounts"
+        payload = await self._request(
+            "GET",
+            path,
+            params={"usable": str(bool(usable)).lower()},
+            headers=self._internal_headers(),
+        )
+        return payload if isinstance(payload, dict) else {}
+
+    async def get_account_activity(
+        self,
+        account_id: str,
+        *,
+        limit: int = 100,
+    ) -> dict[str, Any]:
+        """Read one account's activity through the internal MCP boundary only."""
+
+        path = (
+            "/api/internal/mcp/account-sessions/"
+            f"{quote(str(account_id), safe='')}/activity"
+        )
+        payload = await self._request(
+            "GET",
+            path,
+            params={"limit": limit},
+            headers=self._internal_headers(),
+        )
+        return payload if isinstance(payload, dict) else {}
 
     async def get_articles(self) -> list[dict[str, Any]]:
         payload = await self._request("GET", "/api/articles")

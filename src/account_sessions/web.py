@@ -16,6 +16,10 @@ from account_sessions.contracts import DeliveryRequest, SessionPolicyRequest
 from account_sessions.database import AccountDatabase
 from account_sessions.delivery_service import DeliveryService
 from account_sessions.errors import AccountSessionError, ConfirmationRequiredError
+from account_sessions.mcp_access import (
+    MCPInternalAccessResolver,
+    MCPRequestValidationError,
+)
 from account_sessions.permissions import (
     LOCAL_WEB_CONTEXT,
     PermissionDeniedError,
@@ -155,6 +159,7 @@ def create_account_session_blueprint(
     heartbeat_policy: HeartbeatPolicy | None = None,
     heartbeat_service: HeartbeatService | None = None,
     heartbeat_scheduler: HeartbeatScheduler | None = None,
+    mcp_access_resolver: MCPInternalAccessResolver | None = None,
 ) -> Blueprint:
     """创建可挂载到现役 5000 端口的账号会话 Blueprint。"""
 
@@ -183,6 +188,7 @@ def create_account_session_blueprint(
         heartbeat_service=heartbeat_service,
         heartbeat_scheduler=heartbeat_scheduler,
     )
+    mcp_resolver = mcp_access_resolver or MCPInternalAccessResolver()
 
     @blueprint.record_once
     def register_state(setup_state) -> None:
@@ -208,6 +214,21 @@ def create_account_session_blueprint(
             state.accounts.list_accounts(
                 platform,
                 LOCAL_WEB_CONTEXT,
+                usable_only=usable,
+            )
+        )
+        return jsonify({"platform": platform, "accounts": accounts})
+
+    @blueprint.get("/api/internal/mcp/platforms/<platform>/accounts")
+    def list_internal_mcp_accounts(platform: str):
+        """MCP 专用账号投影；认证和账号白名单均由独立边界负责。"""
+
+        access = mcp_resolver.resolve(request.headers)
+        usable = request.args.get("usable", "false").lower() == "true"
+        accounts = state.run(
+            state.accounts.list_accounts(
+                platform,
+                access,
                 usable_only=usable,
             )
         )
@@ -296,6 +317,21 @@ def create_account_session_blueprint(
     @blueprint.get("/api/account-sessions/<account_id>/activity")
     def account_activity(account_id: str):
         rows = state.run(state.accounts.list_activity(account_id, LOCAL_WEB_CONTEXT))
+        return jsonify({"account_id": account_id, "activities": rows})
+
+    @blueprint.get("/api/internal/mcp/account-sessions/<account_id>/activity")
+    def internal_mcp_account_activity(account_id: str):
+        """MCP 专用账号活动读取；service 层再次执行账号范围校验。"""
+
+        access = mcp_resolver.resolve(request.headers)
+        raw_limit = request.args.get("limit")
+        try:
+            limit = 100 if raw_limit is None else int(raw_limit)
+        except (TypeError, ValueError) as exc:
+            raise MCPRequestValidationError("limit 必须是 1 到 200 的整数") from exc
+        if not 1 <= limit <= 200:
+            raise MCPRequestValidationError("limit 必须是 1 到 200 的整数")
+        rows = state.run(state.accounts.list_activity(account_id, access, limit=limit))
         return jsonify({"account_id": account_id, "activities": rows})
 
     @blueprint.get("/api/delivery-operations")

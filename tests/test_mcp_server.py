@@ -80,7 +80,7 @@ class MCPServerTests(unittest.TestCase):
 
     def test_all_input_schemas_are_closed(self):
         tools = self.run_async(self.server.list_tools())
-        self.assertEqual(len(tools), 12)
+        self.assertEqual(len(tools), 14)
         self.assertTrue(all(tool.input_schema.get("additionalProperties") is False for tool in tools))
 
     def test_list_accounts_does_not_return_cookie_file(self):

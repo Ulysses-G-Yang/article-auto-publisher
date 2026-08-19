@@ -525,6 +525,7 @@ def _make_delivery_platform(page=None):
     platform.page = page or _FakeEditorPage()
     platform.context = FakeContext()
     platform.simulator = _InstantSimulator()
+    platform.PERSIST_VERIFY_INTERVAL_SECONDS = 0
     return platform
 
 
@@ -709,6 +710,26 @@ def test_save_draft_reopen_rejects_missing_persisted_tail() -> None:
 
     with pytest.raises(DraftResultUnknownError, match="图文结构不完整"):
         run(platform.save_draft(title))
+
+
+def test_persisted_reopen_waits_for_async_title_hydration(monkeypatch) -> None:
+    title = "异步水合标题"
+    page = _FakeEditorPage(drafts_api_titles=[title], title_text=title)
+    page.dom_tokens = [{"kind": "text", "text": "正文"}]
+    platform = _make_delivery_platform(page)
+    platform._expected_persisted_blocks = [{"type": "text", "text": "正文"}]
+    values = iter(["", title])
+
+    async def delayed_input_value():
+        return next(values)
+
+    async def instant_sleep(_seconds):
+        return None
+
+    monkeypatch.setattr(page.title, "input_value", delayed_input_value)
+    monkeypatch.setattr("platforms.zhihu.asyncio.sleep", instant_sleep)
+
+    assert run(platform.save_draft(title)).endswith("/p/1/edit")
 
 
 def test_save_draft_returns_empty_when_title_missing() -> None:

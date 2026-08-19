@@ -60,6 +60,8 @@ class ZhihuPlatform(BasePlatform):
     SESSION_COOKIE_NAMES = frozenset({"z_c0", "d_c0", "q_c1"})
     LOGIN_POLL_ATTEMPTS = 60
     LOGIN_POLL_INTERVAL_SECONDS = 2
+    PERSIST_VERIFY_ATTEMPTS = 15
+    PERSIST_VERIFY_INTERVAL_SECONDS = 2
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
@@ -791,18 +793,26 @@ class ZhihuPlatform(BasePlatform):
                 state="visible",
                 timeout=20000,
             )
-            title_field = self.page.locator(TITLE_SELECTOR).first
-            actual_title = " ".join((await title_field.input_value()).split())
-            if actual_title != expected_title:
-                raise DraftResultUnknownError("DRAFT_RESULT_UNKNOWN: 知乎草稿重开后标题不一致")
             expected_tokens = self._expected_content_tokens(blocks)
-            actual_tokens = await self._read_editor_dom_tokens()
-            if not self._tokens_match(expected_tokens, actual_tokens):
-                raise DraftResultUnknownError(
-                    "DRAFT_RESULT_UNKNOWN: 知乎草稿重开后图文结构不完整; "
-                    f"expected={self._token_shape(expected_tokens)}; "
-                    f"actual={self._token_shape(actual_tokens)}"
-                )
+            actual_tokens: list[dict] = []
+            title_matched = False
+            for attempt in range(self.PERSIST_VERIFY_ATTEMPTS):
+                title_field = self.page.locator(TITLE_SELECTOR).first
+                actual_title = " ".join((await title_field.input_value()).split())
+                title_matched = actual_title == expected_title
+                if title_matched:
+                    actual_tokens = await self._read_editor_dom_tokens()
+                    if self._tokens_match(expected_tokens, actual_tokens):
+                        return
+                if attempt + 1 < self.PERSIST_VERIFY_ATTEMPTS:
+                    await asyncio.sleep(self.PERSIST_VERIFY_INTERVAL_SECONDS)
+            if not title_matched:
+                raise DraftResultUnknownError("DRAFT_RESULT_UNKNOWN: 知乎草稿重开后标题不一致")
+            raise DraftResultUnknownError(
+                "DRAFT_RESULT_UNKNOWN: 知乎草稿重开后图文结构不完整; "
+                f"expected={self._token_shape(expected_tokens)}; "
+                f"actual={self._token_shape(actual_tokens)}"
+            )
         except DraftResultUnknownError:
             raise
         except Exception as exc:

@@ -31,6 +31,13 @@ class AccountIdentityError(AccountSessionError):
     http_status = 409
 
 
+class AccountIdentityMismatchError(AccountIdentityError):
+    """平台当前身份与账号首次绑定身份不一致。"""
+
+    error_code = "ACCOUNT_IDENTITY_MISMATCH"
+    http_status = 409
+
+
 class AccountBusyError(AccountSessionError):
     error_code = "ACCOUNT_BUSY"
     http_status = 409

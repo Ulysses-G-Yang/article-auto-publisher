@@ -43,6 +43,17 @@ FROZEN_BODY = "第一段\n\nA &amp; B\u200b\n第三段"
 class _Context:
     pages: list = []
 
+    def __init__(self, platform_name: str) -> None:
+        self.platform_name = platform_name
+
+    async def cookies(self) -> list[dict]:
+        if self.platform_name == "zol":
+            return [
+                {"name": "last_userid", "value": f"fixture-{self.platform_name}"},
+                {"name": "userName", "value": f"{self.platform_name}链路账号"},
+            ]
+        return []
+
 
 class _AdapterRuntimeMixin:
     """只替换浏览器外围；publish/fill_content 仍来自真实平台类。"""
@@ -50,7 +61,7 @@ class _AdapterRuntimeMixin:
     draft_calls = 0
 
     async def initialize(self) -> None:
-        self.context = _Context()
+        self.context = _Context(self.platform_name)
         self.page = self._fake_page
         self.simulator.random_delay = AsyncMock()
         self.simulator.simulate_scroll = AsyncMock()
@@ -70,6 +81,13 @@ class _AdapterRuntimeMixin:
 
     async def check_login(self, *args, **kwargs) -> bool:
         return True
+
+    async def fetch_identity_payload(self) -> dict:
+        return {
+            "ok": True,
+            "user_id": f"fixture-{self.platform_name}",
+            "display_name": f"{self.platform_name}链路账号",
+        }
 
     async def navigate_to_editor(self) -> None:
         return None

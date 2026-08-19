@@ -445,6 +445,12 @@ def test_draft_executor_records_platform_logs_and_success(tmp_path: Path) -> Non
         async def initialize(self) -> None:
             return None
 
+        async def check_login(self) -> bool:
+            return True
+
+        async def fetch_identity_payload(self) -> dict:
+            return {"ok": True, "user_id": "10001234", "display_name": "夜航员"}
+
         async def publish(self, **kwargs) -> dict:
             assert kwargs["delivery_mode"] == "DRAFT"
             assert kwargs["auto_login"] is False
@@ -509,6 +515,12 @@ def test_media_incomplete_with_saved_draft_is_with_warnings_not_failed(
         async def initialize(self) -> None:
             return None
 
+        async def check_login(self) -> bool:
+            return True
+
+        async def fetch_identity_payload(self) -> dict:
+            return {"ok": True, "user_id": "10001234", "display_name": "夜航员"}
+
         async def publish(self, **kwargs) -> dict:
             return {
                 "success": True,
@@ -563,6 +575,12 @@ def test_media_incomplete_without_draft_still_fails(tmp_path: Path) -> None:
         async def initialize(self) -> None:
             return None
 
+        async def check_login(self) -> bool:
+            return True
+
+        async def fetch_identity_payload(self) -> dict:
+            return {"ok": True, "user_id": "10001234", "display_name": "夜航员"}
+
         async def publish(self, **kwargs) -> dict:
             return {
                 "success": True,
@@ -612,6 +630,12 @@ def test_failed_media_progress_is_logged_as_safe_account_audit(
 
         async def initialize(self) -> None:
             return None
+
+        async def check_login(self) -> bool:
+            return True
+
+        async def fetch_identity_payload(self) -> dict:
+            return {"ok": True, "user_id": "10001234", "display_name": "夜航员"}
 
         async def publish(self, **_kwargs) -> dict:
             return {
@@ -691,6 +715,12 @@ def test_delivery_failure_downgrades_only_invalid_sessions(
 
         async def initialize(self) -> None:
             return None
+
+        async def check_login(self) -> bool:
+            return True
+
+        async def fetch_identity_payload(self) -> dict:
+            return {"ok": True, "user_id": "10001234", "display_name": "夜航员"}
 
         async def publish(self, **_kwargs) -> dict:
             raise failure

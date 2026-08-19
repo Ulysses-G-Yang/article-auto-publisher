@@ -58,6 +58,7 @@ def make_policy() -> HeartbeatPolicy:
 async def add_account(
     database: AccountDatabase,
     *,
+    platform_user_id: str | None = None,
     status: str = "ACTIVE",
     session_status: str = "VALID",
     heartbeat_enabled: bool = True,
@@ -76,7 +77,7 @@ async def add_account(
     account = PlatformAccount(
         account_id=account_id,
         platform="xiaoheihe",
-        platform_user_id=f"platform-user-{account_id}",
+        platform_user_id=platform_user_id or f"platform-user-{account_id}",
         display_name="测试账号",
         profile_path=str(profile_path or f"/not-used-by-fake-verify/{uuid.uuid4()}"),
         status=status,
@@ -1016,7 +1017,12 @@ def test_account_service_busy_restores_valid_and_cleanup_failure_does_not_cover_
         await database.initialize()
         profile = tmp_path / "cleanup" / "profiles" / "xiaoheihe" / "success"
         profile.mkdir(parents=True)
-        account = await add_account(database, profile_path=profile, session_status="UNVERIFIED")
+        account = await add_account(
+            database,
+            profile_path=profile,
+            platform_user_id="fake-id",
+            session_status="UNVERIFIED",
+        )
         platform = _ServiceFakePlatform(cleanup_error=RuntimeError("cleanup-only"))
         service = AccountSessionService(
             database,

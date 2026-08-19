@@ -14,6 +14,7 @@ from sqlalchemy.exc import IntegrityError
 from account_sessions.database import AccountDatabase
 from account_sessions.errors import (
     AccountIdentityError,
+    AccountIdentityMismatchError,
     AccountNotFoundError,
     AccountPlatformMismatchError,
     AccountSessionError,
@@ -295,23 +296,163 @@ class AccountSessionService:
             stored = await session.get(PlatformAccount, account_id)
             if stored is None:
                 raise AccountNotFoundError("平台账号不存在")
-            stored.platform_user_id = identity.platform_user_id
-            stored.display_name = identity.display_name
-            stored.session_status = "VALID"
-            stored.last_verified_at = datetime.now(timezone.utc)
-            try:
+            stored_id = str(stored.platform_user_id or "").strip()
+            observed_id = str(identity.platform_user_id or "").strip()
+            if not observed_id:
+                # 身份提取器通常已经拒绝空 ID；这里仍保留最后一道边界，
+                # 防止未来新增适配器把空值当成首次绑定。
+                stored.session_status = "ERROR"
+                stored.last_verified_at = None
+                session.add(
+                    activity_for(
+                        stored,
+                        access,
+                        action="SESSION_VERIFY_FAILED",
+                        level="ERROR",
+                        message="平台身份校验失败（ACCOUNT_IDENTITY_UNVERIFIED）",
+                    )
+                )
+                identity_error: AccountIdentityError | None = AccountIdentityError(
+                    "平台身份未能确认"
+                )
+            elif stored_id and stored_id != observed_id:
+                # 已绑定账号不允许被另一次扫码/残留 Profile 静默改绑。
+                # 只写稳定错误状态和错误码，绝不把两个原始 ID 放入消息或日志。
+                stored.session_status = "ERROR"
+                stored.last_verified_at = None
+                session.add(
+                    activity_for(
+                        stored,
+                        access,
+                        action="SESSION_VERIFY_FAILED",
+                        level="ERROR",
+                        message="平台身份校验失败（ACCOUNT_IDENTITY_MISMATCH）",
+                    )
+                )
+                identity_error = AccountIdentityMismatchError(
+                    "平台当前身份与已绑定账号不一致"
+                )
+            else:
+                # 首次验证允许从空绑定建立稳定身份；已绑定且相同 ID 时只
+                # 更新平台展示名和验证时间，不改变账号的身份归属。
+                stored.platform_user_id = observed_id
+                stored.display_name = identity.display_name
+                stored.session_status = "VALID"
+                stored.last_verified_at = datetime.now(timezone.utc)
+                identity_error = None
+
+            if identity_error is not None:
                 await session.flush()
-            except IntegrityError as exc:
-                raise AccountIdentityError("该平台身份已登记到另一个账号") from exc
+            else:
+                try:
+                    await session.flush()
+                except IntegrityError as exc:
+                    raise AccountIdentityError("该平台身份已登记到另一个账号") from exc
+                session.add(
+                    activity_for(
+                        stored,
+                        access,
+                        action="SESSION_VERIFIED",
+                        message="登录态和平台身份验证成功",
+                    )
+                )
+                return public_account(stored)
+
+        # 让上面的事务先提交 ERROR 状态后再抛出稳定异常；否则上下文
+        # 管理器会回滚状态，调用方就无法观察到身份漂移已被阻断。
+        raise identity_error
+
+    async def assert_delivery_identity(
+        self,
+        account: PlatformAccount,
+        platform: Any,
+        access: AccessContext,
+    ) -> None:
+        """在投递前于同一 Profile 租约内确认已绑定的平台身份。
+
+        该检查只读调用平台的登录态和身份提取，不会把昵称变化写回账号；
+        投递执行单的账号快照因此不会被运行时页面内容静默改写。
+        """
+
+        if not await _check_login(platform, read_only=True):
+            await self._mark_runtime_identity_failure(
+                account.account_id,
+                access,
+                status="LOGIN_REQUIRED",
+                error_code="LOGIN_REQUIRED",
+            )
+            raise AccountIdentityError(
+                "投递前登录态无法确认",
+                error_code="LOGIN_REQUIRED",
+            )
+
+        try:
+            identity = await extract_identity(platform)
+        except AccountIdentityError as exc:
+            await self._mark_runtime_identity_failure(
+                account.account_id,
+                access,
+                status="ERROR",
+                error_code=getattr(exc, "error_code", "ACCOUNT_IDENTITY_UNVERIFIED"),
+            )
+            raise
+        except Exception as exc:
+            await self._mark_runtime_identity_failure(
+                account.account_id,
+                access,
+                status="ERROR",
+                error_code="ACCOUNT_IDENTITY_UNVERIFIED",
+            )
+            raise AccountIdentityError(
+                "投递前无法确认平台身份",
+            ) from exc
+
+        stored_id = str(account.platform_user_id or "").strip()
+        observed_id = str(identity.platform_user_id or "").strip()
+        if not stored_id or not observed_id:
+            await self._mark_runtime_identity_failure(
+                account.account_id,
+                access,
+                status="ERROR",
+                error_code="ACCOUNT_IDENTITY_UNVERIFIED",
+            )
+            raise AccountIdentityError("投递前平台身份未能确认")
+        if stored_id != observed_id:
+            await self._mark_runtime_identity_failure(
+                account.account_id,
+                access,
+                status="ERROR",
+                error_code="ACCOUNT_IDENTITY_MISMATCH",
+            )
+            raise AccountIdentityMismatchError(
+                "平台当前身份与已绑定账号不一致"
+            )
+
+    async def _mark_runtime_identity_failure(
+        self,
+        account_id: str,
+        access: AccessContext,
+        *,
+        status: str,
+        error_code: str,
+    ) -> None:
+        """提交投递前身份失败状态；消息只保留稳定码，不含原始身份。"""
+
+        async with self.database.session() as session:
+            stored = await session.get(PlatformAccount, account_id)
+            if stored is None:
+                return
+            stored.session_status = status
+            stored.last_verified_at = None
             session.add(
                 activity_for(
                     stored,
                     access,
-                    action="SESSION_VERIFIED",
-                    message="登录态和平台身份验证成功",
+                    action="SESSION_VERIFY_FAILED",
+                    level="ERROR",
+                    message=f"投递前平台身份校验失败（{error_code}）",
                 )
             )
-            return public_account(stored)
 
     async def logout_account(
         self,
@@ -427,7 +568,16 @@ class AccountSessionService:
             from account_sessions.session_health import classify_verification_failure
 
             classification = classify_verification_failure(exc)
-            if classification.category == "LOGIN_REQUIRED":
+            identity_error_code = str(getattr(exc, "error_code", "")).upper()
+            if identity_error_code in {
+                "ACCOUNT_IDENTITY_UNVERIFIED",
+                "ACCOUNT_IDENTITY_MISMATCH",
+            }:
+                # 身份缺失/漂移必须让当前账号进入 ERROR，即使它此前是
+                # VALID；否则旧的 VALID 会掩盖本次验证已经失败的事实。
+                account.session_status = "ERROR"
+                account.last_verified_at = None
+            elif classification.category == "LOGIN_REQUIRED":
                 account.session_status = "LOGIN_REQUIRED"
                 account.last_verified_at = None
             elif classification.preserve_session and account.session_status == "VERIFYING":

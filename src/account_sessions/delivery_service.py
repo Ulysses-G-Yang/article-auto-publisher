@@ -231,6 +231,14 @@ class DeliveryService:
                 images = []
             with self.accounts._lease(account, purpose=operation.mode):
                 await platform.initialize()
+                # 即使账号页曾显示 VALID，也必须在同一 Profile 租约内
+                # 再次做只读登录态/身份确认；任何失败都在 publish 前终止，
+                # 避免把残留或错绑 Profile 的内容投递出去。
+                await self.accounts.assert_delivery_identity(
+                    account,
+                    platform,
+                    access,
+                )
                 result = await platform.publish(
                     title=resolved_title,
                     content_blocks=content_blocks,

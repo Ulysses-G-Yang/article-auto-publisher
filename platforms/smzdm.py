@@ -71,6 +71,7 @@ class SmzdmPlatform(BasePlatform):
         self._identity_payload: dict[str, str | int | bool] | None = None
         self._expected_persisted_blocks: list[dict] | None = None
         self._media_progress_state: dict[str, int] | None = None
+        self._pending_cover_path = ""
 
     async def initialize(self):
         await super().initialize()
@@ -929,6 +930,186 @@ class SmzdmPlatform(BasePlatform):
                 "error_code": "SMZDM_IMAGE_UPLOAD_FAILED",
                 "error": safe_media_error(exc, fallback="smzdm 图片上传失败"),
             }
+
+    async def _set_cover_variant(self, label: str, image_path: str) -> None:
+        triggers = self.page.get_by_text(label, exact=True)
+        visible_triggers = [
+            triggers.nth(index)
+            for index in range(await triggers.count())
+            if await triggers.nth(index).is_visible()
+        ]
+        if len(visible_triggers) != 1:
+            raise ContentValidationError(
+                f"SMZDM_COVER_TRIGGER_AMBIGUOUS: {label}入口不存在或候选不唯一"
+            )
+        await visible_triggers[0].click(timeout=5000)
+        await asyncio.sleep(0.5)
+        inputs = self.page.locator(
+            'input[type=file][accept="image/gif, image/png, image/jpeg"]'
+        )
+        visible_inputs = [
+            inputs.nth(index)
+            for index in range(await inputs.count())
+            if await inputs.nth(index).is_visible()
+        ]
+        if len(visible_inputs) != 1:
+            raise ContentValidationError(
+                "SMZDM_COVER_INPUT_AMBIGUOUS: 封面图片控件不存在或候选不唯一"
+            )
+        before = await self.page.locator(".pic-box img.thumb-imgs").count()
+        await visible_inputs[0].set_input_files(image_path, timeout=15000)
+        ready = False
+        for _ in range(30):
+            await asyncio.sleep(0.5)
+            previews = self.page.locator(".pic-box img.thumb-imgs")
+            if await previews.count() <= before:
+                continue
+            ready = bool(
+                await previews.last.evaluate(
+                    "image => image.complete && image.naturalWidth > 0"
+                )
+            )
+            if ready:
+                break
+        if not ready:
+            raise ContentValidationError(
+                "SMZDM_COVER_UPLOAD_NOT_READY: 封面素材上传预览未就绪"
+            )
+        actions = self.page.get_by_text("设为封面图", exact=True)
+        visible_actions = [
+            actions.nth(index)
+            for index in range(await actions.count())
+            if await actions.nth(index).is_visible()
+        ]
+        if len(visible_actions) != 1:
+            raise ContentValidationError(
+                "SMZDM_COVER_ACTION_AMBIGUOUS: 设为封面图操作不唯一"
+            )
+        await visible_actions[0].click(timeout=5000)
+        modal_title = f"封面图-{label.removeprefix('添加')}编辑"
+        await self.page.get_by_text(modal_title, exact=True).wait_for(
+            state="visible", timeout=10000
+        )
+        confirms = self.page.get_by_text("确认", exact=True)
+        visible_confirms = [
+            confirms.nth(index)
+            for index in range(await confirms.count())
+            if await confirms.nth(index).is_visible()
+        ]
+        if len(visible_confirms) != 1:
+            raise ContentValidationError(
+                "SMZDM_COVER_CONFIRM_AMBIGUOUS: 封面裁剪确认控件不唯一"
+            )
+        await visible_confirms[0].click(timeout=5000)
+        await self.page.get_by_text(modal_title, exact=True).wait_for(
+            state="hidden", timeout=10000
+        )
+        await self.page.keyboard.press("Escape")
+        await asyncio.sleep(0.5)
+
+    async def apply_cover(self, cover: dict | None = None) -> dict:
+        """把同一冻结素材分别写入详情长图和列表方图。"""
+
+        strategy = str((cover or {}).get("strategy") or "NONE").upper()
+        if strategy == "NONE":
+            self._pending_cover_path = ""
+            return {"success": True, "cover_status": "not_required"}
+        if strategy not in {"FIRST_BODY_IMAGE", "EXPLICIT"}:
+            return {
+                "success": False,
+                "cover_status": "failed",
+                "safe_to_continue": True,
+                "error_code": "SMZDM_COVER_STRATEGY_UNSUPPORTED",
+                "error": "什么值得买不支持该封面策略",
+            }
+        requested = str((cover or {}).get("local_path") or "")
+        try:
+            cover_path = Path(requested).resolve(strict=True)
+        except (OSError, RuntimeError, ValueError):
+            return {
+                "success": False,
+                "cover_status": "failed",
+                "safe_to_continue": True,
+                "error_code": "SMZDM_COVER_ASSET_UNAVAILABLE",
+                "error": "什么值得买封面素材不可用",
+            }
+        try:
+            await self._set_cover_variant("添加长图", str(cover_path))
+            await self._set_cover_variant("添加方图", str(cover_path))
+        except Exception as exc:
+            if self._exception_means_browser_closed(exc):
+                raise BrowserLifecycleError(
+                    "BROWSER_CONTEXT_CLOSED: 什么值得买设置封面时页面已关闭"
+                ) from exc
+            try:
+                await self.page.keyboard.press("Escape")
+            except Exception:
+                pass
+            return {
+                "success": False,
+                "cover_status": "failed",
+                "safe_to_continue": True,
+                "error_code": getattr(exc, "error_code", None)
+                or "SMZDM_COVER_UPLOAD_FAILED",
+                "error": safe_media_error(exc, fallback="什么值得买封面上传失败"),
+            }
+        self._pending_cover_path = str(cover_path)
+        return {
+            "success": True,
+            "cover_status": "pending_verification",
+            "cover_mode": "EXPLICIT_LONG_AND_SQUARE",
+        }
+
+    async def verify_persisted_cover(
+        self,
+        *,
+        title: str,
+        draft_url: str,
+        cover: dict | None,
+        apply_result: dict,
+    ) -> dict:
+        del title, draft_url, cover
+        state = await self.page.evaluate(
+            """() => {
+                const visible = (element) => {
+                    if (!element) return false;
+                    const rect = element.getBoundingClientRect();
+                    const style = getComputedStyle(element);
+                    return rect.width > 0 && rect.height > 0 &&
+                        style.display !== 'none' && style.visibility !== 'hidden';
+                };
+                const label = Array.from(document.querySelectorAll('*')).find(
+                    element => visible(element) &&
+                        (element.innerText || '').trim() === '封面图'
+                );
+                let region = label;
+                for (let index = 0; index < 6 && region; index += 1) {
+                    const text = region.innerText || '';
+                    const images = Array.from(region.querySelectorAll('img')).filter(
+                        image => visible(image) && image.complete && image.naturalWidth > 0
+                    );
+                    if (text.includes('添加长图') && text.includes('添加方图')) {
+                        return {loaded: images.length};
+                    }
+                    region = region.parentElement;
+                }
+                return {loaded: 0};
+            }"""
+        )
+        if not isinstance(state, dict) or int(state.get("loaded") or 0) < 2:
+            return {
+                "success": False,
+                "cover_status": "failed",
+                "safe_to_continue": True,
+                "error_code": "SMZDM_COVER_PERSISTENCE_UNVERIFIED",
+                "error": "什么值得买草稿重开后长图或方图封面未完整显示",
+            }
+        return {
+            **apply_result,
+            "success": True,
+            "cover_status": "completed",
+            "cover_mode": "EXPLICIT_LONG_AND_SQUARE",
+        }
 
     async def select_topic(
         self,

@@ -141,7 +141,7 @@ def test_old_content_schema_migrates_cover_columns_idempotently(tmp_path: Path) 
         run(database.dispose())
 
 
-def test_docx_import_sets_first_body_image_cover_and_no_image_is_none(tmp_path: Path) -> None:
+def test_docx_import_defaults_cover_to_none_even_when_body_has_images(tmp_path: Path) -> None:
     service = make_service(tmp_path)
 
     async def scenario():
@@ -154,11 +154,10 @@ def test_docx_import_sets_first_body_image_cover_and_no_image_is_none(tmp_path: 
         return with_image, without_image
 
     with_image, without_image = run(scenario())
-    first_image = next(block for block in with_image["blocks"] if block["type"] == "image")
     assert with_image["cover"] == {
-        "strategy": "FIRST_BODY_IMAGE",
-        "asset_id": first_image["asset_id"],
-        "asset_url": f"/api/content-assets/{first_image['asset_id']}",
+        "strategy": "NONE",
+        "asset_id": None,
+        "asset_url": None,
     }
     assert without_image["cover"] == {
         "strategy": "NONE",

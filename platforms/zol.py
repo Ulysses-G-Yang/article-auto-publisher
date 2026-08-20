@@ -93,6 +93,7 @@ class ZOLPlatform(BasePlatform):
         self._final_content_response_index = 0
         self._expected_persisted_blocks: list[dict] | None = None
         self._heading_sequence = 0
+        self._pending_cover_path = ""
 
     def _stop_autosave_observer(self) -> None:
         """移除当前页面的自动保存监听器，不影响已收集的响应证据。"""
@@ -2192,25 +2193,16 @@ class ZOLPlatform(BasePlatform):
                     "error_code": "ZOL_IMAGE_CONTENT_UNVERIFIED",
                     "error": "正文编辑器不支持图片内容回读",
                 }
-            image_nodes = editor.locator("img")
-            if await image_nodes.count() != len(after_fingerprints):
+            observed = await self._read_stable_editor_image_bytes(
+                after_fingerprints,
+                new_fingerprint,
+            )
+            if not observed:
                 return {
                     "success": False,
                     "error_code": "ZOL_IMAGE_CONTENT_UNVERIFIED",
-                    "error": "正文图片节点数量无法确认",
+                    "error": "新增正文图片内容无法稳定读取",
                 }
-            matching_indexes = [
-                index
-                for index, fingerprint in enumerate(after_fingerprints)
-                if fingerprint == new_fingerprint
-            ]
-            if not matching_indexes:
-                return {
-                    "success": False,
-                    "error_code": "ZOL_IMAGE_CONTENT_UNVERIFIED",
-                    "error": "新增正文图片节点无法定位",
-                }
-            observed = await image_nodes.nth(matching_indexes[-1]).screenshot()
             expected = Path(image_path).read_bytes()
             error_code = self._compare_image_bytes(expected, observed)
             if error_code:
@@ -2235,6 +2227,75 @@ class ZOLPlatform(BasePlatform):
                     fallback="正文图片内容无法确认",
                 ),
             }
+
+    async def _read_stable_editor_image_bytes(
+        self,
+        expected_fingerprints: list[str],
+        target_fingerprint: str,
+    ) -> bytes:
+        """在 TinyMCE 重渲染后重新定位图片并读取可比较内容。
+
+        ZOL 插图后会替换 iframe/body 或 ``img`` 节点。旧 locator 的截图可能
+        抛出不可见/脱离 DOM 错误，因此每轮重新解析编辑器和指纹。优先读取
+        元素截图；截图不可用时只在内存中通过当前浏览器会话读取同一图片，
+        不记录 URL、响应或本机路径。
+        """
+
+        deadline = asyncio.get_running_loop().time() + 15
+        while asyncio.get_running_loop().time() < deadline:
+            editor, editor_kind = await self._resolve_content_editor()
+            if editor_kind == "textarea":
+                return b""
+            current_fingerprints = await self._editor_image_src_fingerprints()
+            if len(current_fingerprints) != len(expected_fingerprints):
+                await asyncio.sleep(0.5)
+                continue
+            matching_indexes = [
+                index
+                for index, fingerprint in enumerate(current_fingerprints)
+                if fingerprint == target_fingerprint
+            ]
+            if not matching_indexes:
+                await asyncio.sleep(0.5)
+                continue
+            image_nodes = editor.locator("img")
+            if await image_nodes.count() != len(current_fingerprints):
+                await asyncio.sleep(0.5)
+                continue
+            image = image_nodes.nth(matching_indexes[-1])
+            try:
+                ready = bool(
+                    await image.evaluate(
+                        "node => node.isConnected && node.complete && "
+                        "node.naturalWidth > 0 && node.naturalHeight > 0"
+                    )
+                )
+            except Exception:
+                ready = False
+            if not ready:
+                await asyncio.sleep(0.5)
+                continue
+            try:
+                screenshot = await image.screenshot(timeout=5000)
+                if self._normalized_image(screenshot) is not None:
+                    return screenshot
+            except Exception:
+                pass
+            try:
+                source = str(await image.get_attribute("src") or "")
+                if (
+                    source.startswith(("http://", "https://"))
+                    and self.context is not None
+                ):
+                    response = await self.context.request.get(source, timeout=10000)
+                    if response.ok:
+                        payload = await response.body()
+                        if self._normalized_image(payload) is not None:
+                            return payload
+            except Exception:
+                pass
+            await asyncio.sleep(0.5)
+        return b""
 
     async def _upload_image(self, image_path: str):
         """通过真实 ZOL 图片弹窗上传一张图片并验证正文 DOM 指纹。"""
@@ -2473,6 +2534,158 @@ class ZOLPlatform(BasePlatform):
                 if self._exception_means_browser_closed(exc):
                     raise BrowserLifecycleError("BROWSER_CONTEXT_CLOSED: ZOL 验证话题时页面已关闭") from exc
         return False
+
+    async def apply_cover(self, cover: dict | None = None) -> dict:
+        """通过 ZOL 独立“导读图”单文件控件上传冻结封面。"""
+
+        strategy = str((cover or {}).get("strategy") or "NONE").upper()
+        if strategy == "NONE":
+            self._pending_cover_path = ""
+            return {"success": True, "cover_status": "not_required"}
+        if strategy not in {"FIRST_BODY_IMAGE", "EXPLICIT"}:
+            return {
+                "success": False,
+                "cover_status": "failed",
+                "safe_to_continue": True,
+                "error_code": "ZOL_COVER_STRATEGY_UNSUPPORTED",
+                "error": "ZOL 不支持该封面策略",
+            }
+        requested = str((cover or {}).get("local_path") or "")
+        try:
+            cover_path = Path(requested).resolve(strict=True)
+        except (OSError, RuntimeError, ValueError):
+            return {
+                "success": False,
+                "cover_status": "failed",
+                "safe_to_continue": True,
+                "error_code": "ZOL_COVER_ASSET_UNAVAILABLE",
+                "error": "ZOL 导读图素材不可用",
+            }
+        inputs = self.page.locator(
+            "input[type=file][accept='image/*']:not([multiple])"
+        )
+        if await inputs.count() != 1:
+            return {
+                "success": False,
+                "cover_status": "failed",
+                "safe_to_continue": True,
+                "error_code": "ZOL_COVER_INPUT_AMBIGUOUS",
+                "error": "ZOL 导读图控件不存在或候选不唯一",
+            }
+        guide_text_count = await self.page.get_by_text("导读图", exact=True).count()
+        if guide_text_count < 1:
+            return {
+                "success": False,
+                "cover_status": "failed",
+                "safe_to_continue": True,
+                "error_code": "ZOL_COVER_REGION_UNVERIFIED",
+                "error": "ZOL 导读图区域无法确认",
+            }
+        try:
+            await inputs.first.set_input_files(str(cover_path), timeout=15000)
+            await asyncio.sleep(1)
+            modals = self.page.locator(".ant-modal-wrap:visible")
+            if await modals.count() == 1:
+                modal = modals.first
+                modal_text = normalize_for_comparison(await modal.inner_text())
+                if "发布" in modal_text and "导读" not in modal_text and "裁剪" not in modal_text:
+                    raise ContentValidationError(
+                        "ZOL_COVER_MODAL_UNSAFE: 封面上传落入非导读图弹窗"
+                    )
+                confirms = modal.get_by_text(re.compile(r"^(确定|确认)$"))
+                visible_confirms = [
+                    confirms.nth(index)
+                    for index in range(await confirms.count())
+                    if await confirms.nth(index).is_visible()
+                ]
+                if len(visible_confirms) != 1:
+                    raise ContentValidationError(
+                        "ZOL_COVER_CONFIRM_AMBIGUOUS: 导读图确认控件不唯一"
+                    )
+                await visible_confirms[0].click(timeout=5000)
+            ready = False
+            for _ in range(30):
+                await asyncio.sleep(0.5)
+                ready = bool(
+                    await self.page.evaluate(
+                        """() => Array.from(document.querySelectorAll('img')).some((image) => {
+                            const region = image.closest('.ant-upload-list, .ant-form-item, .upload-box');
+                            if (!region || !/导读图|重新上传/.test(region.innerText || '')) return false;
+                            return image.complete && image.naturalWidth > 0;
+                        })"""
+                    )
+                )
+                if ready:
+                    break
+            if not ready:
+                raise ContentValidationError(
+                    "ZOL_COVER_PREVIEW_NOT_READY: 导读图预览未稳定加载"
+                )
+        except Exception as exc:
+            if self._exception_means_browser_closed(exc):
+                raise BrowserLifecycleError(
+                    "BROWSER_CONTEXT_CLOSED: ZOL 设置导读图时页面已关闭"
+                ) from exc
+            return {
+                "success": False,
+                "cover_status": "failed",
+                "safe_to_continue": True,
+                "error_code": getattr(exc, "error_code", None)
+                or "ZOL_COVER_UPLOAD_FAILED",
+                "error": safe_media_error(exc, fallback="ZOL 导读图上传失败"),
+            }
+        self._pending_cover_path = str(cover_path)
+        return {
+            "success": True,
+            "cover_status": "pending_verification",
+            "cover_mode": "EXPLICIT_GUIDE_IMAGE",
+        }
+
+    async def verify_persisted_cover(
+        self,
+        *,
+        title: str,
+        draft_url: str,
+        cover: dict | None,
+        apply_result: dict,
+    ) -> dict:
+        del title, draft_url, cover
+        urls = await self.page.evaluate(
+            """() => Array.from(document.querySelectorAll('img')).filter((image) => {
+                const region = image.closest('.ant-upload-list, .ant-form-item, .upload-box');
+                return region && /导读图|重新上传/.test(region.innerText || '') &&
+                    image.complete && image.naturalWidth > 0;
+            }).map((image) => image.currentSrc || image.src || '').filter(Boolean)"""
+        )
+        observed = b""
+        if isinstance(urls, list) and len(urls) == 1 and self.context is not None:
+            try:
+                response = await self.context.request.get(str(urls[0]), timeout=15000)
+                if response.ok:
+                    observed = await response.body()
+            except Exception:
+                observed = b""
+        try:
+            expected = Path(self._pending_cover_path).read_bytes()
+        except OSError:
+            expected = b""
+        mismatch = self._compare_image_bytes(expected, observed) if expected and observed else (
+            "ZOL_COVER_CONTENT_UNVERIFIED"
+        )
+        if mismatch is not None:
+            return {
+                "success": False,
+                "cover_status": "failed",
+                "safe_to_continue": True,
+                "error_code": mismatch,
+                "error": "ZOL 草稿重开后导读图与冻结封面素材不一致",
+            }
+        return {
+            **apply_result,
+            "success": True,
+            "cover_status": "completed",
+            "cover_mode": "EXPLICIT_GUIDE_IMAGE",
+        }
 
     async def select_topic(self, topic: str = "", community: str = "",
                            selection_query: str = "", selection_override: dict = None):

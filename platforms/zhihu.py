@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import io
 import re
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -68,6 +69,7 @@ class ZhihuPlatform(BasePlatform):
         self.last_login_error = ""
         self._identity_payload: dict[str, str | int | bool] | None = None
         self._expected_persisted_blocks: list[dict] | None = None
+        self._pending_cover_path = ""
 
     async def fetch_identity_payload(self) -> dict[str, str | int | bool]:
         """通过同源身份 API 返回最小、脱敏后的账号身份。"""
@@ -630,6 +632,150 @@ class ZhihuPlatform(BasePlatform):
                 "error_code": "IMAGE_UPLOAD_FAILED",
                 "error": safe_media_error(exc, fallback="知乎图片上传失败"),
             }
+
+    async def apply_cover(self, cover: dict | None = None) -> dict:
+        """使用知乎独立 ``UploadPicture`` 控件上传冻结封面。"""
+
+        strategy = str((cover or {}).get("strategy") or "NONE").upper()
+        if strategy == "NONE":
+            self._pending_cover_path = ""
+            return {"success": True, "cover_status": "not_required"}
+        if strategy not in {"FIRST_BODY_IMAGE", "EXPLICIT"}:
+            return {
+                "success": False,
+                "cover_status": "failed",
+                "safe_to_continue": True,
+                "error_code": "ZHIHU_COVER_STRATEGY_UNSUPPORTED",
+                "error": "知乎不支持该封面策略",
+            }
+        requested = str((cover or {}).get("local_path") or "")
+        try:
+            cover_path = Path(requested).resolve(strict=True)
+        except (OSError, RuntimeError, ValueError):
+            return {
+                "success": False,
+                "cover_status": "failed",
+                "safe_to_continue": True,
+                "error_code": "ZHIHU_COVER_ASSET_UNAVAILABLE",
+                "error": "知乎封面素材不可用",
+            }
+        wrapper = self.page.locator(".UploadPicture-wrapper")
+        inputs = wrapper.locator("input[type=file][accept='.jpeg, .jpg, .png']")
+        if await wrapper.count() != 1 or await inputs.count() != 1:
+            return {
+                "success": False,
+                "cover_status": "failed",
+                "safe_to_continue": True,
+                "error_code": "ZHIHU_COVER_INPUT_AMBIGUOUS",
+                "error": "知乎封面上传控件不存在或候选不唯一",
+            }
+        try:
+            await inputs.first.set_input_files(str(cover_path), timeout=15000)
+            ready = False
+            for _ in range(30):
+                await asyncio.sleep(0.5)
+                ready = bool(
+                    await wrapper.evaluate(
+                        """root => Array.from(root.querySelectorAll('img')).some(
+                            image => image.complete && image.naturalWidth > 0
+                        )"""
+                    )
+                )
+                if ready:
+                    break
+            if not ready:
+                raise ContentValidationError(
+                    "ZHIHU_COVER_PREVIEW_NOT_READY: 知乎封面预览未稳定加载"
+                )
+        except Exception as exc:
+            if self._exception_means_browser_closed(exc):
+                raise BrowserLifecycleError(
+                    "BROWSER_CONTEXT_CLOSED: 知乎设置封面时页面已关闭"
+                ) from exc
+            return {
+                "success": False,
+                "cover_status": "failed",
+                "safe_to_continue": True,
+                "error_code": getattr(exc, "error_code", None)
+                or "ZHIHU_COVER_UPLOAD_FAILED",
+                "error": safe_media_error(exc, fallback="知乎封面上传失败"),
+            }
+        self._pending_cover_path = str(cover_path)
+        return {
+            "success": True,
+            "cover_status": "pending_verification",
+            "cover_mode": "EXPLICIT_UPLOAD",
+        }
+
+    @staticmethod
+    def _cover_hash(payload: bytes) -> tuple[int, ...] | None:
+        try:
+            from PIL import Image, ImageOps
+
+            with Image.open(io.BytesIO(payload)) as source:
+                image = ImageOps.exif_transpose(source).convert("L").resize((16, 16))
+                pixels = list(image.getdata())
+        except Exception:
+            return None
+        average = sum(pixels) / len(pixels)
+        return tuple(int(value >= average) for value in pixels)
+
+    async def verify_persisted_cover(
+        self,
+        *,
+        title: str,
+        draft_url: str,
+        cover: dict | None,
+        apply_result: dict,
+    ) -> dict:
+        del title, draft_url, cover
+        wrapper = self.page.locator(".UploadPicture-wrapper")
+        if await wrapper.count() != 1:
+            matched = False
+        else:
+            urls = await wrapper.locator("img").evaluate_all(
+                "images => images.filter(image => image.complete && image.naturalWidth > 0)"
+                ".map(image => image.currentSrc || image.src || '').filter(Boolean)"
+            )
+            observed = b""
+            if urls and self.context is not None:
+                try:
+                    response = await self.context.request.get(str(urls[0]), timeout=15000)
+                    if response.ok:
+                        observed = await response.body()
+                except Exception:
+                    observed = b""
+            try:
+                expected = Path(self._pending_cover_path).read_bytes()
+            except OSError:
+                expected = b""
+            expected_hash = self._cover_hash(expected)
+            observed_hash = self._cover_hash(observed)
+            matched = bool(
+                expected_hash is not None
+                and observed_hash is not None
+                and sum(
+                    left != right
+                    for left, right in zip(
+                        expected_hash, observed_hash, strict=True
+                    )
+                )
+                <= 32
+            )
+        if not matched:
+            return {
+                "success": False,
+                "cover_status": "failed",
+                "safe_to_continue": True,
+                "error_code": "ZHIHU_COVER_PERSISTENCE_UNVERIFIED",
+                "error": "知乎草稿重开后封面与冻结素材不一致",
+            }
+        return {
+            **apply_result,
+            "success": True,
+            "cover_status": "completed",
+            "cover_mode": "EXPLICIT_UPLOAD",
+        }
 
     async def select_topic(
         self,

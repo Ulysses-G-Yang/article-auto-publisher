@@ -56,7 +56,7 @@ def test_first_body_image_cover_requires_exact_frozen_first_asset(tmp_path) -> N
     platform._finalize_long_text_layout.assert_not_awaited()
 
 
-def test_first_body_image_cover_is_reported_unsupported_after_layout(tmp_path) -> None:
+def test_first_body_image_cover_uses_platform_generated_longform_mode(tmp_path) -> None:
     first = tmp_path / "first.png"
     first.write_bytes(b"first")
     platform = _platform()
@@ -66,12 +66,12 @@ def test_first_body_image_cover_is_reported_unsupported_after_layout(tmp_path) -
 
     result = run(platform.apply_cover({"strategy": "FIRST_BODY_IMAGE", "local_path": str(first)}))
 
-    assert result["success"] is False
-    assert result["cover_status"] == "failed"
+    assert result["success"] is True
+    assert result["cover_status"] == "pending_verification"
     assert result["safe_to_continue"] is True
-    assert result["error_code"] == "XHS_COVER_ASSET_SELECTION_UNSUPPORTED"
+    assert result["cover_mode"] == "PLATFORM_GENERATED_LONGFORM"
     assert platform._layout_finalized is True
-    assert platform._expected_persisted_cover is False
+    assert platform._expected_persisted_cover is True
     platform._finalize_long_text_layout.assert_awaited_once_with(
         expected_images=1,
         require_first_page_image=False,
@@ -102,11 +102,67 @@ def test_resumed_verified_layout_is_not_formatted_again(tmp_path) -> None:
 
     result = run(platform.apply_cover({"strategy": "FIRST_BODY_IMAGE", "local_path": str(first)}))
 
-    assert result["success"] is False
-    assert result["cover_status"] == "failed"
+    assert result["success"] is True
+    assert result["cover_status"] == "pending_verification"
     assert result["safe_to_continue"] is True
-    assert result["error_code"] == "XHS_COVER_ASSET_SELECTION_UNSUPPORTED"
+    assert result["cover_mode"] == "PLATFORM_GENERATED_LONGFORM"
+    assert platform._expected_persisted_cover is True
     platform._finalize_long_text_layout.assert_not_awaited()
+
+
+def test_platform_generated_cover_requires_preview_and_quality_pass() -> None:
+    platform = _platform()
+    next_button = AsyncMock()
+    platform._unique_visible_button = AsyncMock(return_value=next_button)
+    preview_heading = MagicMock(wait_for=AsyncMock())
+    assessment_button = MagicMock(
+        count=AsyncMock(return_value=1),
+        nth=MagicMock(
+            return_value=MagicMock(
+                is_visible=AsyncMock(return_value=True),
+                click=AsyncMock(),
+            )
+        ),
+    )
+    quality_text = MagicMock(count=AsyncMock(return_value=1))
+
+    text_lookups: list[str] = []
+
+    def get_by_text(text: str, **_kwargs):
+        text_lookups.append(text)
+        if text == "封面预览":
+            return preview_heading
+        if text == "获取封面建议":
+            return assessment_button
+        if text == "封面效果评估通过，未发现封面质量问题":
+            return quality_text
+        raise AssertionError(f"unexpected text lookup: {text}")
+
+    platform.page = MagicMock(
+        is_closed=lambda: False,
+        get_by_text=get_by_text,
+        evaluate=AsyncMock(
+            return_value={"pagePreviews": 10, "phonePreviews": 10}
+        ),
+    )
+    with patch("platforms.xiaohongshu.asyncio.sleep", new=AsyncMock()):
+        result = run(
+            platform.verify_persisted_cover(
+                title="测试",
+                draft_url="https://example.test/draft",
+                cover={"strategy": "FIRST_BODY_IMAGE"},
+                apply_result={
+                    "success": True,
+                    "cover_status": "pending_verification",
+                },
+            )
+        )
+
+    assert result["cover_status"] == "completed"
+    assert result["cover_mode"] == "PLATFORM_GENERATED_LONGFORM"
+    next_button.click.assert_awaited_once()
+    assessment_button.nth.return_value.click.assert_awaited_once()
+    assert "发布" not in text_lookups
 
 
 def test_layout_wait_requires_loaded_remote_images_not_only_img_nodes() -> None:
@@ -279,6 +335,35 @@ def test_save_draft_clicks_exact_leave_once_and_reopens_unique_entity() -> None:
     platform._verify_saved_long_draft.assert_awaited_once_with("唯一标题")
 
 
+def test_saved_layout_without_cover_uses_unique_drawer_title_evidence() -> None:
+    title = "无封面长文草稿"
+    actions = MagicMock(count=AsyncMock(return_value=1), click=AsyncMock())
+    card = MagicMock()
+    card.locator.return_value.filter.return_value = actions
+    platform = _platform()
+    platform._preflight_title = title
+    platform._layout_finalized = True
+    platform._expected_persisted_cover = False
+    platform._expected_persisted_blocks = [{"type": "text", "text": "正文"}]
+    platform._open_long_draft_drawer = AsyncMock()
+    platform._matching_long_draft_cards = AsyncMock(return_value=[card])
+    platform.page.wait_for_selector = AsyncMock()
+    platform._layout_snapshot = AsyncMock(
+        return_value={
+            "cover_title": "",
+            "image_count": 0,
+            "loaded_image_count": 0,
+            "first_card_loaded_images": 0,
+        }
+    )
+    platform._assert_layout_body_tokens = AsyncMock()
+
+    run(platform._verify_saved_long_draft(title))
+
+    actions.click.assert_awaited_once_with(timeout=15000)
+    platform._assert_layout_body_tokens.assert_awaited_once()
+
+
 def test_layout_title_key_accepts_platform_inserted_wrap_space_only() -> None:
     assert XiaohongshuPlatform._draft_title_key("排版探测 -20260820") == (
         XiaohongshuPlatform._draft_title_key("排版探测-20260820")
@@ -338,6 +423,26 @@ def test_resume_layout_title_is_verified_from_first_card_not_body() -> None:
     )
 
     run(platform.fill_title("冻结标题"))
+
+    title_field.fill.assert_not_called()
+
+
+def test_resume_layout_without_cover_uses_preflight_exact_title() -> None:
+    title = "无封面排版草稿"
+    title_field = MagicMock()
+    title_field.count = AsyncMock(return_value=0)
+    locator = MagicMock()
+    locator.first = title_field
+    platform = _platform()
+    platform._editing_existing_draft = True
+    platform._expected_persisted_cover = False
+    platform._preflight_title = title
+    platform.page.locator = MagicMock(return_value=locator)
+    platform._layout_snapshot = AsyncMock(
+        return_value={"root_visible": True, "cover_title": ""}
+    )
+
+    run(platform.fill_title(title))
 
     title_field.fill.assert_not_called()
 

@@ -73,6 +73,11 @@ _BAIJIAHAO_WORD_EVIDENCE = (
     "docs/acceptance/BAIJIAHAO_WORD_DRAFT_20260819.md",
     "codex_handoff_20260817.md",
 )
+_BAIJIAHAO_COVER_DATE = date(2026, 8, 20)
+_BAIJIAHAO_COVER_EVIDENCE = (
+    "docs/acceptance/BAIJIAHAO_COVER_PROBE_20260820.md",
+    "docs/acceptance/BAIJIAHAO_WORD_DRAFT_20260819.md",
+)
 _XHS_EVIDENCE = (
     "docs/acceptance/XIAOHONGSHU_WORD_DRAFT_20260820.md",
     "docs/acceptance/XIAOHONGSHU_SINGLE_IMAGE_DRAFT_20260820.md",
@@ -428,10 +433,10 @@ PLATFORM_DELIVERY_READINESS: tuple[PlatformDeliveryReadiness, ...] = (
                 _BAIJIAHAO_WORD_EVIDENCE,
             ),
             "cover": (
-                ReadinessStatus.REAL_FAILED,
-                "cover_control_not_independently_verified",
-                _BAIJIAHAO_WORD_DATE,
-                _BAIJIAHAO_WORD_EVIDENCE,
+                ReadinessStatus.REAL_VERIFIED,
+                "real_explicit_first_body_cover_reopened",
+                _BAIJIAHAO_COVER_DATE,
+                _BAIJIAHAO_COVER_EVIDENCE,
             ),
             "draft_verification": (
                 ReadinessStatus.REAL_VERIFIED,

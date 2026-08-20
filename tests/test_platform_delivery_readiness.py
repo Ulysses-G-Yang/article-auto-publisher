@@ -89,7 +89,7 @@ def test_platform_facts_follow_current_real_acceptance_evidence() -> None:
     assert by_platform["zhihu"].facets["body_images"].status is ReadinessStatus.REAL_VERIFIED
     assert by_platform["xiaohongshu"].facets["text_draft"].status is ReadinessStatus.REAL_VERIFIED
     assert by_platform["xiaohongshu"].facets["body_images"].status is ReadinessStatus.REAL_VERIFIED
-    assert by_platform["baijiahao"].facets["cover"].status is ReadinessStatus.REAL_FAILED
+    assert by_platform["baijiahao"].facets["cover"].status is ReadinessStatus.REAL_VERIFIED
 
 
 def test_xiaohongshu_word_draft_is_promoted_after_exact_reopen_evidence() -> None:
@@ -201,9 +201,13 @@ def test_baijiahao_word_draft_is_promoted_after_persisted_reopen_evidence() -> N
         assert facet.last_real_check.isoformat() == "2026-08-19"
         assert "BAIJIAHAO_WORD_DRAFT_20260819.md" in " ".join(facet.evidence_refs)
 
-    assert record.facets["cover"].status is ReadinessStatus.REAL_FAILED
+    assert record.facets["cover"].status is ReadinessStatus.REAL_VERIFIED
+    assert record.facets["cover"].last_real_check.isoformat() == "2026-08-20"
+    assert "BAIJIAHAO_COVER_PROBE_20260820.md" in " ".join(
+        record.facets["cover"].evidence_refs
+    )
     assert can_run_stable_image_draft("baijiahao")
-    assert not can_run_complete_word_draft("baijiahao")
+    assert can_run_complete_word_draft("baijiahao")
 
 
 @pytest.mark.parametrize(
@@ -226,7 +230,12 @@ def test_can_run_stable_image_draft_is_read_only_evidence_computation(
 
 
 def test_can_run_complete_word_draft_requires_real_cover_evidence() -> None:
-    assert all(not can_run_complete_word_draft(platform) for platform in EXPECTED_PLATFORMS)
+    assert can_run_complete_word_draft("baijiahao")
+    assert all(
+        not can_run_complete_word_draft(platform)
+        for platform in EXPECTED_PLATFORMS
+        if platform != "baijiahao"
+    )
     # 知乎已通过稳定带图草稿，但封面没有真实验收，不能宣称完整 Word 闭环完成。
     assert readiness_by_platform()["zhihu"].facets["cover"].status is (
         ReadinessStatus.RETEST_REQUIRED

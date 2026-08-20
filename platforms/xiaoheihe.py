@@ -1,6 +1,7 @@
 """小黑盒（Xiaoheihe）平台自动化"""
 import asyncio
 import copy
+import io
 import json
 from pathlib import Path
 
@@ -64,6 +65,7 @@ class XiaoheihePlatform(BasePlatform):
         # 只保存在内存中，用于保存后重新打开平台草稿并核对。不得用比较视图
         # 回写正文或重算 ContentVersion 哈希。
         self._expected_persisted_blocks: list[dict] | None = None
+        self._pending_cover_path = ""
 
     def _raise_if_page_closed(self, stage: str):
         self._require_page_alive(stage)
@@ -1465,6 +1467,160 @@ class XiaoheihePlatform(BasePlatform):
         return {
             "success": True,
             "selection": dict(self._selected_values),
+        }
+
+    async def apply_cover(self, cover: dict | None = None) -> dict:
+        """登记自动首图封面，保存后再以真实草稿卡片核验。"""
+
+        strategy = str((cover or {}).get("strategy") or "NONE").upper()
+        if strategy == "NONE":
+            self._pending_cover_path = ""
+            return {"success": True, "cover_status": "not_required"}
+        if strategy not in {"FIRST_BODY_IMAGE", "EXPLICIT"}:
+            return {
+                "success": False,
+                "cover_status": "failed",
+                "safe_to_continue": True,
+                "error_code": "XHH_COVER_STRATEGY_UNSUPPORTED",
+                "error": "小黑盒不支持该封面策略",
+            }
+        requested = str((cover or {}).get("local_path") or "")
+        first_image = next(
+            (
+                str(block.get("local_path"))
+                for block in (self._expected_persisted_blocks or [])
+                if block.get("type") == "image" and block.get("local_path")
+            ),
+            "",
+        )
+        try:
+            requested_path = Path(requested).resolve(strict=True)
+            first_path = Path(first_image).resolve(strict=True)
+        except (OSError, RuntimeError, ValueError):
+            return {
+                "success": False,
+                "cover_status": "failed",
+                "safe_to_continue": True,
+                "error_code": "XHH_COVER_ASSET_UNAVAILABLE",
+                "error": "小黑盒封面素材不可用",
+            }
+        if requested_path != first_path:
+            return {
+                "success": False,
+                "cover_status": "failed",
+                "safe_to_continue": True,
+                "error_code": "XHH_COVER_MUST_BE_FIRST_BODY_IMAGE",
+                "error": "小黑盒草稿封面只能自动使用正文首图",
+            }
+        self._pending_cover_path = str(requested_path)
+        return {
+            "success": True,
+            "cover_status": "pending_verification",
+            "cover_mode": "AUTO_FIRST_BODY_IMAGE",
+        }
+
+    @staticmethod
+    def _cover_average_hash(payload: bytes) -> tuple[int, ...] | None:
+        try:
+            from PIL import Image
+
+            with Image.open(io.BytesIO(payload)) as source:
+                image = source.convert("L").resize((16, 16))
+                pixels = list(image.getdata())
+        except Exception:
+            return None
+        average = sum(pixels) / len(pixels)
+        return tuple(int(value >= average) for value in pixels)
+
+    async def _cover_image_bytes(self, url: str) -> bytes:
+        if self.context is None or not url:
+            return b""
+        try:
+            response = await self.context.request.get(url, timeout=15000)
+            if not response.ok:
+                return b""
+            return await response.body()
+        except Exception:
+            return b""
+
+    async def verify_persisted_cover(
+        self,
+        *,
+        title: str,
+        draft_url: str,
+        cover: dict | None,
+        apply_result: dict,
+    ) -> dict:
+        """证明唯一草稿卡首图与重开正文首图视觉一致。"""
+
+        del draft_url, cover
+        expected_title = self._normalize_platform_title(title)
+        editor_images = self.page.locator(
+            ".article__edit-content--inner img.hb-cpt__image-elem"
+        )
+        if await editor_images.count() < 1:
+            return {
+                "success": False,
+                "cover_status": "failed",
+                "safe_to_continue": True,
+                "error_code": "XHH_COVER_BODY_IMAGE_MISSING",
+                "error": "小黑盒重开草稿后正文首图不存在",
+            }
+        body_url = await editor_images.first.get_attribute("src") or ""
+        body_bytes = await self._cover_image_bytes(body_url)
+        await self.page.goto(self.DRAFTS_URL, wait_until="domcontentloaded", timeout=30000)
+        await self.simulator.random_delay(2, 3)
+        card_urls = await self.page.evaluate(
+            r"""
+            (expectedTitle) => {
+                const normalize = (value) => String(value || '')
+                    .replace(/\s+/g, ' ').trim().slice(0, 30);
+                const cards = Array.from(document.querySelectorAll(
+                    '.creator-draft__list article.creator-draft__item'
+                )).filter((card) => normalize(
+                    card.querySelector('.creator-draft__content')?.textContent
+                ) === expectedTitle);
+                if (cards.length !== 1) return [];
+                return Array.from(cards[0].querySelectorAll('img'))
+                    .map((image) => image.currentSrc || image.src || '')
+                    .filter(Boolean);
+            }
+            """,
+            expected_title,
+        )
+        if not isinstance(card_urls, list) or not card_urls:
+            return {
+                "success": False,
+                "cover_status": "failed",
+                "safe_to_continue": True,
+                "error_code": "XHH_COVER_DRAFT_CARD_MISSING",
+                "error": "小黑盒唯一草稿卡未显示自动首图封面",
+            }
+        card_bytes = await self._cover_image_bytes(str(card_urls[0]))
+        body_hash = self._cover_average_hash(body_bytes)
+        card_hash = self._cover_average_hash(card_bytes)
+        matched = bool(
+            body_hash is not None
+            and card_hash is not None
+            and sum(
+                left != right
+                for left, right in zip(body_hash, card_hash, strict=True)
+            )
+            <= 8
+        )
+        if not matched:
+            return {
+                "success": False,
+                "cover_status": "failed",
+                "safe_to_continue": True,
+                "error_code": "XHH_COVER_VISUAL_MISMATCH",
+                "error": "小黑盒草稿卡封面与正文首图不一致",
+            }
+        return {
+            **apply_result,
+            "success": True,
+            "cover_status": "completed",
+            "cover_mode": "AUTO_FIRST_BODY_IMAGE",
         }
 
     async def _dismiss_overlays(self):

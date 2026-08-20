@@ -831,7 +831,6 @@ class ContentStudioService:
             for item in assets:
                 self.asset_store.remove_if_owned(item.storage_path)
             raise
-        first_cover_asset_id = _first_body_image_asset_id(blocks)
         try:
             async with self.database.session() as session:
                 draft = ContentDraft(
@@ -842,10 +841,12 @@ class ContentStudioService:
                     blocks_json=blocks,
                     content_schema_version=schema_version,
                     document_json=document,
-                    cover_strategy=(
-                        "FIRST_BODY_IMAGE" if first_cover_asset_id else "NONE"
-                    ),
-                    cover_asset_id=first_cover_asset_id,
+                    # Word 导入的 P0 是正文和图片顺序；封面属于可选能力。
+                    # 默认 NONE 避免某个平台没有独立封面控件时把完整草稿
+                    # 降级成警告/失败。用户仍可在冻结计划前显式选择正文首图
+                    # 或独立封面资产。
+                    cover_strategy="NONE",
+                    cover_asset_id=None,
                     status="ACTIVE",
                     revision=1,
                 )

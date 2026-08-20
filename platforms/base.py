@@ -315,6 +315,24 @@ class BasePlatform(ABC):
             "error": f"{self.platform_name} 尚未实现封面投递",
         }
 
+    async def verify_persisted_cover(
+        self,
+        *,
+        title: str,
+        draft_url: str,
+        cover: dict | None,
+        apply_result: dict,
+    ) -> dict:
+        """保存后核验封面。
+
+        显式上传型平台通常在 :meth:`apply_cover` 内即可确认；自动首图或
+        平台生成封面的适配器可以返回 ``pending_verification``，并在草稿
+        实体已经被证明存在后覆盖本钩子。默认实现保持原结果，绝不把待核验
+        状态自动晋级为成功。
+        """
+
+        return apply_result
+
     # ==================== 完整发布流水线 ====================
 
     async def publish(self, title: str, content_blocks: list,
@@ -499,6 +517,45 @@ class BasePlatform(ABC):
                     "error": "草稿保存失败：未找到保存按钮或草稿箱未出现该草稿，请检查编辑器页面状态与登录态",
                 }
 
+            if cover_result.get("cover_status") == "pending_verification":
+                try:
+                    persisted_cover = await self.verify_persisted_cover(
+                        title=title,
+                        draft_url=draft_url,
+                        cover=cover,
+                        apply_result=cover_result,
+                    )
+                    if not isinstance(persisted_cover, dict):
+                        raise TypeError("平台封面核验结果必须是字典")
+                    cover_result = persisted_cover
+                except Exception as exc:
+                    if self._exception_means_browser_closed(exc):
+                        cover_result = {
+                            "success": False,
+                            "cover_status": "unverified",
+                            "safe_to_continue": True,
+                            "error_code": "PLATFORM_COVER_RESULT_UNKNOWN",
+                            "error": "草稿已保存，但封面核验时浏览器已关闭",
+                        }
+                    else:
+                        cover_result = {
+                            "success": False,
+                            "cover_status": "failed",
+                            "safe_to_continue": True,
+                            "error_code": getattr(exc, "error_code", None)
+                            or "PLATFORM_COVER_PERSISTENCE_FAILED",
+                            "error": safe_media_error(
+                                exc,
+                                fallback="草稿已保存，但封面持久化未通过核验",
+                            ),
+                        }
+                if cover_result.get("cover_status") != "completed":
+                    db.add_task_log(
+                        task_id,
+                        "WARN",
+                        "草稿已保存，但封面持久化未通过核验",
+                    )
+
             # 本轮回归默认只保存草稿，避免验证时误公开发布；未来需要公开发布时
             # 可显式打开 app.publish_after_draft 配置。
             post_url = ""
@@ -530,6 +587,7 @@ class BasePlatform(ABC):
                 "media_error_code": content_result.get("media_error_code"),
                 "cover_strategy": str((cover or {}).get("strategy") or "NONE"),
                 "cover_status": cover_result.get("cover_status", "failed"),
+                "cover_mode": cover_result.get("cover_mode"),
                 "cover_error": cover_result.get("error"),
                 "cover_error_code": cover_result.get("error_code"),
             }

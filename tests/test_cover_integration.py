@@ -7,7 +7,7 @@ import asyncio
 import sys
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, Mock, patch
+from unittest.mock import AsyncMock, Mock, call, patch
 
 import pytest
 
@@ -18,7 +18,11 @@ if str(SRC_ROOT) not in sys.path:
 
 from platforms.baijiahao import BaijiahaoPlatform
 from platforms.base import DraftResultUnknownError
+from platforms.smzdm import SmzdmPlatform
 from platforms.weibo import WeiboPlatform
+from platforms.xiaoheihe import XiaoheihePlatform
+from platforms.zhihu import ZhihuPlatform
+from platforms.zol import ZOLPlatform
 
 
 def run(coroutine):
@@ -535,3 +539,204 @@ def test_baijiahao_base_pipeline_dispatches_exact_frozen_cover(tmp_path: Path) -
     assert result["cover_status"] == "completed"
     platform.set_cover.assert_awaited_once_with(str(cover_path))
     platform.save_draft.assert_awaited_once_with("冻结封面流水线")
+
+
+def test_base_pipeline_verifies_pending_cover_only_after_draft_save() -> None:
+    class _Log:
+        def add_task_log(self, *_args) -> None:
+            return None
+
+    platform = _make_baijiahao(_FakePage([]))
+    platform.check_login = AsyncMock(return_value=True)
+    platform.preflight_delivery = AsyncMock()
+    platform.navigate_to_editor = AsyncMock()
+    platform.fill_title = AsyncMock()
+    platform.fill_content = AsyncMock(
+        return_value={
+            "text_ok": True,
+            "media_status": "completed",
+            "expected_images": 1,
+            "uploaded_images": 1,
+            "failed_images": [],
+        }
+    )
+    platform.apply_cover = AsyncMock(
+        return_value={
+            "success": True,
+            "cover_status": "pending_verification",
+            "cover_mode": "AUTO_FIRST_BODY_IMAGE",
+        }
+    )
+    platform.save_draft = AsyncMock(return_value="https://example.test/draft/1")
+    platform.verify_persisted_cover = AsyncMock(
+        return_value={
+            "success": True,
+            "cover_status": "completed",
+            "cover_mode": "AUTO_FIRST_BODY_IMAGE",
+        }
+    )
+    platform._safe_simulate_scroll = AsyncMock()
+    platform._safe_random_mouse_movement = AsyncMock()
+
+    result = run(
+        platform.publish(
+            title="保存后封面核验",
+            content_blocks=[{"type": "text", "text": "正文"}],
+            images=[],
+            cover={"strategy": "FIRST_BODY_IMAGE"},
+            delivery_mode="DRAFT",
+            auto_login=False,
+            task_id=0,
+            db=_Log(),
+        )
+    )
+
+    assert result["success"] is True
+    assert result["cover_status"] == "completed"
+    assert result["cover_mode"] == "AUTO_FIRST_BODY_IMAGE"
+    platform.save_draft.assert_awaited_once()
+    platform.verify_persisted_cover.assert_awaited_once()
+
+
+def test_base_pipeline_does_not_retry_saved_draft_when_cover_reopen_fails() -> None:
+    class _Log:
+        def add_task_log(self, *_args) -> None:
+            return None
+
+    platform = _make_baijiahao(_FakePage([]))
+    platform.check_login = AsyncMock(return_value=True)
+    platform.preflight_delivery = AsyncMock()
+    platform.navigate_to_editor = AsyncMock()
+    platform.fill_title = AsyncMock()
+    platform.fill_content = AsyncMock(
+        return_value={
+            "text_ok": True,
+            "media_status": "completed",
+            "expected_images": 1,
+            "uploaded_images": 1,
+            "failed_images": [],
+        }
+    )
+    platform.apply_cover = AsyncMock(
+        return_value={"success": True, "cover_status": "pending_verification"}
+    )
+    platform.save_draft = AsyncMock(return_value="https://example.test/draft/2")
+    platform.verify_persisted_cover = AsyncMock(side_effect=RuntimeError("reopen failed"))
+    platform._safe_simulate_scroll = AsyncMock()
+    platform._safe_random_mouse_movement = AsyncMock()
+
+    result = run(
+        platform.publish(
+            title="封面结果失败不重存",
+            content_blocks=[{"type": "text", "text": "正文"}],
+            images=[],
+            cover={"strategy": "FIRST_BODY_IMAGE"},
+            delivery_mode="DRAFT",
+            auto_login=False,
+            task_id=0,
+            db=_Log(),
+        )
+    )
+
+    assert result["success"] is True
+    assert result["cover_status"] == "failed"
+    assert result["cover_error_code"] == "PLATFORM_COVER_PERSISTENCE_FAILED"
+    assert "reopen failed" not in str(result)
+    platform.save_draft.assert_awaited_once()
+
+
+def test_xiaoheihe_cover_requires_the_frozen_first_body_image(tmp_path: Path) -> None:
+    first = tmp_path / "first.png"
+    other = tmp_path / "other.png"
+    first.write_bytes(b"first")
+    other.write_bytes(b"other")
+    platform = XiaoheihePlatform()
+    platform._expected_persisted_blocks = [
+        {"type": "image", "local_path": str(first)}
+    ]
+
+    rejected = run(
+        platform.apply_cover(
+            {"strategy": "EXPLICIT", "local_path": str(other)}
+        )
+    )
+    accepted = run(
+        platform.apply_cover(
+            {"strategy": "FIRST_BODY_IMAGE", "local_path": str(first)}
+        )
+    )
+
+    assert rejected["error_code"] == "XHH_COVER_MUST_BE_FIRST_BODY_IMAGE"
+    assert accepted["cover_status"] == "pending_verification"
+    assert accepted["cover_mode"] == "AUTO_FIRST_BODY_IMAGE"
+
+
+def test_zhihu_cover_selects_only_the_independent_upload_wrapper(tmp_path: Path) -> None:
+    cover_path = tmp_path / "cover.png"
+    cover_path.write_bytes(b"cover")
+    platform = ZhihuPlatform()
+    wrapper = Mock()
+    wrapper.count = AsyncMock(return_value=1)
+    wrapper.evaluate = AsyncMock(return_value=True)
+    cover_input = Mock()
+    cover_input.count = AsyncMock(return_value=1)
+    cover_input.first = Mock(set_input_files=AsyncMock())
+    wrapper.locator.return_value = cover_input
+    platform.page = Mock()
+    platform.page.locator.return_value = wrapper
+
+    result = run(
+        platform.apply_cover(
+            {"strategy": "FIRST_BODY_IMAGE", "local_path": str(cover_path)}
+        )
+    )
+
+    assert result["cover_status"] == "pending_verification"
+    platform.page.locator.assert_called_once_with(".UploadPicture-wrapper")
+    wrapper.locator.assert_called_once_with(
+        "input[type=file][accept='.jpeg, .jpg, .png']"
+    )
+    cover_input.first.set_input_files.assert_awaited_once()
+
+
+def test_zol_cover_rejects_ambiguous_single_file_inputs(tmp_path: Path) -> None:
+    cover_path = tmp_path / "cover.png"
+    cover_path.write_bytes(b"cover")
+    platform = ZOLPlatform()
+    inputs = Mock(count=AsyncMock(return_value=2))
+    platform.page = Mock()
+    platform.page.locator.return_value = inputs
+
+    result = run(
+        platform.apply_cover(
+            {"strategy": "FIRST_BODY_IMAGE", "local_path": str(cover_path)}
+        )
+    )
+
+    assert result["success"] is False
+    assert result["error_code"] == "ZOL_COVER_INPUT_AMBIGUOUS"
+    platform.page.locator.assert_called_once_with(
+        "input[type=file][accept='image/*']:not([multiple])"
+    )
+
+
+def test_smzdm_cover_requires_both_long_and_square_variants(tmp_path: Path) -> None:
+    cover_path = tmp_path / "cover.png"
+    cover_path.write_bytes(b"cover")
+    platform = SmzdmPlatform()
+    platform._set_cover_variant = AsyncMock()
+
+    result = run(
+        platform.apply_cover(
+            {"strategy": "FIRST_BODY_IMAGE", "local_path": str(cover_path)}
+        )
+    )
+
+    assert result["cover_status"] == "pending_verification"
+    assert result["cover_mode"] == "EXPLICIT_LONG_AND_SQUARE"
+    platform._set_cover_variant.assert_has_awaits(
+        [
+            call("添加长图", str(cover_path.resolve())),
+            call("添加方图", str(cover_path.resolve())),
+        ]
+    )

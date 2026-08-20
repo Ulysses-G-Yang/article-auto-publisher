@@ -11,7 +11,7 @@ import copy
 import hashlib
 from io import BytesIO
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import pytest
 from PIL import Image, ImageDraw
@@ -962,6 +962,33 @@ def test_image_content_compare_accepts_resize_compression_but_rejects_other_imag
         ZOLPlatform._compare_image_bytes(expected, b"not-an-image")
         == "ZOL_IMAGE_CONTENT_UNVERIFIED"
     )
+
+
+def test_image_content_reresolves_editor_after_stale_screenshot() -> None:
+    payload = _pattern_bytes()
+    image = MagicMock()
+    image.evaluate = AsyncMock(return_value=True)
+    image.screenshot = AsyncMock(side_effect=[RuntimeError("stale"), payload])
+    image.get_attribute = AsyncMock(return_value="")
+    images = MagicMock()
+    images.count = AsyncMock(return_value=1)
+    images.nth.return_value = image
+    editor = MagicMock()
+    editor.locator.return_value = images
+    platform = ZOLPlatform()
+    platform._resolve_content_editor = AsyncMock(
+        return_value=(editor, "iframe")
+    )
+    platform._editor_image_src_fingerprints = AsyncMock(return_value=["target"])
+
+    with patch("platforms.zol.asyncio.sleep", new=AsyncMock()):
+        observed = asyncio.run(
+            platform._read_stable_editor_image_bytes(["target"], "target")
+        )
+
+    assert observed == payload
+    assert platform._resolve_content_editor.await_count >= 2
+    assert image.screenshot.await_count == 2
 
 
 def test_heading_experiment_only_accepts_verified_h2_widget_and_reads_dom() -> None:

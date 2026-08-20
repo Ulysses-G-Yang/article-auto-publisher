@@ -572,10 +572,18 @@ class XiaohongshuPlatform(BasePlatform):
                     return
 
                 snapshot = await self._layout_snapshot()
-                if snapshot.get("root_visible") is True and self._draft_title_key(
-                    title
-                ) == self._draft_title_key(str(snapshot.get("cover_title") or "")):
-                    return
+                if snapshot.get("root_visible") is True:
+                    observed_cover_title = str(snapshot.get("cover_title") or "")
+                    if observed_cover_title and self._draft_title_key(
+                        title
+                    ) == self._draft_title_key(observed_cover_title):
+                        return
+                    if (
+                        not self._expected_persisted_cover
+                        and normalize_for_comparison(title)
+                        == normalize_for_comparison(self._preflight_title)
+                    ):
+                        return
                 raise ContentValidationError(
                     "XHS_RESUME_TITLE_MISMATCH: 待恢复排版草稿标题与冻结版本不一致"
                 )
@@ -949,14 +957,13 @@ class XiaohongshuPlatform(BasePlatform):
                     "XHS_RESUMED_LAYOUT_INVALID",
                     "小红书待恢复排版草稿图文或标题样式不一致",
                 )
-            self._expected_persisted_cover = False
+            self._expected_persisted_cover = wants_cover
             if wants_cover:
                 return {
-                    "success": False,
-                    "cover_status": "failed",
+                    "success": True,
+                    "cover_status": "pending_verification",
                     "safe_to_continue": True,
-                    "error_code": "XHS_COVER_ASSET_SELECTION_UNSUPPORTED",
-                    "error": "小红书长文只提供平台生成封面，无法精确选择冻结正文首图",
+                    "cover_mode": "PLATFORM_GENERATED_LONGFORM",
                 }
             return {
                 "success": True,
@@ -972,14 +979,13 @@ class XiaohongshuPlatform(BasePlatform):
             return finalized
 
         self._layout_finalized = True
-        self._expected_persisted_cover = False
+        self._expected_persisted_cover = wants_cover
         if wants_cover:
             return {
-                "success": False,
-                "cover_status": "failed",
+                "success": True,
+                "cover_status": "pending_verification",
                 "safe_to_continue": True,
-                "error_code": "XHS_COVER_ASSET_SELECTION_UNSUPPORTED",
-                "error": "小红书长文只提供平台生成封面，无法精确选择冻结正文首图",
+                "cover_mode": "PLATFORM_GENERATED_LONGFORM",
             }
         return {
             "success": True,
@@ -992,6 +998,96 @@ class XiaohongshuPlatform(BasePlatform):
             if block.get("type") == "image" and block.get("local_path"):
                 return str(block["local_path"])
         return ""
+
+    async def verify_persisted_cover(
+        self,
+        *,
+        title: str,
+        draft_url: str,
+        cover: dict | None,
+        apply_result: dict,
+    ) -> dict:
+        """进入发布预览页，验证平台生成封面存在且质量检查通过。
+
+        小红书长文没有独立封面素材选择器；其真实封面是冻结长文排版生成的
+        第一张 1440×2400 页面图。这里明确报告平台原生模式，不冒充精确
+        ``FIRST_BODY_IMAGE`` 上传，也绝不点击公开发布按钮。
+        """
+
+        del title, draft_url, cover
+        action = await self._unique_visible_button("下一步")
+        if action is None:
+            return self._cover_verification_failure(
+                "XHS_COVER_PREVIEW_ENTRY_MISSING",
+                "小红书封面预览入口不存在或候选不唯一",
+            )
+        await action.click(timeout=10000)
+        try:
+            await self.page.get_by_text("封面预览", exact=True).wait_for(
+                state="visible", timeout=15000
+            )
+        except Exception:
+            return self._cover_verification_failure(
+                "XHS_COVER_PREVIEW_NOT_READY",
+                "小红书平台生成封面预览未就绪",
+            )
+        state = await self.page.evaluate(
+            """() => {
+                const loaded = (selector) => Array.from(
+                    document.querySelectorAll(selector)
+                ).filter((image) => image.complete && image.naturalWidth > 0).length;
+                return {
+                    pagePreviews: loaded('img.img.preview'),
+                    phonePreviews: loaded('img.preivew-image'),
+                };
+            }"""
+        )
+        if (
+            not isinstance(state, dict)
+            or int(state.get("pagePreviews") or 0) < 1
+            or int(state.get("phonePreviews") or 0) < 1
+        ):
+            return self._cover_verification_failure(
+                "XHS_COVER_PREVIEW_IMAGE_MISSING",
+                "小红书平台生成封面图片未完整加载",
+            )
+        assessment = self.page.get_by_text("获取封面建议", exact=True)
+        visible_assessments = [
+            assessment.nth(index)
+            for index in range(await assessment.count())
+            if await assessment.nth(index).is_visible()
+        ]
+        if len(visible_assessments) == 1:
+            await visible_assessments[0].click(timeout=5000)
+        passed = False
+        for _ in range(20):
+            await asyncio.sleep(0.5)
+            passed = await self.page.get_by_text(
+                "封面效果评估通过，未发现封面质量问题", exact=True
+            ).count() > 0
+            if passed:
+                break
+        if not passed:
+            return self._cover_verification_failure(
+                "XHS_COVER_QUALITY_UNVERIFIED",
+                "小红书平台生成封面未通过质量评估",
+            )
+        return {
+            **apply_result,
+            "success": True,
+            "cover_status": "completed",
+            "cover_mode": "PLATFORM_GENERATED_LONGFORM",
+        }
+
+    @staticmethod
+    def _cover_verification_failure(error_code: str, error: str) -> dict:
+        return {
+            "success": False,
+            "cover_status": "failed",
+            "safe_to_continue": True,
+            "error_code": error_code,
+            "error": error,
+        }
 
     @staticmethod
     def _layout_failure(error_code: str, error: str) -> dict:
@@ -1615,8 +1711,17 @@ class XiaohongshuPlatform(BasePlatform):
         )
         if self._layout_finalized:
             snapshot = await self._layout_snapshot()
-            title_key = self._draft_title_key(str(snapshot.get("cover_title") or ""))
-            if self._draft_title_key(expected_title) != title_key:
+            # 无封面模式不会生成 ``.cover-outer-container`` 标题节点；此时
+            # 上面的草稿抽屉唯一精确标题匹配已经完成标题证明，不能再拿空的
+            # 封面标题误判真实草稿为 RESULT_UNKNOWN。只有平台生成封面时才
+            # 要求封面页标题与冻结标题一致。
+            title_key = self._draft_title_key(
+                str(snapshot.get("cover_title") or "")
+            )
+            if (
+                self._expected_persisted_cover
+                and self._draft_title_key(expected_title) != title_key
+            ):
                 raise DraftResultUnknownError(
                     "DRAFT_RESULT_UNKNOWN: 小红书排版草稿重开后标题不一致"
                 )

@@ -34,6 +34,7 @@
         switcherControllers: {},
         switcherSequences: {},
         draftLibraryLoading: false,
+        navigationSequence: 0,
         saveTimer: null,
         saving: false,
         dirty: false,
@@ -251,7 +252,7 @@
     }
 
     function localDraftPut(dirty = state.dirty) {
-        if (!state.localDb || !state.draft) return Promise.resolve();
+        if (!state.localDb || !state.draft || !state.draft.draft_id) return Promise.resolve();
         const snapshot = {
             draft_id: state.draft.draft_id,
             revision: state.draft.revision,
@@ -1834,8 +1835,30 @@
         catch (error) { setMessage('content-error', error.message || '另存草稿副本失败'); }
     }
 
+    async function openDraftFromLocation() {
+        const sequence = ++state.navigationSequence;
+        const requestedId = new URLSearchParams(window.location.search).get('draft_id')?.trim() || '';
+        if (requestedId) {
+            const draft = await jsonResponse(await fetch(
+                endpoint(root.dataset.draftUrlTemplate, 'draft_id', requestedId),
+                { headers: { Accept: 'application/json' } },
+            ));
+            if (sequence !== state.navigationSequence) return;
+            await openDraft(draft, { historyMode: 'replace' });
+            return;
+        }
+        clearStudioMessages();
+        if (sequence !== state.navigationSequence) return;
+        await openDraft(blankDraft(), { historyMode: 'replace' });
+    }
+
     function bindEvents() {
         window.addEventListener('hashchange', syncStudioStepFromLocation);
+        window.addEventListener('popstate', () => {
+            openDraftFromLocation().catch(error => {
+                setMessage('studio-fatal', `加载工作台失败：${error.message || '未知错误'}`);
+            });
+        });
         byId('draft-title').addEventListener('input', event => {
             state.draft.title = event.target.value;
             if (isV2Draft() && state.draft.document && typeof state.draft.document === 'object') {
@@ -1955,18 +1978,7 @@
             bindEvents();
             state.localDb = await openLocalDb();
             await fetchPlatforms();
-            const params = new URLSearchParams(window.location.search);
-            const requestedId = params.get('draft_id')?.trim() || '';
-            if (requestedId) {
-                const draft = await jsonResponse(await fetch(
-                    endpoint(root.dataset.draftUrlTemplate, 'draft_id', requestedId),
-                    { headers: { Accept: 'application/json' } },
-                ));
-                await openDraft(draft, { historyMode: 'replace' });
-            } else {
-                clearStudioMessages();
-                await openDraft(blankDraft(), { historyMode: 'replace' });
-            }
+            await openDraftFromLocation();
             syncStudioStepFromLocation();
         } catch (error) {
             byId('studio-loading').classList.add('d-none');

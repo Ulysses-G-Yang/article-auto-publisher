@@ -178,7 +178,7 @@ def test_studio_initialization_is_blank_until_explicit_draft_id() -> None:
     assert "function openLocalDb(timeoutMs = 1500)" in script
     assert "request.onblocked = () => finish(null)" in script
     assert "const timer = setTimeout(() => finish(null), timeoutMs)" in script
-    assert "const requestedId = params.get('draft_id')?.trim() || '';" in script
+    assert "const requestedId = new URLSearchParams(window.location.search)" in script
     assert "await openDraft(blankDraft(), { historyMode: 'replace' });" in script
     assert "const drafts = await refreshDrafts()" not in script
     assert "draft = drafts[0]" not in script
@@ -441,11 +441,24 @@ def test_blank_workspace_uses_minimal_lazy_create_and_never_restores_indexeddb()
     assert "async function createPersistedDraft()" in script
     assert "if (!state.draft.draft_id)" in script
     assert (
+        "if (!state.localDb || !state.draft || !state.draft.draft_id) return Promise.resolve();"
+        in script
+    )
+    assert (
         "const local = payload?.draft_id ? await localDraftGet(payload.draft_id) : null;"
         in script
     )
     assert "if (!(await createPersistedDraft())) return;" in script
     assert "state.draft.draft_id ? await localDraftGet" not in script
+
+
+def test_history_navigation_reloads_the_explicit_location() -> None:
+    script = read("web/static/js/content-studio.js")
+
+    assert "async function openDraftFromLocation()" in script
+    assert "window.addEventListener('popstate'" in script
+    assert "await openDraftFromLocation();" in script
+    assert "historyMode: 'push'" in script
 
 
 def test_accounts_page_honors_platform_query_without_visual_refactor() -> None:

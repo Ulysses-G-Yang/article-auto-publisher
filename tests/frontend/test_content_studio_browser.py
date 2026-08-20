@@ -351,4 +351,59 @@ async def test_explicit_draft_restore_and_docx_import_use_distinct_urls() -> Non
         finally:
             await browser.close()
             await api.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(not BASE_URL, reason="需要显式隔离 QA URL")
+async def test_history_push_state_back_reload_restores_previous_draft() -> None:
+    executable = Path(BROWSER_PATH) if BROWSER_PATH else None
+    if executable and not executable.is_file():
+        pytest.fail(f"Chromium 不存在: {executable}")
+
+    async with async_playwright() as playwright:
+        api = await playwright.request.new_context(base_url=BASE_URL)
+        first_response = await api.post(
+            "/api/content-drafts",
+            data={"title": "QA 历史导航一", "blocks": [{"type": "text", "text": "第一份"}]},
+        )
+        second_response = await api.post(
+            "/api/content-drafts",
+            data={"title": "QA 历史导航二", "blocks": [{"type": "text", "text": "第二份"}]},
+        )
+        assert first_response.ok and second_response.ok
+        first_id = (await first_response.json())["draft_id"]
+        second_id = (await second_response.json())["draft_id"]
+
+        browser = await playwright.chromium.launch(
+            headless=True,
+            executable_path=str(executable) if executable else None,
+        )
+        try:
+            page = await browser.new_page(viewport={"width": 1440, "height": 900})
+            await page.goto(f"{BASE_URL}/upload?draft_id={first_id}", wait_until="networkidle")
+            await page.locator("#studio-workspace:not(.d-none)").wait_for()
+            await page.locator("#open-source-library").click()
+            await page.locator("#draft-library-list").wait_for()
+            history_item = page.locator(".library-item").filter(has_text="QA 历史导航二")
+            await history_item.get_by_role("button", name="继续编辑").click()
+            await page.wait_for_function(
+                "expected => new URL(window.location.href).searchParams.get("
+                "'draft_id') === expected",
+                second_id,
+            )
+            assert await page.locator("#draft-title").input_value() == "QA 历史导航二"
+
+            await page.evaluate("window.history.back()")
+            await page.wait_for_function(
+                "expected => new URL(window.location.href).searchParams.get("
+                "'draft_id') === expected",
+                first_id,
+            )
+            await page.wait_for_function(
+                "expected => document.querySelector('#draft-title')?.value === expected",
+                "QA 历史导航一",
+            )
+        finally:
+            await browser.close()
+            await api.dispose()
             await api.dispose()

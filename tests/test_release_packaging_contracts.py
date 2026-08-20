@@ -43,10 +43,19 @@ def test_release_whitelist_excludes_development_and_machine_state_files() -> Non
 
     assert '"requirements-dev.txt"' not in script
     assert '"tests"' not in script
+    assert '"human"' in script
     for pattern in (".git", "data", "Cookie", "Profile", "logs", "node_modules", "uv\\.lock"):
         assert pattern in script
     assert "source_commit=$resolvedSha" in script
     assert "Get-FileHash -LiteralPath $archiveOutput -Algorithm SHA256" in script
+
+
+def test_windows_start_script_exposes_bundled_src_modules_to_mcp() -> None:
+    script = read("scripts/start_production_windows.ps1")
+
+    assert '$srcRoot = Join-Path $ProjectRoot "src"' in script
+    assert "$env:PYTHONPATH" in script
+    assert '"$srcRoot;$($env:PYTHONPATH)"' in script
 
 
 def test_release_docs_describe_runtime_only_test_behavior() -> None:

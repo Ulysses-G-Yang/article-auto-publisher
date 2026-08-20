@@ -26,6 +26,15 @@ if ($env:APP_ENV -ne "production") {
     throw "APP_ENV 不是 production，拒绝启动生产入口。"
 }
 
+# MCP 入口以模块方式启动；发布包不安装本地源码为 site-package，显式加入
+# 随包的 src 目录，确保 account_sessions/article_mvp 等运行模块可解析。
+$srcRoot = Join-Path $ProjectRoot "src"
+$env:PYTHONPATH = if ($env:PYTHONPATH) {
+    "$srcRoot;$($env:PYTHONPATH)"
+} else {
+    $srcRoot
+}
+
 $condaCommand = Get-Command conda -ErrorAction SilentlyContinue
 if (-not $condaCommand) {
     throw "找不到 conda。请先运行 setup_windows.ps1。"

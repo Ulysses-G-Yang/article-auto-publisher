@@ -116,7 +116,7 @@ try {
         Copy-TrackedFile -RelativePath $relativePath -DestinationRelativePath $relativePath
     }
 
-    $runtimeDirectories = @("core", "mcp_server", "models", "platforms", "src", "web")
+    $runtimeDirectories = @("core", "human", "mcp_server", "models", "platforms", "src", "web")
     foreach ($relativePath in $runtimeDirectories) {
         Copy-TrackedDirectory -RelativePath $relativePath
     }

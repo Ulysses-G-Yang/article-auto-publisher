@@ -42,11 +42,7 @@ FACET_NAMES: tuple[str, ...] = (
 )
 
 PLATFORM_DISPLAY_NAMES: Mapping[str, str] = MappingProxyType(
-    {
-        item.id: item.display_name
-        for item in PLATFORM_CATALOG
-        if item.delivery_enabled
-    }
+    {item.id: item.display_name for item in PLATFORM_CATALOG if item.delivery_enabled}
 )
 
 _HANDOFF_DATE = date(2026, 8, 17)
@@ -100,9 +96,7 @@ class FacetReadiness:
         return {
             "status": self.status.value,
             "page_state": self.page_state,
-            "last_real_check": (
-                self.last_real_check.isoformat() if self.last_real_check else None
-            ),
+            "last_real_check": (self.last_real_check.isoformat() if self.last_real_check else None),
             "evidence_refs": list(self.evidence_refs),
             "success_criteria": self.success_criteria,
         }
@@ -120,9 +114,7 @@ class PlatformDeliveryReadiness:
         return {
             "platform": self.platform,
             "display_name": self.display_name,
-            "facets": {
-                name: self.facets[name].as_dict() for name in FACET_NAMES
-            },
+            "facets": {name: self.facets[name].as_dict() for name in FACET_NAMES},
         }
 
 
@@ -131,18 +123,10 @@ _SUCCESS_CRITERIA: Mapping[str, str] = MappingProxyType(
         "account_session": (
             "隔离账号在真实页面完成登录态检查，账号为 ACTIVE/VALID，且没有残留 Profile 锁。"
         ),
-        "editor_entry": (
-            "使用指定账号进入目标编辑器，页面状态和编辑器入口均与平台契约一致。"
-        ),
-        "text_draft": (
-            "标题、正文和段落顺序完整写入，并在平台侧成功保存为 DRAFT。"
-        ),
-        "body_images": (
-            "正文图片按冻结版本顺序出现，图片数量在页面稳定后与输入数量一致。"
-        ),
-        "cover": (
-            "封面策略对应的图片在平台预览中真实出现，且不误传正文或其他控件。"
-        ),
+        "editor_entry": ("使用指定账号进入目标编辑器，页面状态和编辑器入口均与平台契约一致。"),
+        "text_draft": ("标题、正文和段落顺序完整写入，并在平台侧成功保存为 DRAFT。"),
+        "body_images": ("正文图片按冻结版本顺序出现，图片数量在页面稳定后与输入数量一致。"),
+        "cover": ("封面策略对应的图片在平台预览中真实出现，且不误传正文或其他控件。"),
         "draft_verification": (
             "平台草稿箱标题/计数和正文媒体状态可追溯核对，不能只凭接口返回码判定。"
         ),
@@ -480,18 +464,23 @@ PLATFORM_DELIVERY_READINESS: tuple[PlatformDeliveryReadiness, ...] = (
             ),
             "body_images": (
                 ReadinessStatus.REAL_VERIFIED,
-                "real_reopen_verified_7_ordered_body_images",
+                "real_reopen_verified_7_loaded_remote_body_images",
+                date(2026, 8, 20),
+                _XHS_EVIDENCE,
+            ),
+            "cover": (
+                ReadinessStatus.REAL_FAILED,
+                "platform_generated_cover_has_no_exact_body_asset_selector",
                 date(2026, 8, 20),
                 _XHS_EVIDENCE,
             ),
             "draft_verification": (
                 ReadinessStatus.REAL_VERIFIED,
-                "unique_title_and_29_ordered_tokens_reopened",
+                "unique_title_and_29_logical_tokens_reopened_after_layout",
                 date(2026, 8, 20),
                 _XHS_EVIDENCE,
             ),
         },
-        no_prior_run=frozenset({"cover"}),
     ),
 )
 
@@ -499,9 +488,7 @@ PLATFORM_DELIVERY_READINESS: tuple[PlatformDeliveryReadiness, ...] = (
 def readiness_by_platform() -> Mapping[str, PlatformDeliveryReadiness]:
     """返回只读的平台就绪度映射。"""
 
-    return MappingProxyType(
-        {record.platform: record for record in PLATFORM_DELIVERY_READINESS}
-    )
+    return MappingProxyType({record.platform: record for record in PLATFORM_DELIVERY_READINESS})
 
 
 def _repo_root() -> Path:
@@ -525,9 +512,7 @@ def validate_readiness_matrix(
     if tuple(DELIVERY_ENABLED_PLATFORMS) != tuple(DELIVERY_PLATFORMS):
         raise ValueError("platform_catalog 与格式能力 registry 的平台集合不一致")
     if platforms != tuple(DELIVERY_ENABLED_PLATFORMS):
-        raise ValueError(
-            "平台就绪清单必须与 platform_catalog.delivery_enabled 完全一致"
-        )
+        raise ValueError("平台就绪清单必须与 platform_catalog.delivery_enabled 完全一致")
     for record in records:
         if record.display_name != PLATFORM_DISPLAY_NAMES.get(record.platform):
             raise ValueError(f"平台显示名不一致: {record.platform}")
@@ -541,13 +526,15 @@ def validate_readiness_matrix(
                 raise ValueError(f"平台能力项缺少证据引用: {record.platform}/{facet_name}")
             for reference in facet.evidence_refs:
                 _validate_evidence_ref(reference)
-            if facet.status in {
-                ReadinessStatus.REAL_VERIFIED,
-                ReadinessStatus.REAL_FAILED,
-            } and facet.last_real_check is None:
-                raise ValueError(
-                    f"REAL 状态必须有日期: {record.platform}/{facet_name}"
-                )
+            if (
+                facet.status
+                in {
+                    ReadinessStatus.REAL_VERIFIED,
+                    ReadinessStatus.REAL_FAILED,
+                }
+                and facet.last_real_check is None
+            ):
+                raise ValueError(f"REAL 状态必须有日期: {record.platform}/{facet_name}")
             if facet_name == "public_publish" and facet.status != ReadinessStatus.DISABLED:
                 raise ValueError(f"公开发布必须保持 DISABLED: {record.platform}")
 

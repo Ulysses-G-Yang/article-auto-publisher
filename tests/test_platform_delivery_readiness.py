@@ -39,9 +39,7 @@ EXPECTED_PLATFORMS = (
 def test_readiness_matrix_matches_delivery_catalog_and_has_seven_facets() -> None:
     assert EXPECTED_PLATFORMS == DELIVERY_ENABLED_PLATFORMS
     assert EXPECTED_PLATFORMS == DELIVERY_PLATFORMS
-    assert tuple(record.platform for record in PLATFORM_DELIVERY_READINESS) == (
-        EXPECTED_PLATFORMS
-    )
+    assert tuple(record.platform for record in PLATFORM_DELIVERY_READINESS) == (EXPECTED_PLATFORMS)
     for record in PLATFORM_DELIVERY_READINESS:
         assert tuple(record.facets) == FACET_NAMES
         assert all(record.facets[name].success_criteria for name in FACET_NAMES)
@@ -106,12 +104,12 @@ def test_xiaohongshu_word_draft_is_promoted_after_exact_reopen_evidence() -> Non
         facet = record.facets[facet_name]
         assert facet.status is ReadinessStatus.REAL_VERIFIED
         assert facet.last_real_check.isoformat() == "2026-08-20"
-        assert "XIAOHONGSHU_WORD_DRAFT_20260820.md" in " ".join(
-            facet.evidence_refs
-        )
+        assert "XIAOHONGSHU_WORD_DRAFT_20260820.md" in " ".join(facet.evidence_refs)
 
     assert can_run_stable_image_draft("xiaohongshu")
+    assert record.facets["cover"].status is ReadinessStatus.REAL_FAILED
     assert not can_run_complete_word_draft("xiaohongshu")
+
 
 def test_zol_word_draft_is_promoted_only_after_persisted_reopen_evidence() -> None:
     record = readiness_by_platform()["zol"]
@@ -201,9 +199,7 @@ def test_baijiahao_word_draft_is_promoted_after_persisted_reopen_evidence() -> N
         facet = record.facets[facet_name]
         assert facet.status is ReadinessStatus.REAL_VERIFIED
         assert facet.last_real_check.isoformat() == "2026-08-19"
-        assert "BAIJIAHAO_WORD_DRAFT_20260819.md" in " ".join(
-            facet.evidence_refs
-        )
+        assert "BAIJIAHAO_WORD_DRAFT_20260819.md" in " ".join(facet.evidence_refs)
 
     assert record.facets["cover"].status is ReadinessStatus.REAL_FAILED
     assert can_run_stable_image_draft("baijiahao")
@@ -229,10 +225,8 @@ def test_can_run_stable_image_draft_is_read_only_evidence_computation(
     assert can_run_stable_image_draft(platform) is expected
 
 
-def test_can_run_complete_word_draft_requires_cover_and_is_false_for_current_six() -> None:
-    assert all(
-        not can_run_complete_word_draft(platform) for platform in EXPECTED_PLATFORMS
-    )
+def test_can_run_complete_word_draft_requires_real_cover_evidence() -> None:
+    assert all(not can_run_complete_word_draft(platform) for platform in EXPECTED_PLATFORMS)
     # 知乎已通过稳定带图草稿，但封面没有真实验收，不能宣称完整 Word 闭环完成。
     assert readiness_by_platform()["zhihu"].facets["cover"].status is (
         ReadinessStatus.RETEST_REQUIRED

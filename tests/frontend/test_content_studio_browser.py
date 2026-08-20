@@ -271,7 +271,7 @@ async def test_explicit_draft_restore_and_docx_import_use_distinct_urls() -> Non
             "/api/content-drafts",
             data={
                 "title": "QA 显式恢复标题",
-                "blocks": [{"type": "text", "text": "只读恢复验证。"}],
+                "blocks": [{"type": "text", "text": "只读恢复验证。", "position": 0}],
                 "cover": {"strategy": "NONE", "asset_id": None},
             },
         )
@@ -364,11 +364,17 @@ async def test_history_push_state_back_reload_restores_previous_draft() -> None:
         api = await playwright.request.new_context(base_url=BASE_URL)
         first_response = await api.post(
             "/api/content-drafts",
-            data={"title": "QA 历史导航一", "blocks": [{"type": "text", "text": "第一份"}]},
+            data={
+                "title": "QA 历史导航一",
+                "blocks": [{"type": "text", "text": "第一份", "position": 0}],
+            },
         )
         second_response = await api.post(
             "/api/content-drafts",
-            data={"title": "QA 历史导航二", "blocks": [{"type": "text", "text": "第二份"}]},
+            data={
+                "title": "QA 历史导航二",
+                "blocks": [{"type": "text", "text": "第二份", "position": 0}],
+            },
         )
         assert first_response.ok and second_response.ok
         first_id = (await first_response.json())["draft_id"]

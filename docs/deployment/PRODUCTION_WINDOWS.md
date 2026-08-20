@@ -47,6 +47,10 @@
 
 该脚本不结束 Chrome，也不删除 Profile。
 
+RC 压缩包是运行时白名单包，不包含 `requirements-dev.txt` 或 `tests/`。因此
+`setup_windows.ps1` 在包内安装 `requirements.txt`，仍会执行 `compileall`，并在日志中
+明确跳过不存在的 `pytest`；源码 checkout 则继续安装开发依赖并执行完整回归。
+
 ## RC 生产入口冒烟
 
 在全新临时目录、临时 `APP_DATA_DIR` 和未登录账号下，仅验证：

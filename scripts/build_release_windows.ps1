@@ -78,7 +78,8 @@ if (-not $gitCommand) {
     throw "找不到 git；RC 包必须从精确 commit 构建。"
 }
 
-$resolvedSha = (Invoke-Git -Arguments @("rev-parse", "--verify", "${CommitSha}^{commit}") | Select-Object -Last 1).ToString().Trim().ToLowerInvariant()
+$commitRevision = $CommitSha + '^{commit}'
+$resolvedSha = (Invoke-Git -Arguments @("rev-parse", "--verify", $commitRevision) | Select-Object -Last 1).ToString().Trim().ToLowerInvariant()
 if ($resolvedSha -notmatch '^[0-9a-f]{40}$' -or $resolvedSha -ne $CommitSha.ToLowerInvariant()) {
     throw "CommitSha 不是可验证的精确 40 位 commit：$CommitSha"
 }
@@ -142,9 +143,9 @@ try {
 
     Copy-LicenseFile -RelativePath "frontend\coreui-free-bootstrap-admin-template\LICENSE" -Name "COREUI_TEMPLATE_LICENSE"
     Copy-LicenseFile -RelativePath "web\static\vendor\coreui-template\LICENSE" -Name "COREUI_VENDOR_LICENSE"
-    Copy-LicenseFile -RelativePath "web\static\vendor\coreui\LICENSE.txt" -Name "COREUI_LICENSE.txt"
-    Copy-LicenseFile -RelativePath "web\static\vendor\coreui-icons\LICENSE.txt" -Name "COREUI_ICONS_LICENSE.txt"
-    Copy-LicenseFile -RelativePath "web\static\vendor\gridstack\LICENSE.txt" -Name "GRIDSTACK_LICENSE.txt"
+    Copy-LicenseFile -RelativePath "src\article_mvp\web\static\vendor\coreui\LICENSE.txt" -Name "COREUI_LICENSE.txt"
+    Copy-LicenseFile -RelativePath "src\article_mvp\web\static\vendor\coreui-icons\LICENSE.txt" -Name "COREUI_ICONS_LICENSE.txt"
+    Copy-LicenseFile -RelativePath "src\article_mvp\web\static\vendor\gridstack\LICENSE.txt" -Name "GRIDSTACK_LICENSE.txt"
 
     $manifest = @(
         "ArticleOps v0.4.1-rc1",
@@ -169,7 +170,7 @@ try {
         '(?i)(^|[\\/])uv\.lock$'
     )
     $entries = @(Get-ChildItem -LiteralPath $PackageRoot -Recurse -Force | ForEach-Object {
-        $_.FullName.Substring($PackageRoot.Length).TrimStart('\\', '/')
+        $_.FullName.Substring($PackageRoot.Length).TrimStart([char[]]@('\', '/'))
     })
     foreach ($entry in $entries) {
         foreach ($pattern in $forbiddenEntryPatterns) {
@@ -185,7 +186,7 @@ try {
     foreach ($file in Get-ChildItem -LiteralPath $PackageRoot -Recurse -File) {
         if ($textExtensions -notcontains $file.Extension.ToLowerInvariant()) { continue }
         $text = Get-Content -LiteralPath $file.FullName -Raw
-        if ($text -match '(?i)(?<![A-Za-z0-9])([A-Z]:\\|\\\\[A-Za-z0-9_.-]+\\)') {
+        if ($text -match '(?i)(?<![A-Za-z0-9])([A-Z]:\\|\\\\(?!u[0-9a-f]{4}\\)[A-Za-z0-9_.-]+\\[A-Za-z0-9_.-]+)') {
             throw "发布包文本包含本机绝对路径：$($file.FullName.Substring($PackageRoot.Length))"
         }
     }

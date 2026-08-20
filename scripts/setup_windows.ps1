@@ -77,6 +77,18 @@ if ($gitRepository) {
 }
 Write-Host "代码版本: $currentCommit" -ForegroundColor Green
 
+$requirementsFile = if ($gitRepository) { "requirements-dev.txt" } else { "requirements.txt" }
+$requirementsPath = Join-Path $ProjectRoot $requirementsFile
+if (-not (Test-Path -LiteralPath $requirementsPath -PathType Leaf)) {
+    throw "找不到依赖清单：$requirementsFile"
+}
+$testsAvailable = Test-Path -LiteralPath (Join-Path $ProjectRoot "tests") -PathType Container
+if ($gitRepository) {
+    Write-Host "依赖清单: $requirementsFile；检测到 tests，安装后可执行 pytest。" -ForegroundColor Green
+} else {
+    Write-Host "依赖清单: $requirementsFile；RC 运行包不含 tests，将跳过 pytest。" -ForegroundColor Yellow
+}
+
 $chromeCandidates = @()
 foreach ($basePath in @($env:ProgramFiles, ${env:ProgramFiles(x86)}, $env:LOCALAPPDATA)) {
     if ($basePath) {
@@ -105,10 +117,10 @@ if ($pythonVersion -notmatch "^Python 3\.12\.") {
 }
 Write-Host $pythonVersion -ForegroundColor Green
 
-Write-Host "[3/6] 安装固定运行和测试依赖" -ForegroundColor Cyan
+Write-Host "[3/6] 安装固定运行依赖" -ForegroundColor Cyan
 Invoke-Native $CondaCommand @(
     "run", "--no-capture-output", "-n", $EnvironmentName,
-    "python", "-m", "pip", "install", "-r", "requirements-dev.txt"
+    "python", "-m", "pip", "install", "-r", $requirementsFile
 )
 
 Write-Host "[4/6] 创建全新的生产运行目录" -ForegroundColor Cyan
@@ -159,7 +171,10 @@ if ((Test-Path -LiteralPath $envFile) -and -not $ForceConfig) {
         "`$env:MCP_PORT = $(ConvertTo-PowerShellLiteral '8765')",
         "`$env:MCP_ALLOWED_HOSTS = $(ConvertTo-PowerShellLiteral ($allowedHosts -join ','))",
         "`$env:MCP_FILE_SERVICE_ALLOWED_HOSTS = $(ConvertTo-PowerShellLiteral $FileServiceHost)",
-        "`$env:PUBLISH_AFTER_DRAFT = $(ConvertTo-PowerShellLiteral 'false')"
+        "`$env:PUBLISH_AFTER_DRAFT = $(ConvertTo-PowerShellLiteral 'false')",
+        "`$env:LEGACY_UPLOAD_QUEUE_ENABLED = $(ConvertTo-PowerShellLiteral 'false')",
+        "`$env:ACCOUNT_SESSIONS_ALLOW_PUBLIC_PUBLISH = $(ConvertTo-PowerShellLiteral 'false')",
+        "`$env:MCP_LEGACY_MUTATIONS_ENABLED = $(ConvertTo-PowerShellLiteral 'false')"
     )
     Set-Content -LiteralPath $envFile -Value ($configLines -join [Environment]::NewLine) -Encoding UTF8
     Write-Host "已生成生产配置（密钥不会打印，也不会进入 Git）: $envFile" -ForegroundColor Green
@@ -170,12 +185,15 @@ if ((Test-Path -LiteralPath $envFile) -and -not $ForceConfig) {
 Write-Host "[5/6] 检查生产配置和目录" -ForegroundColor Cyan
 Invoke-Native $pythonPath @("scripts\check_environment.py", "--flask-port", "5000", "--mcp-port", "8765")
 
-if (-not $SkipTests) {
-    Write-Host "[6/6] 执行安装后的回归检查" -ForegroundColor Cyan
-    Invoke-Native $pythonPath @("-m", "compileall", "-q", "app.py", "config.py", "core", "mcp_server", "platforms", "web", "scripts", "run_flask_production.py")
+Write-Host "[6/6] 执行安装后的运行时代码检查" -ForegroundColor Cyan
+Invoke-Native $pythonPath @("-m", "compileall", "-q", "app.py", "config.py", "core", "mcp_server", "platforms", "web", "scripts", "run_flask_production.py")
+if ($SkipTests) {
+    Write-Host "已跳过 pytest（-SkipTests）；compileall 已完成。" -ForegroundColor Yellow
+} elseif ($testsAvailable) {
+    Write-Host "执行 pytest 回归检查。" -ForegroundColor Cyan
     Invoke-Native $pythonPath @("-m", "pytest", "-q")
 } else {
-    Write-Host "[6/6] 已跳过 pytest（-SkipTests）" -ForegroundColor Yellow
+    Write-Host "当前发布包未包含 tests；跳过 pytest，compileall 已完成。" -ForegroundColor Yellow
 }
 
 Write-Host "初始化完成。" -ForegroundColor Green

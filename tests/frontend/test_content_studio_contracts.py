@@ -1,6 +1,5 @@
 from pathlib import Path
 
-
 ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -45,7 +44,10 @@ def test_upload_is_content_studio_not_legacy_queue_form() -> None:
     assert 'id="content-studio"' in template
     assert 'data-drafts-url="/api/content-drafts"' in template
     assert 'data-docx-url="/api/content-drafts/import-docx"' in template
-    assert 'data-legacy-url="/api/content-sources/legacy-articles"' in template
+    assert 'id="source-library-modal"' in template
+    assert 'id="source-library-title" class="modal-title">历史草稿' in template
+    assert 'id="legacy-tab"' not in template
+    assert 'data-legacy-url=' not in template
     assert 'data-plan-execute-url-template="/api/delivery-plans/{plan_id}/execute"' in template
     assert "/api/upload" not in template
     assert "开始处理并发布" not in template
@@ -106,7 +108,10 @@ def test_mobile_studio_does_not_hide_or_clip_overflow() -> None:
     assert ".studio-card { width: 100%; min-width: 0;" in studio_styles
     assert ".content-block { display: grid; width: 100%; min-width: 0;" in studio_styles
     assert ".studio-card-header > .d-flex .btn { flex: 1 1 calc(50% - .5rem);" in studio_styles
-    assert "#draft-title, .block-content textarea { width: 100%; min-width: 0; max-width: 100%; }" in studio_styles
+    assert (
+        "#draft-title, .block-content textarea { width: 100%; min-width: 0; max-width: 100%; }"
+        in studio_styles
+    )
     assert ".block-actions { grid-column: 1 / -1; justify-content: flex-end; }" in studio_styles
 
 
@@ -115,8 +120,9 @@ def test_target_switcher_loads_accounts_without_auto_selection() -> None:
     script = read("web/static/js/content-studio.js")
 
     assert "/api/platforms/{platform}/accounts?usable=true" in template
-    assert "state.switcherController?.abort()" in script
-    assert "const sequence = ++state.switcherSequence" in script
+    assert "state.switcherControllers[platformId]?.abort()" in script
+    assert "state.switcherSequences[platformId]" in script
+    assert "const controller = new AbortController()" in script
     assert "account.session_status === 'VALID'" in script
     assert "系统不会自动选择账号" in template
     assert "loadAccounts('xiaoheihe')" not in script
@@ -125,7 +131,7 @@ def test_target_switcher_loads_accounts_without_auto_selection() -> None:
     assert "function togglePlatform(platformId, checked)" in script
 
 
-def test_target_switcher_is_dynamic_vertical_rows_without_legacy_radios() -> None:
+def test_target_switcher_is_dynamic_capability_matrix_without_legacy_radios() -> None:
     template = read("web/templates/upload.html")
     script = read("web/static/js/content-studio.js")
     stylesheet = read("web/static/css/content-studio.css")
@@ -142,33 +148,61 @@ def test_target_switcher_is_dynamic_vertical_rows_without_legacy_radios() -> Non
     assert "target-platform-row" in stylesheet
     assert ".target-mode-switch" in stylesheet
     assert "target-platform-switch" in stylesheet
+    assert "state.platforms.map(platform => switcherRow(platform))" in script
+    assert "platformCapability(platform)" in script
+    assert "仅账号管理" in script
+    assert "即将接入" in script
 
 
-def test_target_switcher_uses_full_width_single_column_layout() -> None:
+def test_target_switcher_uses_comfortable_responsive_matrix_layout() -> None:
     stylesheet = read("web/static/css/content-studio.css")
 
     assert (
         ".target-builder { display: grid; "
         "grid-template-columns: minmax(0,1fr); align-items: stretch;"
     ) in stylesheet
-    assert ".target-switcher-list { display: flex; width: 100%; min-width: 0;" in stylesheet
+    assert ".target-switcher-list { display: grid; width: 100%; min-width: 0;" in stylesheet
+    assert "grid-template-columns: repeat(2,minmax(0,1fr));" in stylesheet
     assert ".target-platform-row { width: 100%; min-width: 0;" in stylesheet
     assert ".target-platform-head { display: flex; min-width: 0;" in stylesheet
     assert ".target-platform-name { min-width: 0; flex: 1 1 auto;" in stylesheet
-    assert "    .target-builder { grid-template-columns: repeat(2,minmax(0,1fr)); }" not in stylesheet
+    assert ".target-switcher-list { grid-template-columns: minmax(0,1fr); }" in stylesheet
     assert "    .target-builder, .studio-side, .source-actions" not in stylesheet
-    assert ".target-platform-head { flex-wrap: wrap; }" in stylesheet
-    assert ".target-mode-switch { order: 5; width: 100%; }" in stylesheet
+    assert "flex-wrap: wrap; align-items: center;" in stylesheet
+    assert ".target-mode-switch { order: 5; display: inline-flex; width: 100%;" in stylesheet
 
 
-def test_studio_initialization_refreshes_drafts_and_always_terminates() -> None:
+def test_studio_initialization_is_blank_until_explicit_draft_id() -> None:
     script = read("web/static/js/content-studio.js")
 
     assert "function openLocalDb(timeoutMs = 1500)" in script
     assert "request.onblocked = () => finish(null)" in script
     assert "const timer = setTimeout(() => finish(null), timeoutMs)" in script
-    assert "const drafts = await refreshDrafts()" in script
+    assert "const requestedId = params.get('draft_id')?.trim() || '';" in script
+    assert "await openDraft(blankDraft(), { historyMode: 'replace' });" in script
+    assert "const drafts = await refreshDrafts()" not in script
+    assert "draft = drafts[0]" not in script
+    init_body = script.split("async function init()", 1)[1].split("init();", 1)[0]
+    assert "method: 'POST'" not in init_body
     assert script.rstrip().endswith("init();\n})();")
+
+
+def test_explicit_restore_import_and_history_use_draft_urls() -> None:
+    template = read("web/templates/upload.html")
+    script = read("web/static/js/content-studio.js")
+
+    assert "endpoint(root.dataset.draftUrlTemplate, 'draft_id', requestedId)" in script
+    assert "historyMode: 'push'" in script
+    assert "history.pushState({}, '', url)" in script
+    assert "history.replaceState({}, '', url)" in script
+    assert "await openDraft(draft, { historyMode: 'replace' });" in script
+    assert "独立创建一份新草稿，不会覆盖历史" in template
+    assert "async function loadDraftLibrary()" in script
+    assert "shown.coreui.modal" in script
+    assert "source_ref" in script
+    assert "创建：${formatDate(draft.created_at)}" in script
+    assert "状态：${draftStatusLabels" in script
+    assert "copyLegacyArticle" not in script
 
 def test_multi_target_and_confirmation_contracts_are_separate() -> None:
     template = read("web/templates/upload.html")
@@ -215,7 +249,9 @@ def test_primary_action_reports_and_focuses_missing_fields() -> None:
     assert "disabled" not in template.split('id="create-plan"', 1)[1].split(">", 1)[0]
     assert 'id="validation-summary"' in template
     assert "showValidation(issues)" in script
-    assert "issues[0].focus" in script
+    assert "focusValidationIssue(issues[0])" in script
+    assert "step: 'content-section'" in script
+    assert "step: 'targets-section'" in script
     assert "填写文章标题" in script
     assert "至少选择一个投递目标" in script
 
@@ -229,17 +265,29 @@ def test_v2_draft_state_and_patch_never_silently_downgrade() -> None:
     assert "cover: cloneValue(normalizedCover(state.draft.cover))" in script
     assert "const requestIsV2 = isV2Draft()" in script
     assert "const requestBlocks = requestIsV2 ? null : publicBlocks();" in script
-    assert "const requestDocument = requestIsV2 ? cloneValue(state.draft.document) : null;" in script
+    assert (
+        "const requestDocument = requestIsV2 ? cloneValue(state.draft.document) : null;"
+        in script
+    )
     assert "const requestBody = requestIsV2" in script
     assert "document: requestDocument" in script
     assert "cover: requestCover" in script
     assert "asset_id: value.strategy === 'EXPLICIT' ? value.asset_id : null" in script
     assert "const requestSnapshot = contentSnapshot(state.draft);" in script
-    assert "const changedDuringRequest = contentSnapshot(state.draft) !== requestSnapshot;" in script
+    assert (
+        "const changedDuringRequest = contentSnapshot(state.draft) !== requestSnapshot;"
+        in script
+    )
     assert "DRAFT_CONTENT_SCHEMA_CONFLICT" in script
     assert "editor.contentEditable = readonly ? 'false' : 'true';" in script
     assert "if (isV2Draft()) return [];" in script
-    assert "if (isV2Draft()) {\n            setMessage('content-error', v2ReadonlyMessage());\n            return;\n        }" in script
+    assert (
+        "if (isV2Draft()) {\n"
+        "            setMessage('content-error', v2ReadonlyMessage());\n"
+        "            return;\n"
+        "        }"
+        in script
+    )
     assert "assetUpload.disabled = readonly" in script
     assert "Word 富文档受保护，当前正文只读；重新导入可替换" in script
     assert "showDropOverlay(false);" in script
@@ -252,10 +300,16 @@ def test_v2_local_recovery_conflict_copy_and_title_stay_schema_aware() -> None:
     assert "document: schemaVersion === 2 ? cloneValue(snapshot.document) : null" in script
     assert "state.draft.document = cloneValue(local.document);" in script
     assert "const localMatchesSchema = serverIsV2" in script
-    assert "const localSameRevision = Boolean(local?.dirty && local.revision === payload.revision);" in script
+    assert (
+        "const localSameRevision = Boolean(local?.dirty && local.revision === payload.revision);"
+        in script
+    )
     assert "已保留本地副本且未静默降级" in script
     assert "state.draft.document.title = event.target.value;" in script
-    assert "content_schema_version: 2,\n                document: cloneValue(state.draft.document)" in script
+    assert (
+        "content_schema_version: 2,\n                document: cloneValue(state.draft.document)"
+        in script
+    )
     assert "cover: coverRequest(state.draft.cover)" in script
 
 
@@ -332,23 +386,84 @@ def test_cover_ui_uses_controlled_assets_and_preserves_request_contract() -> Non
     assert ".cover-asset-card" in styles
 
 
-def test_docx_auto_cover_is_import_only_and_can_be_dismissed() -> None:
+def test_docx_import_preserves_explicit_no_cover_default() -> None:
     script = read("web/static/js/content-studio.js")
 
-    assert "async function maybeAutoSelectImportedCover()" in script
-    assert "state.draft.source_type !== 'DOCX'" in script
-    assert "normalizedCover(state.draft.cover).strategy !== 'NONE'" in script
-    assert "state.coverAutoSelectionDismissed" in script
-    assert (
-        "setCoverStrategy('FIRST_BODY_IMAGE', candidates[0].asset_id, "
-        "{ automatic: true })"
-    ) in script
-    assert "await maybeAutoSelectImportedCover();" in script
+    assert "maybeAutoSelectImportedCover" not in script
+    import_body = script.split("async function importDocx(file)", 1)[1].split(
+        "async function resolveConflict", 1
+    )[0]
+    assert "FIRST_BODY_IMAGE" not in import_body
+    assert "openDraft(draft, { historyMode: 'replace' })" in import_body
     assert "state.coverAutoSelectionDismissed = automatic ? false : strategy === 'NONE';" in script
     assert (
         "state.coverAutoSelectionDismissed = "
         "Boolean(local.cover_auto_selection_dismissed);"
     ) in script
+
+
+def test_studio_steps_are_clickable_and_keep_sections_close() -> None:
+    template = read("web/templates/upload.html")
+    script = read("web/static/js/content-studio.js")
+    styles = read("web/static/css/content-studio.css")
+
+    assert template.count('class="studio-step-link"') == 3
+    assert 'href="#targets-section"' in template
+    assert 'data-step-target="content-section"' in template
+    assert 'data-step-target="targets-section"' in template
+    assert 'data-step-target="execution-section"' in template
+    assert 'id="go-to-targets"' in template
+    assert 'id="back-to-content"' in template
+    assert 'id="go-to-execution"' in template
+    assert "function scrollToStudioStep(targetId)" in script
+    assert "window.addEventListener('hashchange', syncStudioStepFromLocation)" in script
+    assert "prefers-reduced-motion: reduce" in script
+    assert ".studio-progress { position: sticky;" in styles
+    assert "pointer-events: none;" in styles
+    assert ".studio-step-section { scroll-margin-top:" in styles
+
+
+def test_platform_modes_follow_the_platform_switch_state() -> None:
+    script = read("web/static/js/content-studio.js")
+    styles = read("web/static/css/content-studio.css")
+
+    assert "modeDraft.disabled = !on" in script
+    assert "modePublish.disabled = !on" in script
+    assert "toggle.disabled = !canDeliver" in script
+    assert "if (!state.switcherToggles[platformId]) return;" in script
+    assert ".target-mode-switch .mode-seg:disabled" in styles
+
+
+def test_blank_workspace_uses_minimal_lazy_create_and_never_restores_indexeddb() -> None:
+    script = read("web/static/js/content-studio.js")
+
+    assert "function blankDraft()" in script
+    assert "async function createPersistedDraft()" in script
+    assert "if (!state.draft.draft_id)" in script
+    assert (
+        "const local = payload?.draft_id ? await localDraftGet(payload.draft_id) : null;"
+        in script
+    )
+    assert "if (!(await createPersistedDraft())) return;" in script
+    assert "state.draft.draft_id ? await localDraftGet" not in script
+
+
+def test_accounts_page_honors_platform_query_without_visual_refactor() -> None:
+    script = read("web/static/js/account-sessions.js")
+
+    assert "new URLSearchParams(window.location.search).get('platform')" in script
+    assert "item.id === requestedPlatform && item.account_enabled" in script
+    assert "selectPlatform(requested.id)" in script
+
+
+def test_empty_valid_account_state_links_to_platform_account_management() -> None:
+    script = read("web/static/js/content-studio.js")
+
+    empty_branch = script.split("if (accounts.length === 0)", 1)[1].split(
+        "return accounts.map", 1
+    )[0]
+    assert "accounts?platform=" in empty_branch
+    assert "VALID 登录态" in empty_branch
 
 
 def test_format_review_targets_are_warning_only_and_never_execute() -> None:

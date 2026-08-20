@@ -4,12 +4,13 @@
 它不登录、不创建 DeliveryPlan，也不触发平台操作。
 """
 
+import json
 import os
 from pathlib import Path
+from urllib.parse import parse_qs, urlparse
 
 import pytest
 from playwright.async_api import async_playwright
-
 
 BASE_URL = os.getenv("ARTICLEOPS_FRONTEND_BASE_URL", "").rstrip("/")
 BROWSER_PATH = os.getenv("ARTICLEOPS_CHROMIUM_EXECUTABLE", "").strip()
@@ -70,11 +71,9 @@ async def test_studio_key_controls_stay_inside_mobile_and_tablet_viewports() -> 
                 console_errors: list[dict] = []
                 page.on(
                     "console",
-                    lambda message: console_errors.append(
+                    lambda message, errors=console_errors: errors.append(
                         {"text": message.text, "location": message.location}
-                    )
-                    if message.type == "error"
-                    else None,
+                    ) if message.type == "error" else None,
                 )
                 await page.goto(
                     f"{BASE_URL}/upload?draft_id={draft_id}",
@@ -82,17 +81,19 @@ async def test_studio_key_controls_stay_inside_mobile_and_tablet_viewports() -> 
                 )
                 await page.locator("#studio-workspace:not(.d-none)").wait_for()
 
-                platform_cards = page.locator("#platform-selector-grid .platform-card")
-                assert await platform_cards.count() == 10
+                platform_rows = page.locator("#target-switcher-list .target-platform-row")
+                assert await platform_rows.count() == 10
                 assert await page.locator(
-                    '.platform-card[data-platform-id="xiaoheihe"]:not(:disabled)'
+                    '.target-platform-row[data-platform-id="xiaoheihe"] '
+                    'input[role="switch"]:not(:disabled)'
                 ).count() == 1
                 assert await page.locator(
-                    '.platform-card[data-platform-id="zhihu"]:not(:disabled)'
+                    '.target-platform-row[data-platform-id="zhihu"] '
+                    'input[role="switch"]:not(:disabled)'
                 ).count() == 1
                 assert await page.locator(
-                    "#platform-selector-grid .platform-card:disabled"
-                ).count() == 7
+                    "#target-switcher-list input[role='switch']:disabled"
+                ).count() == 4
                 rows = await page.evaluate(
                     """selectors => Object.entries(selectors).flatMap(([name, selector]) =>
                         [...document.querySelectorAll(selector)].map((element, index) => {
@@ -175,22 +176,22 @@ async def test_account_target_selection_persists_without_creating_plan() -> None
         try:
             await page.goto(f"{BASE_URL}/upload?draft_id={draft_id}", wait_until="networkidle")
             await page.locator("#studio-workspace:not(.d-none)").wait_for()
-            account_select = page.locator("#target-account")
-            assert await account_select.is_disabled()
-
-            await page.locator(
-                '.platform-card[data-platform-id="xiaoheihe"]'
-            ).click()
-            await account_select.locator("option").nth(2).wait_for(state="attached")
-            assert await account_select.input_value() == ""
-            option_labels = await account_select.locator("option").all_text_contents()
-            assert [account["display_name"] for account in valid_accounts] == [
-                label.split(" · ****", 1)[0] for label in option_labels[1:]
-            ]
+            xhh_row = page.locator('.target-platform-row[data-platform-id="xiaoheihe"]')
+            xhh_switch = xhh_row.locator('input[role="switch"]')
+            assert not await xhh_switch.is_checked()
+            await xhh_switch.check()
+            account_checks = xhh_row.locator('.target-account-check input[type="checkbox"]')
+            await account_checks.nth(1).wait_for(state="attached")
+            account_count = await account_checks.count()
+            assert account_count == len(valid_accounts)
+            assert not any(
+                [await account_checks.nth(index).is_checked() for index in range(account_count)]
+            )
 
             selected = valid_accounts[0]
-            await account_select.select_option(selected["account_id"])
-            await page.locator("#add-target").click()
+            await xhh_row.locator(
+                f'input[aria-label="选择账号 {selected["display_name"]}"]'
+            ).check()
             await page.locator("#targets-list .target-row").wait_for()
             assert await page.locator("#target-count").text_content() == "1 个目标"
 
@@ -210,4 +211,144 @@ async def test_account_target_selection_persists_without_creating_plan() -> None
         finally:
             await page.close()
             await browser.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(not BASE_URL, reason="需要显式隔离 QA URL")
+async def test_plain_upload_is_blank_and_history_is_lazy_loaded() -> None:
+    executable = Path(BROWSER_PATH) if BROWSER_PATH else None
+    if executable and not executable.is_file():
+        pytest.fail(f"Chromium 不存在: {executable}")
+
+    async with async_playwright() as playwright:
+        browser = await playwright.chromium.launch(
+            headless=True,
+            executable_path=str(executable) if executable else None,
+        )
+        try:
+            page = await browser.new_page(viewport={"width": 1440, "height": 900})
+            draft_requests: list[tuple[str, str]] = []
+            page.on(
+                "request",
+                lambda request: draft_requests.append((request.method, request.url))
+                if urlparse(request.url).path.rstrip("/") == "/api/content-drafts"
+                else None,
+            )
+            await page.goto(f"{BASE_URL}/upload", wait_until="networkidle")
+            await page.locator("#studio-workspace:not(.d-none)").wait_for()
+
+            assert await page.locator("#draft-title").input_value() == ""
+            assert await page.locator("#rich-editor").inner_text() == ""
+            assert await page.locator("#cover-none").is_checked()
+            assert await page.locator("#target-count").text_content() == "0 个目标"
+            assert draft_requests == []
+
+            async with page.expect_request(
+                lambda request: request.method == "GET"
+                and urlparse(request.url).path.rstrip("/") == "/api/content-drafts"
+            ):
+                await page.locator("#open-source-library").click()
+            await page.locator("#source-library-modal.show").wait_for()
+            assert len(draft_requests) == 1
+            assert parse_qs(urlparse(draft_requests[0][1]).query) == {
+                "limit": ["50"],
+                "offset": ["0"],
+            }
+        finally:
+            await browser.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(not BASE_URL, reason="需要显式隔离 QA URL")
+async def test_explicit_draft_restore_and_docx_import_use_distinct_urls() -> None:
+    executable = Path(BROWSER_PATH) if BROWSER_PATH else None
+    if executable and not executable.is_file():
+        pytest.fail(f"Chromium 不存在: {executable}")
+
+    async with async_playwright() as playwright:
+        api = await playwright.request.new_context(base_url=BASE_URL)
+        draft_response = await api.post(
+            "/api/content-drafts",
+            data={
+                "title": "QA 显式恢复标题",
+                "blocks": [{"type": "text", "text": "只读恢复验证。"}],
+                "cover": {"strategy": "NONE", "asset_id": None},
+            },
+        )
+        assert draft_response.ok
+        draft_id = (await draft_response.json())["draft_id"]
+
+        browser = await playwright.chromium.launch(
+            headless=True,
+            executable_path=str(executable) if executable else None,
+        )
+        try:
+            page = await browser.new_page(viewport={"width": 1440, "height": 900})
+            await page.goto(f"{BASE_URL}/upload?draft_id={draft_id}", wait_until="networkidle")
+            await page.locator("#studio-workspace:not(.d-none)").wait_for()
+            assert await page.locator("#draft-title").input_value() == "QA 显式恢复标题"
+            assert parse_qs(urlparse(page.url).query)["draft_id"] == [draft_id]
+            await page.reload(wait_until="networkidle")
+            assert await page.locator("#draft-title").input_value() == "QA 显式恢复标题"
+
+            import_count = 0
+
+            async def import_route(route) -> None:
+                nonlocal import_count
+                import_count += 1
+                imported_id = f"qa-import-{import_count}"
+                payload = {
+                    "draft_id": imported_id,
+                    "source_type": "DOCX",
+                    "source_ref": f"{imported_id}.docx",
+                    "title": f"导入标题 {import_count}",
+                    "content_schema_version": 1,
+                    "document": None,
+                    "blocks": [{
+                        "block_id": f"b{import_count}",
+                        "type": "text",
+                        "text": "导入正文",
+                        "asset_id": None,
+                        "asset_url": None,
+                        "position": 0,
+                    }],
+                    "cover": {"strategy": "NONE", "asset_id": None, "asset_url": None},
+                    "status": "ACTIVE",
+                    "revision": 1,
+                    "targets": [],
+                    "created_at": None,
+                    "updated_at": None,
+                }
+                await route.fulfill(
+                    status=201,
+                    content_type="application/json",
+                    body=json.dumps(payload, ensure_ascii=False),
+                )
+
+            await page.route("**/api/content-drafts/import-docx", import_route)
+            docx_mime = (
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+            )
+            for expected_id in ("qa-import-1", "qa-import-2"):
+                await page.locator("#docx-import").set_input_files(
+                    {
+                        "name": f"{expected_id}.docx",
+                        "mimeType": docx_mime,
+                        "buffer": b"qa",
+                    }
+                )
+                await page.wait_for_function(
+                    "expected => new URL(window.location.href).searchParams.get("
+                    "'draft_id') === expected",
+                    expected_id,
+                )
+                assert await page.locator("#cover-none").is_checked()
+                assert await page.locator("#draft-title").input_value() == (
+                    f"导入标题 {import_count}"
+                )
+            assert import_count == 2
+            assert parse_qs(urlparse(page.url).query)["draft_id"] == ["qa-import-2"]
+        finally:
+            await browser.close()
+            await api.dispose()
             await api.dispose()

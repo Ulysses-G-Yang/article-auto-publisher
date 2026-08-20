@@ -5,7 +5,7 @@
     if (!root) return;
 
     const byId = id => document.getElementById(id);
-    const sourceLabels = { BLANK: '空白草稿', DOCX: 'DOCX 导入', LEGACY_ARTICLE: '历史文章副本', SYSTEM_SEED: '系统草稿' };
+    const sourceLabels = { BLANK: '空白草稿', DOCX: 'DOCX 导入', SYSTEM_SEED: '系统草稿' };
     const planStatusLabels = {
         READY: '待执行', CREATING: '正在创建执行单', QUEUED: '已排队', RUNNING: '执行中', SUCCESS: '已完成',
         PARTIAL_FAIL: '部分失败', FATAL: '执行失败', CONFIRMATION_REQUIRED: '待公开确认',
@@ -31,8 +31,9 @@
         switcherAccounts: {},
         switcherSelected: {},
         switcherModes: {},
-        switcherController: null,
-        switcherSequence: 0,
+        switcherControllers: {},
+        switcherSequences: {},
+        draftLibraryLoading: false,
         saveTimer: null,
         saving: false,
         dirty: false,
@@ -133,6 +134,70 @@
         const indicator = byId('save-indicator');
         indicator.className = `save-indicator is-${kind}`;
         byId('save-indicator-text').textContent = text;
+        const saveButton = byId('save-draft-now');
+        if (saveButton) {
+            const canSave = kind === 'local' || kind === 'error';
+            saveButton.disabled = !canSave;
+            saveButton.setAttribute('aria-disabled', String(!canSave));
+            saveButton.title = canSave ? '立即同步当前草稿' : text;
+        }
+    }
+
+    function setCurrentStudioStep(stepNumber) {
+        document.querySelectorAll('[data-studio-step]').forEach(item => {
+            const current = Number(item.dataset.studioStep) === stepNumber;
+            item.classList.toggle('is-current', current);
+            const button = item.querySelector('.studio-step-link');
+            if (button) {
+                if (current) button.setAttribute('aria-current', 'step');
+                else button.removeAttribute('aria-current');
+            }
+        });
+    }
+
+    function updateStudioProgress() {
+        const hasContent = Boolean(state.draft?.title?.trim() && publicBlocks().length);
+        const hasTargets = Boolean(state.draft?.targets?.length);
+        const hasPlan = Boolean(state.plan);
+        document.querySelector('[data-studio-step="1"]')?.classList.toggle('is-complete', hasContent);
+        document.querySelector('[data-studio-step="2"]')?.classList.toggle('is-complete', hasTargets);
+        document.querySelector('[data-studio-step="3"]')?.classList.toggle('is-complete', hasPlan);
+    }
+
+    function scrollToStudioStep(targetId) {
+        const section = byId(targetId);
+        if (!section) return;
+        const stepNumber = targetId === 'content-section' ? 1 : targetId === 'targets-section' ? 2 : 3;
+        setCurrentStudioStep(stepNumber);
+        section.scrollIntoView({
+            behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth',
+            block: 'start',
+        });
+        const heading = section.querySelector('h2');
+        if (heading) {
+            heading.setAttribute('tabindex', '-1');
+            window.setTimeout(() => heading.focus({ preventScroll: true }), 250);
+        }
+    }
+
+    function syncStudioStepFromLocation() {
+        const targetId = window.location.hash.replace(/^#/, '');
+        if (['content-section', 'targets-section', 'execution-section'].includes(targetId)) {
+            setCurrentStudioStep(targetId === 'content-section' ? 1 : targetId === 'targets-section' ? 2 : 3);
+        }
+    }
+
+    function focusValidationIssue(issue) {
+        if (issue.step) scrollToStudioStep(issue.step);
+        const target = byId(issue.focus);
+        if (target?.matches?.('input, button, textarea, [contenteditable="true"], [tabindex]')) {
+            window.setTimeout(() => target.focus({ preventScroll: false }), 280);
+            return;
+        }
+        if (issue.focus === 'target-switcher-list') {
+            const firstSwitch = target?.querySelector('input[type="checkbox"]:not(:disabled)');
+            window.setTimeout(() => firstSwitch?.focus({ preventScroll: false }), 280);
+        }
     }
 
     function openLocalDb(timeoutMs = 1500) {
@@ -229,11 +294,88 @@
         byId('plan-result').classList.add('d-none');
     }
 
+    function blankDraft() {
+        return {
+            draft_id: null,
+            source_type: 'BLANK',
+            source_ref: null,
+            title: '',
+            content_schema_version: 1,
+            document: null,
+            blocks: [],
+            cover: normalizedCover({ strategy: 'NONE' }),
+            status: 'UNSAVED',
+            revision: null,
+            targets: [],
+            created_at: null,
+            updated_at: null,
+        };
+    }
+
+    function clearStudioMessages() {
+        ['studio-fatal', 'content-error', 'target-builder-error', 'execution-error',
+            'plan-review-error', 'publish-confirm-error'].forEach(id => setMessage(id, ''));
+        byId('validation-summary')?.classList.add('d-none');
+    }
+
+    function requestDraftPayload(draft = state.draft) {
+        if (!draft) return { title: '', blocks: [], cover: coverRequest({ strategy: 'NONE' }) };
+        if (isV2Draft(draft)) {
+            return {
+                title: draft.title || '',
+                content_schema_version: 2,
+                document: cloneValue(draft.document),
+                cover: coverRequest(draft.cover),
+            };
+        }
+        return {
+            title: draft.title || '',
+            blocks: publicBlocks(draft.blocks),
+            cover: coverRequest(draft.cover),
+        };
+    }
+
+    async function createPersistedDraft() {
+        if (!state.draft) return false;
+        if (state.draft.draft_id) return true;
+        const localSnapshot = contentSnapshot(state.draft);
+        const payload = await jsonResponse(await fetch(root.dataset.draftsUrl, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+            body: JSON.stringify(requestDraftPayload()),
+        }));
+        const changedDuringRequest = contentSnapshot(state.draft) !== localSnapshot;
+        const currentDraft = state.draft;
+        applyDraft(payload);
+        if (changedDuringRequest) {
+            state.draft.title = currentDraft.title;
+            state.draft.blocks = cloneValue(currentDraft.blocks);
+            state.draft.cover = normalizedCover(currentDraft.cover);
+            state.draft.targets = cloneValue(currentDraft.targets || []);
+            state.dirty = true;
+            byId('draft-title').value = state.draft.title;
+            renderBlocks();
+            renderCover();
+            renderTargets();
+            updateDraftMeta();
+            setSaveState('local', '本地已保存');
+            await localDraftPut(true);
+            clearTimeout(state.saveTimer);
+            state.saveTimer = setTimeout(() => saveDraftNow(), 1000);
+            return false;
+        }
+        state.dirty = false;
+        await localDraftPut(false);
+        setSaveState('synced', '已同步');
+        return true;
+    }
+
     async function markDirty() {
         if (!state.draft) return;
         state.dirty = true;
         invalidatePlan();
         setSaveState('local', '本地已保存');
+        updateStudioProgress();
         await localDraftPut(true);
         clearTimeout(state.saveTimer);
         state.saveTimer = setTimeout(() => saveDraftNow(), 1000);
@@ -244,6 +386,17 @@
         if (!state.draft || !state.dirty || state.saving || state.conflictServerDraft) return !state.dirty;
         state.saving = true;
         setSaveState('saving', '正在同步');
+        if (!state.draft.draft_id) {
+            try {
+                return await createPersistedDraft();
+            } catch (error) {
+                setSaveState('error', '同步失败');
+                setMessage('content-error', `${error.message || '草稿同步失败'}；本地恢复副本已保留。`);
+                return false;
+            } finally {
+                state.saving = false;
+            }
+        }
         const baseRevision = state.draft.revision;
         try {
             const requestTitle = state.draft.title;
@@ -314,16 +467,17 @@
         }
     }
 
-    function applyDraft(payload, { render = true } = {}) {
-        const schemaVersion = Number(payload.content_schema_version) === 2 ? 2 : 1;
+    function applyDraft(payload, { render = true, historyMode = 'replace' } = {}) {
+        const source = payload || blankDraft();
+        const schemaVersion = Number(source.content_schema_version) === 2 ? 2 : 1;
         state.draft = {
-            ...payload,
-            title: payload.title || '',
-            blocks: Array.isArray(payload.blocks) ? payload.blocks.map((block, position) => ({ ...block, position })) : [],
+            ...source,
+            title: source.title || '',
+            blocks: Array.isArray(source.blocks) ? source.blocks.map((block, position) => ({ ...block, position })) : [],
             content_schema_version: schemaVersion,
-            document: schemaVersion === 2 ? cloneValue(payload.document) : null,
-            cover: normalizedCover(payload.cover),
-            targets: Array.isArray(payload.targets) ? payload.targets : [],
+            document: schemaVersion === 2 ? cloneValue(source.document) : null,
+            cover: normalizedCover(source.cover),
+            targets: Array.isArray(source.targets) ? source.targets : [],
         };
         // 回填滑块状态：已有目标 → 平台开关/账号勾选/模式
         state.switcherToggles = {};
@@ -349,13 +503,15 @@
             updateDraftMeta();
         }
         const url = new URL(window.location.href);
-        url.searchParams.set('draft_id', state.draft.draft_id);
-        history.replaceState({}, '', url);
+        if (state.draft.draft_id) url.searchParams.set('draft_id', state.draft.draft_id);
+        else url.searchParams.delete('draft_id');
+        if (historyMode === 'push') history.pushState({}, '', url);
+        else history.replaceState({}, '', url);
     }
 
-    async function openDraft(payload) {
-        applyDraft(payload);
-        const local = await localDraftGet(payload.draft_id);
+    async function openDraft(payload, options = {}) {
+        applyDraft(payload, options);
+        const local = payload?.draft_id ? await localDraftGet(payload.draft_id) : null;
         const serverIsV2 = isV2Draft(state.draft);
         const localMatchesSchema = serverIsV2
             ? Number(local?.content_schema_version) === 2
@@ -388,9 +544,11 @@
             setSaveState('local', '已恢复本地未同步内容');
             clearTimeout(state.saveTimer);
             state.saveTimer = setTimeout(() => saveDraftNow(), 1000);
-        } else {
+        } else if (payload?.draft_id) {
             await localDraftPut(false);
             setSaveState('synced', '已同步');
+        } else {
+            setSaveState('synced', '空白工作台（未保存）');
         }
         byId('studio-loading').classList.add('d-none');
         byId('studio-workspace').classList.remove('d-none');
@@ -404,7 +562,7 @@
              const sourceBadge = byId('draft-source-badge');
              if (sourceBadge) sourceBadge.textContent = source;
              const revElem = byId('draft-revision');
-             if (revElem) revElem.textContent = `修订 ${state.draft.revision}`;
+             if (revElem) revElem.textContent = state.draft.revision ? `修订 ${state.draft.revision}` : '未保存';
              const updatedElem = byId('draft-updated-at');
              if (updatedElem) updatedElem.textContent = state.draft.updated_at ? `更新于 ${formatDate(state.draft.updated_at)}` : '';
         }
@@ -421,8 +579,9 @@
                 };
             byId('side-block-count').textContent = `${counts.paragraphs + counts.headings} 段 · ${counts.images} 图`;
             byId('side-target-count').textContent = String(state.draft.targets.length);
-            byId('side-revision').textContent = String(state.draft.revision);
+            byId('side-revision').textContent = state.draft.revision ? String(state.draft.revision) : '未保存';
         }
+        updateStudioProgress();
     }
 
     function formatDate(value) {
@@ -848,14 +1007,6 @@
         return changed;
     }
 
-    async function maybeAutoSelectImportedCover() {
-        if (!state.draft || state.draft.source_type !== 'DOCX' || !isV2Draft()) return;
-        if (normalizedCover(state.draft.cover).strategy !== 'NONE' || state.coverAutoSelectionDismissed) return;
-        const candidates = contentImageCandidates();
-        if (!candidates.length) return;
-        setCoverStrategy('FIRST_BODY_IMAGE', candidates[0].asset_id, { automatic: true });
-    }
-
     function v2ReadonlyMessage() {
         return 'Word 富文档受保护，当前正文只读；重新导入可替换';
     }
@@ -1014,6 +1165,7 @@
         setMessage('content-error', '');
         setSaveState('saving', '正在上传图片');
         try {
+            if (!(await createPersistedDraft())) return;
             for (const file of files) {
                 const form = new FormData(); form.append('file', file);
                 const response = await fetch(endpoint(root.dataset.assetsUrlTemplate, 'draft_id', state.draft.draft_id), { method: 'POST', body: form, headers: { Accept: 'application/json' } });
@@ -1080,16 +1232,27 @@
     function renderTargetSwitcher() {
         const list = byId('target-switcher-list');
         if (!list) return;
-        list.replaceChildren(...state.platforms
-            .filter(platform => platform.delivery_enabled)
-            .map(platform => switcherRow(platform)));
+        list.replaceChildren(...state.platforms.map(platform => switcherRow(platform)));
+        const deliverable = state.platforms.filter(platform => platform.delivery_enabled).length;
+        const accountOnly = state.platforms.filter(platform => !platform.delivery_enabled && platform.account_enabled).length;
+        const comingSoon = state.platforms.length - deliverable - accountOnly;
+        const summary = byId('platform-capability-summary');
+        if (summary) summary.textContent = `${deliverable} 个可投递 · ${accountOnly} 个仅账号管理 · ${comingSoon} 个即将接入`;
         byId('targets-empty').classList.toggle('d-none', (state.draft?.targets || []).length > 0);
     }
 
+    function platformCapability(platform) {
+        if (platform.delivery_enabled) return { label: '可投递', className: 'is-deliverable' };
+        if (platform.account_enabled) return { label: '仅账号管理', className: 'is-account-only' };
+        return { label: '即将接入', className: 'is-coming-soon' };
+    }
+
     function switcherRow(platform) {
-        const on = Boolean(state.switcherToggles[platform.id]);
+        const canDeliver = Boolean(platform.delivery_enabled);
+        const on = canDeliver && Boolean(state.switcherToggles[platform.id]);
+        const capability = platformCapability(platform);
         const row = document.createElement('div');
-        row.className = `target-platform-row${on ? ' is-on' : ''}`;
+        row.className = `target-platform-row ${capability.className}${on ? ' is-on' : ''}`;
         row.dataset.platformId = platform.id;
 
         // 头部：图标 + 名称 + 模式滑块（草稿/公开）+ 平台开关
@@ -1101,6 +1264,11 @@
         name.textContent = platform.display_name;
         head.appendChild(name);
 
+        const capabilityBadge = document.createElement('span');
+        capabilityBadge.className = 'target-capability-badge';
+        capabilityBadge.textContent = capability.label;
+        head.appendChild(capabilityBadge);
+
         const mode = document.createElement('div');
         mode.className = 'target-mode-switch';
         mode.setAttribute('role', 'group');
@@ -1110,11 +1278,13 @@
         modeDraft.className = `mode-seg${switcherMode(platform.id) === 'DRAFT' ? ' is-active' : ''}`;
         modeDraft.textContent = '平台草稿';
         modeDraft.dataset.mode = 'DRAFT';
+        modeDraft.disabled = !on;
         const modePublish = document.createElement('button');
         modePublish.type = 'button';
         modePublish.className = `mode-seg${switcherMode(platform.id) === 'PUBLISH' ? ' is-active' : ''}`;
         modePublish.textContent = '公开发布';
         modePublish.dataset.mode = 'PUBLISH';
+        modePublish.disabled = !on;
         modeDraft.addEventListener('click', () => setSwitcherMode(platform.id, 'DRAFT'));
         modePublish.addEventListener('click', () => setSwitcherMode(platform.id, 'PUBLISH'));
         mode.append(modeDraft, modePublish);
@@ -1127,7 +1297,9 @@
         toggle.className = 'form-check-input';
         toggle.role = 'switch';
         toggle.checked = on;
+        toggle.disabled = !canDeliver;
         toggle.setAttribute('aria-label', `启用${platform.display_name}投递`);
+        toggle.title = canDeliver ? `启用${platform.display_name}并选择账号` : capability.label;
         toggle.addEventListener('change', () => togglePlatform(platform.id, toggle.checked));
         switchWrap.appendChild(toggle);
         head.appendChild(switchWrap);
@@ -1136,10 +1308,27 @@
         // 展开区：账号多选
         const body = document.createElement('div');
         body.className = 'target-platform-body';
-        if (on) {
+        if (!canDeliver) {
+            const message = document.createElement('div');
+            message.className = 'target-unavailable-message';
+            message.textContent = platform.account_enabled
+                ? '当前版本暂不参与投递，可先在账号页维护登录态。'
+                : '平台入口已预留，适配器与账号能力尚未开放。';
+            body.appendChild(message);
+            if (platform.account_enabled) {
+                const link = document.createElement('a');
+                link.className = 'btn btn-sm btn-outline-secondary';
+                link.href = `/accounts?platform=${encodeURIComponent(platform.id)}`;
+                link.textContent = '前往账号管理';
+                body.appendChild(link);
+            }
+        } else if (on) {
             if (state.switcherAccounts[platform.id] === undefined) {
+                state.switcherAccounts[platform.id] = null;
                 body.appendChild(switcherBodyMessage('正在读取账号…'));
                 loadSwitcherAccounts(platform.id);
+            } else if (state.switcherAccounts[platform.id] === null) {
+                body.appendChild(switcherBodyMessage('正在读取账号…'));
             } else {
                 body.append(...switcherAccountChecks(platform.id));
             }
@@ -1162,7 +1351,11 @@
             const empty = document.createElement('div');
             empty.className = 'target-accounts-empty';
             empty.textContent = '该平台暂无可用账号（需要 VALID 登录态）。';
-            return [empty];
+            const link = document.createElement('a');
+            link.className = 'btn btn-sm btn-outline-secondary';
+            link.href = `/accounts?platform=${encodeURIComponent(platformId)}`;
+            link.textContent = '前往账号管理';
+            return [empty, link];
         }
         return accounts.map(account => {
             const wrap = document.createElement('label');
@@ -1182,22 +1375,26 @@
     }
 
     async function loadSwitcherAccounts(platformId) {
-        const sequence = ++state.switcherSequence;
-        state.switcherController?.abort();
-        state.switcherController = new AbortController();
+        const sequence = (state.switcherSequences[platformId] || 0) + 1;
+        state.switcherSequences[platformId] = sequence;
+        state.switcherControllers[platformId]?.abort();
+        const controller = new AbortController();
+        state.switcherControllers[platformId] = controller;
         try {
             const url = endpoint(root.dataset.accountsUrlTemplate, 'platform', platformId);
-            const payload = await jsonResponse(await fetch(url, { signal: state.switcherController.signal, headers: { Accept: 'application/json' } }));
-            if (sequence !== state.switcherSequence) return;
+            const payload = await jsonResponse(await fetch(url, { signal: controller.signal, headers: { Accept: 'application/json' } }));
+            if (sequence !== state.switcherSequences[platformId]) return;
             if (payload.platform && payload.platform !== platformId) throw new Error('账号响应与所选平台不匹配');
             state.switcherAccounts[platformId] = (Array.isArray(payload.accounts) ? payload.accounts : []).filter(account => account.session_status === 'VALID');
             state.switcherSelected[platformId] = state.switcherSelected[platformId] || [];
             reRenderSwitcherRow(platformId);
         } catch (error) {
-            if (error.name === 'AbortError' || sequence !== state.switcherSequence) return;
+            if (error.name === 'AbortError' || sequence !== state.switcherSequences[platformId]) return;
             state.switcherAccounts[platformId] = [];
             setMessage('target-builder-error', `加载${platformLabel(platformId)}账号失败：${error.message || '未知错误'}`);
             reRenderSwitcherRow(platformId);
+        } finally {
+            if (state.switcherControllers[platformId] === controller) delete state.switcherControllers[platformId];
         }
     }
 
@@ -1210,10 +1407,13 @@
     }
 
     function togglePlatform(platformId, checked) {
+        const platform = state.platforms.find(item => item.id === platformId);
+        if (!platform?.delivery_enabled) return;
         state.switcherToggles[platformId] = checked;
-        if (checked) {
-            if (state.switcherAccounts[platformId] === undefined) loadSwitcherAccounts(platformId);
-        } else {
+        if (!checked) {
+            state.switcherControllers[platformId]?.abort();
+            delete state.switcherControllers[platformId];
+            if (state.switcherAccounts[platformId] === null) delete state.switcherAccounts[platformId];
             state.switcherSelected[platformId] = [];
         }
         reRenderSwitcherRow(platformId);
@@ -1232,6 +1432,7 @@
     }
 
     function setSwitcherMode(platformId, mode) {
+        if (!state.switcherToggles[platformId]) return;
         state.switcherModes[platformId] = mode;
         reRenderSwitcherRow(platformId);
         rebuildTargets();
@@ -1260,6 +1461,7 @@
 
     async function saveTargets(targets) {
         if (!(await saveDraftNow()) || state.conflictServerDraft) return false;
+        if (!(await createPersistedDraft()) || state.conflictServerDraft) return false;
         try {
             const response = await fetch(endpoint(root.dataset.targetsUrlTemplate, 'draft_id', state.draft.draft_id), {
                 method: 'PUT', headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
@@ -1304,9 +1506,9 @@
 
     function validateStudio() {
         const issues = [];
-        if (!state.draft.title.trim()) issues.push({ message: '填写文章标题', focus: 'draft-title' });
-        if (publicBlocks().length === 0) issues.push({ message: '正文还不能为空，输入文字或插入图片', focus: 'rich-editor' });
-        if (state.draft.targets.length === 0) issues.push({ message: '至少选择一个投递目标', focus: 'target-switcher-list' });
+        if (!state.draft.title.trim()) issues.push({ message: '填写文章标题', focus: 'draft-title', step: 'content-section' });
+        if (publicBlocks().length === 0) issues.push({ message: '正文还不能为空，输入文字或插入图片', focus: 'rich-editor', step: 'content-section' });
+        if (state.draft.targets.length === 0) issues.push({ message: '至少选择一个投递目标', focus: 'target-switcher-list', step: 'targets-section' });
         return issues;
     }
 
@@ -1334,9 +1536,9 @@
 
     function showValidation(issues) {
         const container = byId('validation-summary'); const list = byId('validation-list');
-        list.replaceChildren(...issues.map(issue => { const item = document.createElement('li'); const button = document.createElement('button'); button.type = 'button'; button.className = 'btn btn-link btn-sm p-0 align-baseline'; button.textContent = issue.message; button.addEventListener('click', () => byId(issue.focus)?.focus()); item.appendChild(button); return item; }));
+        list.replaceChildren(...issues.map(issue => { const item = document.createElement('li'); const button = document.createElement('button'); button.type = 'button'; button.className = 'btn btn-link btn-sm p-0 align-baseline'; button.textContent = issue.message; button.addEventListener('click', () => focusValidationIssue(issue)); item.appendChild(button); return item; }));
         container.classList.remove('d-none'); container.focus();
-        byId(issues[0].focus)?.focus({ preventScroll: false });
+        focusValidationIssue(issues[0]);
     }
 
     async function createPlan() {
@@ -1344,12 +1546,21 @@
         if (issues.length) { showValidation(issues); return; }
         byId('validation-summary').classList.add('d-none'); setMessage('execution-error', '');
         if (!(await saveDraftNow()) || state.conflictServerDraft) return;
-        state.planBusy = true; byId('create-plan').setAttribute('aria-busy', 'true');
+        const createButton = byId('create-plan');
+        state.planBusy = true;
+        createButton.setAttribute('aria-busy', 'true');
+        createButton.disabled = true;
+        createButton.textContent = '正在生成投递计划…';
         try {
             const response = await fetch(endpoint(root.dataset.planUrlTemplate, 'draft_id', state.draft.draft_id), { method: 'POST', headers: { 'Content-Type': 'application/json', Accept: 'application/json' }, body: JSON.stringify({ revision: state.draft.revision }) });
             state.plan = await jsonResponse(response); renderPlan(); renderPlanReview(); coreModal('plan-review-modal').show();
         } catch (error) { setMessage('execution-error', error.message || '投递计划生成失败'); }
-        finally { state.planBusy = false; byId('create-plan').removeAttribute('aria-busy'); }
+        finally {
+            state.planBusy = false;
+            createButton.removeAttribute('aria-busy');
+            createButton.disabled = false;
+            createButton.textContent = '检查并继续';
+        }
     }
 
     function renderPlanReview() {
@@ -1445,6 +1656,7 @@
             }
             row.append(copy, actions); return row;
         }));
+        updateStudioProgress();
     }
 
     async function executePlan(payload, { fromReview = false } = {}) {
@@ -1511,43 +1723,77 @@
         }, 2500);
     }
 
+    const draftStatusLabels = {
+        ACTIVE: '编辑中', UNSAVED: '未保存', ARCHIVED: '已归档',
+    };
+
     function renderDraftLibrary() {
-        byId('draft-library-list').replaceChildren(...state.drafts.map(draft => {
-            const item = document.createElement('article'); item.className = 'library-item'; const copy = document.createElement('div'); copy.className = 'library-item-copy'; const title = document.createElement('strong'); title.textContent = draft.title || '未命名草稿'; const meta = document.createElement('small'); meta.textContent = `${sourceLabels[draft.source_type] || draft.source_type} · 修订 ${draft.revision} · ${formatDate(draft.updated_at)}`; copy.append(title, meta); const button = document.createElement('button'); button.type = 'button'; button.className = 'btn btn-outline-primary btn-sm'; button.textContent = draft.draft_id === state.draft?.draft_id ? '当前草稿' : '继续编辑'; button.disabled = draft.draft_id === state.draft?.draft_id; button.addEventListener('click', async () => { await saveDraftNow(); const full = await jsonResponse(await fetch(endpoint(root.dataset.draftUrlTemplate, 'draft_id', draft.draft_id))); await openDraft(full); coreModal('source-library-modal').hide(); }); item.append(copy, button); return item;
+        const list = byId('draft-library-list');
+        if (!list) return;
+        list.replaceChildren(...state.drafts.map(draft => {
+            const item = document.createElement('article');
+            item.className = 'library-item';
+            const copy = document.createElement('div');
+            copy.className = 'library-item-copy';
+            const title = document.createElement('strong');
+            title.textContent = draft.title || '未命名草稿';
+            const source = sourceLabels[draft.source_type] || draft.source_type || '草稿';
+            const sourceRef = draft.source_ref ? ` · 文件/来源：${draft.source_ref}` : '';
+            const meta = document.createElement('small');
+            meta.textContent = `${source}${sourceRef}`;
+            const dates = document.createElement('small');
+            dates.textContent = `创建：${formatDate(draft.created_at)} · 更新：${formatDate(draft.updated_at)}`;
+            const status = document.createElement('small');
+            status.textContent = `状态：${draftStatusLabels[draft.status] || draft.status || '未知'}`;
+            copy.append(title, meta, dates, status);
+            const button = document.createElement('button');
+            button.type = 'button';
+            button.className = 'btn btn-outline-primary btn-sm';
+            button.textContent = draft.draft_id === state.draft?.draft_id ? '当前草稿' : '继续编辑';
+            button.disabled = draft.draft_id === state.draft?.draft_id;
+            button.addEventListener('click', async () => {
+                if (!(await saveDraftNow())) return;
+                button.disabled = true;
+                try {
+                    const full = await jsonResponse(await fetch(
+                        endpoint(root.dataset.draftUrlTemplate, 'draft_id', draft.draft_id),
+                        { headers: { Accept: 'application/json' } },
+                    ));
+                    await openDraft(full, { historyMode: 'push' });
+                    coreModal('source-library-modal').hide();
+                } catch (error) {
+                    setMessage('draft-library-error', error.message || '历史草稿读取失败');
+                    button.disabled = false;
+                }
+            });
+            item.append(copy, button);
+            return item;
         }));
-        byId('draft-library-empty').classList.toggle('d-none', state.drafts.length > 0);
+        byId('draft-library-empty')?.classList.toggle('d-none', state.drafts.length > 0);
     }
 
-    async function refreshDrafts() {
-        const payload = await jsonResponse(await fetch(`${root.dataset.draftsUrl}?limit=50&offset=0`, { headers: { Accept: 'application/json' } }));
-        state.drafts = Array.isArray(payload.drafts) ? payload.drafts : [];
-        renderDraftLibrary(); return state.drafts;
-    }
-
-    async function loadLegacyArticles() {
-        if (byId('legacy-library-list').dataset.loaded === 'true') return;
-        byId('legacy-library-loading').classList.remove('d-none'); setMessage('legacy-library-error', '');
+    async function loadDraftLibrary() {
+        if (state.draftLibraryLoading) return;
+        state.draftLibraryLoading = true;
+        const loading = byId('draft-library-loading');
+        loading?.classList.remove('d-none');
+        setMessage('draft-library-error', '');
         try {
-            const payload = await jsonResponse(await fetch(`${root.dataset.legacyUrl}?limit=50&offset=0`, { headers: { Accept: 'application/json' } }));
-            const articles = Array.isArray(payload.articles) ? payload.articles : [];
-            byId('legacy-library-list').replaceChildren(...articles.map(article => {
-                const articleId = article.article_id ?? article.id;
-                const item = document.createElement('article'); item.className = 'library-item'; const copy = document.createElement('div'); copy.className = 'library-item-copy'; const title = document.createElement('strong'); title.textContent = article.title || article.filename || `历史文章 #${articleId}`; const meta = document.createElement('small'); meta.textContent = `${article.filename || '历史文章'} · ${formatDate(article.created_at)}`; copy.append(title, meta); const button = document.createElement('button'); button.type = 'button'; button.className = 'btn btn-outline-primary btn-sm'; button.textContent = '继续编辑'; button.addEventListener('click', () => copyLegacyArticle(articleId, button)); item.append(copy, button); return item;
+            const payload = await jsonResponse(await fetch(`${root.dataset.draftsUrl}?limit=50&offset=0`, {
+                headers: { Accept: 'application/json' },
             }));
-            byId('legacy-library-list').dataset.loaded = 'true';
-        } catch (error) { setMessage('legacy-library-error', error.message || '历史文章读取失败'); }
-        finally { byId('legacy-library-loading').classList.add('d-none'); }
-    }
-
-    async function copyLegacyArticle(articleId, button) {
-        button.disabled = true; button.textContent = '正在复制…';
-        try { const draft = await jsonResponse(await fetch(endpoint(root.dataset.fromLegacyUrlTemplate, 'article_id', articleId), { method: 'POST', headers: { Accept: 'application/json' } })); await refreshDrafts(); await openDraft(draft); coreModal('source-library-modal').hide(); }
-        catch (error) { setMessage('legacy-library-error', error.message || '历史文章复制失败'); }
-        finally { button.disabled = false; button.textContent = '继续编辑'; }
+            state.drafts = Array.isArray(payload.drafts) ? payload.drafts : [];
+            renderDraftLibrary();
+        } catch (error) {
+            setMessage('draft-library-error', error.message || '历史草稿读取失败');
+        } finally {
+            state.draftLibraryLoading = false;
+            loading?.classList.add('d-none');
+        }
     }
 
     async function createBlankDraft() {
-        try { await saveDraftNow(); const draft = await jsonResponse(await fetch(root.dataset.draftsUrl, { method: 'POST', headers: { 'Content-Type': 'application/json', Accept: 'application/json' }, body: JSON.stringify({ title: '', blocks: [] }) })); await refreshDrafts(); await openDraft(draft); coreModal('source-library-modal').hide(); requestAnimationFrame(() => byId('draft-title').focus()); }
+        try { if (!(await saveDraftNow())) return; const draft = await jsonResponse(await fetch(root.dataset.draftsUrl, { method: 'POST', headers: { 'Content-Type': 'application/json', Accept: 'application/json' }, body: JSON.stringify({ title: '', blocks: [], cover: { strategy: 'NONE', asset_id: null } }) })); await openDraft(draft, { historyMode: 'replace' }); coreModal('source-library-modal').hide(); requestAnimationFrame(() => byId('draft-title').focus()); }
         catch (error) { setMessage('studio-fatal', error.message || '无法新建草稿'); }
     }
 
@@ -1555,7 +1801,7 @@
         if (!file) return;
         setSaveState('saving', '正在导入 DOCX');
         const form = new FormData(); form.append('file', file);
-        try { await saveDraftNow(); const draft = await jsonResponse(await fetch(root.dataset.docxUrl, { method: 'POST', body: form, headers: { Accept: 'application/json' } })); await refreshDrafts(); await openDraft(draft); await maybeAutoSelectImportedCover(); coreModal('source-library-modal').hide(); }
+        try { if (!(await saveDraftNow())) return; const draft = await jsonResponse(await fetch(root.dataset.docxUrl, { method: 'POST', body: form, headers: { Accept: 'application/json' } })); await openDraft(draft, { historyMode: 'replace' }); coreModal('source-library-modal').hide(); }
         catch (error) { setMessage('studio-fatal', error.message || 'DOCX 导入失败'); setSaveState('error', 'DOCX 导入失败'); }
     }
 
@@ -1584,11 +1830,12 @@
                 cover: coverRequest(state.draft.cover),
             }
             : { title: state.draft.title, blocks: publicBlocks(), cover: coverRequest(state.draft.cover) };
-        try { const copy = await jsonResponse(await fetch(root.dataset.draftsUrl, { method: 'POST', headers: { 'Content-Type': 'application/json', Accept: 'application/json' }, body: JSON.stringify(local) })); state.conflictServerDraft = null; await refreshDrafts(); await openDraft(copy); setSaveState('synced', '本地内容已另存副本'); coreModal('conflict-modal').hide(); }
+        try { const copy = await jsonResponse(await fetch(root.dataset.draftsUrl, { method: 'POST', headers: { 'Content-Type': 'application/json', Accept: 'application/json' }, body: JSON.stringify(local) })); state.conflictServerDraft = null; await openDraft(copy, { historyMode: 'replace' }); setSaveState('synced', '本地内容已另存副本'); coreModal('conflict-modal').hide(); }
         catch (error) { setMessage('content-error', error.message || '另存草稿副本失败'); }
     }
 
     function bindEvents() {
+        window.addEventListener('hashchange', syncStudioStepFromLocation);
         byId('draft-title').addEventListener('input', event => {
             state.draft.title = event.target.value;
             if (isV2Draft() && state.draft.document && typeof state.draft.document === 'object') {
@@ -1696,7 +1943,7 @@
         byId('confirm-publish-target').addEventListener('click', confirmPublishTarget);
         byId('new-blank-draft').addEventListener('click', createBlankDraft);
         byId('docx-import').addEventListener('change', event => { importDocx(event.target.files?.[0]); event.target.value = ''; });
-        byId('legacy-tab').addEventListener('shown.coreui.tab', loadLegacyArticles);
+        byId('source-library-modal').addEventListener('shown.coreui.modal', loadDraftLibrary);
         byId('conflict-use-server').addEventListener('click', () => resolveConflict(true));
         byId('conflict-save-copy').addEventListener('click', () => resolveConflict(false));
         window.addEventListener('beforeunload', () => { if (state.dirty) localDraftPut(true); });
@@ -1708,23 +1955,19 @@
             bindEvents();
             state.localDb = await openLocalDb();
             await fetchPlatforms();
-            const drafts = await refreshDrafts();
             const params = new URLSearchParams(window.location.search);
-            const requestedId = params.get('draft_id');
-            let draft = requestedId
-                ? await jsonResponse(await fetch(endpoint(root.dataset.draftUrlTemplate, 'draft_id', requestedId), { headers: { Accept: 'application/json' } }))
-                : drafts[0];
-
-            if (!draft) {
-                draft = await jsonResponse(await fetch(root.dataset.draftsUrl, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
-                    body: JSON.stringify({ title: '', blocks: [] }),
-                }));
-                await refreshDrafts();
+            const requestedId = params.get('draft_id')?.trim() || '';
+            if (requestedId) {
+                const draft = await jsonResponse(await fetch(
+                    endpoint(root.dataset.draftUrlTemplate, 'draft_id', requestedId),
+                    { headers: { Accept: 'application/json' } },
+                ));
+                await openDraft(draft, { historyMode: 'replace' });
+            } else {
+                clearStudioMessages();
+                await openDraft(blankDraft(), { historyMode: 'replace' });
             }
-
-            await openDraft(draft);
+            syncStudioStepFromLocation();
         } catch (error) {
             byId('studio-loading').classList.add('d-none');
             setMessage('studio-fatal', `加载工作台失败：${error.message || '未知错误'}`);

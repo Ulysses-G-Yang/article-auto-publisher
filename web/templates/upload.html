@@ -9,8 +9,6 @@
      data-drafts-url="/api/content-drafts"
      data-draft-url-template="/api/content-drafts/{draft_id}"
      data-docx-url="/api/content-drafts/import-docx"
-     data-legacy-url="/api/content-sources/legacy-articles"
-     data-from-legacy-url-template="/api/content-drafts/from-legacy/{article_id}"
      data-assets-url-template="/api/content-drafts/{draft_id}/assets"
      data-targets-url-template="/api/content-drafts/{draft_id}/targets"
      data-platforms-url="/api/platforms"
@@ -24,27 +22,27 @@
     <div class="page-heading studio-heading">
         <div><h1>创作与投递</h1><p>从内容草稿到多账号投递，全程使用同一份可恢复内容。</p></div>
         <div id="save-indicator" class="save-indicator is-loading" role="status" aria-live="polite">
-            <span class="save-indicator-dot" aria-hidden="true"></span><span id="save-indicator-text">正在读取草稿</span>
+            <span class="save-indicator-dot" aria-hidden="true"></span><span id="save-indicator-text">正在准备工作台</span>
         </div>
     </div>
 
     <ol class="studio-progress" aria-label="创作与投递流程">
-        <li class="active"><span>1</span><div><strong>内容</strong><small>草稿与图文块</small></div></li>
-        <li><span>2</span><div><strong>投递目标</strong><small>平台与账号</small></div></li>
-        <li><span>3</span><div><strong>核对执行</strong><small>冻结版本后执行</small></div></li>
+        <li class="is-current" data-studio-step="1"><a class="studio-step-link" href="#content-section" data-step-target="content-section" aria-current="step"><span>1</span><span><strong>内容</strong><small>草稿与图文块</small></span></a></li>
+        <li data-studio-step="2"><a class="studio-step-link" href="#targets-section" data-step-target="targets-section"><span>2</span><span><strong>投递目标</strong><small>平台与账号</small></span></a></li>
+        <li data-studio-step="3"><a class="studio-step-link" href="#execution-section" data-step-target="execution-section"><span>3</span><span><strong>核对执行</strong><small>冻结版本后执行</small></span></a></li>
     </ol>
 
-    <div id="studio-loading" class="card studio-loading" role="status"><div class="card-body"><span class="spinner-border spinner-border-sm" aria-hidden="true"></span><span>正在打开最近草稿…</span></div></div>
+    <div id="studio-loading" class="card studio-loading" role="status"><div class="card-body"><span class="spinner-border spinner-border-sm" aria-hidden="true"></span><span>正在准备空白工作台…</span></div></div>
     <div id="studio-fatal" class="alert alert-danger d-none" role="alert"></div>
 
     <div id="studio-workspace" class="studio-layout d-none">
         <div class="studio-main">
-            <section class="card studio-card" aria-labelledby="content-heading">
+            <section id="content-section" class="card studio-card studio-step-section" aria-labelledby="content-heading">
                 <header class="card-header studio-card-header">
                     <div><span class="section-kicker">CONTENT</span><h2 id="content-heading">编辑内容</h2></div>
                     <div class="d-flex flex-wrap gap-2">
                         <button id="save-draft-now" class="btn btn-outline-secondary btn-sm" type="button"><i class="cil-save me-1" aria-hidden="true"></i>保存</button>
-                        <button id="open-source-library" class="btn btn-outline-secondary btn-sm" type="button" data-coreui-toggle="modal" data-coreui-target="#source-library-modal"><i class="cil-folder-open me-1" aria-hidden="true"></i>更换内容源</button>
+                        <button id="open-source-library" class="btn btn-outline-secondary btn-sm" type="button" data-coreui-toggle="modal" data-coreui-target="#source-library-modal"><i class="cil-folder-open me-1" aria-hidden="true"></i>历史草稿</button>
                         <label id="asset-upload-trigger" class="btn btn-outline-primary btn-sm mb-0" for="asset-upload"><i class="cil-image-plus me-1" aria-hidden="true"></i>插入图片</label>
                         <input id="asset-upload" class="visually-hidden" type="file" accept="image/png,image/jpeg,image/gif,image/webp" multiple>
                     </div>
@@ -83,15 +81,19 @@
                         <div id="cover-empty" class="small text-body-secondary d-none">当前正文没有可用图片，首图和指定图片暂不可用。</div>
                         <div id="cover-auto-note" class="alert alert-info d-none mt-3 mb-0" role="status">已自动使用正文首图，可改为无封面/指定图片。</div>
                     </section>
+                    <div class="studio-step-actions">
+                        <span><strong>内容确认完成了吗？</strong><small>下一步只选择平台和账号，不会立即执行投递。</small></span>
+                        <a id="go-to-targets" class="btn btn-primary" href="#targets-section" data-step-target="targets-section"><i class="cil-arrow-right me-2" aria-hidden="true"></i>下一步：选择投递目标</a>
+                    </div>
                     <div id="blocks-empty" class="studio-empty d-none"><i class="cil-notes" aria-hidden="true"></i><strong>正文还是空的</strong><span>直接在上方输入文字，或拖入 <strong>Word 文档(.docx)</strong> / 图片导入。</span></div>
                     <div id="content-error" class="alert alert-danger d-none mt-3 mb-0" role="alert"></div>
                 </div>
             </section>
 
-            <section class="card studio-card" aria-labelledby="targets-heading">
-                <header class="card-header studio-card-header"><div><span class="section-kicker">DESTINATIONS</span><h2 id="targets-heading">投递目标</h2></div><span id="target-count" class="badge text-bg-primary">0 个目标</span></header>
+            <section id="targets-section" class="card studio-card studio-step-section" aria-labelledby="targets-heading">
+                <header class="card-header studio-card-header"><div><span class="section-kicker">DESTINATIONS</span><h2 id="targets-heading">投递目标</h2></div><div class="target-header-status"><span id="platform-capability-summary" class="small text-body-secondary" role="status"></span><span id="target-count" class="badge text-bg-primary">0 个目标</span></div></header>
                 <div class="card-body">
-                    <p class="section-intro">滑动开关启用平台，再勾选该平台的账号；每个平台可分别选「平台草稿 / 公开发布」。系统不会自动选择账号。</p>
+                    <p class="section-intro">10 个平台统一展示；只有标记“可投递”的平台能开启。先打开平台，再勾选账号；系统不会自动选择账号。</p>
                     <div class="target-builder">
                         <div id="platform-grid-loading" class="platform-grid-loading" role="status"><span class="spinner-border spinner-border-sm" aria-hidden="true"></span><span>正在读取平台目录…</span></div>
                         <div id="target-switcher-list" class="target-switcher-list d-none" role="group" aria-label="投递目标滑块"></div>
@@ -99,10 +101,14 @@
                         <div id="targets-list" class="targets-list"></div>
                         <div id="targets-empty" class="studio-empty compact"><i class="cil-paper-plane" aria-hidden="true"></i><strong>尚未选择投递目标</strong><span>打开平台开关并勾选账号后，目标会自动生成。</span></div>
                     </div>
+                    <div class="studio-step-actions studio-step-actions-split">
+                        <a id="back-to-content" class="btn btn-outline-secondary" href="#content-section" data-step-target="content-section"><i class="cil-arrow-left me-2" aria-hidden="true"></i>返回检查内容</a>
+                        <a id="go-to-execution" class="btn btn-primary" href="#execution-section" data-step-target="execution-section">下一步：核对执行<i class="cil-arrow-right ms-2" aria-hidden="true"></i></a>
+                    </div>
                 </div>
             </section>
 
-            <section id="execution-section" class="card studio-card" aria-labelledby="execution-heading">
+            <section id="execution-section" class="card studio-card studio-step-section" aria-labelledby="execution-heading">
                 <header class="card-header studio-card-header"><div><span class="section-kicker">EXECUTION</span><h2 id="execution-heading">核对与执行</h2></div><span class="badge text-bg-light border"><i class="cil-lock-locked me-1" aria-hidden="true"></i>执行前冻结版本</span></header>
                 <div class="card-body">
                     <div id="validation-summary" class="alert alert-warning d-none" role="alert" tabindex="-1"><strong>还需完成以下条件：</strong><ul id="validation-list" class="mb-0 mt-2"></ul></div>
@@ -114,15 +120,14 @@
         </div>
 
         <aside class="studio-side" aria-label="草稿与安全信息">
-            <section class="card side-card"><div class="card-body"><span class="section-kicker">CURRENT DRAFT</span><h2 id="side-draft-title">未命名草稿</h2><dl class="draft-facts"><div><dt>来源</dt><dd id="side-draft-source">—</dd></div><div><dt>图文块</dt><dd id="side-block-count">0</dd></div><div><dt>投递目标</dt><dd id="side-target-count">0</dd></div><div><dt>修订</dt><dd id="side-revision">—</dd></div></dl><button class="btn btn-outline-secondary w-100" type="button" data-coreui-toggle="modal" data-coreui-target="#source-library-modal">打开内容库</button></div></section>
+            <section class="card side-card"><div class="card-body"><span class="section-kicker">CURRENT DRAFT</span><h2 id="side-draft-title">未命名草稿</h2><dl class="draft-facts"><div><dt>来源</dt><dd id="side-draft-source">—</dd></div><div><dt>图文块</dt><dd id="side-block-count">0</dd></div><div><dt>投递目标</dt><dd id="side-target-count">0</dd></div><div><dt>修订</dt><dd id="side-revision">—</dd></div></dl><button class="btn btn-outline-secondary w-100" type="button" data-coreui-toggle="modal" data-coreui-target="#source-library-modal">打开历史草稿</button></div></section>
             <section class="card side-card safety-card"><div class="card-body"><div class="safety-icon"><i class="cil-shield-alt" aria-hidden="true"></i></div><h2>发布安全门</h2><ul><li>平台草稿目标使用一次批量摘要确认</li><li>公开发布目标逐条二次确认</li><li>内容、账号或模式变化会使令牌失效</li><li>“保持登录态”只是会话持久化策略</li></ul></div></section>
         </aside>
     </div>
 
-    <div class="modal fade" id="source-library-modal" tabindex="-1" aria-labelledby="source-library-title" aria-hidden="true"><div class="modal-dialog modal-xl modal-dialog-scrollable"><div class="modal-content"><div class="modal-header"><div><span class="section-kicker">CONTENT LIBRARY</span><h2 id="source-library-title" class="modal-title">选择内容源</h2></div><button class="btn-close" type="button" data-coreui-dismiss="modal" aria-label="关闭"></button></div><div class="modal-body">
-        <div class="source-actions"><button id="new-blank-draft" class="source-action" type="button"><i class="cil-file" aria-hidden="true"></i><span><strong>新建空白文章</strong><small>从标题和第一个文字块开始</small></span></button><label class="source-action" for="docx-import"><i class="cil-cloud-upload" aria-hidden="true"></i><span><strong>导入 DOCX</strong><small>转换为统一图文块，不会立即发布</small></span></label><input id="docx-import" class="visually-hidden" type="file" accept=".docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document"></div>
-        <ul class="nav nav-underline source-tabs" role="tablist"><li class="nav-item"><button class="nav-link active" type="button" data-coreui-toggle="tab" data-coreui-target="#draft-library-pane" role="tab">系统草稿</button></li><li class="nav-item"><button id="legacy-tab" class="nav-link" type="button" data-coreui-toggle="tab" data-coreui-target="#legacy-library-pane" role="tab">历史文章（只读）</button></li></ul>
-        <div class="tab-content"><div id="draft-library-pane" class="tab-pane fade show active" role="tabpanel"><div id="draft-library-list" class="library-list"></div><div id="draft-library-empty" class="studio-empty d-none"><strong>暂无系统草稿</strong></div></div><div id="legacy-library-pane" class="tab-pane fade" role="tabpanel"><div class="alert alert-info">历史文章保持只读；点击“继续编辑”会复制为新草稿，不修改原文章、旧任务和日志。</div><div id="legacy-library-loading" class="studio-loading-inline d-none"><span class="spinner-border spinner-border-sm"></span>正在读取历史文章…</div><div id="legacy-library-list" class="library-list"></div><div id="legacy-library-error" class="alert alert-danger d-none"></div></div></div>
+    <div class="modal fade" id="source-library-modal" tabindex="-1" aria-labelledby="source-library-title" aria-hidden="true"><div class="modal-dialog modal-xl modal-dialog-scrollable"><div class="modal-content"><div class="modal-header"><div><span class="section-kicker">DRAFT HISTORY</span><h2 id="source-library-title" class="modal-title">历史草稿</h2></div><button class="btn-close" type="button" data-coreui-dismiss="modal" aria-label="关闭"></button></div><div class="modal-body">
+        <div class="source-actions"><button id="new-blank-draft" class="source-action" type="button"><i class="cil-file" aria-hidden="true"></i><span><strong>新建空白文章</strong><small>明确创建一份新的空白草稿</small></span></button><label class="source-action" for="docx-import"><i class="cil-cloud-upload" aria-hidden="true"></i><span><strong>导入 DOCX</strong><small>独立创建一份新草稿，不会覆盖历史</small></span></label><input id="docx-import" class="visually-hidden" type="file" accept=".docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document"></div>
+        <div id="draft-library-loading" class="studio-loading-inline d-none" role="status"><span class="spinner-border spinner-border-sm"></span>正在读取历史草稿…</div><div id="draft-library-error" class="alert alert-danger d-none" role="alert"></div><div id="draft-library-list" class="library-list"></div><div id="draft-library-empty" class="studio-empty d-none"><strong>暂无历史草稿</strong><span>导入 DOCX 或点击“新建空白文章”后，这里会显示可继续编辑的草稿。</span></div>
     </div></div></div></div>
 
     <div class="modal fade" id="conflict-modal" tabindex="-1" data-coreui-backdrop="static" aria-labelledby="conflict-title" aria-hidden="true"><div class="modal-dialog"><div class="modal-content"><div class="modal-header"><h2 id="conflict-title" class="modal-title fs-5">草稿发生修订冲突</h2></div><div class="modal-body"><p>另一个页面已保存了更新版本。为避免静默覆盖，请选择如何处理当前本地内容。</p><dl class="conflict-facts"><div><dt>当前本地修订</dt><dd id="conflict-local-revision">—</dd></div><div><dt>服务端修订</dt><dd id="conflict-server-revision">—</dd></div></dl></div><div class="modal-footer"><button id="conflict-use-server" class="btn btn-outline-secondary" type="button">采用服务端版本</button><button id="conflict-save-copy" class="btn btn-primary" type="button">将本地内容另存为副本</button></div></div></div></div>
@@ -133,5 +138,5 @@
 </div>
 {% endblock %}
 
-{% block extra_scripts %}<script src="{{ url_for('static', filename='js/content-studio.js', v='20260813-studio-recovery') }}"></script>{% endblock %}
+{% block extra_scripts %}<script src="{{ url_for('static', filename='js/content-studio.js', v='20260820-ux-linkage2') }}"></script>{% endblock %}
 

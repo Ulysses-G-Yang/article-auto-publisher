@@ -179,6 +179,13 @@
                 .sort((left, right) => left.sort_order - right.sort_order);
             if (state.platforms.length === 0) throw new Error('平台目录为空。');
             renderPlatforms();
+            const requestedPlatform = new URLSearchParams(window.location.search).get('platform');
+            const requested = state.platforms.find(item => item.id === requestedPlatform && item.account_enabled);
+            if (requested) {
+                const input = byId(`session-platform-${requested.id}`);
+                if (input) input.click();
+                else selectPlatform(requested.id);
+            }
         } catch (error) {
             setMessage('session-platforms-error', error.message || '平台目录加载失败。');
         } finally {

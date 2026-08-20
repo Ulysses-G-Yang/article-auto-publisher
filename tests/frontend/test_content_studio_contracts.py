@@ -204,6 +204,17 @@ def test_explicit_restore_import_and_history_use_draft_urls() -> None:
     assert "状态：${draftStatusLabels" in script
     assert "copyLegacyArticle" not in script
 
+
+def test_history_source_summary_hides_internal_source_refs() -> None:
+    script = read("web/static/js/content-studio.js")
+
+    assert "LEGACY_ARTICLE: '历史文章'" in script
+    assert "SYSTEM_SEED: '系统草稿'" in script
+    assert "function draftSourceSummary(draft)" in script
+    assert "sourceType !== 'DOCX' || !draft?.source_ref" in script
+    assert "split(/[\\\\/]+/).filter(Boolean).pop()" in script
+    assert "meta.textContent = draftSourceSummary(draft);" in script
+
 def test_multi_target_and_confirmation_contracts_are_separate() -> None:
     template = read("web/templates/upload.html")
     script = read("web/static/js/content-studio.js")

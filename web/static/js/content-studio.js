@@ -5,7 +5,20 @@
     if (!root) return;
 
     const byId = id => document.getElementById(id);
-    const sourceLabels = { BLANK: '空白草稿', DOCX: 'DOCX 导入', SYSTEM_SEED: '系统草稿' };
+    const sourceLabels = {
+        BLANK: '空白草稿',
+        DOCX: 'DOCX 导入',
+        LEGACY_ARTICLE: '历史文章',
+        SYSTEM_SEED: '系统草稿',
+    };
+
+    function draftSourceSummary(draft) {
+        const sourceType = draft?.source_type || '';
+        const source = sourceLabels[sourceType] || sourceType || '草稿';
+        if (sourceType !== 'DOCX' || !draft?.source_ref) return source;
+        const sourceRef = String(draft.source_ref).split(/[\\/]+/).filter(Boolean).pop() || '';
+        return sourceRef ? `${source} · 文件/来源：${sourceRef}` : source;
+    }
     const planStatusLabels = {
         READY: '待执行', CREATING: '正在创建执行单', QUEUED: '已排队', RUNNING: '执行中', SUCCESS: '已完成',
         PARTIAL_FAIL: '部分失败', FATAL: '执行失败', CONFIRMATION_REQUIRED: '待公开确认',
@@ -1738,10 +1751,8 @@
             copy.className = 'library-item-copy';
             const title = document.createElement('strong');
             title.textContent = draft.title || '未命名草稿';
-            const source = sourceLabels[draft.source_type] || draft.source_type || '草稿';
-            const sourceRef = draft.source_ref ? ` · 文件/来源：${draft.source_ref}` : '';
             const meta = document.createElement('small');
-            meta.textContent = `${source}${sourceRef}`;
+            meta.textContent = draftSourceSummary(draft);
             const dates = document.createElement('small');
             dates.textContent = `创建：${formatDate(draft.created_at)} · 更新：${formatDate(draft.updated_at)}`;
             const status = document.createElement('small');

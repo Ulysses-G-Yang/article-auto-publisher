@@ -340,7 +340,7 @@ async def test_explicit_draft_restore_and_docx_import_use_distinct_urls() -> Non
                 await page.wait_for_function(
                     "expected => new URL(window.location.href).searchParams.get("
                     "'draft_id') === expected",
-                    expected_id,
+                    arg=expected_id,
                 )
                 assert await page.locator("#cover-none").is_checked()
                 assert await page.locator("#draft-title").input_value() == (
@@ -395,7 +395,7 @@ async def test_history_push_state_back_reload_restores_previous_draft() -> None:
             await page.wait_for_function(
                 "expected => new URL(window.location.href).searchParams.get("
                 "'draft_id') === expected",
-                second_id,
+                arg=second_id,
             )
             assert await page.locator("#draft-title").input_value() == "QA 历史导航二"
 
@@ -403,11 +403,11 @@ async def test_history_push_state_back_reload_restores_previous_draft() -> None:
             await page.wait_for_function(
                 "expected => new URL(window.location.href).searchParams.get("
                 "'draft_id') === expected",
-                first_id,
+                arg=first_id,
             )
             await page.wait_for_function(
                 "expected => document.querySelector('#draft-title')?.value === expected",
-                "QA 历史导航一",
+                arg="QA 历史导航一",
             )
         finally:
             await browser.close()

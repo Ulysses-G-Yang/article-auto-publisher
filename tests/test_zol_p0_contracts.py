@@ -187,6 +187,15 @@ def test_image_upload_re_resolves_rebuilt_iframe_before_next_text_block() -> Non
     platform._bound_draft_id = "bound-id"
     platform._wait_for_bound_autosave = AsyncMock()
     platform._collapse_editor_selection_at_end = AsyncMock()
+    platform._remove_delayed_duplicate_images = AsyncMock()
+    inserted_blocks = []
+
+    async def insert_tinymce_block(editor, editor_kind, **kwargs):
+        inserted_blocks.append((editor, editor_kind, kwargs))
+        editor.text = f"{editor.text}\n{kwargs['text']}".strip()
+        editor.value = editor.text
+
+    platform._insert_tinymce_block = AsyncMock(side_effect=insert_tinymce_block)
     original_body = page.frame_body
     replacement_body = FakeLocator(
         page=page,
@@ -232,8 +241,16 @@ def test_image_upload_re_resolves_rebuilt_iframe_before_next_text_block() -> Non
     )
 
     assert result["text_ok"] is True
+    platform._remove_delayed_duplicate_images.assert_awaited_once_with(1)
     assert "后文" in replacement_body.text
     assert "后文" not in original_body.text
+    assert inserted_blocks == [
+        (
+            replacement_body,
+            "iframe",
+            {"block_type": "text", "text": "后文"},
+        )
+    ]
 
 
 class _ImageCountLocator(FakeLocator):

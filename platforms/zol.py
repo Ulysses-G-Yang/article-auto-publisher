@@ -1927,19 +1927,31 @@ class ZOLPlatform(BasePlatform):
                     previous_kind = "text"
                 elif btype == "text" and block_text:
                     editor, editor_kind = await self._click_editor(editor)
-                    if previous_kind == "image":
-                        await self._append_editor_block_anchor(editor, editor_kind)
+                    if previous_kind == "image" and editor_kind == "iframe":
+                        # 图片弹窗会重建 TinyMCE iframe，并且浏览器在空段落中的
+                        # 原生光标并不稳定：Playwright 的 keyboard.insert_text()
+                        # 可能返回成功，但正文仍只留下一个空 <p>。图片后的正文
+                        # 必须通过当前 TinyMCE 实例写入模型，随后再由统一 DOM
+                        # token 校验确认真实顺序，不能依赖残留 selection。
+                        await self._insert_tinymce_block(
+                            editor,
+                            editor_kind,
+                            block_type="text",
+                            text=block_text,
+                        )
                     else:
+                        if previous_kind == "image":
+                            await self._append_editor_block_anchor(editor, editor_kind)
                         await self._collapse_editor_selection_at_end(editor, editor_kind)
-                    if previous_kind == "text":
-                        await self.page.keyboard.press("Enter")
-                        await self.page.keyboard.press("Enter")
-                    block_lines = block_text.splitlines() or [block_text]
-                    for index, line in enumerate(block_lines):
-                        if line:
-                            await self.page.keyboard.insert_text(line)
-                        if index < len(block_lines) - 1:
+                        if previous_kind == "text":
                             await self.page.keyboard.press("Enter")
+                            await self.page.keyboard.press("Enter")
+                        block_lines = block_text.splitlines() or [block_text]
+                        for index, line in enumerate(block_lines):
+                            if line:
+                                await self.page.keyboard.insert_text(line)
+                            if index < len(block_lines) - 1:
+                                await self.page.keyboard.press("Enter")
                     previous_kind = "text"
                 elif btype == "image":
                     editor, editor_kind = await self._click_editor(editor)
@@ -2020,6 +2032,12 @@ class ZOLPlatform(BasePlatform):
             await self._verify_heading_nodes(expected_headings)
 
         if uploaded_images == expected_images and expected_images:
+            # ZOL 图片插件可能在弹窗关闭数秒后再克隆一次同 src 节点。
+            # 多图路径会在下一次上传前清理，但单图或最后一张图没有这个机会；
+            # 最终结构校验前必须再收口一次。该方法只删除可证明为同 src 的
+            # 重复节点，任何未知额外图片仍会 fail closed。
+            await self._remove_delayed_duplicate_images(expected_images)
+            editor, editor_kind = await self._resolve_content_editor()
             actual_tokens = await self._read_editor_dom_tokens(editor, editor_kind)
             expected_with_images = self._expected_content_tokens(
                 content_blocks,
@@ -2027,7 +2045,9 @@ class ZOLPlatform(BasePlatform):
             )
             if not self._content_tokens_match(expected_with_images, actual_tokens):
                 raise ContentValidationError(
-                    "ZOL_CONTENT_ORDER_VERIFY_FAILED: 正文图文顺序与 DOM 回读不一致"
+                    "ZOL_CONTENT_ORDER_VERIFY_FAILED: 正文图文顺序与 DOM 回读不一致; "
+                    f"expected={self._content_token_shape(expected_with_images, limit=40)}; "
+                    f"actual={self._content_token_shape(actual_tokens, limit=40)}"
                 )
         if expected_images == 0:
             media_status = "not_required"
@@ -2274,12 +2294,10 @@ class ZOLPlatform(BasePlatform):
             if not ready:
                 await asyncio.sleep(0.5)
                 continue
-            try:
-                screenshot = await image.screenshot(timeout=5000)
-                if self._normalized_image(screenshot) is not None:
-                    return screenshot
-            except Exception:
-                pass
+            # 优先读取 ``img.src`` 对应的 CDN 文件。元素截图会受 CSS 缩放、
+            # 设备像素比、懒加载占位和页面装饰影响；真实平台已经出现过源图
+            # 完全一致、但渲染截图被误判为另一张图的情况。CDN 文件仍通过
+            # 当前登录上下文在内存中读取，不记录 URL、响应或本机路径。
             try:
                 source = str(await image.get_attribute("src") or "")
                 if (
@@ -2291,6 +2309,14 @@ class ZOLPlatform(BasePlatform):
                         payload = await response.body()
                         if self._normalized_image(payload) is not None:
                             return payload
+            except Exception:
+                pass
+            # 非 HTTP 地址（例如临时 blob）或 CDN 读取失败时，才退回元素截图。
+            # 截图仍需成功解码；无法证明内容一致时继续等待并最终 fail closed。
+            try:
+                screenshot = await image.screenshot(timeout=5000)
+                if self._normalized_image(screenshot) is not None:
+                    return screenshot
             except Exception:
                 pass
             await asyncio.sleep(0.5)
@@ -2402,7 +2428,12 @@ class ZOLPlatform(BasePlatform):
             return {
                 "success": False,
                 "error_code": "ZOL_IMAGE_UPLOAD_FAILED",
-                "error": safe_media_error(exc, fallback="ZOL 图片上传失败"),
+                # ``safe_media_error`` 只接受字符串；直接传异常对象会退化成
+                # 无信息的固定文案，导致真实选择器/时序问题无法诊断。
+                "error": safe_media_error(
+                    str(exc),
+                    fallback=f"ZOL 图片上传失败（{type(exc).__name__}）",
+                ),
             }
         finally:
             # 所有失败分支都必须关闭弹窗，否则后续图片和正文键盘输入会被遮罩截获。

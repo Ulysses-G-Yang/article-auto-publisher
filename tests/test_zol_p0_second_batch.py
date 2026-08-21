@@ -991,6 +991,40 @@ def test_image_content_reresolves_editor_after_stale_screenshot() -> None:
     assert image.screenshot.await_count == 2
 
 
+def test_image_content_prefers_cdn_bytes_over_css_rendered_screenshot() -> None:
+    source_payload = _pattern_bytes()
+    rendered_payload = _pattern_bytes(mirror=True)
+    response = SimpleNamespace(
+        ok=True,
+        body=AsyncMock(return_value=source_payload),
+    )
+    request = SimpleNamespace(get=AsyncMock(return_value=response))
+    image = MagicMock()
+    image.evaluate = AsyncMock(return_value=True)
+    image.get_attribute = AsyncMock(return_value="https://cdn.example/image.jpg")
+    image.screenshot = AsyncMock(return_value=rendered_payload)
+    images = MagicMock()
+    images.count = AsyncMock(return_value=1)
+    images.nth.return_value = image
+    editor = MagicMock()
+    editor.locator.return_value = images
+    platform = ZOLPlatform()
+    platform.context = SimpleNamespace(request=request)
+    platform._resolve_content_editor = AsyncMock(return_value=(editor, "iframe"))
+    platform._editor_image_src_fingerprints = AsyncMock(return_value=["target"])
+
+    observed = asyncio.run(
+        platform._read_stable_editor_image_bytes(["target"], "target")
+    )
+
+    assert observed == source_payload
+    request.get.assert_awaited_once_with(
+        "https://cdn.example/image.jpg",
+        timeout=10000,
+    )
+    image.screenshot.assert_not_awaited()
+
+
 def test_heading_experiment_only_accepts_verified_h2_widget_and_reads_dom() -> None:
     platform = ZOLPlatform(enable_heading_experiment=True)
 

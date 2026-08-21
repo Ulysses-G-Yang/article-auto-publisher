@@ -1810,6 +1810,45 @@ class RegressionTests(DatabaseTestCase):
         platform.simulator.random_delay = AsyncMock()
         platform._preflight_title = "微博标题"
         platform._draft_title_baseline_count = 0
+
+        response = type(
+            "CreateResponse",
+            (),
+            {
+                "status": 200,
+                "url": "https://card.weibo.com/article/v5/aj/editor/draft/create",
+                "request": type("Request", (), {"method": "POST"})(),
+            },
+        )()
+
+        class ResponseInfo:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_args):
+                return None
+
+            @property
+            def value(self):
+                async def resolve():
+                    return response
+
+                return resolve()
+
+        write_button = type(
+            "WriteButton",
+            (),
+            {
+                "count": AsyncMock(return_value=1),
+                "is_visible": AsyncMock(return_value=True),
+                "click": AsyncMock(),
+            },
+        )()
+
+        def expect_response(predicate, **_kwargs):
+            self.assertTrue(predicate(response))
+            return ResponseInfo()
+
         page = type(
             "Page",
             (),
@@ -1819,23 +1858,13 @@ class RegressionTests(DatabaseTestCase):
                 "wait_for_function": AsyncMock(),
                 "evaluate": AsyncMock(
                     side_effect=[
+                        "1234567888",
                         "1234567890",
                         {"title": "", "body": ""},
                     ]
                 ),
-                "get_by_text": staticmethod(
-                    lambda text, **_kw: type(
-                        "Loc",
-                        (),
-                        {
-                            "first": type(
-                                "First",
-                                (),
-                                {"click": AsyncMock()},
-                            )()
-                        },
-                    )()
-                ),
+                "get_by_role": staticmethod(lambda *_args, **_kwargs: write_button),
+                "expect_response": staticmethod(expect_response),
             },
         )()
         platform.page = page

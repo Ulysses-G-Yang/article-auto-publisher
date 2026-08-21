@@ -303,6 +303,96 @@ def test_weibo_preflight_keeps_javascript_newline_regex_literal() -> None:
     assert "\r" not in page.expression
 
 
+class _CreateResponse:
+    status = 200
+    url = "https://card.weibo.com/article/v5/aj/editor/draft/create"
+    request = SimpleNamespace(method="POST")
+
+
+class _ResponseInfo:
+    def __init__(self, response: _CreateResponse) -> None:
+        async def resolve():
+            return response
+
+        self.value = resolve()
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *_args) -> None:
+        return None
+
+
+class _WriteButton:
+    def __init__(self, page, *, change_id: bool) -> None:
+        self.page = page
+        self.change_id = change_id
+        self.click = AsyncMock(side_effect=self._click)
+
+    async def count(self) -> int:
+        return 1
+
+    async def is_visible(self) -> bool:
+        return True
+
+    async def _click(self, **_kwargs) -> None:
+        if self.change_id:
+            self.page.draft_id = "4182999"
+
+
+class _NewDraftPage:
+    def __init__(self, *, change_id: bool = True) -> None:
+        self.draft_id = "4181973"
+        self.goto = AsyncMock()
+        self.wait_for_selector = AsyncMock()
+        self.write_button = _WriteButton(self, change_id=change_id)
+
+    async def wait_for_function(self, *_args, **_kwargs) -> None:
+        if "beforeId" in _args[0] and self.draft_id == _kwargs["arg"]:
+            raise TimeoutError("new draft id not observed")
+
+    async def evaluate(self, script: str, _argument=None):
+        if "location.hash.match" in script:
+            return self.draft_id
+        if "textarea[placeholder='请输入标题']" in script:
+            return {"title": "", "body": ""}
+        raise AssertionError("unexpected evaluate call")
+
+    def get_by_role(self, role: str, *, name: str, exact: bool):
+        assert (role, name, exact) == ("button", "写文章", True)
+        return self.write_button
+
+    def expect_response(self, predicate, *, timeout: int):
+        response = _CreateResponse()
+        assert timeout == 20000
+        assert predicate(response) is True
+        return _ResponseInfo(response)
+
+
+def test_weibo_new_draft_requires_create_response_and_changed_positive_id() -> None:
+    page = _NewDraftPage()
+    platform = WeiboPlatform()
+    platform.page = page
+    platform._preflight_title = "唯一标题"
+    platform._draft_title_baseline_count = 0
+
+    asyncio.run(platform.navigate_to_editor())
+
+    assert platform._active_draft_id == "4182999"
+    page.write_button.click.assert_awaited_once_with(timeout=10000)
+
+
+def test_weibo_create_response_without_new_id_is_result_unknown() -> None:
+    page = _NewDraftPage(change_id=False)
+    platform = WeiboPlatform()
+    platform.page = page
+    platform._preflight_title = "唯一标题"
+    platform._draft_title_baseline_count = 0
+
+    with pytest.raises(DraftResultUnknownError, match="禁止重试"):
+        asyncio.run(platform.navigate_to_editor())
+
+
 class _Route:
     def __init__(self) -> None:
         self.abort = AsyncMock()

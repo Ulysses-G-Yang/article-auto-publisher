@@ -213,6 +213,37 @@ async def run_probe() -> dict:
                 timeout=30000,
             )
             await asyncio.sleep(3)
+            draft_list_state = await platform.page.evaluate(
+                """() => {
+                    const visible = (node) => {
+                        const rect = node.getBoundingClientRect();
+                        const style = getComputedStyle(node);
+                        return rect.width > 0 && rect.height > 0
+                            && style.display !== 'none'
+                            && style.visibility !== 'hidden';
+                    };
+                    return {
+                        write_candidates: Array.from(
+                            document.querySelectorAll('button, a, div, span')
+                        ).filter((node) => visible(node)
+                            && (node.innerText || '').trim() === '写文章')
+                            .slice(0, 20).map((node) => ({
+                                tag: node.tagName.toLowerCase(),
+                                class_name: String(node.className || '').slice(0, 180),
+                                role: node.getAttribute('role') || '',
+                                href: node.getAttribute('href') || '',
+                                child_count: node.children.length,
+                                parent_tag: node.parentElement?.tagName.toLowerCase() || '',
+                                parent_class: String(
+                                    node.parentElement?.className || ''
+                                ).slice(0, 180),
+                            })),
+                        list_item_count: Array.from(
+                            document.querySelectorAll('.list-item')
+                        ).filter(visible).length,
+                    };
+                }"""
+            )
             draft_url = await platform.page.evaluate(
                 r"""() => {
                     const anchors = Array.from(document.querySelectorAll('a[href]'));
@@ -237,6 +268,38 @@ async def run_probe() -> dict:
 
                 await platform.page.route("**/*", block_mutations)
                 try:
+                    write_button = platform.page.get_by_role(
+                        "button",
+                        name="写文章",
+                        exact=True,
+                    )
+                    write_button_count = await write_button.count()
+                    before_write_url = platform.page.url
+                    if write_button_count == 1:
+                        await write_button.click(timeout=10000)
+                        await asyncio.sleep(3)
+                    write_click_probe = await platform.page.evaluate(
+                        """(selector) => {
+                            const title = document.querySelector(
+                                "textarea[placeholder='请输入标题']"
+                            );
+                            const body = document.querySelector(selector);
+                            return {
+                                url: location.href,
+                                title_length: title ? title.value.length : null,
+                                body_trimmed_length: body
+                                    ? (body.innerText || '').trim().length
+                                    : null,
+                            };
+                        }""",
+                        BODY_DOM_SELECTOR,
+                    )
+                    write_click_probe.update(
+                        {
+                            "button_count": write_button_count,
+                            "before_url": before_write_url,
+                        }
+                    )
                     await platform.page.goto(
                         "https://card.weibo.com/article/v5/editor#/draft/0",
                         wait_until="domcontentloaded",
@@ -256,6 +319,34 @@ async def run_probe() -> dict:
                                 editor_visible: Array.from(
                                     document.querySelectorAll(selector)
                                 ).some(visible),
+                                editor_state: (() => {
+                                    const title = document.querySelector(
+                                        "textarea[placeholder='请输入标题']"
+                                    );
+                                    const editors = Array.from(
+                                        document.querySelectorAll(selector)
+                                    ).filter(visible);
+                                    const body = editors.length === 1 ? editors[0] : null;
+                                    return {
+                                        editor_count: editors.length,
+                                        title_length: title ? title.value.length : null,
+                                        body_text_length: body
+                                            ? (body.innerText || '').length
+                                            : null,
+                                        body_trimmed_length: body
+                                            ? (body.innerText || '').trim().length
+                                            : null,
+                                        body_child_tags: body
+                                            ? Array.from(body.children).slice(0, 20)
+                                                .map((child) => child.tagName.toLowerCase())
+                                            : [],
+                                        body_child_count: body ? body.children.length : null,
+                                        body_placeholder: body
+                                            ? (body.getAttribute('data-placeholder') || '')
+                                                .slice(0, 40)
+                                            : '',
+                                    };
+                                })(),
                                 controls: Array.from(document.querySelectorAll(
                                     '[role], [title], [aria-label], svg'
                                 )).filter((node) => {
@@ -520,6 +611,8 @@ async def run_probe() -> dict:
                     "display_name": account.display_name,
                     "identity_warning": identity_warning,
                     "identity_evidence": identity_evidence,
+                    "draft_list_state": draft_list_state,
+                    "write_click_probe": write_click_probe,
                     "invalid_draft_probe": invalid_probe,
                     "blocked_mutation_paths": sorted(set(blocked_paths)),
                 }

@@ -274,6 +274,7 @@ def test_draft_list_payload_is_short_whitelisted_and_redacted() -> None:
                     "label": "显示器评测 token=abcdefghijklmnop",
                     "button_texts": ["继续编辑", r"C:\\private\\draft.png"],
                     "unique_edit_entry": True,
+                    "exact_expected_title": True,
                     "href": "https://example.invalid/private",
                     "src": "data:image/png;base64,secret",
                     "style": "background: secret",
@@ -287,6 +288,7 @@ def test_draft_list_payload_is_short_whitelisted_and_redacted() -> None:
     item = payload["draft_items"][0]
     assert payload["draft_item_count"] == 1
     assert payload["unique_edit_entry_count"] == 1
+    assert payload["expected_title_match_count"] == 1
     assert set(item) == {
         "tag",
         "role",
@@ -294,6 +296,7 @@ def test_draft_list_payload_is_short_whitelisted_and_redacted() -> None:
         "label_length",
         "button_texts",
         "unique_edit_entry",
+        "exact_expected_title",
     }
     assert item["label_present"] is True
     assert item["label_length"] == 0
@@ -314,7 +317,9 @@ def test_draft_list_probe_script_reads_only_whitelisted_item_structure() -> None
     assert "label_length" in DRAFT_LIST_PROBE_SCRIPT
     assert "button_texts" in DRAFT_LIST_PROBE_SCRIPT
     assert "unique_edit_entry" in DRAFT_LIST_PROBE_SCRIPT
-    assert ".filter((item) => item.unique_edit_entry)" in DRAFT_LIST_PROBE_SCRIPT
+    assert ".draft-actions .btn" in DRAFT_LIST_PROBE_SCRIPT
+    assert "exact_expected_title" in DRAFT_LIST_PROBE_SCRIPT
+    assert "expected_title_match_count" in DRAFT_LIST_PROBE_SCRIPT
     assert "href" not in lowered
     assert "src" not in lowered
     assert "classname" not in lowered
@@ -340,7 +345,7 @@ class _FakeDraftListPage:
             pass
         return self._current_url
 
-    async def evaluate(self, _script: str) -> dict:
+    async def evaluate(self, _script: str, *_args) -> dict:
         self.evaluate_calls += 1
         try:
             return next(self._payloads)
@@ -372,6 +377,48 @@ async def test_wait_for_draft_list_requires_two_stable_read_only_snapshots() -> 
     assert status == "DRAFT_LIST_READY"
     assert payload["items"]
     assert page.evaluate_calls == 2
+
+
+@pytest.mark.asyncio
+async def test_wait_for_draft_list_passes_expected_title_without_exposing_it() -> None:
+    clock = _FakeClock()
+    page = _FakeDraftListPage(
+        [
+            {
+                "status": "DRAFT_LIST_CANDIDATES",
+                "items": [
+                    {
+                        "tag": "div",
+                        "unique_edit_entry": True,
+                        "exact_expected_title": True,
+                    }
+                ],
+            },
+            {
+                "status": "DRAFT_LIST_CANDIDATES",
+                "items": [
+                    {
+                        "tag": "div",
+                        "unique_edit_entry": True,
+                        "exact_expected_title": True,
+                    }
+                ],
+            },
+        ]
+    )
+
+    status, payload = await wait_for_draft_list(
+        page,
+        expected_title="只用于页面内精确比较",
+        timeout_seconds=5,
+        sleep=clock.sleep,
+        clock=clock,
+    )
+
+    assert status == "DRAFT_LIST_READY"
+    safe = sanitize_draft_list_payload(payload)
+    assert safe["expected_title_match_count"] == 1
+    assert "只用于页面内精确比较" not in json.dumps(safe, ensure_ascii=False)
 
 
 @pytest.mark.asyncio

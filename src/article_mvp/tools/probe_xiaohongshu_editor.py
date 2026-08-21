@@ -234,11 +234,19 @@ DRAFT_LIST_ENTRY_SCRIPT = r"""() => {
 
 # 点击入口后只读取草稿项的标签存在性/长度、固定动作摘要和 tag/role；不读取链接、
 # 资源、样式、class、value 或正文内容。草稿项的编辑入口只按可见按钮/链接短文本计数。
-DRAFT_LIST_PROBE_SCRIPT = r"""() => {
+DRAFT_LIST_PROBE_SCRIPT = r"""(expectedTitle) => {
     const compact = (value) => String(value || '').replace(/\s+/g, ' ').trim().slice(0, 80);
+    const titleKey = (value) => String(value || '').replace(/\s+/g, '').trim();
+    const expectedKey = titleKey(expectedTitle);
     const visible = (element) => element.getAttribute('aria-hidden') !== 'true'
         && element.getClientRects().length > 0;
-    const interactiveSelector = 'button, a, [role="button"], [role="link"]';
+    const interactiveSelector = [
+        'button',
+        'a',
+        '[role="button"]',
+        '[role="link"]',
+        '.draft-actions .btn',
+    ].join(', ');
     const listContainers = Array.from(document.querySelectorAll(
         '.draft-drawer .draft-list'
     )).filter(visible);
@@ -258,6 +266,12 @@ DRAFT_LIST_PROBE_SCRIPT = r"""() => {
         const info = item.querySelector('.draft-info');
         const firstLine = compact(info ? (info.innerText || '').split('\n')[0] : '');
         return firstLine.length;
+    };
+    const itemTitleKey = (item) => {
+        const title = item.querySelector('.draft-title-text');
+        if (title) return titleKey(title.innerText || title.textContent || '');
+        const info = item.querySelector('.draft-info');
+        return titleKey(info ? (info.innerText || '').split('\n')[0] : '');
     };
     const safeAction = (text) => {
         const normalized = compact(text);
@@ -288,14 +302,18 @@ DRAFT_LIST_PROBE_SCRIPT = r"""() => {
             label_length: labelLengthValue,
             button_texts: buttons.map(safeAction),
             unique_edit_entry: editEntries.length === 1,
+            exact_expected_title: !!expectedKey && itemTitleKey(item) === expectedKey,
         };
-    }).filter((item) => item.unique_edit_entry);
+    });
     return {
         status: itemsPayload.length
             ? 'DRAFT_LIST_CANDIDATES'
             : (listContainers.length ? 'DRAFT_LIST_UNRECOGNIZED' : 'DRAFT_LIST_NOT_READY'),
         list_container_count: listContainers.length,
         items: itemsPayload,
+        expected_title_match_count: itemsPayload.filter(
+            (item) => item.exact_expected_title
+        ).length,
     };
 }"""
 
@@ -432,6 +450,9 @@ def sanitize_draft_list_payload(payload: Any) -> dict[str, Any]:
                     "label_length": label_length,
                     "button_texts": button_texts,
                     "unique_edit_entry": bool(raw_item.get("unique_edit_entry")),
+                    "exact_expected_title": bool(
+                        raw_item.get("exact_expected_title")
+                    ),
                 }
             )
     return {
@@ -439,6 +460,9 @@ def sanitize_draft_list_payload(payload: Any) -> dict[str, Any]:
         "draft_items": items,
         "unique_edit_entry_count": sum(
             item["unique_edit_entry"] for item in items
+        ),
+        "expected_title_match_count": sum(
+            item["exact_expected_title"] for item in items
         ),
     }
 
@@ -551,6 +575,7 @@ def validate_manual_handoff_timeout(seconds: int) -> int:
 async def wait_for_draft_list(
     page: Any,
     *,
+    expected_title: str = "",
     timeout_seconds: int = DRAFT_LIST_WAIT_TIMEOUT_SECONDS,
     sleep: Any = asyncio.sleep,
     clock: Any = None,
@@ -569,7 +594,13 @@ async def wait_for_draft_list(
         if origin != CREATOR_ORIGIN or path != CREATOR_PUBLISH_PATH:
             return "UNEXPECTED_ORIGIN", {}
         try:
-            raw_payload = await page.evaluate(DRAFT_LIST_PROBE_SCRIPT)
+            if expected_title:
+                raw_payload = await page.evaluate(
+                    DRAFT_LIST_PROBE_SCRIPT,
+                    expected_title,
+                )
+            else:
+                raw_payload = await page.evaluate(DRAFT_LIST_PROBE_SCRIPT)
         except Exception as exc:  # noqa: BLE001
             raise ProbeError("BROWSER_CONTEXT_CLOSED") from exc
         payload = raw_payload if isinstance(raw_payload, dict) else {}
@@ -704,6 +735,11 @@ def parse_args() -> argparse.Namespace:
         default=DEFAULT_MANUAL_HANDOFF_TIMEOUT_SECONDS,
         help="人工交接等待秒数（1-600，默认 300）",
     )
+    parser.add_argument(
+        "--expected-title",
+        default="",
+        help="草稿箱探测时仅输出该标题的精确匹配数量，不输出标题文本",
+    )
     args = parser.parse_args()
     if not 1 <= args.handoff_timeout_seconds <= MAX_MANUAL_HANDOFF_TIMEOUT_SECONDS:
         parser.error(
@@ -752,6 +788,7 @@ async def run_probe(
     *,
     manual_handoff: bool = False,
     probe_draft_list: bool = False,
+    expected_title: str = "",
     handoff_timeout_seconds: int = DEFAULT_MANUAL_HANDOFF_TIMEOUT_SECONDS,
 ) -> dict[str, Any]:
     """复用现有 Profile 租约执行一次只读页面探测。"""
@@ -784,6 +821,10 @@ async def run_probe(
                 if origin != CREATOR_ORIGIN or path != CREATOR_PUBLISH_PATH:
                     return build_probe_result("UNEXPECTED_ORIGIN")
                 entry = platform.page.locator(".draft-title-box")
+                try:
+                    await entry.first.wait_for(state="visible", timeout=15000)
+                except Exception:
+                    pass
                 if await entry.count() != 1 or not await entry.is_visible():
                     return build_draft_list_result(
                         "DRAFT_LIST_ENTRY_MISSING", {"entry_count": await entry.count()}
@@ -801,7 +842,10 @@ async def run_probe(
                         {"entry_count": len(visible_tabs)},
                     )
                 await visible_tabs[0].click(timeout=15000)
-                draft_status, draft_payload = await wait_for_draft_list(platform.page)
+                draft_status, draft_payload = await wait_for_draft_list(
+                    platform.page,
+                    expected_title=expected_title,
+                )
                 if draft_status == "UNEXPECTED_ORIGIN":
                     return build_probe_result(draft_status)
                 return build_draft_list_result(draft_status, draft_payload)
@@ -827,6 +871,7 @@ async def _main() -> int:
             args.account_id,
             manual_handoff=args.manual_handoff,
             probe_draft_list=args.probe_draft_list,
+            expected_title=args.expected_title,
             handoff_timeout_seconds=args.handoff_timeout_seconds,
         )
     except ProbeError as exc:

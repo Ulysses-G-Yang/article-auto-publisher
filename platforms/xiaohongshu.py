@@ -472,11 +472,35 @@ class XiaohongshuPlatform(BasePlatform):
                 visible_tabs.append(tab)
         if len(visible_tabs) != 1:
             raise DraftBaselineError("DRAFT_BASELINE_FAILED: 小红书长文草稿分类不唯一")
+        tab_label = " ".join((await visible_tabs[0].inner_text()).split())
+        count_match = re.fullmatch(r"长文笔记\((\d+)\)", tab_label)
+        if count_match is None:
+            raise DraftBaselineError(
+                "DRAFT_BASELINE_FAILED: 小红书长文草稿数量标签无法识别"
+            )
+        expected_items = int(count_match.group(1))
         await visible_tabs[0].click(timeout=15000)
         await self.page.wait_for_selector(
             ".draft-drawer .draft-list",
             state="visible",
             timeout=15000,
+        )
+        cards = self.page.locator(".draft-drawer .draft-list .draft-item")
+        stable_samples = 0
+        for _ in range(60):
+            visible_count = 0
+            for index in range(await cards.count()):
+                if await cards.nth(index).is_visible():
+                    visible_count += 1
+            if visible_count == expected_items:
+                stable_samples += 1
+                if stable_samples >= 2:
+                    return
+            else:
+                stable_samples = 0
+            await asyncio.sleep(0.25)
+        raise DraftBaselineError(
+            "DRAFT_BASELINE_FAILED: 小红书长文草稿列表未完整稳定加载"
         )
 
     async def _matching_long_draft_cards(self, title: str) -> list:
@@ -487,8 +511,11 @@ class XiaohongshuPlatform(BasePlatform):
         matches = []
         for index in range(await cards.count()):
             card = cards.nth(index)
-            lines = [line.strip() for line in (await card.inner_text()).splitlines()]
-            if expected_key and any(self._draft_title_key(line) == expected_key for line in lines):
+            title_field = card.locator(".draft-title-text").first
+            if await title_field.count() != 1:
+                continue
+            card_title = await title_field.inner_text()
+            if expected_key and self._draft_title_key(card_title) == expected_key:
                 matches.append(card)
         return matches
 
@@ -1705,7 +1732,12 @@ class XiaohongshuPlatform(BasePlatform):
         blocks = self._expected_persisted_blocks
         if blocks is None:
             raise DraftResultUnknownError("DRAFT_RESULT_UNKNOWN: 小红书缺少冻结内容核验快照")
-        await self._open_long_draft_drawer()
+        try:
+            await self._open_long_draft_drawer()
+        except DraftBaselineError as exc:
+            raise DraftResultUnknownError(
+                "DRAFT_RESULT_UNKNOWN: 小红书保存后草稿列表未完整稳定加载"
+            ) from exc
         matches = await self._matching_long_draft_cards(expected_title)
         baseline_match_count = getattr(self, "_preflight_matching_draft_count", None)
         if not isinstance(baseline_match_count, int):

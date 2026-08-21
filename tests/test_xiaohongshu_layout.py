@@ -407,7 +407,11 @@ def test_matching_cards_remains_fail_closed_when_space_normalization_collides() 
     cards = []
     for title in ("同 名", "同名"):
         card = MagicMock()
-        card.inner_text = AsyncMock(return_value=title)
+        title_field = MagicMock(
+            count=AsyncMock(return_value=1),
+            inner_text=AsyncMock(return_value=title),
+        )
+        card.locator.return_value.first = title_field
         cards.append(card)
     locator = MagicMock()
     locator.count = AsyncMock(return_value=2)
@@ -420,6 +424,50 @@ def test_matching_cards_remains_fail_closed_when_space_normalization_collides() 
     matches = run(platform._matching_long_draft_cards("同名"))
 
     assert len(matches) == 2
+
+
+def test_long_draft_drawer_waits_for_tab_count_to_load_stably() -> None:
+    entry = MagicMock(
+        wait_for=AsyncMock(),
+        is_visible=AsyncMock(return_value=True),
+        click=AsyncMock(),
+    )
+    entries = MagicMock(
+        first=entry,
+        count=AsyncMock(return_value=1),
+        nth=MagicMock(return_value=entry),
+    )
+    tab = MagicMock(
+        is_visible=AsyncMock(return_value=True),
+        inner_text=AsyncMock(return_value="长文笔记(2)"),
+        click=AsyncMock(),
+    )
+    tabs = MagicMock(
+        count=AsyncMock(return_value=1),
+        nth=MagicMock(return_value=tab),
+    )
+    card_items = [
+        MagicMock(is_visible=AsyncMock(return_value=True)),
+        MagicMock(is_visible=AsyncMock(return_value=True)),
+    ]
+    cards = MagicMock(
+        count=AsyncMock(return_value=2),
+        nth=MagicMock(side_effect=lambda index: card_items[index]),
+    )
+    page = MagicMock(wait_for_selector=AsyncMock())
+    page.locator.side_effect = lambda selector: (
+        entries if selector == ".draft-title-box" else cards
+    )
+    page.get_by_text.return_value = tabs
+    platform = _platform()
+    platform.page = page
+
+    with patch("platforms.xiaohongshu.asyncio.sleep", new=AsyncMock()):
+        run(platform._open_long_draft_drawer())
+
+    assert cards.count.await_count == 2
+    entry.click.assert_awaited_once()
+    tab.click.assert_awaited_once()
 
 
 def test_resume_exact_title_does_not_rewrite_title() -> None:

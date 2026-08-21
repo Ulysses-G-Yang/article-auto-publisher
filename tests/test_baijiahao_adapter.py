@@ -279,7 +279,10 @@ def test_unique_draft_uses_scoped_modify_when_preview_link_is_absent() -> None:
     result = asyncio.run(platform._find_unique_exact_draft("唯一标题"))
 
     assert "article_id=react-draft" in result
-    platform._open_exact_draft_via_modify.assert_awaited_once_with("唯一标题")
+    platform._open_exact_draft_via_modify.assert_awaited_once_with(
+        "唯一标题",
+        row_index=0,
+    )
 
 
 def test_same_title_verification_selects_only_new_draft_id() -> None:
@@ -311,6 +314,37 @@ def test_same_title_verification_selects_only_new_draft_id() -> None:
     assert "article_id=new-draft" in result
 
 
+def test_same_title_without_preview_id_opens_newest_row_once() -> None:
+    platform = BaijiahaoPlatform()
+    platform.page = SimpleNamespace(reload=AsyncMock())
+    platform._preflight_matching_draft_count = 1
+    platform._preflight_draft_ids = frozenset()
+    platform._open_works_page = AsyncMock()
+    platform._search_works = AsyncMock()
+    platform._matching_work_rows = AsyncMock(
+        return_value=[
+            {"index": 0, "preview_href": ""},
+            {"index": 1, "preview_href": ""},
+        ]
+    )
+    platform._open_exact_draft_via_modify = AsyncMock(
+        return_value=(
+            "https://baijiahao.baidu.com/builder/rc/edit?"
+            "type=news&article_id=newest-react-draft"
+        )
+    )
+
+    result = asyncio.run(platform._find_unique_exact_draft("允许同名"))
+
+    assert "article_id=newest-react-draft" in result
+    platform._search_works.assert_awaited_once_with("允许同名")
+    platform.page.reload.assert_not_awaited()
+    platform._open_exact_draft_via_modify.assert_awaited_once_with(
+        "允许同名",
+        row_index=0,
+    )
+
+
 def test_scoped_modify_accepts_only_one_new_same_origin_editor_page() -> None:
     original = SimpleNamespace(
         url="https://baijiahao.baidu.com/builder/rc/content",
@@ -339,6 +373,10 @@ def test_scoped_modify_accepts_only_one_new_same_origin_editor_page() -> None:
 
     assert "article_id=react-draft" in result
     popup.close.assert_awaited_once()
+    assert original.evaluate.await_args.args[1] == {
+        "title": "唯一标题",
+        "rowIndex": 0,
+    }
 
 
 @pytest.mark.parametrize(

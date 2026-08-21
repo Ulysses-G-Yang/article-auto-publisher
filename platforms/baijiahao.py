@@ -1775,9 +1775,12 @@ class BaijiahaoPlatform(BasePlatform):
                 if len(candidates) == 1:
                     created_match = candidates[0]
                     break
-                # 首篇同名草稿的旧页面可能没有预览链接，仍可沿用唯一行的
-                # React“修改”动作；已有同名基线时绝不靠列表位置猜新实体。
-                if baseline_count == 0 and len(matches) == 1:
+                # 新版草稿列表不再给任何一行暴露预览 ID。真实页面按最近
+                # 修改时间倒序；数量严格只增加一条时，第 0 个精确标题行是
+                # 本次新增实体。随后必须重开并核验冻结内容，不能只凭顺序
+                # 宣告成功。这里一旦得到数量证据便停止轮询，避免反复操作
+                # 草稿箱搜索框。
+                if matches and int(matches[0].get("index", -1)) == 0:
                     created_match = matches[0]
                     break
             if attempt + 1 < 6:
@@ -1794,23 +1797,36 @@ class BaijiahaoPlatform(BasePlatform):
         preview_href = str(created_match.get("preview_href") or "")
         if preview_href:
             return self._edit_url_from_preview_href(preview_href)
-        return await self._open_exact_draft_via_modify(title)
+        return await self._open_exact_draft_via_modify(
+            title,
+            row_index=int(created_match.get("index", -1)),
+        )
 
-    async def _open_exact_draft_via_modify(self, title: str) -> str:
-        """点击唯一草稿行的 React“修改”动作，只捕获同源编辑页地址。
+    async def _open_exact_draft_via_modify(
+        self,
+        title: str,
+        *,
+        row_index: int = 0,
+    ) -> str:
+        """点击指定精确标题行的 React“修改”动作并捕获同源编辑页。
 
         百家号新版作品行不再提供 ``/builder/preview/s`` 链接。这里不猜
-        React 私有属性，也不拼接未知 ID；只允许标题精确匹配的唯一草稿行、
-        唯一“修改”动作和最终通过 ``_safe_draft_url`` 的同源编辑页。
+        React 私有属性，也不拼接未知 ID；只允许保存前后数量证明得到的
+        精确标题行、该行唯一“修改”动作和最终通过 ``_safe_draft_url`` 的
+        同源编辑页。
         """
 
         if self.context is None:
             raise DraftResultUnknownError(
                 "DRAFT_RESULT_UNKNOWN: 百家号缺少草稿重开浏览器上下文"
             )
+        if isinstance(row_index, bool) or not isinstance(row_index, int) or row_index < 0:
+            raise DraftResultUnknownError(
+                "DRAFT_RESULT_UNKNOWN: 百家号目标草稿行索引无效"
+            )
         before_page_ids = {id(page) for page in self.context.pages}
         click_result = await self.page.evaluate(
-            """title => {
+            """({title, rowIndex}) => {
                 const visible = (el) => !!(
                     el && (el.offsetWidth || el.offsetHeight
                         || el.getClientRects().length)
@@ -1829,10 +1845,10 @@ class BaijiahaoPlatform(BasePlatform):
                         ));
                     return exactTitle;
                 });
-                if (rows.length !== 1) {
-                    return {status: 'ROW_NOT_UNIQUE', rows: rows.length};
+                if (rowIndex < 0 || rowIndex >= rows.length) {
+                    return {status: 'ROW_INDEX_INVALID', rows: rows.length};
                 }
-                const actions = Array.from(rows[0].querySelectorAll(
+                const actions = Array.from(rows[rowIndex].querySelectorAll(
                     'button, a, [role="button"], span'
                 )).filter((el) => visible(el) && text(el) === '修改'
                     && !Array.from(el.children).some(
@@ -1844,11 +1860,11 @@ class BaijiahaoPlatform(BasePlatform):
                 actions[0].click();
                 return {status: 'CLICKED'};
             }""",
-            title,
+            {"title": title, "rowIndex": row_index},
         )
         if not isinstance(click_result, dict) or click_result.get("status") != "CLICKED":
             raise DraftResultUnknownError(
-                "DRAFT_RESULT_UNKNOWN: 百家号唯一草稿修改动作不可用"
+                "DRAFT_RESULT_UNKNOWN: 百家号目标草稿修改动作不可用"
             )
 
         loop = asyncio.get_running_loop()

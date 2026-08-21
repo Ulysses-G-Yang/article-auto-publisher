@@ -359,7 +359,7 @@ class WeiboPlatform(BasePlatform):
             )
             matches = int(
                 await self.page.evaluate(
-                    """(title) => {
+                    r"""(title) => {
                         const visible = (node) => {
                             const rect = node.getBoundingClientRect();
                             const style = getComputedStyle(node);
@@ -1449,7 +1449,7 @@ class WeiboPlatform(BasePlatform):
             for _ in range(4):
                 await self.simulator.random_delay(2, 3)
                 card_result = await self.page.evaluate(
-                    """(title) => {
+                    r"""(title) => {
                         const visible = (node) => {
                             const rect = node.getBoundingClientRect();
                             const style = getComputedStyle(node);

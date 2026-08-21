@@ -10,7 +10,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -27,12 +27,36 @@ _SAFETY_SWITCHES = (
     "ACCOUNT_SESSIONS_ALLOW_PUBLIC_PUBLISH",
     "LEGACY_UPLOAD_QUEUE_ENABLED",
 )
+_ACCEPTANCE_ONLY_PLATFORMS = ("weibo",)
+
+
+class _AcceptanceCapabilityOverlay:
+    """给一次性验收进程追加尚未进入生产目录的平台能力。
+
+    生产 ``PlatformFormatCapabilities`` 会拒绝未晋级的平台，这是正确的
+    fail-closed 行为。微博真实草稿验收需要先经过一次受控试运行，因此这里只
+    在当前 Flask 进程覆盖 ``get``，不修改默认注册表或生产平台目录。
+    """
+
+    def __init__(self, base: Any, overrides: Mapping[str, Any]) -> None:
+        self._base = base
+        self._overrides = dict(overrides)
+
+    def get(self, platform: str) -> Any | None:
+        return self._overrides.get(platform) or self._base.get(platform)
+
+    def __contains__(self, platform: str) -> bool:
+        return platform in self._overrides or platform in self._base
+
+    @property
+    def declarations(self) -> Mapping[str, Any]:
+        return {**self._base.declarations, **self._overrides}
 
 
 def _delivery_platforms() -> tuple[str, ...]:
     from content_studio.platform_format_capabilities import DELIVERY_PLATFORMS
 
-    return DELIVERY_PLATFORMS
+    return tuple(dict.fromkeys((*DELIVERY_PLATFORMS, *_ACCEPTANCE_ONLY_PLATFORMS)))
 
 
 def _normalize_platforms(platforms: Iterable[str]) -> tuple[str, ...]:
@@ -141,6 +165,7 @@ def build_acceptance_app(
     if content_state is None or not hasattr(content_state, "service"):
         raise RuntimeError("Content Studio 运行时未注册")
     declarations = {}
+    acceptance_only_declarations = {}
     for platform in selected:
         if platform == "zol":
             declarations[platform] = PlatformFormatDeclaration(
@@ -182,9 +207,24 @@ def build_acceptance_app(
                 frozenset({"heading", "image_order"}),
                 frozenset({2}),
             )
+        elif platform == "weibo":
+            # 真实只读探测已证明微博长文编辑器存在稳定 H2 菜单与正文图片
+            # 面板。本声明只用于本次 DRAFT-only 验收；草稿列表证据通过前，
+            # 生产平台目录继续保持 delivery_enabled=False。
+            acceptance_only_declarations[platform] = PlatformFormatDeclaration(
+                platform,
+                frozenset({"heading", "image_order"}),
+                frozenset({2}),
+            )
         else:
             declarations[platform] = FEATURE_KEYS
-    content_state.service.platform_format_capabilities = PlatformFormatCapabilities(declarations)
+    registry = PlatformFormatCapabilities(declarations)
+    if acceptance_only_declarations:
+        registry = _AcceptanceCapabilityOverlay(
+            registry,
+            acceptance_only_declarations,
+        )
+    content_state.service.platform_format_capabilities = registry
 
     # 验收进程继续显式注入 ZOL 已验证标题路径。小红书本地 Profile 草稿
     # 已从投递目录移除，不能再通过验收参数绕开云端实体要求。

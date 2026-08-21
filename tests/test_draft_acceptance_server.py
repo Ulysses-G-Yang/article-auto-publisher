@@ -9,6 +9,7 @@ import pytest
 from flask import Flask
 
 import scripts.run_draft_acceptance_server as acceptance
+from account_sessions.platform_catalog import PLATFORM_CATALOG
 from content_studio.content_document import FEATURE_KEYS
 from content_studio.platform_format_capabilities import (
     DEFAULT_PLATFORM_FORMAT_CAPABILITIES,
@@ -47,7 +48,11 @@ def safe_environment(monkeypatch: pytest.MonkeyPatch):
 
 def test_build_injects_only_selected_platform_capabilities(monkeypatch: pytest.MonkeyPatch):
     before = {
-        name: DEFAULT_PLATFORM_FORMAT_CAPABILITIES.get(name).supported
+        name: (
+            declaration.supported
+            if (declaration := DEFAULT_PLATFORM_FORMAT_CAPABILITIES.get(name))
+            else None
+        )
         for name in acceptance._delivery_platforms()
     }
 
@@ -61,7 +66,11 @@ def test_build_injects_only_selected_platform_capabilities(monkeypatch: pytest.M
     assert registry.get("xiaoheihe").heading_levels == frozenset({2, 3})
     assert registry.get("zhihu").supported == frozenset()
     assert {
-        name: DEFAULT_PLATFORM_FORMAT_CAPABILITIES.get(name).supported
+        name: (
+            declaration.supported
+            if (declaration := DEFAULT_PLATFORM_FORMAT_CAPABILITIES.get(name))
+            else None
+        )
         for name in acceptance._delivery_platforms()
     } == before
     assert registry is not DEFAULT_PLATFORM_FORMAT_CAPABILITIES
@@ -99,6 +108,21 @@ def test_xiaohongshu_local_resume_is_not_an_acceptance_escape_hatch() -> None:
             "DRAFT_ONLY",
             xhs_resume_title="唯一恢复标题",
         )
+
+
+def test_weibo_acceptance_is_process_local_and_production_stays_disabled() -> None:
+    app = acceptance.build_acceptance_app(("weibo",), "DRAFT_ONLY")
+    registry = app.extensions["content_studio"].service.platform_format_capabilities
+
+    declaration = registry.get("weibo")
+    assert declaration.supported == frozenset({"heading", "image_order"})
+    assert declaration.heading_levels == frozenset({2})
+    assert registry.get("xiaoheihe").supported == frozenset()
+    assert DEFAULT_PLATFORM_FORMAT_CAPABILITIES.get("weibo") is None
+
+    production_weibo = next(item for item in PLATFORM_CATALOG if item.id == "weibo")
+    assert production_weibo.account_enabled is True
+    assert production_weibo.delivery_enabled is False
 
 
 @pytest.mark.parametrize(

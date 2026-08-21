@@ -1,36 +1,52 @@
-"""微博账号会话适配器。
+"""微博账号会话与头条文章草稿适配器。
 
-登录态与身份验证链路（真实扫码 → 跳转回首页 → 身份捕获/DOM 确认），
-内容投递能力尚未接入：所有投递方法显式拒绝。
+登录态通过持久 Profile 验证；草稿链路只允许 ``DRAFT``，按冻结图文块顺序
+写入 TipTap，保存后必须重开同一 draft ID 并复核标题、H2 与正文图片。
 
 真实登录页（https://passport.weibo.com/sso/signin?entry=miniblog...）：
 - 「扫描二维码登录」为默认 Tab，二维码为约 140x140 的 img（v2.qr.weibo.cn）。
 - 登录成功信号：扫码确认后页面从 passport 跳转回 weibo.com。
-- 身份接口带签名/cookie 约束，裸 fetch 不可靠；采用「捕获页面自身响应」
-  模式 + 首页 DOM 兜底，与小黑盒/小红书一致。
+- 身份接口带签名/cookie 约束，裸 fetch 不可靠；只读取登录配置或顶部导航
+  的唯一当前用户，禁止从内容流用户卡片猜测账号。
 """
 
 from __future__ import annotations
 
 import asyncio
+import copy
+import hashlib
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from loguru import logger
 
 from platforms.base import (
     BasePlatform,
     BrowserLifecycleError,
+    DraftBaselineError,
+    DraftResultUnknownError,
     LoginRequiredError,
     PlatformAutomationError,
     SelectorError,
 )
-from platforms.content_validation import ensure_valid_content, safe_media_error
+from platforms.content_validation import (
+    ContentValidationError,
+    ensure_valid_content,
+    extract_expected_paragraphs,
+    normalize_for_comparison,
+    safe_media_error,
+)
+from platforms.media_progress import safe_media_progress
 
 LOGIN_URL = (
     "https://passport.weibo.com/sso/signin?entry=miniblog"
     "&source=miniblog&disp=popup&url=https%3A%2F%2Fweibo.com%2F"
 )
 HOME_URL = "https://weibo.com/"
+BODY_SELECTOR = "div.tiptap.ProseMirror:visible"
+BODY_IMAGE_ICON_FINGERPRINT = (
+    "81fecffe5f54bf65524a7465730d595b95fbf6be95d1bb792f1682118b03d00a"
+)
 IDENTITY_NAME_KEYS = {"nickname", "user_name", "screen_name", "name", "nick"}
 IDENTITY_UID_KEYS = {"uid", "user_id"}
 
@@ -42,7 +58,7 @@ class PlatformNotImplementedError(PlatformAutomationError):
 
 
 class WeiboPlatform(BasePlatform):
-    """微博账号会话适配器；内容投递能力保持关闭。"""
+    """微博账号会话与 fail-closed 草稿投递适配器。"""
 
     platform_name = "weibo"
     # 游客也有 SUB/SUBP/WBPSESS；SCF/ALF/SSOLoginState 仅登录后存在。
@@ -54,10 +70,22 @@ class WeiboPlatform(BasePlatform):
         super().__init__(**kwargs)
         self.last_login_error = ""
         self._identity_payload: dict[str, str | int | bool] | None = None
+        self._preflight_title = ""
+        self._active_draft_id = ""
+        self._draft_title_baseline_count: int | None = None
+        self._expected_persisted_blocks: list[dict] | None = None
+        self._expected_persisted_image_count = 0
+        self._media_progress_state: dict | None = None
 
     async def initialize(self):
         await super().initialize()
         self._identity_payload = None
+        self._preflight_title = ""
+        self._active_draft_id = ""
+        self._draft_title_baseline_count = None
+        self._expected_persisted_blocks = None
+        self._expected_persisted_image_count = 0
+        self._media_progress_state = None
 
     # ==================== 登录态与身份 ====================
 
@@ -178,97 +206,95 @@ class WeiboPlatform(BasePlatform):
             pass
 
     async def fetch_identity_payload(self) -> dict[str, str | int | bool]:
-        """返回微博首页同源确认的最小平台身份（捕获 + DOM 兜底）。"""
+        """返回微博导航区同源确认的当前账号，绝不扫描内容流用户。"""
 
         if isinstance(self._identity_payload, dict) and self._identity_payload.get("ok"):
             return dict(self._identity_payload)
         try:
-            async def _on_response(response) -> None:
-                try:
-                    if (
-                        response.request.resource_type in ("xhr", "fetch")
-                        and "weibo.com" in response.url
-                        and any(
-                            key in response.url.lower()
-                            for key in ("user", "logininfo", "profile", "account")
-                        )
-                    ):
-                        payload = await response.json()
-                        found = self._extract_identity_from_json(payload)
-                        if found and self._identity_payload is None:
-                            self._identity_payload = {
-                                "ok": True,
-                                "user_id": found[0],
-                                "display_name": found[1],
-                            }
-                except Exception:  # noqa: BLE001
-                    pass
-
-            self.page.on("response", _on_response)
-            try:
-                await self.page.goto(
-                    HOME_URL,
-                    wait_until="domcontentloaded",
-                    timeout=30000,
-                )
-                for _ in range(8):
-                    if self._identity_payload is not None:
-                        break
-                    await asyncio.sleep(1)
-            finally:
-                try:
-                    self.page.remove_listener("response", _on_response)
-                except Exception:  # noqa: BLE001
-                    pass
-        except BrowserLifecycleError:
-            raise
+            identity = await self.page.evaluate(
+                r"""() => {
+                    const pairs = [];
+                    const add = (value) => {
+                        if (!value || typeof value !== 'object') return;
+                        const uid = String(
+                            value.uid || value.user_id || value.id || ''
+                        ).trim();
+                        const displayName = String(
+                            value.screen_name || value.nickname || value.nick
+                            || value.name || ''
+                        ).trim();
+                        if (/^\d+$/.test(uid) && displayName) {
+                            pairs.push({user_id: uid, display_name: displayName});
+                        }
+                    };
+                    for (const root of [
+                        window.$CONFIG,
+                        window.__INITIAL_STATE__,
+                        window.__WB_STATE__,
+                    ]) {
+                        add(root);
+                        add(root && root.user);
+                        add(root && root.loginUser);
+                        add(root && root.account);
+                    }
+                    const unique = Array.from(new Map(
+                        pairs.map((item) => [
+                            item.user_id + '\u0000' + item.display_name,
+                            item,
+                        ])
+                    ).values());
+                    if (unique.length === 1) return unique[0];
+                    const visible = (node) => {
+                        const rect = node.getBoundingClientRect();
+                        const style = getComputedStyle(node);
+                        return rect.width > 0 && rect.height > 0
+                            && rect.y >= -10 && rect.y < 140
+                            && style.display !== 'none'
+                            && style.visibility !== 'hidden';
+                    };
+                    const nav = Array.from(
+                        document.querySelectorAll('a[href*="/u/"]')
+                    ).filter(visible).map((node) => {
+                        const match = (node.getAttribute('href') || '')
+                            .match(/\/u\/(\d+)/);
+                        return {
+                            user_id: match ? match[1] : '',
+                            display_name: (
+                                node.getAttribute('title')
+                                || node.getAttribute('aria-label')
+                                || node.innerText || ''
+                            ).trim(),
+                        };
+                    }).filter((item) => item.user_id && item.display_name);
+                    const uniqueNav = Array.from(new Map(
+                        nav.map((item) => [
+                            item.user_id + '\u0000' + item.display_name,
+                            item,
+                        ])
+                    ).values());
+                    return uniqueNav.length === 1
+                        ? uniqueNav[0]
+                        : {user_id: '', display_name: ''};
+                }"""
+            )
         except Exception as exc:
             if self._exception_means_browser_closed(exc):
                 raise BrowserLifecycleError(
-                    "BROWSER_CONTEXT_CLOSED: 微博身份捕获时页面已关闭"
+                    "BROWSER_CONTEXT_CLOSED: 微博身份确认时页面已关闭"
                 ) from exc
-            logger.warning("微博身份捕获失败: {}", exc)
-
-        # DOM 兜底：头像链接 /u/<uid> + 顶部用户区昵称（登录后首页）
-        if not (
-            isinstance(self._identity_payload, dict) and self._identity_payload.get("ok")
-        ):
-            try:
-                dom = await self.page.evaluate(
-                    """() => {
-                        const uidLink = document.querySelector('a[href*="/u/"]');
-                        const uidMatch = uidLink
-                            ? (uidLink.getAttribute('href') || '').match(/\\/u\\/(\\d+)/)
-                            : null;
-                        const nickEl = document.querySelector('[class*="_nick_"]');
-                        let nickname = nickEl
-                            ? (nickEl.innerText || '').trim()
-                            : '';
-                        if (nickname.startsWith('@')) {
-                            nickname = '';
-                        }
-                        return {
-                            user_id: uidMatch ? uidMatch[1] : '',
-                            display_name: nickname,
-                        };
-                    }"""
-                )
-                if (
-                    isinstance(dom, dict)
-                    and dom.get("user_id")
-                    and dom.get("display_name")
-                ):
-                    self._identity_payload = {
-                        "ok": True,
-                        "user_id": str(dom["user_id"]),
-                        "display_name": str(dom["display_name"]),
-                    }
-            except Exception:  # noqa: BLE001
-                pass
-
-        if isinstance(self._identity_payload, dict) and self._identity_payload.get("ok"):
-            return dict(self._identity_payload)
-        return {"ok": False, "user_id": "", "display_name": ""}
+            return {"ok": False, "user_id": "", "display_name": ""}
+        if not isinstance(identity, dict):
+            return {"ok": False, "user_id": "", "display_name": ""}
+        user_id = str(identity.get("user_id") or "").strip()
+        display_name = str(identity.get("display_name") or "").strip()
+        if not user_id or not display_name:
+            return {"ok": False, "user_id": "", "display_name": ""}
+        self._identity_payload = {
+            "ok": True,
+            "user_id": user_id,
+            "display_name": display_name,
+        }
+        return dict(self._identity_payload)
 
     @staticmethod
     def _extract_identity_from_json(payload) -> tuple[str, str] | None:
@@ -307,6 +333,69 @@ class WeiboPlatform(BasePlatform):
             f"PLATFORM_NOT_IMPLEMENTED: 微博{operation}能力尚未接入"
         )
 
+    async def preflight_delivery(self, title: str) -> None:
+        """在创建草稿前冻结标题并证明没有同名草稿。"""
+
+        self._require_page_alive("微博草稿基线检查")
+        expected_title = str(title or "").strip()
+        if not expected_title:
+            raise DraftBaselineError("DRAFT_BASELINE_FAILED: 微博标题不能为空")
+        if len(expected_title) > 32:
+            raise DraftBaselineError(
+                "DRAFT_BASELINE_FAILED: 微博头条文章标题不能超过 32 个字符"
+            )
+        try:
+            await self.page.goto(
+                "https://card.weibo.com/article/v5/editor#/draft",
+                wait_until="domcontentloaded",
+                timeout=30000,
+            )
+            await self.page.wait_for_function(
+                """() => Array.from(document.querySelectorAll('*')).some((node) =>
+                    (node.innerText || '').trim() === '写文章'
+                    && node.children.length <= 3
+                )""",
+                timeout=15000,
+            )
+            matches = int(
+                await self.page.evaluate(
+                    """(title) => {
+                        const visible = (node) => {
+                            const rect = node.getBoundingClientRect();
+                            const style = getComputedStyle(node);
+                            return rect.width > 0 && rect.height > 0
+                                && style.display !== 'none'
+                                && style.visibility !== 'hidden';
+                        };
+                        return Array.from(
+                            document.querySelectorAll('.list-item')
+                        ).filter((card) => {
+                            if (!visible(card)) return false;
+                            const firstLine = (card.innerText || '')
+                                .split(/\r?\n/, 1)[0].trim();
+                            return firstLine === title;
+                        }).length;
+                    }""",
+                    expected_title,
+                )
+            )
+        except DraftBaselineError:
+            raise
+        except Exception as exc:
+            if self._exception_means_browser_closed(exc):
+                raise BrowserLifecycleError(
+                    "BROWSER_CONTEXT_CLOSED: 微博草稿基线检查时页面已关闭"
+                ) from exc
+            raise DraftBaselineError(
+                "DRAFT_BASELINE_FAILED: 微博无法确认同名草稿基线"
+            ) from exc
+        if matches:
+            raise DraftBaselineError(
+                "DRAFT_BASELINE_FAILED: 微博已存在同名草稿，禁止自动重复创建"
+            )
+        self._preflight_title = expected_title
+        self._draft_title_baseline_count = 0
+
     async def navigate_to_editor(self):
         """打开微博头条文章编辑器：草稿箱视图 → 真实点击「写文章」。
 
@@ -315,6 +404,10 @@ class WeiboPlatform(BasePlatform):
         id 为空、服务端返回参数错误）。创建后标题/正文字段即可填写。
         """
         self._require_page_alive("微博打开编辑器")
+        if not self._preflight_title or self._draft_title_baseline_count != 0:
+            raise DraftBaselineError(
+                "DRAFT_BASELINE_FAILED: 微博缺少唯一标题草稿基线"
+            )
         try:
             await self.page.goto(
                 "https://card.weibo.com/article/v5/editor#/draft",
@@ -351,6 +444,45 @@ class WeiboPlatform(BasePlatform):
                 )
             except Exception:
                 pass
+            draft_id = str(
+                await self.page.evaluate(
+                    r"""() => {
+                        const match = location.hash.match(/^#\/draft\/(\d+)$/);
+                        return match ? match[1] : '';
+                    }"""
+                )
+                or ""
+            )
+            if not draft_id.isdigit():
+                raise DraftBaselineError(
+                    "DRAFT_BASELINE_FAILED: 微博没有创建可绑定的草稿 ID"
+                )
+            editor_state = await self.page.evaluate(
+                """(selector) => {
+                    const title = document.querySelector(
+                        "textarea[placeholder='请输入标题']"
+                    );
+                    const body = document.querySelector(selector);
+                    return {
+                        title: title ? title.value : null,
+                        body: body ? (body.innerText || '') : null,
+                    };
+                }""",
+                BODY_SELECTOR.removesuffix(":visible"),
+            )
+            if not isinstance(editor_state, dict):
+                raise DraftBaselineError(
+                    "DRAFT_BASELINE_FAILED: 微博新草稿编辑器状态不可读"
+                )
+            if normalize_for_comparison(editor_state.get("title")) or (
+                normalize_for_comparison(editor_state.get("body"))
+            ):
+                raise DraftBaselineError(
+                    "DRAFT_BASELINE_FAILED: 微博新草稿编辑器不是空白状态"
+                )
+            self._active_draft_id = draft_id
+        except DraftBaselineError:
+            raise
         except BrowserLifecycleError:
             raise
         except Exception as exc:
@@ -364,12 +496,19 @@ class WeiboPlatform(BasePlatform):
         """填写微博头条文章标题（textarea，placeholder「请输入标题」，0/32）。"""
 
         self._require_page_alive("微博填写标题")
+        expected_title = str(title or "").strip()
+        if expected_title != self._preflight_title:
+            raise DraftBaselineError(
+                "DRAFT_BASELINE_FAILED: 微博标题与预检冻结标题不一致"
+            )
         title_field = self.page.locator("textarea[placeholder='请输入标题']").first
         try:
             if await title_field.count() == 0 or not await title_field.is_visible():
                 raise RuntimeError("标题输入框不可见")
             # 直接 fill（不依赖 click，避免加载遮罩拦截命中）
-            await title_field.fill(str(title or "").strip())
+            await title_field.fill(expected_title)
+            if str(await title_field.input_value()).strip() != expected_title:
+                raise RuntimeError("标题回读不一致")
         except Exception as exc:
             if self._exception_means_browser_closed(exc):
                 raise BrowserLifecycleError(
@@ -379,14 +518,18 @@ class WeiboPlatform(BasePlatform):
             raise SelectorError("微博标题输入框未找到或填写失败") from exc
 
     async def fill_content(self, content_blocks: list, images: list):
-        """填写正文：键盘逐段写入 TipTap 编辑器，回读并有序校验。"""
+        """按冻结 ContentVersion 的原始顺序写入微博 TipTap 图文。"""
 
         self._require_page_alive("微博填写正文")
-        # 草稿视图可能含隐藏的编辑器实例，必须取可见的那个
-        editor = self.page.locator("div.tiptap.ProseMirror:visible").first
+        expected_images = self._validate_delivery_blocks(content_blocks, images)
+        self._media_progress_state = {
+            "expected_images": expected_images,
+            "uploaded_images": 0,
+            "failed_image_count": 0,
+            "media_status": "not_required" if expected_images == 0 else "in_progress",
+        }
+        editor = await self._current_body_editor()
         try:
-            if await editor.count() == 0 or not await editor.is_visible():
-                raise RuntimeError("正文编辑器不可见")
             try:
                 await editor.click(timeout=5000)
             except Exception:
@@ -415,103 +558,119 @@ class WeiboPlatform(BasePlatform):
             pass
         await self.simulator.random_delay(0.3, 0.8)
 
-        first_text = True
-        for block in content_blocks:
-            btype = block.get("type")
-            if btype in ("text", "heading") and block.get("text"):
-                text = str(block["text"]).strip()
+        uploaded_images = 0
+        failed_images: list[dict[str, str]] = []
+        content_started = False
+        paragraph_ready_after_image = False
+        for block_index, block in enumerate(content_blocks):
+            if not isinstance(block, dict):
+                raise ContentValidationError(
+                    "WEIBO_CONTENT_CONTRACT_INVALID: 正文块无效"
+                )
+            block_type = block.get("type")
+            if block_type in {"text", "heading"}:
+                text = str(block.get("text") or "").strip()
                 if not text:
                     continue
-                if not first_text:
-                    await self.page.keyboard.press("Enter")
+                if content_started:
+                    await self._place_body_caret_at_end()
+                    if paragraph_ready_after_image:
+                        paragraph_ready_after_image = False
+                    else:
+                        await self.page.keyboard.press("Enter")
+                await self._place_body_caret_at_end()
                 lines = text.splitlines() or [text]
-                for i, line in enumerate(lines):
+                for line_index, line in enumerate(lines):
                     if line.strip():
                         await self.page.keyboard.insert_text(line.strip())
-                    if i < len(lines) - 1:
+                    if line_index < len(lines) - 1:
                         await self.page.keyboard.press("Enter")
-                first_text = False
+                if block_type == "heading":
+                    await self._apply_h2_to_current_block()
+                content_started = True
+                continue
 
+            if block_type != "image":
+                raise ContentValidationError(
+                    "WEIBO_CONTENT_CONTRACT_INVALID: 未知正文块类型"
+                )
+            if content_started:
+                await self._place_body_caret_at_end()
+                if paragraph_ready_after_image:
+                    paragraph_ready_after_image = False
+                else:
+                    await self.page.keyboard.press("Enter")
+            await self._place_body_caret_at_end()
+            image_path = self._image_path_for_block(block, images)
+            if not image_path:
+                raise ContentValidationError(
+                    "WEIBO_CONTENT_CONTRACT_INVALID: 图片块没有唯一受控文件"
+                )
+            upload_result = await self._upload_image(image_path) or {}
+            if not upload_result.get("success"):
+                failed_images.append(
+                    {
+                        "filename": Path(image_path).name,
+                        "error_code": str(
+                            upload_result.get("error_code")
+                            or "PLATFORM_MEDIA_INCOMPLETE"
+                        ),
+                        "error": safe_media_error(
+                            upload_result.get("error"),
+                            fallback="图片上传失败",
+                        ),
+                    }
+                )
+                self._update_media_progress(
+                    expected_images,
+                    uploaded_images,
+                    len(failed_images),
+                )
+                error = ContentValidationError(
+                    "WEIBO_MEDIA_INCOMPLETE: 微博正文图片未完整写入，已停止且禁止自动重试"
+                )
+                self._attach_media_progress(error)
+                raise error
+            uploaded_images += 1
+            self._update_media_progress(
+                expected_images,
+                uploaded_images,
+                len(failed_images),
+            )
+            await self._create_paragraph_after_image()
+            paragraph_ready_after_image = True
+            try:
+                await self._validate_dom_prefix(
+                    content_blocks[: block_index + 1],
+                    phase=f"图片处理后第{block_index + 1}块",
+                )
+            except ContentValidationError as exc:
+                self._attach_media_progress(exc)
+                raise
+            await self.simulator.random_delay(2.5, 4.5)
+            content_started = True
+
+        editor = await self._current_body_editor()
         actual_text = await editor.inner_text()
         expected_count = ensure_valid_content(
             content_blocks,
             actual_text,
             platform="微博",
-            phase="输入后",
+            phase="图文处理后",
         )
-        logger.info("微博正文文字输入并验证成功: {} 个文本段落", expected_count)
-
-        expected_images = sum(
-            1 for block in content_blocks if block.get("type") == "image"
-        )
-        uploaded_images = 0
-        failed_images = []
-        for block in content_blocks:
-            if block.get("type") == "image":
-                img_path = block.get("local_path")
-                if not img_path and images:
-                    for img in images:
-                        if img.get("position_index") == block.get("position"):
-                            img_path = img.get("local_path")
-                            break
-                    if not img_path:
-                        img_path = images[0].get("local_path")
-                if img_path:
-                    upload_result = await self._upload_image(img_path) or {}
-                    if upload_result.get("success"):
-                        uploaded_images += 1
-                    else:
-                        failed_images.append(
-                            {
-                                "filename": Path(str(img_path)).name,
-                                "error": safe_media_error(
-                                    upload_result.get("error"),
-                                    fallback="图片上传失败",
-                                ),
-                            }
-                        )
-                    # 每张图片之间放慢节奏，降低风控敏感度
-                    await self.simulator.random_delay(2.5, 4.5)
-                else:
-                    failed_images.append(
-                        {"filename": "", "error": "文章图片块没有对应本地文件"}
-                    )
-
-        actual_text = await editor.inner_text()
-        ensure_valid_content(
-            content_blocks,
-            actual_text,
-            platform="微博",
-            phase="图片处理后",
-        )
+        try:
+            await self._validate_dom_exact(content_blocks, phase="正文最终")
+        except ContentValidationError as exc:
+            self._attach_media_progress(exc)
+            raise
         logger.info("微博正文输入并最终验证成功: {} 个文本段落", expected_count)
 
         if expected_images == 0:
             media_status = "not_required"
-            media_error = None
-        elif uploaded_images == expected_images:
-            media_status = "completed"
-            media_error = None
-        elif uploaded_images == 0:
-            media_status = "failed"
-            media_error = f"{expected_images} 张图片全部上传失败"
         else:
-            media_status = "partial"
-            media_error = f"{expected_images - uploaded_images} 张图片上传失败"
-
-        if failed_images:
-            logger.warning(
-                "微博图片处理结果: expected={}, uploaded={}, failed={}",
-                expected_images,
-                uploaded_images,
-                len(failed_images),
-            )
-
-        cover_result: dict | None = None
-        if uploaded_images > 0:
-            cover_result = await self.set_cover() or {}
-            if not cover_result.get("success"):
-                logger.warning("微博封面设置失败: {}", cover_result.get("error"))
+            media_status = "completed"
+        self._expected_persisted_blocks = copy.deepcopy(content_blocks)
+        self._expected_persisted_image_count = expected_images
 
         return {
             "text_ok": True,
@@ -519,53 +678,468 @@ class WeiboPlatform(BasePlatform):
             "uploaded_images": uploaded_images,
             "failed_images": failed_images,
             "media_status": media_status,
-            "media_error": media_error,
-            "cover": cover_result,
+            "media_error": None,
+            "media_error_code": None,
         }
 
-    async def _upload_image(self, image_path: str) -> dict:
-        """通过头条文章编辑器的文件控件上传图片；以编辑器内图片数量增加为判据。
+    def _validate_delivery_blocks(self, blocks: list, images: list[dict]) -> int:
+        if not isinstance(blocks, list) or not blocks:
+            raise ContentValidationError(
+                "WEIBO_CONTENT_CONTRACT_INVALID: 正文块不能为空"
+            )
+        expected_images = 0
+        for block in blocks:
+            if not isinstance(block, dict):
+                raise ContentValidationError(
+                    "WEIBO_CONTENT_CONTRACT_INVALID: 正文块无效"
+                )
+            block_type = block.get("type")
+            if block_type == "image":
+                expected_images += 1
+                if not self._image_path_for_block(block, images):
+                    raise ContentValidationError(
+                        "WEIBO_CONTENT_CONTRACT_INVALID: 图片块没有唯一受控文件"
+                    )
+                continue
+            if block_type not in {"text", "heading"}:
+                raise ContentValidationError(
+                    "WEIBO_CONTENT_CONTRACT_INVALID: 未知正文块类型"
+                )
+            text = str(block.get("text") or "").strip()
+            if not text:
+                raise ContentValidationError(
+                    "WEIBO_CONTENT_CONTRACT_INVALID: 文字块不能为空"
+                )
+            if block_type == "heading" and (
+                block.get("level") != 2 or "\n" in text or "\r" in text
+            ):
+                raise ContentValidationError(
+                    "WEIBO_HEADING_UNSUPPORTED: 仅支持单行二级标题"
+                )
+        return expected_images
 
-        2026-08-17 用户实测：**微博正文插图可以自动化上传**（图片随文章
-        一起保存/发布成功）——编辑器存在 input[type=file] 控件。优先选择
-        accept 含 image 的控件；当前没有经过真实 DOM 探测的正文归属证据，
-        只有唯一 image 控件时才允许继续，多个候选或无候选均安全停止。
-        """
+    @staticmethod
+    def _media_status(expected: int, uploaded: int, failed: int) -> str:
+        if expected == 0:
+            return "not_required"
+        if uploaded == expected:
+            return "completed"
+        if uploaded == 0 and failed:
+            return "failed"
+        if uploaded + failed == expected:
+            return "partial"
+        return "in_progress"
+
+    def _update_media_progress(self, expected: int, uploaded: int, failed: int) -> None:
+        self._media_progress_state = {
+            "expected_images": expected,
+            "uploaded_images": uploaded,
+            "failed_image_count": failed,
+            "media_status": self._media_status(expected, uploaded, failed),
+        }
+
+    def _attach_media_progress(self, exc: ContentValidationError) -> None:
+        progress = safe_media_progress(self._media_progress_state)
+        if progress is not None:
+            exc.media_progress = progress
+
+    async def _current_body_editor(self):
+        """返回当前可见正文编辑器；图片重渲染后必须重新定位。"""
+
+        self._require_page_alive("微博定位当前正文编辑器")
+        editor = self.page.locator(BODY_SELECTOR).first
+        try:
+            if await editor.count() == 0 or not await editor.is_visible():
+                raise SelectorError("微博正文编辑器未找到或当前不可见")
+            return editor
+        except SelectorError:
+            raise
+        except Exception as exc:
+            if self._exception_means_browser_closed(exc):
+                raise BrowserLifecycleError(
+                    "BROWSER_CONTEXT_CLOSED: 微博定位正文编辑器时页面已关闭"
+                ) from exc
+            raise SelectorError("微博正文编辑器未找到或当前不可见") from exc
+
+    async def _place_body_caret_at_end(self) -> None:
+        editor = await self._current_body_editor()
+        try:
+            await editor.press("Control+End")
+        except Exception as exc:
+            if self._exception_means_browser_closed(exc):
+                raise BrowserLifecycleError(
+                    "BROWSER_CONTEXT_CLOSED: 微博移动正文光标时页面已关闭"
+                ) from exc
+            raise ContentValidationError(
+                "WEIBO_CARET_POSITION_FAILED: 正文末尾光标定位失败"
+            ) from exc
+
+    async def _apply_h2_to_current_block(self) -> None:
+        """通过真实“标题 2”菜单设置当前块，并立即验证末尾为 H2。"""
+
+        try:
+            triggers = self.page.locator(
+                ".main-editor-toolbar .wb-cursor-pointer"
+            )
+            trigger_matches = []
+            for index in range(await triggers.count()):
+                candidate = triggers.nth(index)
+                if not await candidate.is_visible():
+                    continue
+                label = " ".join((await candidate.inner_text()).split())
+                if label in {"正文", *(f"标题 {level}" for level in range(1, 7))}:
+                    trigger_matches.append(candidate)
+            if len(trigger_matches) != 1:
+                raise RuntimeError("标题格式入口不唯一")
+            await trigger_matches[0].click(timeout=5000)
+            await asyncio.sleep(0.25)
+
+            options = self.page.locator(".n-popover:visible .card")
+            option_matches = []
+            for index in range(await options.count()):
+                candidate = options.nth(index)
+                if await candidate.is_visible() and (
+                    " ".join((await candidate.inner_text()).split()) == "标题 2"
+                ):
+                    option_matches.append(candidate)
+            if len(option_matches) != 1:
+                raise RuntimeError("标题 2 选项不唯一")
+            await option_matches[0].click(timeout=5000)
+            await asyncio.sleep(0.25)
+            editor = await self._current_body_editor()
+            tail_tag = str(
+                await editor.evaluate(
+                    """root => root.lastElementChild
+                        ? root.lastElementChild.tagName.toLowerCase() : ''"""
+                )
+                or ""
+            )
+            if tail_tag != "h2":
+                raise RuntimeError("标题 2 没有落为 H2")
+        except Exception as exc:
+            if self._exception_means_browser_closed(exc):
+                raise BrowserLifecycleError(
+                    "BROWSER_CONTEXT_CLOSED: 微博设置二级标题时页面已关闭"
+                ) from exc
+            raise ContentValidationError(
+                "WEIBO_HEADING_APPLY_FAILED: 二级标题样式未能应用"
+            ) from exc
+
+    async def _find_body_image_trigger(self):
+        """以真实 SVG 指纹定位，再用悬浮文案二次确认“插入图片”。"""
+
+        try:
+            candidates = self.page.locator(
+                ".main-editor-toolbar .svg-icon-wrapper"
+            )
+            matches = []
+            for index in range(await candidates.count()):
+                candidate = candidates.nth(index)
+                if not await candidate.is_visible():
+                    continue
+                paths = await candidate.locator("svg path").evaluate_all(
+                    "nodes => nodes.map((node) => node.getAttribute('d') || '')"
+                )
+                if not isinstance(paths, list):
+                    continue
+                fingerprint = hashlib.sha256(
+                    "|".join(str(path) for path in paths).encode("utf-8")
+                ).hexdigest()
+                if fingerprint == BODY_IMAGE_ICON_FINGERPRINT:
+                    matches.append(candidate)
+            if len(matches) != 1:
+                raise ContentValidationError(
+                    "WEIBO_BODY_IMAGE_TRIGGER_NOT_UNIQUE: 正文插图入口不存在或不唯一"
+                )
+            await matches[0].hover(timeout=5000)
+            await asyncio.sleep(0.45)
+            labels = await self.page.evaluate(
+                    """() => {
+                        const visible = (node) => {
+                            const rect = node.getBoundingClientRect();
+                            const style = getComputedStyle(node);
+                            return rect.width > 0 && rect.height > 0
+                                && style.display !== 'none'
+                                && style.visibility !== 'hidden';
+                        };
+                        return Array.from(document.querySelectorAll(
+                            '.n-popover, [role=tooltip]'
+                        )).filter(visible).map((node) =>
+                            (node.innerText || '').trim()
+                        ).filter(Boolean);
+                    }"""
+                )
+            if not isinstance(labels, list) or "插入图片" not in labels:
+                raise ContentValidationError(
+                    "WEIBO_BODY_IMAGE_TRIGGER_NOT_UNIQUE: 正文插图入口语义未确认"
+                )
+            return matches[0]
+        except ContentValidationError:
+            raise
+        except Exception as exc:
+            if self._exception_means_browser_closed(exc):
+                raise BrowserLifecycleError(
+                    "BROWSER_CONTEXT_CLOSED: 微博定位正文插图入口时页面已关闭"
+                ) from exc
+            raise ContentValidationError(
+                "WEIBO_BODY_IMAGE_TRIGGER_NOT_UNIQUE: 正文插图入口不存在或不唯一"
+            ) from exc
+
+    async def _create_paragraph_after_image(self) -> None:
+        """越过图片原子块，创建后续文字可安全写入的段落。"""
+
+        editor = await self._current_body_editor()
+        try:
+            await editor.press("Control+End")
+            await self.page.keyboard.press("ArrowDown")
+            await self.page.keyboard.press("ArrowRight")
+            await self.page.keyboard.press("Enter")
+            tail_ready = bool(
+                await editor.evaluate(
+                    """root => {
+                        const tail = root.lastElementChild;
+                        return !!tail && tail.tagName.toLowerCase() === 'p'
+                            && tail.querySelectorAll('img').length === 0;
+                    }"""
+                )
+            )
+            if not tail_ready:
+                raise RuntimeError("图片后正文段落未建立")
+        except Exception as exc:
+            if self._exception_means_browser_closed(exc):
+                raise BrowserLifecycleError(
+                    "BROWSER_CONTEXT_CLOSED: 微博图片后创建正文段落时页面已关闭"
+                ) from exc
+            raise ContentValidationError(
+                "WEIBO_POST_IMAGE_PARAGRAPH_FAILED: 图片后无法建立正文插入点"
+            ) from exc
+
+    @staticmethod
+    def _image_path_for_block(block: dict, images: list[dict]) -> str | None:
+        direct = block.get("local_path") if isinstance(block, dict) else None
+        if direct:
+            return str(direct)
+        position = block.get("position") if isinstance(block, dict) else None
+        matches = [
+            image
+            for image in images or []
+            if isinstance(image, dict) and image.get("position_index") == position
+        ]
+        if len(matches) != 1:
+            return None
+        local_path = matches[0].get("local_path")
+        return str(local_path) if local_path else None
+
+    @staticmethod
+    def _expected_content_tokens(blocks: list[dict]) -> list[dict]:
+        tokens: list[dict] = []
+        for block in blocks:
+            block_type = block.get("type") if isinstance(block, dict) else None
+            if block_type == "image":
+                tokens.append({"kind": "image"})
+                continue
+            for paragraph in extract_expected_paragraphs([block]):
+                if block_type == "heading":
+                    tokens.append(
+                        {
+                            "kind": "heading",
+                            "level": int(block.get("level") or 0),
+                            "text": paragraph.comparison_text,
+                        }
+                    )
+                else:
+                    tokens.append(
+                        {"kind": "text", "text": paragraph.comparison_text}
+                    )
+        return tokens
+
+    async def _read_editor_dom_tokens(self) -> list[dict]:
+        editor = await self._current_body_editor()
+        try:
+            raw = await editor.evaluate(
+                """root => {
+                    const tokens = [];
+                    for (const node of root.children) {
+                        const images = node.matches('img')
+                            ? [node] : Array.from(node.querySelectorAll('img'));
+                        if (images.length) {
+                            for (const _image of images) tokens.push({kind: 'image'});
+                            continue;
+                        }
+                        const text = node.innerText || node.textContent || '';
+                        if (!text.trim()) continue;
+                        const tag = node.tagName.toLowerCase();
+                        if (/^h[1-6]$/.test(tag)) {
+                            tokens.push({
+                                kind: 'heading',
+                                level: Number(tag.slice(1)),
+                                text,
+                            });
+                        } else {
+                            tokens.push({kind: 'text', text});
+                        }
+                    }
+                    return tokens;
+                }"""
+            )
+        except Exception as exc:
+            if self._exception_means_browser_closed(exc):
+                raise BrowserLifecycleError(
+                    "BROWSER_CONTEXT_CLOSED: 微博读取正文 DOM 时页面已关闭"
+                ) from exc
+            raise ContentValidationError(
+                "WEIBO_CONTENT_DOM_VERIFY_FAILED: 正文 DOM 回读失败"
+            ) from exc
+        if not isinstance(raw, list):
+            raise ContentValidationError(
+                "WEIBO_CONTENT_DOM_VERIFY_FAILED: DOM 序列无效"
+            )
+        normalized: list[dict] = []
+        for item in raw:
+            if not isinstance(item, dict):
+                raise ContentValidationError(
+                    "WEIBO_CONTENT_DOM_VERIFY_FAILED: DOM token 无效"
+                )
+            kind = item.get("kind")
+            if kind == "image":
+                normalized.append({"kind": "image"})
+                continue
+            text = normalize_for_comparison(item.get("text"))
+            if not text:
+                continue
+            if kind == "heading":
+                normalized.append(
+                    {
+                        "kind": "heading",
+                        "level": int(item.get("level") or 0),
+                        "text": text,
+                    }
+                )
+            elif kind == "text":
+                for paragraph in extract_expected_paragraphs(
+                    [{"type": "text", "text": text}]
+                ):
+                    normalized.append(
+                        {"kind": "text", "text": paragraph.comparison_text}
+                    )
+            else:
+                raise ContentValidationError(
+                    "WEIBO_CONTENT_DOM_VERIFY_FAILED: DOM token 类型无效"
+                )
+        return normalized
+
+    @staticmethod
+    def _token_shape(tokens: list[dict]) -> str:
+        shape = [
+            "I" if token.get("kind") == "image"
+            else (
+                f"H{token.get('level')}:{len(token.get('text') or '')}"
+                if token.get("kind") == "heading"
+                else f"T:{len(token.get('text') or '')}"
+            )
+            for token in tokens[:40]
+        ]
+        return ",".join(shape) or "EMPTY"
+
+    async def _validate_dom_prefix(self, blocks: list[dict], *, phase: str) -> None:
+        expected = self._expected_content_tokens(blocks)
+        actual = await self._read_editor_dom_tokens()
+        if actual[: len(expected)] != expected:
+            raise ContentValidationError(
+                f"CONTENT_VALIDATION_ERROR: 微博{phase}图文顺序不完整; "
+                f"expected={self._token_shape(expected)}; "
+                f"actual={self._token_shape(actual)}"
+            )
+
+    async def _validate_dom_exact(self, blocks: list[dict], *, phase: str) -> None:
+        expected = self._expected_content_tokens(blocks)
+        actual = await self._read_editor_dom_tokens()
+        if actual != expected:
+            raise ContentValidationError(
+                f"CONTENT_VALIDATION_ERROR: 微博{phase}图文顺序不完整; "
+                f"expected={self._token_shape(expected)}; "
+                f"actual={self._token_shape(actual)}"
+            )
+
+    async def _upload_image(self, image_path: str) -> dict:
+        """点击语义唯一的“插入图片”，一次选择一张正文图并核验数量。"""
 
         self._require_page_alive("微博上传图片")
         try:
-            file_inputs = self.page.locator("input[type=file]")
-            count = await file_inputs.count()
-            if count == 0:
-                return {
-                    "success": False,
-                    "error_code": "WEIBO_BODY_IMAGE_INPUT_NOT_FOUND",
-                    "error": "微博正文图片控件未找到，已安全停止",
-                }
-            image_candidates = []
-            for i in range(count):
-                accept = (await file_inputs.nth(i).get_attribute("accept")) or ""
-                if "image" in accept.lower():
-                    image_candidates.append(file_inputs.nth(i))
-            if not image_candidates:
-                return {
-                    "success": False,
-                    "error_code": "WEIBO_BODY_IMAGE_INPUT_NOT_FOUND",
-                    "error": "微博未发现可证明属于正文的图片控件，已安全停止",
-                }
-            if len(image_candidates) != 1:
-                return {
-                    "success": False,
-                    "error_code": "WEIBO_BODY_IMAGE_INPUT_AMBIGUOUS",
-                    "error": "微博正文图片控件候选不唯一，已安全停止",
-                }
-            target_input = image_candidates[0]
+            trigger = await self._find_body_image_trigger()
             before = await self.page.evaluate(
                 """() => document.querySelectorAll(
                     '.tiptap img, .ProseMirror img'
                 ).length"""
             )
-            await target_input.set_input_files(str(image_path), timeout=15000)
+            await trigger.click(timeout=5000)
+            await asyncio.sleep(0.5)
+            dialogs = self.page.locator(".n-dialog:visible")
+            dialog_matches = []
+            for index in range(await dialogs.count()):
+                candidate = dialogs.nth(index)
+                if not await candidate.is_visible():
+                    continue
+                label = " ".join((await candidate.inner_text()).split())
+                if all(token in label for token in ("图片库", "上传", "插入")):
+                    dialog_matches.append(candidate)
+            if len(dialog_matches) != 1:
+                return {
+                    "success": False,
+                    "error_code": "WEIBO_BODY_IMAGE_DIALOG_NOT_UNIQUE",
+                    "error": "微博正文图片弹窗不存在或不唯一",
+                }
+            dialog = dialog_matches[0]
+            inputs = dialog.locator("input[type=file]")
+            if await inputs.count() != 1:
+                return {
+                    "success": False,
+                    "error_code": "WEIBO_BODY_IMAGE_INPUT_NOT_UNIQUE",
+                    "error": "微博正文图片弹窗内文件控件不存在或不唯一",
+                }
+            body_input = inputs.first
+            accept = str(await body_input.get_attribute("accept") or "").lower()
+            allowed_suffixes = {".jpg", ".jpeg", ".bmp", ".gif", ".png", ".heic"}
+            observed_suffixes = {
+                value.strip() for value in accept.split(",") if value.strip()
+            }
+            if (
+                not observed_suffixes
+                or not observed_suffixes.issubset(allowed_suffixes)
+                or not observed_suffixes.intersection({".jpg", ".jpeg", ".png"})
+            ):
+                return {
+                    "success": False,
+                    "error_code": "WEIBO_BODY_IMAGE_INPUT_INVALID",
+                    "error": "微博正文图片文件控件类型无法确认",
+                }
+            await body_input.set_input_files(str(image_path), timeout=15000)
+
+            insert_button = None
+            for _ in range(30):
+                buttons = dialog.locator("button")
+                enabled_matches = []
+                for index in range(await buttons.count()):
+                    candidate = buttons.nth(index)
+                    if (
+                        await candidate.is_visible()
+                        and await candidate.is_enabled()
+                        and " ".join((await candidate.inner_text()).split()) == "插入"
+                    ):
+                        enabled_matches.append(candidate)
+                if len(enabled_matches) == 1:
+                    insert_button = enabled_matches[0]
+                    break
+                if len(enabled_matches) > 1:
+                    break
+                await asyncio.sleep(0.5)
+            if insert_button is None:
+                return {
+                    "success": False,
+                    "error_code": "WEIBO_BODY_IMAGE_INSERT_NOT_READY",
+                    "error": "微博正文图片上传后唯一插入按钮未就绪",
+                }
+            await insert_button.click(timeout=5000)
             after = before
             for _ in range(10):
                 await asyncio.sleep(1)
@@ -582,16 +1156,29 @@ class WeiboPlatform(BasePlatform):
                         '.tiptap img, .ProseMirror img'
                     ).length"""
                 )
-                if stable >= observed:
+                if stable == observed == before + 1:
                     after = stable
                     break
-            if after <= before:
+            if after != before + 1:
                 return {
                     "success": False,
                     "error_code": "WEIBO_EDITOR_IMAGE_COUNT_UNCHANGED",
-                    "error": "上传后正文编辑器图片数量未稳定增加",
+                    "error": "上传后正文编辑器图片数量没有稳定且只增加一张",
                 }
-            return {"success": True, "error": ""}
+            return {
+                "success": True,
+                "error": "",
+                "observed_image_count": after,
+            }
+        except ContentValidationError as exc:
+            return {
+                "success": False,
+                "error_code": "WEIBO_BODY_IMAGE_TRIGGER_NOT_UNIQUE",
+                "error": safe_media_error(
+                    exc,
+                    fallback="微博正文插图入口不存在或不唯一",
+                ),
+            }
         except Exception as exc:
             if self._exception_means_browser_closed(exc):
                 raise BrowserLifecycleError(
@@ -702,25 +1289,87 @@ class WeiboPlatform(BasePlatform):
         }
 
     async def save_draft(self, title: str = "") -> str:
-        """点击「保存草稿」，以「草稿箱标题出现」为成功判据。
+        """精确保存一次，并重开同一 draft ID 核验冻结图文。"""
 
-        2026-08 实测：保存接口可能返回 code 100000（geetest 风控软提示），
-        但保存实际生效（草稿卡片标题更新）。因此以草稿箱列表出现标题
-        关键字为准；接口 code 仅作日志参考，不据此判失败。
-
-        安全约束（2026-08-17 修复）：**绝不触发公开发布**——
-        1. 「保存草稿」按钮精确匹配（不做模糊 includes，避免命中发布相关按钮）；
-        2. 点击后监听发布接口（/publish/ 等），一旦捕获到发布请求立即失败；
-        3. 草稿箱验证只认 #/draft 草稿箱列表，不把已发布内容当作草稿。
-        """
         self._require_page_alive("微博保存草稿")
+        expected_title = str(title or "").strip()
+        if (
+            not expected_title
+            or expected_title != self._preflight_title
+            or self._draft_title_baseline_count != 0
+        ):
+            raise DraftBaselineError(
+                "DRAFT_BASELINE_FAILED: 微博缺少与本次一致的唯一标题基线"
+            )
+        if self._expected_persisted_blocks is None:
+            raise DraftBaselineError(
+                "DRAFT_BASELINE_FAILED: 微博缺少冻结内容核验快照"
+            )
+        draft_id = self._active_draft_id
+        if not draft_id.isdigit():
+            raise DraftBaselineError(
+                "DRAFT_BASELINE_FAILED: 微博缺少当前草稿 ID"
+            )
+
+        try:
+            current_id = str(
+                await self.page.evaluate(
+                    r"""() => {
+                        const match = location.hash.match(/^#\/draft\/(\d+)$/);
+                        return match ? match[1] : '';
+                    }"""
+                )
+                or ""
+            )
+            title_field = self.page.locator(
+                "textarea[placeholder='请输入标题']"
+            ).first
+            if (
+                current_id != draft_id
+                or await title_field.count() != 1
+                or not await title_field.is_visible()
+                or str(await title_field.input_value()).strip() != expected_title
+            ):
+                raise DraftBaselineError(
+                    "DRAFT_BASELINE_FAILED: 微博保存前草稿身份或标题不一致"
+                )
+            await self._validate_dom_exact(
+                self._expected_persisted_blocks,
+                phase="保存前",
+            )
+        except DraftBaselineError:
+            raise
+        except ContentValidationError as exc:
+            raise DraftBaselineError(
+                "DRAFT_BASELINE_FAILED: 微博保存前图文结构不完整"
+            ) from exc
+        except Exception as exc:
+            if self._exception_means_browser_closed(exc):
+                raise BrowserLifecycleError(
+                    "BROWSER_CONTEXT_CLOSED: 微博保存草稿前页面已关闭"
+                ) from exc
+            raise DraftBaselineError(
+                "DRAFT_BASELINE_FAILED: 微博保存前状态无法证明"
+            ) from exc
+
         captured: dict = {}
+        save_triggered = False
+
+        async def _guard_public_publish(route, request) -> None:
+            method = str(request.method or "").upper()
+            path = self._safe_request_path(request.url)
+            if self._is_public_publish_mutation(path, method):
+                captured["blocked_publish"] = True
+                captured["publish_path"] = path
+                await route.abort("blockedbyclient")
+                return
+            await route.continue_()
 
         async def _on_response(response) -> None:
             try:
                 url = response.url
-                method = response.request.method
-                if "draft/save" in url and method in ("POST", "PUT"):
+                method = str(response.request.method or "").upper()
+                if "draft/save" in url and method in {"POST", "PUT"}:
                     captured["status"] = response.status
                     try:
                         body = await response.json()
@@ -728,100 +1377,186 @@ class WeiboPlatform(BasePlatform):
                             captured["code"] = body.get("code")
                     except Exception:
                         pass
-                if (
-                    "/publish" in url
-                    or "/article/publish" in url
-                    or (method in ("POST", "PUT") and "publish" in url.lower())
-                ):
-                    # 一旦出现发布请求，立即标记为误发布，绝不放行
+                path = self._safe_request_path(url)
+                if self._is_public_publish_mutation(path, method):
                     captured["published"] = True
-                    captured["publish_url"] = url[:200]
+                    captured["publish_path"] = path
             except Exception:  # noqa: BLE001
                 pass
 
+        route_registered = False
+        response_registered = False
         try:
+            await self.page.route("**/*", _guard_public_publish)
+            route_registered = True
             self.page.on("response", _on_response)
-            await self.page.evaluate(
+            response_registered = True
+            click_result = await self.page.evaluate(
                 """() => {
                     const nodes = Array.from(
                         document.querySelectorAll('button, [role=button]')
                     );
-                    // 精确匹配「保存草稿」文本（去空白后完全相等），
-                    // 不做 includes，避免命中「发布/下一步」等危险按钮。
-                    const target = nodes.find((el) =>
-                        (el.innerText || '').replace(/\\s+/g, '') === '保存草稿');
-                    if (target) target.click();
+                    const candidates = nodes.filter((el) => {
+                        const text = (el.innerText || '').replace(/\\s+/g, '');
+                        const rect = el.getBoundingClientRect();
+                        const style = getComputedStyle(el);
+                        return text === '保存草稿'
+                            && rect.width > 0 && rect.height > 0
+                            && style.visibility !== 'hidden'
+                            && style.display !== 'none'
+                            && !el.disabled
+                            && el.getAttribute('aria-disabled') !== 'true';
+                    });
+                    if (candidates.length !== 1) {
+                        return {clicked: false, count: candidates.length};
+                    }
+                    candidates[0].click();
+                    return {clicked: true, count: 1};
                 }"""
             )
+            if not isinstance(click_result, dict) or not click_result.get("clicked"):
+                raise DraftBaselineError(
+                    "DRAFT_BASELINE_FAILED: 微博精确保存草稿按钮不存在或不唯一"
+                )
+            save_triggered = True
             await self.simulator.random_delay(2, 4)
             for _ in range(10):
-                if captured.get("status") or captured.get("published"):
+                if (
+                    captured.get("status")
+                    or captured.get("published")
+                    or captured.get("blocked_publish")
+                ):
                     break
                 await asyncio.sleep(1)
             # 给发布/保存响应一个收敛窗口，避免 status 先到、publish 后到被漏检
             await self.simulator.random_delay(1, 2)
-        finally:
-            try:
-                self.page.remove_listener("response", _on_response)
-            except Exception:  # noqa: BLE001
-                pass
+            if captured.get("published") or captured.get("blocked_publish"):
+                raise DraftResultUnknownError(
+                    "DRAFT_RESULT_UNKNOWN: 微博保存期间出现公开发布请求，已拦截且禁止重试"
+                )
+            status = captured.get("status")
+            if not isinstance(status, int) or not 200 <= status < 300:
+                raise DraftResultUnknownError(
+                    "DRAFT_RESULT_UNKNOWN: 微博保存动作已触发但未观察到 2xx 保存响应"
+                )
 
-        if captured.get("published"):
-            logger.error(
-                "微博保存草稿时检测到发布请求，立即失败（绝不误发布）: {}",
-                captured.get("publish_url"),
-            )
-            return ""
-
-        if not captured.get("status"):
-            logger.error("微博保存草稿未产生任何保存请求")
-            return ""
-
-        # 回到草稿箱列表，按标题关键字验证草稿卡片（成功判据）
-        try:
             await self.page.goto(
                 "https://card.weibo.com/article/v5/editor#/draft",
                 wait_until="domcontentloaded",
                 timeout=30000,
             )
-            keyword = str(title or "").strip()[:12]
-            if not keyword:
-                logger.error("微博草稿验证缺少标题关键字")
-                return ""
-            found = False
-            for _ in range(3):
-                await self.simulator.random_delay(3, 5)
-                found = bool(
-                    await self.page.evaluate(
-                        "(kw) => (document.body.innerText || '').includes(kw)",
-                        keyword,
+            opened = False
+            for _ in range(4):
+                await self.simulator.random_delay(2, 3)
+                card_result = await self.page.evaluate(
+                    """(title) => {
+                        const visible = (node) => {
+                            const rect = node.getBoundingClientRect();
+                            const style = getComputedStyle(node);
+                            return rect.width > 0 && rect.height > 0
+                                && style.display !== 'none'
+                                && style.visibility !== 'hidden';
+                        };
+                        const matches = Array.from(
+                            document.querySelectorAll('.list-item')
+                        ).filter((card) => visible(card)
+                            && (card.innerText || '').split(/\r?\n/, 1)[0].trim()
+                                === title);
+                        if (matches.length !== 1) {
+                            return {clicked: false, count: matches.length};
+                        }
+                        matches[0].click();
+                        return {clicked: true, count: 1};
+                    }""",
+                    expected_title,
+                )
+                if not isinstance(card_result, dict) or not card_result.get("clicked"):
+                    continue
+                for _ in range(10):
+                    observed_id = str(
+                        await self.page.evaluate(
+                            r"""() => {
+                                const match = location.hash.match(/^#\/draft\/(\d+)$/);
+                                return match ? match[1] : '';
+                            }"""
+                        )
+                        or ""
                     )
-                )
-                if found:
+                    if observed_id == draft_id:
+                        opened = True
+                        break
+                    await asyncio.sleep(0.5)
+                if opened:
                     break
-            if not found:
-                logger.error(
-                    "微博草稿箱未找到标题包含「{}」的草稿（接口 code={}）",
-                    keyword,
-                    captured.get("code"),
+            if not opened:
+                raise DraftResultUnknownError(
+                    "DRAFT_RESULT_UNKNOWN: 微博未找到标题精确匹配且绑定本次 ID 的唯一草稿"
                 )
-                return ""
+
+            await self.page.wait_for_selector(
+                "textarea[placeholder='请输入标题']",
+                state="visible",
+                timeout=20000,
+            )
+            reopened_title = str(
+                await self.page.locator(
+                    "textarea[placeholder='请输入标题']"
+                ).first.input_value()
+            ).strip()
+            if reopened_title != expected_title:
+                raise DraftResultUnknownError(
+                    "DRAFT_RESULT_UNKNOWN: 微博草稿重开后标题不一致"
+                )
+            await self._validate_dom_exact(
+                self._expected_persisted_blocks,
+                phase="草稿重开后",
+            )
             logger.info(
-                "微博草稿验证成功: 草稿箱出现标题「{}」，接口 status={} code={}",
-                keyword,
+                "微博草稿验证成功: draft ID={}，接口 status={} code={}",
+                draft_id,
                 captured.get("status"),
                 captured.get("code"),
             )
-            return "https://card.weibo.com/article/v5/editor#/draft"
-        except BrowserLifecycleError:
+            return f"https://card.weibo.com/article/v5/editor#/draft/{draft_id}"
+        except DraftBaselineError:
+            raise
+        except DraftResultUnknownError:
             raise
         except Exception as exc:
+            if save_triggered:
+                raise DraftResultUnknownError(
+                    "DRAFT_RESULT_UNKNOWN: 微博保存动作已触发但持久化结果无法证明"
+                ) from exc
             if self._exception_means_browser_closed(exc):
                 raise BrowserLifecycleError(
-                    "BROWSER_CONTEXT_CLOSED: 微博验证草稿时页面已关闭"
+                    "BROWSER_CONTEXT_CLOSED: 微博保存前页面已关闭"
                 ) from exc
-            logger.error("微博草稿验证失败: {}", exc)
+            raise
+        finally:
+            if response_registered:
+                try:
+                    self.page.remove_listener("response", _on_response)
+                except Exception:  # noqa: BLE001
+                    pass
+            if route_registered:
+                try:
+                    await self.page.unroute("**/*", _guard_public_publish)
+                except Exception:  # noqa: BLE001
+                    pass
+
+    @staticmethod
+    def _safe_request_path(url: str) -> str:
+        try:
+            return urlsplit(str(url or "")).path.lower()
+        except Exception:
             return ""
+
+    @staticmethod
+    def _is_public_publish_mutation(path: str, method: str) -> bool:
+        if str(method or "").upper() not in {"POST", "PUT", "PATCH", "DELETE"}:
+            return False
+        normalized = str(path or "").lower()
+        return "/publish" in normalized or "/article/publish" in normalized
 
     async def publish_now(self, title: str = "") -> str:
         self._not_implemented("公开发布")

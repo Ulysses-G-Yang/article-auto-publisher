@@ -20,6 +20,7 @@ class FakeFileInput:
         self.accept = accept
         self.visible = visible
         self.set_input_files = AsyncMock(side_effect=error)
+        self.set_files = self.set_input_files
 
     async def get_attribute(self, name: str) -> str | None:
         return self.accept if name == "accept" else None
@@ -40,18 +41,74 @@ class FakeFileInputs:
 
     @property
     def first(self):
-        raise AssertionError("image input selection must never fall back to first")
+        assert len(self.inputs) == 1
+        return self.inputs[0]
+
+
+class FakeInsertButton:
+    def __init__(self) -> None:
+        self.click = AsyncMock()
+
+    async def is_visible(self) -> bool:
+        return True
+
+    async def is_enabled(self) -> bool:
+        return True
+
+    async def inner_text(self) -> str:
+        return "插入"
+
+
+class FakeItems:
+    def __init__(self, items: list) -> None:
+        self.items = items
+
+    async def count(self) -> int:
+        return len(self.items)
+
+    def nth(self, index: int):
+        return self.items[index]
+
+
+class FakeImageDialog:
+    def __init__(self, inputs: list[FakeFileInput]) -> None:
+        self.inputs = FakeFileInputs(inputs)
+        self.insert = FakeInsertButton()
+
+    async def is_visible(self) -> bool:
+        return True
+
+    async def inner_text(self) -> str:
+        return "图片库 上传 手机传图 插入"
+
+    def locator(self, selector: str):
+        if selector == "input[type=file]":
+            return self.inputs
+        if selector == "button":
+            return FakeItems([self.insert])
+        raise AssertionError(f"unexpected dialog selector: {selector}")
 
 
 class FakeUploadPage:
     def __init__(self, inputs: list[FakeFileInput], image_counts: list[int]) -> None:
-        self.file_inputs = FakeFileInputs(inputs)
+        image_inputs = [
+            item
+            for item in inputs
+            if any(
+                suffix in item.accept.lower()
+                for suffix in (".jpg", ".jpeg", ".png", ".gif", ".bmp", ".heic")
+            )
+        ]
+        self.dialog = FakeImageDialog(image_inputs)
+        self.dialogs = FakeItems([self.dialog])
         self.image_counts = iter(image_counts)
         self.last_image_count = image_counts[-1] if image_counts else 0
+        self.trigger = type("Trigger", (), {"click": AsyncMock()})()
 
-    def locator(self, selector: str) -> FakeFileInputs:
-        assert selector == "input[type=file]"
-        return self.file_inputs
+    def locator(self, selector: str):
+        if selector == ".n-dialog:visible":
+            return self.dialogs
+        raise AssertionError(f"unexpected page selector: {selector}")
 
     async def evaluate(self, _script: str) -> int:
         try:
@@ -69,6 +126,7 @@ PLATFORMS = (
 def run_upload(platform_class, module_name: str, inputs, image_counts):
     platform = platform_class()
     platform.page = FakeUploadPage(inputs, image_counts)
+    platform._find_body_image_trigger = AsyncMock(return_value=platform.page.trigger)
     with patch(f"{module_name}.asyncio.sleep", new=AsyncMock()):
         result = asyncio.run(platform._upload_image("photo.png"))
     return platform, result
@@ -79,9 +137,9 @@ def test_video_or_cover_before_unique_body_image_is_selected(
     platform_class, module_name: str, prefix: str
 ) -> None:
     cover_or_video = FakeFileInput("video/*")
-    body_image = FakeFileInput("image/png,image/jpeg")
+    body_image = FakeFileInput(".jpg,.jpeg,.bmp,.gif,.png,.heic")
 
-    _platform, result = run_upload(
+    platform, result = run_upload(
         platform_class,
         module_name,
         [cover_or_video, body_image],
@@ -91,6 +149,8 @@ def test_video_or_cover_before_unique_body_image_is_selected(
     assert result["success"] is True
     cover_or_video.set_input_files.assert_not_awaited()
     body_image.set_input_files.assert_awaited_once_with("photo.png", timeout=15000)
+    platform.page.trigger.click.assert_awaited_once_with(timeout=5000)
+    platform.page.dialog.insert.click.assert_awaited_once_with(timeout=5000)
 
 
 @pytest.mark.parametrize(("platform_class", "module_name", "prefix"), PLATFORMS)
@@ -107,7 +167,7 @@ def test_missing_image_candidate_fails_closed(
     )
 
     assert result["success"] is False
-    assert result["error_code"] == f"{prefix}_BODY_IMAGE_INPUT_NOT_FOUND"
+    assert result["error_code"] == f"{prefix}_BODY_IMAGE_INPUT_NOT_UNIQUE"
     video_input.set_input_files.assert_not_awaited()
 
 
@@ -115,8 +175,8 @@ def test_missing_image_candidate_fails_closed(
 def test_cover_image_first_and_body_image_later_are_ambiguous(
     platform_class, module_name: str, prefix: str
 ) -> None:
-    first_image = FakeFileInput("image/*")
-    second_image = FakeFileInput("image/png")
+    first_image = FakeFileInput(".jpg,.jpeg,.png")
+    second_image = FakeFileInput(".bmp,.gif,.heic")
 
     _platform, result = run_upload(
         platform_class,
@@ -126,7 +186,7 @@ def test_cover_image_first_and_body_image_later_are_ambiguous(
     )
 
     assert result["success"] is False
-    assert result["error_code"] == f"{prefix}_BODY_IMAGE_INPUT_AMBIGUOUS"
+    assert result["error_code"] == f"{prefix}_BODY_IMAGE_INPUT_NOT_UNIQUE"
     first_image.set_input_files.assert_not_awaited()
     second_image.set_input_files.assert_not_awaited()
 
@@ -135,7 +195,7 @@ def test_cover_image_first_and_body_image_later_are_ambiguous(
 def test_image_count_not_increasing_is_failure(
     platform_class, module_name: str, prefix: str
 ) -> None:
-    body_image = FakeFileInput("image/*")
+    body_image = FakeFileInput(".jpg,.jpeg,.bmp,.gif,.png,.heic")
 
     _platform, result = run_upload(
         platform_class,
@@ -154,7 +214,7 @@ def test_upload_exception_redacts_physical_path(
     platform_class, module_name: str, prefix: str
 ) -> None:
     body_image = FakeFileInput(
-        "image/*",
+        ".jpg,.jpeg,.bmp,.gif,.png,.heic",
         RuntimeError(
             r"set_input_files failed for D:\Secret Folder\a.png "
             "token=abcdefghijklmnopqrstuv123456"

@@ -1808,6 +1808,8 @@ class RegressionTests(DatabaseTestCase):
     def test_weibo_navigate_to_editor_sequence(self):
         platform = WeiboPlatform()
         platform.simulator.random_delay = AsyncMock()
+        platform._preflight_title = "微博标题"
+        platform._draft_title_baseline_count = 0
         page = type(
             "Page",
             (),
@@ -1815,6 +1817,12 @@ class RegressionTests(DatabaseTestCase):
                 "goto": AsyncMock(),
                 "wait_for_selector": AsyncMock(return_value=True),
                 "wait_for_function": AsyncMock(),
+                "evaluate": AsyncMock(
+                    side_effect=[
+                        "1234567890",
+                        {"title": "", "body": ""},
+                    ]
+                ),
                 "get_by_text": staticmethod(
                     lambda text, **_kw: type(
                         "Loc",
@@ -1836,6 +1844,7 @@ class RegressionTests(DatabaseTestCase):
 
     def test_weibo_fill_title_writes_into_title_field(self):
         platform = WeiboPlatform()
+        platform._preflight_title = "微博标题"
         title_field = type(
             "First",
             (),
@@ -1844,6 +1853,7 @@ class RegressionTests(DatabaseTestCase):
                 "is_visible": AsyncMock(return_value=True),
                 "click": AsyncMock(),
                 "fill": AsyncMock(),
+                "input_value": AsyncMock(return_value="微博标题"),
             },
         )()
         title_locator = type("Loc", (), {"first": title_field})()

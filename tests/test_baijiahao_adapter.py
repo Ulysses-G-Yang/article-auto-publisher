@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from platforms.baijiahao import BaijiahaoPlatform
-from platforms.base import DraftBaselineError, DraftResultUnknownError
+from platforms.base import DraftResultUnknownError
 from platforms.content_validation import ContentValidationError
 
 
@@ -282,6 +282,35 @@ def test_unique_draft_uses_scoped_modify_when_preview_link_is_absent() -> None:
     platform._open_exact_draft_via_modify.assert_awaited_once_with("唯一标题")
 
 
+def test_same_title_verification_selects_only_new_draft_id() -> None:
+    platform = BaijiahaoPlatform()
+    platform.page = SimpleNamespace()
+    platform._preflight_matching_draft_count = 1
+    platform._preflight_draft_ids = frozenset({"old-draft"})
+    platform._open_works_page = AsyncMock()
+    platform._search_works = AsyncMock()
+    platform._matching_work_rows = AsyncMock(
+        return_value=[
+            {
+                "index": 0,
+                "preview_href": (
+                    "https://baijiahao.baidu.com/builder/preview/s?id=new-draft"
+                ),
+            },
+            {
+                "index": 1,
+                "preview_href": (
+                    "https://baijiahao.baidu.com/builder/preview/s?id=old-draft"
+                ),
+            },
+        ]
+    )
+
+    result = asyncio.run(platform._find_unique_exact_draft("允许同名"))
+
+    assert "article_id=new-draft" in result
+
+
 def test_scoped_modify_accepts_only_one_new_same_origin_editor_page() -> None:
     original = SimpleNamespace(
         url="https://baijiahao.baidu.com/builder/rc/content",
@@ -487,17 +516,27 @@ def test_current_body_editor_reacquires_after_transient_iframe_rebuild() -> None
     assert platform._body_editor_locator.await_count == 2
 
 
-def test_preflight_rejects_existing_exact_title_before_editor_side_effect() -> None:
+def test_preflight_records_existing_exact_title_ids_without_blocking() -> None:
     platform = BaijiahaoPlatform()
     platform.page = object()
     platform._open_works_page = AsyncMock()
     platform._search_works = AsyncMock()
-    platform._matching_work_rows = AsyncMock(return_value=[{"index": 0}])
+    platform._matching_work_rows = AsyncMock(
+        return_value=[
+            {
+                "index": 0,
+                "preview_href": (
+                    "https://baijiahao.baidu.com/builder/preview/s?id=old-draft"
+                ),
+            }
+        ]
+    )
 
-    with pytest.raises(DraftBaselineError, match="已存在同名内容"):
-        asyncio.run(platform.preflight_delivery(" 唯一标题 "))
+    asyncio.run(platform.preflight_delivery(" 唯一标题 "))
 
-    assert platform._preflight_title == ""
+    assert platform._preflight_title == "唯一标题"
+    assert platform._preflight_matching_draft_count == 1
+    assert platform._preflight_draft_ids == frozenset({"old-draft"})
 
 
 @pytest.mark.parametrize(

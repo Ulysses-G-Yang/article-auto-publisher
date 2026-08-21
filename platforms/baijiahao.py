@@ -70,6 +70,8 @@ class BaijiahaoPlatform(BasePlatform):
         self._expected_persisted_blocks: list[dict] | None = None
         self._expected_persisted_cover = False
         self._preflight_title = ""
+        self._preflight_matching_draft_count = 0
+        self._preflight_draft_ids: frozenset[str] = frozenset()
         self._media_progress_state: dict[str, int] | None = None
 
     async def initialize(self):
@@ -313,9 +315,12 @@ class BaijiahaoPlatform(BasePlatform):
         )
 
     async def preflight_delivery(self, title: str) -> None:
-        """在打开新编辑器前证明同名内容不存在，避免重复草稿。"""
+        """记录同名草稿实体基线，但允许平台创建同名新草稿。"""
 
         self._require_page_alive("百家号草稿基线检查")
+        self._preflight_title = ""
+        self._preflight_matching_draft_count = 0
+        self._preflight_draft_ids = frozenset()
         expected_title = self._normalize_title(title)
         if not expected_title:
             raise DraftBaselineError("DRAFT_BASELINE_FAILED: 百家号标题不能为空")
@@ -333,10 +338,15 @@ class BaijiahaoPlatform(BasePlatform):
             raise DraftBaselineError(
                 "DRAFT_BASELINE_FAILED: 百家号无法确认同名内容基线"
             ) from exc
-        if matches:
-            raise DraftBaselineError(
-                "DRAFT_BASELINE_FAILED: 百家号已存在同名内容，禁止自动创建重复草稿"
+        self._preflight_matching_draft_count = len(matches)
+        self._preflight_draft_ids = frozenset(
+            draft_id
+            for draft_id in (
+                self._preview_article_id(str(match.get("preview_href") or ""))
+                for match in matches
             )
+            if draft_id
+        )
         self._preflight_title = expected_title
 
     @staticmethod
@@ -1739,23 +1749,49 @@ class BaijiahaoPlatform(BasePlatform):
     async def _find_unique_exact_draft(self, title: str) -> str:
         await self._open_works_page()
         matches: list[dict] = []
+        baseline_count = getattr(self, "_preflight_matching_draft_count", 0)
+        baseline_ids = getattr(self, "_preflight_draft_ids", frozenset())
+        if not isinstance(baseline_count, int) or baseline_count < 0:
+            raise DraftResultUnknownError(
+                "DRAFT_RESULT_UNKNOWN: 百家号缺少保存前同名草稿数量基线"
+            )
+        if not isinstance(baseline_ids, frozenset):
+            baseline_ids = frozenset(baseline_ids or ())
+        created_match: dict | None = None
         for attempt in range(6):
             await self._search_works(title)
             matches = await self._matching_work_rows(title)
-            if len(matches) == 1:
-                break
+            if len(matches) == baseline_count + 1:
+                candidates = [
+                    match
+                    for match in matches
+                    if (
+                        (draft_id := self._preview_article_id(
+                            str(match.get("preview_href") or "")
+                        ))
+                        and draft_id not in baseline_ids
+                    )
+                ]
+                if len(candidates) == 1:
+                    created_match = candidates[0]
+                    break
+                # 首篇同名草稿的旧页面可能没有预览链接，仍可沿用唯一行的
+                # React“修改”动作；已有同名基线时绝不靠列表位置猜新实体。
+                if baseline_count == 0 and len(matches) == 1:
+                    created_match = matches[0]
+                    break
             if attempt + 1 < 6:
                 await self.page.reload(wait_until="domcontentloaded", timeout=30000)
                 await self.simulator.random_delay(1, 2)
-        if len(matches) != 1:
+        if created_match is None:
             raise DraftResultUnknownError(
-                "DRAFT_RESULT_UNKNOWN: 百家号未找到标题精确匹配的唯一草稿"
+                "DRAFT_RESULT_UNKNOWN: 百家号无法从同名草稿中唯一识别本次新增实体"
             )
         # 百家号“修改”是 React 处理器调用 window.open，而不是当前页链接。
         # 浏览器可能拦截该弹窗，导致平台已保存成功但验证器误报结果未知。
         # 作品行还提供同源预览链接，其 id 与编辑器 article_id 相同；只从
         # 唯一匹配行提取该稳定 ID，再由持久化核验函数主动打开编辑页。
-        preview_href = str(matches[0].get("preview_href") or "")
+        preview_href = str(created_match.get("preview_href") or "")
         if preview_href:
             return self._edit_url_from_preview_href(preview_href)
         return await self._open_exact_draft_via_modify(title)
@@ -1844,25 +1880,8 @@ class BaijiahaoPlatform(BasePlatform):
 
     @classmethod
     def _edit_url_from_preview_href(cls, value: str) -> str:
-        parts = urlsplit(str(value or ""))
-        if (
-            parts.scheme != "https"
-            or parts.netloc != "baijiahao.baidu.com"
-            or parts.path != "/builder/preview/s"
-            or parts.username
-            or parts.password
-            or parts.fragment
-        ):
-            raise DraftResultUnknownError(
-                "DRAFT_RESULT_UNKNOWN: 百家号草稿预览地址无效"
-            )
-        values = parse_qsl(parts.query, keep_blank_values=True)
-        article_ids = [item for key, item in values if key == "id"]
-        if (
-            len(values) != 1
-            or len(article_ids) != 1
-            or re.fullmatch(r"[A-Za-z0-9_-]{1,128}", article_ids[0]) is None
-        ):
+        article_id = cls._preview_article_id(value)
+        if article_id is None:
             raise DraftResultUnknownError(
                 "DRAFT_RESULT_UNKNOWN: 百家号草稿预览 ID 无法唯一验证"
             )
@@ -1875,7 +1894,7 @@ class BaijiahaoPlatform(BasePlatform):
                     urlencode(
                         {
                             "type": "news",
-                            "article_id": article_ids[0],
+                            "article_id": article_id,
                             "is_pay_training_camp": "",
                         }
                     ),
@@ -1883,6 +1902,30 @@ class BaijiahaoPlatform(BasePlatform):
                 )
             )
         )
+
+    @staticmethod
+    def _preview_article_id(value: str) -> str | None:
+        """从同源预览地址提取非敏感草稿 ID；无可靠 ID 时返回 ``None``。"""
+
+        parts = urlsplit(str(value or ""))
+        if (
+            parts.scheme != "https"
+            or parts.netloc != "baijiahao.baidu.com"
+            or parts.path != "/builder/preview/s"
+            or parts.username
+            or parts.password
+            or parts.fragment
+        ):
+            return None
+        values = parse_qsl(parts.query, keep_blank_values=True)
+        article_ids = [item for key, item in values if key == "id"]
+        if (
+            len(values) != 1
+            or len(article_ids) != 1
+            or re.fullmatch(r"[A-Za-z0-9_-]{1,128}", article_ids[0]) is None
+        ):
+            return None
+        return article_ids[0]
 
     @staticmethod
     def _safe_draft_url(value: str) -> str:

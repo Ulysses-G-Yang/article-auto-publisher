@@ -364,6 +364,39 @@ def test_saved_layout_without_cover_uses_unique_drawer_title_evidence() -> None:
     platform._assert_layout_body_tokens.assert_awaited_once()
 
 
+def test_saved_layout_allows_one_new_card_after_existing_same_title() -> None:
+    title = "允许同名草稿"
+    new_actions = MagicMock(count=AsyncMock(return_value=1), click=AsyncMock())
+    new_card = MagicMock()
+    new_card.locator.return_value.filter.return_value = new_actions
+    old_card = MagicMock()
+    platform = _platform()
+    platform._preflight_title = title
+    platform._preflight_matching_draft_count = 1
+    platform._layout_finalized = True
+    platform._expected_persisted_cover = False
+    platform._expected_persisted_blocks = [{"type": "text", "text": "正文"}]
+    platform._open_long_draft_drawer = AsyncMock()
+    platform._matching_long_draft_cards = AsyncMock(
+        return_value=[new_card, old_card]
+    )
+    platform.page.wait_for_selector = AsyncMock()
+    platform._layout_snapshot = AsyncMock(
+        return_value={
+            "cover_title": "",
+            "image_count": 0,
+            "loaded_image_count": 0,
+            "first_card_loaded_images": 0,
+        }
+    )
+    platform._assert_layout_body_tokens = AsyncMock()
+
+    run(platform._verify_saved_long_draft(title))
+
+    new_actions.click.assert_awaited_once_with(timeout=15000)
+    platform._assert_layout_body_tokens.assert_awaited_once()
+
+
 def test_layout_title_key_accepts_platform_inserted_wrap_space_only() -> None:
     assert XiaohongshuPlatform._draft_title_key("排版探测 -20260820") == (
         XiaohongshuPlatform._draft_title_key("排版探测-20260820")

@@ -5,7 +5,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from platforms.base import DraftBaselineError
 from platforms.content_validation import ContentValidationError
 from platforms.xiaohongshu import (
     XiaohongshuPlatform,
@@ -320,11 +319,15 @@ def _preflight_platform(*, resume_title: str = ""):
     return platform, action
 
 
-def test_same_title_still_fails_closed_without_explicit_resume() -> None:
-    platform, _action = _preflight_platform()
-    with pytest.raises(DraftBaselineError, match="禁止自动重复创建"):
-        run(platform.preflight_delivery("唯一标题"))
+def test_same_title_records_baseline_without_resuming_existing_draft() -> None:
+    platform, action = _preflight_platform()
+
+    run(platform.preflight_delivery("唯一标题"))
+
     assert platform._editing_existing_draft is False
+    assert platform._preflight_matching_draft_count == 1
+    assert platform._preflight_title == "唯一标题"
+    action.click.assert_not_awaited()
 
 
 def test_explicit_exact_resume_opens_only_unique_existing_draft() -> None:

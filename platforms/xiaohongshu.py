@@ -128,6 +128,7 @@ class XiaohongshuPlatform(BasePlatform):
         self._layout_finalized = False
         self._layout_expected_image_count = 0
         self._preflight_title = ""
+        self._preflight_matching_draft_count = 0
         self._resume_existing_title = " ".join(str(resume_existing_title or "").split())
         self._editing_existing_draft = False
 
@@ -397,9 +398,17 @@ class XiaohongshuPlatform(BasePlatform):
             raise SelectorError("小红书长文编辑器未找到标题输入框") from exc
 
     async def preflight_delivery(self, title: str) -> None:
-        """保存前证明不存在同名长文草稿，避免结果未知后产生重复副作用。"""
+        """记录保存前草稿基线；同名标题本身不再阻止创建新草稿。
+
+        小红书允许同名草稿。幂等证明改为保存前后的草稿总数和同名卡片数
+        都恰好增加一条，再重开最新同名卡片核验冻结内容。只有显式恢复模式
+        仍要求同名卡片唯一，避免误编辑另一篇历史草稿。
+        """
 
         self._require_page_alive("小红书草稿基线检查")
+        self._preflight_title = ""
+        self._preflight_matching_draft_count = 0
+        self._editing_existing_draft = False
         expected_title = " ".join(str(title or "").split())
         if not expected_title:
             raise DraftBaselineError("DRAFT_BASELINE_FAILED: 小红书标题不能为空")
@@ -422,13 +431,12 @@ class XiaohongshuPlatform(BasePlatform):
             raise DraftBaselineError(
                 "DRAFT_BASELINE_FAILED: 小红书无法确认同名长文草稿基线"
             ) from exc
-        self._editing_existing_draft = False
-        if matches and (len(matches) != 1 or expected_title != self._resume_existing_title):
+        self._preflight_matching_draft_count = len(matches)
+        if expected_title == self._resume_existing_title and len(matches) > 1:
             raise DraftBaselineError(
-                "DRAFT_BASELINE_FAILED: 小红书已存在同名草稿，禁止自动重复创建"
+                "DRAFT_BASELINE_FAILED: 小红书待恢复同名草稿不唯一"
             )
-        self._preflight_title = expected_title
-        if matches:
+        if matches and expected_title == self._resume_existing_title:
             actions = (
                 matches[0].locator(".draft-actions .btn").filter(has_text=re.compile(r"^编辑$"))
             )
@@ -441,6 +449,7 @@ class XiaohongshuPlatform(BasePlatform):
                 timeout=20000,
             )
             self._editing_existing_draft = True
+        self._preflight_title = expected_title
 
     async def _open_long_draft_drawer(self) -> None:
         """使用真实鼠标事件打开草稿抽屉并切换到长文笔记。"""
@@ -1698,8 +1707,23 @@ class XiaohongshuPlatform(BasePlatform):
             raise DraftResultUnknownError("DRAFT_RESULT_UNKNOWN: 小红书缺少冻结内容核验快照")
         await self._open_long_draft_drawer()
         matches = await self._matching_long_draft_cards(expected_title)
-        if len(matches) != 1:
-            raise DraftResultUnknownError("DRAFT_RESULT_UNKNOWN: 小红书未找到唯一同名长文草稿")
+        baseline_match_count = getattr(self, "_preflight_matching_draft_count", None)
+        if not isinstance(baseline_match_count, int):
+            raise DraftResultUnknownError(
+                "DRAFT_RESULT_UNKNOWN: 小红书缺少保存前同名草稿数量基线"
+            )
+        expected_match_count = (
+            baseline_match_count
+            if self._editing_existing_draft
+            else baseline_match_count + 1
+        )
+        if len(matches) != expected_match_count:
+            raise DraftResultUnknownError(
+                "DRAFT_RESULT_UNKNOWN: 小红书同名草稿数量未按预期变化"
+            )
+        # 小红书草稿抽屉按最近更新时间倒序；结合总数和同名数均只增加一条，
+        # 第一张同名卡片就是本次新实体。后续仍会重开并逐项核验冻结内容，
+        # 因此排序变化只会得到 RESULT_UNKNOWN，不会把旧草稿误报为成功。
         actions = matches[0].locator(".draft-actions .btn").filter(has_text=re.compile(r"^编辑$"))
         if await actions.count() != 1:
             raise DraftResultUnknownError("DRAFT_RESULT_UNKNOWN: 小红书草稿编辑入口不唯一")

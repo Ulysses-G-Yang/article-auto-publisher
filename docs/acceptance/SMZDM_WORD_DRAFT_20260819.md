@@ -56,3 +56,19 @@ atom 后光标未退出”三个问题。每轮都使用不同唯一标题和新
 `can_run_stable_image_draft("smzdm")` 可以为 `true`。封面控件没有独立真实核验，
 继续保持 `RETEST_REQUIRED`，所以 `can_run_complete_word_draft("smzdm")` 仍必须为
 `false`。
+
+## 2026-08-21 同名草稿与完整 7 图回归
+
+- 输入：用户指定的 21 块、7 图 Word；标题为
+  `大型游戏玩家别只盯1ms：拖影、延迟要一起看`。
+- 账号：`值友3424774480` / `****3440`，执行前为 `ACTIVE/VALID`。
+- Delivery Plan：`67af5fd9`；Delivery Operation：`8d4e051c`。
+- 执行前一次性记录草稿箱全部安全 `/edit/{draft_id}`；保存后只轮询当前 DOM，
+  不刷新草稿箱、不按标题判唯一，也不因已有同名草稿而失败。
+- 保存后取得唯一新增草稿 ID `ad7257dk`，重新打开安全地址
+  `https://post.smzdm.com/edit/ad7257dk`，由适配器核对完整标题、正文、7 张图片与
+  原始图文顺序。
+- 计划终态 `SUCCESS`；目标与操作终态 `DRAFT_SAVED`；文章映射 `SUCCEEDED`。
+- 本轮只执行一次 `DRAFT` 保存，没有公开发布、删除草稿或结果不明后的自动重试。
+
+该回归证明同名草稿不再构成阻塞；草稿身份由保存前后 `draft_id` 集合差确定。

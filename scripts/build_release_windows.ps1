@@ -16,7 +16,10 @@ param(
     [ValidatePattern('^[0-9a-fA-F]{40}$')]
     [string]$CommitSha,
 
-    [string]$OutputDirectory = ".\build\release"
+    [string]$OutputDirectory = ".\build\release",
+
+    [ValidatePattern('^[0-9]+\.[0-9]+\.[0-9]+(?:-[A-Za-z0-9.-]+)?$')]
+    [string]$Version = "0.4.2"
 )
 
 $ErrorActionPreference = "Stop"
@@ -92,12 +95,16 @@ $archivePath = Join-Path $tempRoot "source.zip"
 $extractRoot = Join-Path $tempRoot "source"
 $SourceRoot = Join-Path $extractRoot "source"
 $PackageRoot = Join-Path $tempRoot "package"
-$packageName = "ArticleOps-v0.4.1-rc1-$resolvedSha"
+$UpgradeRoot = Join-Path $tempRoot "upgrade"
+$packageName = "ArticleOps-v$Version-$resolvedSha"
 $archiveOutput = Join-Path $outputRoot "$packageName.zip"
 $hashOutput = "$archiveOutput.sha256"
+$upgradeName = "ArticleOps-upgrade-v$Version-$resolvedSha"
+$upgradeOutput = Join-Path $outputRoot "$upgradeName.zip"
+$upgradeHashOutput = "$upgradeOutput.sha256"
 
 try {
-    New-Item -ItemType Directory -Force -Path $tempRoot, $extractRoot, $PackageRoot | Out-Null
+    New-Item -ItemType Directory -Force -Path $tempRoot, $extractRoot, $PackageRoot, $UpgradeRoot | Out-Null
     Invoke-Git -Arguments @("archive", "--format=zip", "--output=$archivePath", "--prefix=source/", $resolvedSha) | Out-Null
     Expand-Archive -LiteralPath $archivePath -DestinationPath $extractRoot -Force
     if (-not (Test-Path -LiteralPath $SourceRoot -PathType Container)) {
@@ -135,6 +142,7 @@ try {
     $releaseDocuments = @(
         "docs\releases\v0.4.0-draft-delivery.md",
         "docs\releases\v0.4.1-rc1.md",
+        "docs\releases\v0.4.2-hotfix.md",
         "docs\deployment\PRODUCTION_WINDOWS.md"
     )
     foreach ($relativePath in $releaseDocuments) {
@@ -148,7 +156,7 @@ try {
     Copy-LicenseFile -RelativePath "src\article_mvp\web\static\vendor\gridstack\LICENSE.txt" -Name "GRIDSTACK_LICENSE.txt"
 
     $manifest = @(
-        "ArticleOps v0.4.1-rc1",
+        "ArticleOps v$Version",
         "source_commit=$resolvedSha",
         "built_at_utc=$([DateTime]::UtcNow.ToString('o'))",
         "public_publish_default=false",
@@ -194,8 +202,37 @@ try {
     Compress-Archive -Path (Join-Path $PackageRoot "*") -DestinationPath $archiveOutput -Force
     $hash = (Get-FileHash -LiteralPath $archiveOutput -Algorithm SHA256).Hash.ToLowerInvariant()
     Set-Content -LiteralPath $hashOutput -Value "$hash  $([IO.Path]::GetFileName($archiveOutput))" -Encoding ASCII
-    Write-Host "RC 包：$archiveOutput" -ForegroundColor Green
-    Write-Host "SHA256：$hashOutput" -ForegroundColor Green
+
+    $upgradePayloadRoot = Join-Path $UpgradeRoot "payload"
+    New-Item -ItemType Directory -Force -Path $upgradePayloadRoot | Out-Null
+    Copy-Item -Path (Join-Path $PackageRoot "*") -Destination $upgradePayloadRoot -Recurse -Force
+    Copy-Item -LiteralPath (Join-Path $SourceRoot "scripts\apply_upgrade_windows.ps1") `
+        -Destination (Join-Path $UpgradeRoot "apply_upgrade_windows.ps1") -Force
+
+    $upgradeFiles = @(Get-ChildItem -LiteralPath $upgradePayloadRoot -Recurse -File | ForEach-Object {
+        [ordered]@{
+            path = $_.FullName.Substring($upgradePayloadRoot.Length).TrimStart([char[]]@('\', '/')).Replace('\', '/')
+            sha256 = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+        }
+    })
+    $upgradeManifest = [ordered]@{
+        version = $Version
+        source_commit = $resolvedSha
+        built_at_utc = [DateTime]::UtcNow.ToString('o')
+        preserves = @("data", "uploads", "images", "Cookie", "Chrome Profile", "production_env.ps1")
+        files = $upgradeFiles
+    }
+    $upgradeManifest | ConvertTo-Json -Depth 5 | Set-Content `
+        -LiteralPath (Join-Path $UpgradeRoot "UPGRADE_MANIFEST.json") -Encoding UTF8
+    Compress-Archive -Path (Join-Path $UpgradeRoot "*") -DestinationPath $upgradeOutput -Force
+    $upgradeHash = (Get-FileHash -LiteralPath $upgradeOutput -Algorithm SHA256).Hash.ToLowerInvariant()
+    Set-Content -LiteralPath $upgradeHashOutput `
+        -Value "$upgradeHash  $([IO.Path]::GetFileName($upgradeOutput))" -Encoding ASCII
+
+    Write-Host "完整包：$archiveOutput" -ForegroundColor Green
+    Write-Host "完整包 SHA256：$hashOutput" -ForegroundColor Green
+    Write-Host "升级包：$upgradeOutput" -ForegroundColor Green
+    Write-Host "升级包 SHA256：$upgradeHashOutput" -ForegroundColor Green
     Write-Host "source_commit=$resolvedSha" -ForegroundColor Cyan
 } finally {
     if (Test-Path -LiteralPath $tempRoot) {

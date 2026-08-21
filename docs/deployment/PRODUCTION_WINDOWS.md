@@ -1,4 +1,4 @@
-# ArticleOps Windows RC 部署说明
+# ArticleOps Windows 部署与升级说明
 
 ## 安全边界
 
@@ -19,11 +19,32 @@
 
 脚本只从该 SHA 的 Git archive 按白名单复制运行代码，并生成：
 
-- `ArticleOps-v0.4.1-rc1-<commit-sha>.zip`
-- 同名 `.sha256` 文件
+- `ArticleOps-v0.4.2-<commit-sha>.zip`：全新安装包。
+- `ArticleOps-upgrade-v0.4.2-<commit-sha>.zip`：已有业务电脑升级包。
+- 两个压缩包各自同名的 `.sha256` 文件。
 
 交付前在目标机核对 SHA256，并记录压缩包内 `RELEASE_MANIFEST.txt` 的
-`source_commit`。本候选版本不自动创建正式 `v0.4.1` tag。
+`source_commit`。本版本不自动创建正式 tag。
+
+## 已有业务电脑原地升级
+
+不要用完整包覆盖旧目录。解压 `ArticleOps-upgrade-v0.4.2-<commit-sha>.zip` 到
+临时目录，然后执行：
+
+```powershell
+$targetRoot = Read-Host "请输入现有 ArticleOps 运行目录"
+.\apply_upgrade_windows.ps1 -TargetRoot $targetRoot -ValidateOnly
+.\apply_upgrade_windows.ps1 -TargetRoot $targetRoot
+```
+
+第一条命令只校验压缩包与目标目录，不停止服务或写文件；通过后再执行第二条命令。
+升级器会验证载荷 SHA-256 和目标目录，再停止当前项目服务，逐文件备份旧程序、
+覆盖清单内代码，并在依赖清单变化时更新现有 Python 环境。最后启动服务并执行健康
+检查；任何阶段失败都会尝试恢复旧程序。
+
+以下内容始终保留：`data/`、SQLite 数据库、Cookie、Chrome Profile、
+`data\production_env.ps1`、上传内容和历史记录。代码备份保存在目标目录的
+`data\upgrade_backups\<UTC时间>`，升级器不会删除平台草稿或结束 Chrome。
 
 ## 全新 Windows 运行目录
 

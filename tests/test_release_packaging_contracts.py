@@ -47,6 +47,23 @@ def test_release_whitelist_excludes_development_and_machine_state_files() -> Non
         assert pattern in script
     assert "source_commit=$resolvedSha" in script
     assert "Get-FileHash -LiteralPath $archiveOutput -Algorithm SHA256" in script
+    assert '"ArticleOps-upgrade-v$Version-$resolvedSha"' in script
+    assert '"scripts\\apply_upgrade_windows.ps1"' in script
+
+
+def test_windows_upgrade_preserves_runtime_state_and_rolls_back_code() -> None:
+    script = read("scripts/apply_upgrade_windows.ps1")
+
+    for preserved in ("data", "uploads", "images", "production_env.ps1"):
+        assert preserved in script
+    assert "UPGRADE_MANIFEST.json" in script
+    assert "Get-FileHash" in script
+    assert "$ValidateOnly" in script
+    assert "仅校验模式未停止服务、未复制文件、未修改目标目录" in script
+    assert "data\\upgrade_backups" in script
+    assert 'Invoke-TargetScript -Name "stop_production_windows.ps1"' in script
+    assert 'Invoke-TargetScript -Name "start_production_windows.ps1"' in script
+    assert "已尝试恢复旧代码" in script
 
 
 def test_windows_start_script_exposes_bundled_src_modules_to_mcp() -> None:
@@ -59,8 +76,10 @@ def test_windows_start_script_exposes_bundled_src_modules_to_mcp() -> None:
 
 def test_release_docs_describe_runtime_only_test_behavior() -> None:
     docs = read("docs/deployment/PRODUCTION_WINDOWS.md")
-    release = read("docs/releases/v0.4.1-rc1.md")
+    release = read("docs/releases/v0.4.2-hotfix.md")
 
     assert "仍会执行 `compileall`" in docs
     assert "跳过不存在的 `pytest`" in docs
     assert "排除 `.git`、`data`、数据库、Cookie" in release
+    assert "ArticleOps-upgrade-v0.4.2" in docs
+    assert "data\\upgrade_backups" in docs

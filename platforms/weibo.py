@@ -1176,28 +1176,21 @@ class WeiboPlatform(BasePlatform):
         try:
             raw = await editor.evaluate(
                 """root => {
-                    const tokens = [];
-                    for (const node of root.children) {
-                        const images = node.matches('img')
-                            ? [node] : Array.from(node.querySelectorAll('img'));
-                        if (images.length) {
-                            for (const _image of images) tokens.push({kind: 'image'});
-                            continue;
-                        }
-                        const text = node.innerText || node.textContent || '';
-                        if (!text.trim()) continue;
-                        const tag = node.tagName.toLowerCase();
-                        if (/^h[1-6]$/.test(tag)) {
-                            tokens.push({
-                                kind: 'heading',
-                                level: Number(tag.slice(1)),
-                                text,
-                            });
-                        } else {
-                            tokens.push({kind: 'text', text});
-                        }
-                    }
-                    return tokens;
+                    return Array.from(root.children).map((node) => ({
+                        tag: node.tagName.toLowerCase(),
+                        class_name: String(node.className || ''),
+                        text: node.innerText || node.textContent || '',
+                        images: Array.from(
+                            node.matches('img') ? [node] : node.querySelectorAll('img')
+                        ).map((image) => ({
+                            is_separator: image.classList.contains(
+                                'ProseMirror-separator'
+                            ),
+                            is_body_image: image.classList.contains(
+                                'image-view__body__image'
+                            ),
+                        })),
+                    }));
                 }"""
             )
         except Exception as exc:
@@ -1212,39 +1205,111 @@ class WeiboPlatform(BasePlatform):
             raise ContentValidationError(
                 "WEIBO_CONTENT_DOM_VERIFY_FAILED: DOM 序列无效"
             )
+        return self._normalize_editor_dom_snapshot(raw)
+
+    @staticmethod
+    def _normalize_editor_dom_snapshot(raw: list[dict]) -> list[dict]:
+        """将微博 ProseMirror DOM 归一成图文 token。
+
+        微博会在普通文字段落内插入不可见的 ``ProseMirror-separator``
+        ``img``。它是光标占位节点，不是用户正文图片；正文图片只接受当前
+        官方结构 ``figure.wb-node-image`` 内唯一的 body image。未知形状一律
+        fail closed，避免把占位图算成正文图或吞掉同段文字。
+        """
+
         normalized: list[dict] = []
         for item in raw:
             if not isinstance(item, dict):
                 raise ContentValidationError(
-                    "WEIBO_CONTENT_DOM_VERIFY_FAILED: DOM token 无效"
+                    "WEIBO_CONTENT_DOM_VERIFY_FAILED: DOM 节点无效"
                 )
-            kind = item.get("kind")
-            if kind == "image":
+            tag = str(item.get("tag") or "").lower()
+            class_tokens = set(str(item.get("class_name") or "").split())
+            images = item.get("images")
+            if not isinstance(images, list) or any(
+                not isinstance(image, dict) for image in images
+            ):
+                raise ContentValidationError(
+                    "WEIBO_CONTENT_DOM_VERIFY_FAILED: 图片节点无效"
+                )
+            content_images = [
+                image for image in images if not image.get("is_separator")
+            ]
+            if content_images:
+                if (
+                    tag != "figure"
+                    or "wb-node-image" not in class_tokens
+                    or len(content_images) != 1
+                    or not content_images[0].get("is_body_image")
+                    or normalize_for_comparison(item.get("text"))
+                ):
+                    raise ContentValidationError(
+                        "WEIBO_CONTENT_DOM_VERIFY_FAILED: 正文图片结构无法确认"
+                    )
                 normalized.append({"kind": "image"})
                 continue
             text = normalize_for_comparison(item.get("text"))
             if not text:
                 continue
-            if kind == "heading":
+            if tag in {"h1", "h2", "h3", "h4", "h5", "h6"}:
                 normalized.append(
                     {
                         "kind": "heading",
-                        "level": int(item.get("level") or 0),
+                        "level": int(tag[1]),
                         "text": text,
                     }
                 )
-            elif kind == "text":
+            else:
                 for paragraph in extract_expected_paragraphs(
                     [{"type": "text", "text": text}]
                 ):
                     normalized.append(
                         {"kind": "text", "text": paragraph.comparison_text}
                     )
-            else:
-                raise ContentValidationError(
-                    "WEIBO_CONTENT_DOM_VERIFY_FAILED: DOM token 类型无效"
-                )
         return normalized
+
+    async def _semantic_editor_image_count(self) -> int:
+        """只统计官方正文图片 figure，忽略 ProseMirror 光标占位图。"""
+
+        editor = await self._current_body_editor()
+        state = await editor.evaluate(
+            """root => {
+                const contentImages = Array.from(root.querySelectorAll('img')).filter(
+                    (image) => !image.classList.contains('ProseMirror-separator')
+                );
+                const validFigures = Array.from(
+                    root.querySelectorAll(':scope > figure.wb-node-image')
+                ).filter((figure) => {
+                    const images = Array.from(figure.querySelectorAll('img')).filter(
+                        (image) => !image.classList.contains('ProseMirror-separator')
+                    );
+                    return images.length === 1
+                        && images[0].classList.contains('image-view__body__image');
+                });
+                const recognizedImages = new Set(
+                    validFigures.map((figure) => Array.from(
+                        figure.querySelectorAll('img')
+                    ).find((image) => !image.classList.contains(
+                        'ProseMirror-separator'
+                    )))
+                );
+                return {
+                    semantic_count: validFigures.length,
+                    unsupported_count: contentImages.filter(
+                        (image) => !recognizedImages.has(image)
+                    ).length,
+                };
+            }"""
+        )
+        if (
+            not isinstance(state, dict)
+            or not isinstance(state.get("semantic_count"), int)
+            or int(state.get("unsupported_count") or 0) != 0
+        ):
+            raise ContentValidationError(
+                "WEIBO_CONTENT_DOM_VERIFY_FAILED: 正文图片结构无法确认"
+            )
+        return int(state["semantic_count"])
 
     @staticmethod
     def _token_shape(tokens: list[dict]) -> str:
@@ -1284,12 +1349,28 @@ class WeiboPlatform(BasePlatform):
 
         self._require_page_alive("微博上传图片")
         try:
-            trigger = await self._find_body_image_trigger()
-            before = await self.page.evaluate(
-                """() => document.querySelectorAll(
-                    '.tiptap img, .ProseMirror img'
-                ).length"""
-            )
+            try:
+                trigger = await self._find_body_image_trigger()
+            except ContentValidationError as exc:
+                return {
+                    "success": False,
+                    "error_code": "WEIBO_BODY_IMAGE_TRIGGER_NOT_UNIQUE",
+                    "error": safe_media_error(
+                        exc,
+                        fallback="微博正文插图入口不存在或不唯一",
+                    ),
+                }
+            try:
+                before = await self._semantic_editor_image_count()
+            except ContentValidationError as exc:
+                return {
+                    "success": False,
+                    "error_code": "WEIBO_EDITOR_IMAGE_SHAPE_UNSUPPORTED",
+                    "error": safe_media_error(
+                        exc,
+                        fallback="微博正文已有图片结构无法确认",
+                    ),
+                }
             await trigger.click(timeout=5000)
             await asyncio.sleep(0.5)
             dialogs = self.page.locator(".n-dialog:visible")
@@ -1487,41 +1568,44 @@ class WeiboPlatform(BasePlatform):
             after = before
             for _ in range(10):
                 await asyncio.sleep(1)
-                observed = await self.page.evaluate(
-                    """() => document.querySelectorAll(
-                        '.tiptap img, .ProseMirror img'
-                    ).length"""
-                )
+                try:
+                    observed = await self._semantic_editor_image_count()
+                except ContentValidationError:
+                    return {
+                        "success": False,
+                        "error_code": "WEIBO_EDITOR_IMAGE_SHAPE_UNSUPPORTED",
+                        "error": "微博插图后正文图片结构无法确认",
+                    }
                 if observed <= before:
                     continue
+                if observed > before + 1:
+                    return {
+                        "success": False,
+                        "error_code": "WEIBO_EDITOR_IMAGE_COUNT_AMBIGUOUS",
+                        "error": "微博插图后正文图片块增加数量不唯一",
+                    }
                 await asyncio.sleep(1)
-                stable = await self.page.evaluate(
-                    """() => document.querySelectorAll(
-                        '.tiptap img, .ProseMirror img'
-                    ).length"""
-                )
+                try:
+                    stable = await self._semantic_editor_image_count()
+                except ContentValidationError:
+                    return {
+                        "success": False,
+                        "error_code": "WEIBO_EDITOR_IMAGE_SHAPE_UNSUPPORTED",
+                        "error": "微博插图后正文图片结构无法确认",
+                    }
                 if stable == observed == before + 1:
                     after = stable
                     break
             if after != before + 1:
                 return {
                     "success": False,
-                    "error_code": "WEIBO_EDITOR_IMAGE_COUNT_UNCHANGED",
-                    "error": "上传后正文编辑器图片数量没有稳定且只增加一张",
+                    "error_code": "WEIBO_EDITOR_SEMANTIC_IMAGE_COUNT_UNCHANGED",
+                    "error": "上传后正文编辑器真实图片块没有稳定且只增加一张",
                 }
             return {
                 "success": True,
                 "error": "",
                 "observed_image_count": after,
-            }
-        except ContentValidationError as exc:
-            return {
-                "success": False,
-                "error_code": "WEIBO_BODY_IMAGE_TRIGGER_NOT_UNIQUE",
-                "error": safe_media_error(
-                    exc,
-                    fallback="微博正文插图入口不存在或不唯一",
-                ),
             }
         except Exception as exc:
             if self._exception_means_browser_closed(exc):

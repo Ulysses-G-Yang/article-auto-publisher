@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, call, patch
 import pytest
 
 from platforms.base import DraftResultUnknownError
+from platforms.content_validation import ContentValidationError
 from platforms.smzdm import SmzdmPlatform
 
 
@@ -136,6 +137,49 @@ def test_smzdm_creates_real_paragraph_after_image_atom() -> None:
         call("Enter"),
     ]
     assert "tail.tagName.toLowerCase() === 'p'" in editor.evaluate.await_args.args[0]
+
+
+def test_smzdm_waits_for_async_paragraph_after_image_atom() -> None:
+    editor = SimpleNamespace(
+        press=AsyncMock(),
+        evaluate=AsyncMock(side_effect=[False, False, True]),
+    )
+    keyboard = SimpleNamespace(press=AsyncMock())
+    platform = SmzdmPlatform()
+    platform.page = SimpleNamespace(keyboard=keyboard)
+    platform._current_body_editor = AsyncMock(return_value=editor)
+
+    with patch("platforms.smzdm.asyncio.sleep", new=AsyncMock()) as sleep:
+        asyncio.run(platform._create_paragraph_after_image())
+
+    assert editor.evaluate.await_count == 3
+    assert sleep.await_count == 2
+    assert keyboard.press.await_args_list == [
+        call("ArrowDown"),
+        call("ArrowRight"),
+        call("Enter"),
+    ]
+
+
+def test_smzdm_fails_closed_when_post_image_paragraph_never_appears() -> None:
+    editor = SimpleNamespace(
+        press=AsyncMock(),
+        evaluate=AsyncMock(return_value=False),
+    )
+    keyboard = SimpleNamespace(press=AsyncMock())
+    platform = SmzdmPlatform()
+    platform.POST_IMAGE_PARAGRAPH_POLL_ATTEMPTS = 3
+    platform.page = SimpleNamespace(keyboard=keyboard)
+    platform._current_body_editor = AsyncMock(return_value=editor)
+
+    with patch("platforms.smzdm.asyncio.sleep", new=AsyncMock()):
+        with pytest.raises(
+            ContentValidationError,
+            match="SMZDM_POST_IMAGE_PARAGRAPH_FAILED",
+        ):
+            asyncio.run(platform._create_paragraph_after_image())
+
+    assert editor.evaluate.await_count == 3
 
 
 class PersistedTitle:

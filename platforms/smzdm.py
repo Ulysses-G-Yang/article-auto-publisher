@@ -64,6 +64,8 @@ class SmzdmPlatform(BasePlatform):
     SESSION_COOKIE_NAMES = frozenset({"sess"})
     LOGIN_POLL_ATTEMPTS = 120
     LOGIN_POLL_INTERVAL_SECONDS = 3
+    POST_IMAGE_PARAGRAPH_POLL_ATTEMPTS = 20
+    POST_IMAGE_PARAGRAPH_POLL_INTERVAL_SECONDS = 0.25
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
@@ -630,17 +632,28 @@ class SmzdmPlatform(BasePlatform):
             await self.page.keyboard.press("ArrowDown")
             await self.page.keyboard.press("ArrowRight")
             await self.page.keyboard.press("Enter")
-            tail_ready = bool(
-                await editor.evaluate(
-                    """root => {
-                        const tail = root.lastElementChild;
-                        return !!tail && tail.tagName.toLowerCase() === 'p'
-                            && tail.querySelectorAll('img').length === 0;
-                    }"""
+            # TipTap 在图片节点上传完成后会异步提交 ProseMirror transaction。
+            # 真实页面观察到：按键已经成功，但空 ``p`` 会在稍后才成为末尾
+            # 子节点。不能在按键后立即单次判断，否则会把已成功的插图误报
+            # 为失败。每轮重新取得编辑器，兼容 TipTap 替换根节点。
+            for attempt in range(self.POST_IMAGE_PARAGRAPH_POLL_ATTEMPTS):
+                editor = await self._current_body_editor()
+                tail_ready = bool(
+                    await editor.evaluate(
+                        """root => {
+                            const tail = root.lastElementChild;
+                            return !!tail && tail.tagName.toLowerCase() === 'p'
+                                && tail.querySelectorAll('img').length === 0;
+                        }"""
+                    )
                 )
-            )
-            if not tail_ready:
-                raise RuntimeError("图片后正文段落未建立")
+                if tail_ready:
+                    return
+                if attempt + 1 < self.POST_IMAGE_PARAGRAPH_POLL_ATTEMPTS:
+                    await asyncio.sleep(
+                        self.POST_IMAGE_PARAGRAPH_POLL_INTERVAL_SECONDS
+                    )
+            raise RuntimeError("图片后正文段落未在有界时间内建立")
         except Exception as exc:
             if self._exception_means_browser_closed(exc):
                 raise BrowserLifecycleError(

@@ -8,6 +8,7 @@ import pytest
 from platforms.content_validation import ContentValidationError
 from platforms.xiaohongshu import (
     XiaohongshuPlatform,
+    XiaohongshuCloudDraftUnavailableError,
     choose_verified_body_image_index,
 )
 
@@ -319,20 +320,23 @@ def _preflight_platform(*, resume_title: str = ""):
     return platform, action
 
 
-def test_same_title_records_baseline_without_resuming_existing_draft() -> None:
+def test_preflight_blocks_profile_local_draft_before_page_side_effects() -> None:
     platform, action = _preflight_platform()
 
-    run(platform.preflight_delivery("唯一标题"))
+    with pytest.raises(
+        XiaohongshuCloudDraftUnavailableError,
+        match="XHS_CLOUD_DRAFT_UNAVAILABLE",
+    ):
+        run(platform.preflight_delivery("唯一标题"))
 
     assert platform._editing_existing_draft is False
-    assert platform._preflight_matching_draft_count == 1
-    assert platform._preflight_title == "唯一标题"
+    platform.page.goto.assert_not_awaited()
     action.click.assert_not_awaited()
 
 
-def test_explicit_exact_resume_opens_only_unique_existing_draft() -> None:
+def test_explicit_local_resume_is_also_blocked() -> None:
     platform, action = _preflight_platform(resume_title="唯一标题")
-    run(platform.preflight_delivery("  唯一标题  "))
-    action.click.assert_awaited_once()
-    assert platform._editing_existing_draft is True
-    assert platform._draft_box_count_before == 10
+    with pytest.raises(XiaohongshuCloudDraftUnavailableError):
+        run(platform.preflight_delivery("  唯一标题  "))
+    platform.page.goto.assert_not_awaited()
+    action.click.assert_not_awaited()

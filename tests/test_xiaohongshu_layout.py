@@ -7,7 +7,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from platforms.content_validation import ContentValidationError
-from platforms.xiaohongshu import XiaohongshuPlatform
+from platforms.xiaohongshu import (
+    XiaohongshuCloudDraftUnavailableError,
+    XiaohongshuPlatform,
+)
 
 
 def run(coroutine):
@@ -307,16 +310,20 @@ def test_layout_tokens_join_page_wrapped_h2_and_require_heading_class() -> None:
         run(platform._assert_layout_body_tokens(blocks))
 
 
-def test_save_draft_refuses_raw_editor_without_layout() -> None:
+def test_save_draft_refuses_profile_local_card_as_cloud_draft() -> None:
     platform = _platform()
     platform._draft_box_count_before = 10
     platform._unique_visible_button = AsyncMock()
 
-    assert run(platform.save_draft("标题")) == ""
+    with pytest.raises(
+        XiaohongshuCloudDraftUnavailableError,
+        match="XHS_CLOUD_DRAFT_UNAVAILABLE",
+    ):
+        run(platform.save_draft("标题"))
     platform._unique_visible_button.assert_not_awaited()
 
 
-def test_save_draft_clicks_exact_leave_once_and_reopens_unique_entity() -> None:
+def test_save_draft_never_clicks_local_leave_action() -> None:
     action = AsyncMock()
     page = SimpleNamespace(is_closed=lambda: False, goto=AsyncMock())
     platform = XiaohongshuPlatform()
@@ -328,11 +335,11 @@ def test_save_draft_clicks_exact_leave_once_and_reopens_unique_entity() -> None:
     platform._draft_box_count = AsyncMock(return_value=11)
     platform._verify_saved_long_draft = AsyncMock()
 
-    result = run(platform.save_draft("唯一标题"))
+    with pytest.raises(XiaohongshuCloudDraftUnavailableError):
+        run(platform.save_draft("唯一标题"))
 
-    assert result.endswith("/publish/publish")
-    action.click.assert_awaited_once_with(timeout=10000)
-    platform._verify_saved_long_draft.assert_awaited_once_with("唯一标题")
+    action.click.assert_not_awaited()
+    platform._verify_saved_long_draft.assert_not_awaited()
 
 
 def test_saved_layout_without_cover_uses_unique_drawer_title_evidence() -> None:

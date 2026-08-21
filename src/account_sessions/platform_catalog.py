@@ -54,7 +54,9 @@ PLATFORM_CATALOG: tuple[PlatformCatalogItem, ...] = (
     _item("smzdm", "什么值得买", 50, delivery_enabled=True, account_enabled=True),
     _item("toutiao", "头条号", 60, account_enabled=True),
     _item("baijiahao", "百家号", 70, delivery_enabled=True, account_enabled=True),
-    _item("xiaohongshu", "小红书", 80, delivery_enabled=True, account_enabled=True),
+    # 网页端长文“草稿箱”经跨浏览器复核只存在于隔离 Profile 本地，
+    # 不是账号云端草稿。保留登录/账号管理，关闭自动投递，避免假成功。
+    _item("xiaohongshu", "小红书", 80, account_enabled=True),
     _item("douyin", "抖音", 90, account_enabled=True),
     _item("wechat_mp", "微信公众号", 100),
 )

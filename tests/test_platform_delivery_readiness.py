@@ -32,7 +32,6 @@ EXPECTED_PLATFORMS = (
     "zhihu",
     "smzdm",
     "baijiahao",
-    "xiaohongshu",
 )
 
 
@@ -87,27 +86,12 @@ def test_platform_facts_follow_current_real_acceptance_evidence() -> None:
     by_platform = readiness_by_platform()
 
     assert by_platform["zhihu"].facets["body_images"].status is ReadinessStatus.REAL_VERIFIED
-    assert by_platform["xiaohongshu"].facets["text_draft"].status is ReadinessStatus.REAL_VERIFIED
-    assert by_platform["xiaohongshu"].facets["body_images"].status is ReadinessStatus.REAL_VERIFIED
     assert by_platform["baijiahao"].facets["cover"].status is ReadinessStatus.REAL_VERIFIED
 
 
-def test_xiaohongshu_word_draft_is_promoted_after_exact_reopen_evidence() -> None:
-    record = readiness_by_platform()["xiaohongshu"]
-    for facet_name in (
-        "account_session",
-        "editor_entry",
-        "text_draft",
-        "body_images",
-        "draft_verification",
-    ):
-        facet = record.facets[facet_name]
-        assert facet.status is ReadinessStatus.REAL_VERIFIED
-        assert facet.last_real_check.isoformat() == "2026-08-20"
-        assert "XIAOHONGSHU_WORD_DRAFT_20260820.md" in " ".join(facet.evidence_refs)
-
-    assert can_run_stable_image_draft("xiaohongshu")
-    assert record.facets["cover"].status is ReadinessStatus.REAL_FAILED
+def test_xiaohongshu_local_profile_draft_is_not_delivery_ready() -> None:
+    assert "xiaohongshu" not in readiness_by_platform()
+    assert not can_run_stable_image_draft("xiaohongshu")
     assert not can_run_complete_word_draft("xiaohongshu")
 
 
@@ -218,7 +202,7 @@ def test_baijiahao_word_draft_is_promoted_after_persisted_reopen_evidence() -> N
         ("zol", True),
         ("smzdm", True),
         ("baijiahao", True),
-        ("xiaohongshu", True),
+        ("xiaohongshu", False),
         ("unknown", False),
     ],
 )

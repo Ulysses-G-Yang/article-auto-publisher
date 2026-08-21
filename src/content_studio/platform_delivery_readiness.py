@@ -1,4 +1,4 @@
-"""六个平台真实投递就绪度的只读证据清单。
+"""五个平台真实投递就绪度的只读证据清单。
 
 本模块只描述已发生的验收事实，不参与账号选择、投递编排或平台适配器执行。
 尤其要区分“代码存在”“单元测试通过”和“真实平台验收通过”：默认清单只把
@@ -78,12 +78,6 @@ _BAIJIAHAO_COVER_EVIDENCE = (
     "docs/acceptance/BAIJIAHAO_COVER_PROBE_20260820.md",
     "docs/acceptance/BAIJIAHAO_WORD_DRAFT_20260819.md",
 )
-_XHS_EVIDENCE = (
-    "docs/acceptance/XIAOHONGSHU_WORD_DRAFT_20260820.md",
-    "docs/acceptance/XIAOHONGSHU_SINGLE_IMAGE_DRAFT_20260820.md",
-    "codex_handoff_20260817.md",
-    "docs/XIAOHONGSHU_RISK_CONTROL.md",
-)
 _PUBLIC_GATE_EVIDENCE = ("codex_handoff_20260817.md", "AGENTS.md")
 
 
@@ -145,8 +139,6 @@ _SUCCESS_CRITERIA: Mapping[str, str] = MappingProxyType(
 def _evidence_for(platform: str, facet: str) -> tuple[str, ...]:
     if facet == "public_publish":
         return _PUBLIC_GATE_EVIDENCE
-    if platform == "xiaohongshu":
-        return _XHS_EVIDENCE
     if facet == "draft_verification":
         return _DRAFTBOX_EVIDENCE
     return _HANDOFF_EVIDENCE
@@ -443,47 +435,6 @@ PLATFORM_DELIVERY_READINESS: tuple[PlatformDeliveryReadiness, ...] = (
                 "persisted_draft_and_29_ordered_tokens_reopened",
                 _BAIJIAHAO_WORD_DATE,
                 _BAIJIAHAO_WORD_EVIDENCE,
-            ),
-        },
-    ),
-    _build_platform(
-        "xiaohongshu",
-        facet_overrides={
-            "account_session": (
-                ReadinessStatus.REAL_VERIFIED,
-                "account_active_valid_during_word_draft_acceptance",
-                date(2026, 8, 20),
-                _XHS_EVIDENCE,
-            ),
-            "editor_entry": (
-                ReadinessStatus.REAL_VERIFIED,
-                "real_longform_tiptap_entry_passed",
-                date(2026, 8, 20),
-                _XHS_EVIDENCE,
-            ),
-            "text_draft": (
-                ReadinessStatus.REAL_VERIFIED,
-                "real_reopen_verified_17_text_and_5_h2_blocks",
-                date(2026, 8, 20),
-                _XHS_EVIDENCE,
-            ),
-            "body_images": (
-                ReadinessStatus.REAL_VERIFIED,
-                "real_reopen_verified_7_loaded_remote_body_images",
-                date(2026, 8, 20),
-                _XHS_EVIDENCE,
-            ),
-            "cover": (
-                ReadinessStatus.REAL_FAILED,
-                "platform_generated_cover_has_no_exact_body_asset_selector",
-                date(2026, 8, 20),
-                _XHS_EVIDENCE,
-            ),
-            "draft_verification": (
-                ReadinessStatus.REAL_VERIFIED,
-                "unique_title_and_29_logical_tokens_reopened_after_layout",
-                date(2026, 8, 20),
-                _XHS_EVIDENCE,
             ),
         },
     ),

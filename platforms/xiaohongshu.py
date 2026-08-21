@@ -3,10 +3,12 @@
 ⚠️ 风控警告：小红书风控严格，所有涉及小红的任务必须先读
 ``docs/XIAOHONGSHU_RISK_CONTROL.md``，并遵守其中的硬性纪律。
 
-登录态与身份验证链路（真实扫码 → 会话 cookie → 身份捕获）以及带图 Word
-长文草稿链路均已真实验收。正文图片只允许走已验证工具栏指纹和动态
-FileChooser，排版后必须重开验证远程图片；平台不能精确选择正文首图作为
-封面，因此该封面策略保持失败；公开发布始终关闭。
+登录态与身份验证链路（真实扫码 → 会话 cookie → 身份捕获）已真实验收。
+正文图文写入和长文排版可以在隔离 Profile 内完成，但 2026-08-21 复核证明
+网页端“暂存离开/草稿箱”只保存在该浏览器 Profile，本账号在无 LocalStorage/
+IndexedDB 的新上下文中看不到这些卡片；最终页也只有“发布笔记”，没有云端
+“保存草稿”入口。因此 DRAFT 投递当前明确关闭，绝不能把本地卡片冒充云端
+草稿成功；公开发布同样始终关闭。
 
 真实登录页（https://creator.xiaohongshu.com/login）：
 - 「APP扫一扫登录」为默认 Tab，二维码为约 160x160 的 base64 PNG。
@@ -96,6 +98,12 @@ class PlatformNotImplementedError(PlatformAutomationError):
     """平台能力尚未实现。"""
 
     error_code = "PLATFORM_NOT_IMPLEMENTED"
+
+
+class XiaohongshuCloudDraftUnavailableError(DraftBaselineError):
+    """小红书网页长文只有 Profile 本地草稿，不能形成云端 DRAFT 实体。"""
+
+    error_code = "XHS_CLOUD_DRAFT_UNAVAILABLE"
 
 
 class XiaohongshuPlatform(BasePlatform):
@@ -398,58 +406,15 @@ class XiaohongshuPlatform(BasePlatform):
             raise SelectorError("小红书长文编辑器未找到标题输入框") from exc
 
     async def preflight_delivery(self, title: str) -> None:
-        """记录保存前草稿基线；同名标题本身不再阻止创建新草稿。
+        """在任何编辑器副作用前拒绝不可跨浏览器验证的本地草稿。"""
 
-        小红书允许同名草稿。幂等证明改为保存前后的草稿总数和同名卡片数
-        都恰好增加一条，再重开最新同名卡片核验冻结内容。只有显式恢复模式
-        仍要求同名卡片唯一，避免误编辑另一篇历史草稿。
-        """
-
-        self._require_page_alive("小红书草稿基线检查")
-        self._preflight_title = ""
-        self._preflight_matching_draft_count = 0
-        self._editing_existing_draft = False
         expected_title = " ".join(str(title or "").split())
         if not expected_title:
             raise DraftBaselineError("DRAFT_BASELINE_FAILED: 小红书标题不能为空")
-        try:
-            await self.page.goto(
-                "https://creator.xiaohongshu.com/publish/publish",
-                wait_until="domcontentloaded",
-                timeout=30000,
-            )
-            self._draft_box_count_before = await self._draft_box_count()
-            await self._open_long_draft_drawer()
-            matches = await self._matching_long_draft_cards(expected_title)
-        except DraftBaselineError:
-            raise
-        except Exception as exc:
-            if self._exception_means_browser_closed(exc):
-                raise BrowserLifecycleError(
-                    "BROWSER_CONTEXT_CLOSED: 小红书草稿基线检查时页面已关闭"
-                ) from exc
-            raise DraftBaselineError(
-                "DRAFT_BASELINE_FAILED: 小红书无法确认同名长文草稿基线"
-            ) from exc
-        self._preflight_matching_draft_count = len(matches)
-        if expected_title == self._resume_existing_title and len(matches) > 1:
-            raise DraftBaselineError(
-                "DRAFT_BASELINE_FAILED: 小红书待恢复同名草稿不唯一"
-            )
-        if matches and expected_title == self._resume_existing_title:
-            actions = (
-                matches[0].locator(".draft-actions .btn").filter(has_text=re.compile(r"^编辑$"))
-            )
-            if await actions.count() != 1:
-                raise DraftBaselineError("DRAFT_BASELINE_FAILED: 小红书待恢复草稿编辑入口不唯一")
-            await actions.click(timeout=15000)
-            await self.page.wait_for_selector(
-                XHS_EDITOR_SELECTOR,
-                state="visible",
-                timeout=20000,
-            )
-            self._editing_existing_draft = True
-        self._preflight_title = expected_title
+        raise XiaohongshuCloudDraftUnavailableError(
+            "XHS_CLOUD_DRAFT_UNAVAILABLE: 小红书网页长文仅保存到隔离浏览器本地，"
+            "当前没有可跨浏览器回读的云端草稿入口"
+        )
 
     async def _open_long_draft_drawer(self) -> None:
         """使用真实鼠标事件打开草稿抽屉并切换到长文笔记。"""
@@ -1658,70 +1623,12 @@ class XiaohongshuPlatform(BasePlatform):
         }
 
     async def save_draft(self, title: str = "") -> str:
-        """离开已完成排版的自动保存草稿，并以唯一卡片重开证明结果。"""
-        self._require_page_alive("小红书保存草稿")
-        if not self._layout_finalized:
-            logger.error("小红书尚未完成排版与远程图片验证，禁止保存")
-            return ""
-        before = getattr(self, "_draft_box_count_before", None)
-        if not isinstance(before, int):
-            logger.error("小红书缺少保存前草稿箱基线")
-            return ""
+        """拒绝把“暂存离开”的 Profile 本地卡片冒充云端草稿。"""
 
-        action = await self._unique_visible_button("暂存离开")
-        if action is None:
-            logger.error("小红书暂存离开入口未唯一确认")
-            return ""
-        await action.click(timeout=10000)
-        await self.simulator.random_delay(5, 8)
-
-        # 「一键排版」已经自动写入草稿；离开后必须证明计数和唯一标题卡片。
-        try:
-            await self.page.goto(
-                "https://creator.xiaohongshu.com/publish/publish",
-                wait_until="domcontentloaded",
-                timeout=30000,
-            )
-            after = None
-            expected_after = (
-                before
-                if self._editing_existing_draft
-                else (before + 1 if before is not None else None)
-            )
-            for _ in range(3):
-                await self.simulator.random_delay(5, 8)
-                after = await self._draft_box_count()
-                if after is not None and expected_after is not None and after == expected_after:
-                    break
-            if after is None or before is None:
-                logger.error("小红书草稿箱计数读取失败: before={}, after={}", before, after)
-                return ""
-            if after != expected_after:
-                logger.error(
-                    "小红书草稿箱计数不符合预期: before={}, after={}, resume={}",
-                    before,
-                    after,
-                    self._editing_existing_draft,
-                )
-                return ""
-            logger.info(
-                "小红书草稿验证成功: 草稿箱计数 {} -> {}，排版草稿已重开",
-                before,
-                after,
-            )
-            await self._verify_saved_long_draft(title)
-            return "https://creator.xiaohongshu.com/publish/publish"
-        except DraftResultUnknownError:
-            raise
-        except BrowserLifecycleError:
-            raise
-        except Exception as exc:
-            if self._exception_means_browser_closed(exc):
-                raise BrowserLifecycleError(
-                    "BROWSER_CONTEXT_CLOSED: 小红书验证草稿时页面已关闭"
-                ) from exc
-            logger.error("小红书草稿验证失败: {}", exc)
-            return ""
+        del title
+        raise XiaohongshuCloudDraftUnavailableError(
+            "XHS_CLOUD_DRAFT_UNAVAILABLE: 小红书网页长文没有可验证的云端草稿保存入口"
+        )
 
     async def _verify_saved_long_draft(self, title: str) -> None:
         """重开唯一同名排版草稿，验证标题、图文顺序、图片加载与封面。"""

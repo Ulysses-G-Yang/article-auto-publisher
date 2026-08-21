@@ -94,17 +94,11 @@
 | draft_verification | `REAL_VERIFIED` | `persisted_draft_and_29_ordered_tokens_reopened` | 2026-08-19 | `docs/acceptance/BAIJIAHAO_WORD_DRAFT_20260819.md`, `codex_handoff_20260817.md` |
 | public_publish | `DISABLED` | `global_publish_gate_closed` | — | `AGENTS.md`, `codex_handoff_20260817.md` |
 
-### 小红书 `xiaohongshu`
+### 小红书 `xiaohongshu`（退出投递目录）
 
-| 能力项 | 状态 | page_state | last_real_check | evidence_refs |
-|---|---|---|---|---|
-| account_session | `REAL_VERIFIED` | `account_active_valid_during_word_draft_acceptance` | 2026-08-20 | `docs/acceptance/XIAOHONGSHU_WORD_DRAFT_20260820.md`, `docs/XIAOHONGSHU_RISK_CONTROL.md` |
-| editor_entry | `REAL_VERIFIED` | `real_longform_tiptap_entry_passed` | 2026-08-20 | `docs/acceptance/XIAOHONGSHU_WORD_DRAFT_20260820.md`, `docs/XIAOHONGSHU_RISK_CONTROL.md` |
-| text_draft | `REAL_VERIFIED` | `real_reopen_verified_17_text_and_5_h2_blocks` | 2026-08-20 | `docs/acceptance/XIAOHONGSHU_WORD_DRAFT_20260820.md`, `docs/XIAOHONGSHU_RISK_CONTROL.md` |
-| body_images | `REAL_VERIFIED` | `real_reopen_verified_7_ordered_body_images` | 2026-08-20 | `docs/acceptance/XIAOHONGSHU_WORD_DRAFT_20260820.md`, `docs/XIAOHONGSHU_RISK_CONTROL.md` |
-| cover | `RETEST_REQUIRED` | `no_prior_real_run` | — | `codex_handoff_20260817.md`, `docs/XIAOHONGSHU_RISK_CONTROL.md` |
-| draft_verification | `REAL_VERIFIED` | `unique_title_and_29_ordered_tokens_reopened` | 2026-08-20 | `docs/acceptance/XIAOHONGSHU_WORD_DRAFT_20260820.md`, `docs/XIAOHONGSHU_RISK_CONTROL.md`, `docs/PLATFORM_DRAFTBOX_AUDIT.md` |
-| public_publish | `DISABLED` | `global_publish_gate_closed` | — | `AGENTS.md`, `codex_handoff_20260817.md` |
+账号登录与管理仍可用；网页长文“草稿箱”经跨浏览器复核为 Profile 本地状态，
+没有可验证的云端 DRAFT 实体。因此 `delivery_enabled=false`，不参与下面的投递
+就绪度计算；公开发布仍关闭。
 
 ## 当前计算结果
 
@@ -117,8 +111,9 @@
 | 小黑盒 | `true` | 唯一草稿重开后 22 个文字/标题块、7 张正文图片和 29 个有序节点完全一致 |
 | 什么值得买 | `true` | 唯一草稿重开后 22 个文字/标题块、7 张正文图片和 29 个有序节点完全一致 |
 | 百家号 | `true` | 已重开核对 22 个文字/标题节点、7 张正文图片和 29 个有序节点；封面仍不计入稳定带图草稿条件 |
-| 小红书 | `true` | 唯一草稿重开后 17 段普通文字、5 个 H2、7 张正文图片和 29 个有序节点完全一致 |
 
-当前六个平台的 `can_run_stable_image_draft()` 均为 `true`；`can_run_complete_word_draft()` 仍均为 `false`，因为各平台封面尚未形成真实验收闭环。正文 Word 图文与封面是两个独立证据门，不能相互冒充。
+当前五个投递平台的 `can_run_stable_image_draft()` 均为 `true`；小红书返回
+`false` 且不进入新投递计划。`can_run_complete_word_draft()` 仍由各平台封面
+证据单独决定，正文 Word 图文与封面不能相互冒充。
 
 这些函数没有接入 `DeliveryService`、CLI、Web 或 MCP。下一次真实验收完成后，先补证据文件和日期，再更新矩阵并晋级状态；不得因为代码或单元测试变化自动晋级为 `REAL_VERIFIED`。

@@ -8,7 +8,7 @@
 |---|---|---|---|
 | 小黑盒 | https://www.xiaoheihe.cn/creator/draft | ✅ 正常 | 标题 + 上次编辑时间 + 类型（文章）完整展示 |
 | 微博 | https://card.weibo.com/article/v5/editor#/draft | ✅ 正常 | 草稿箱(02/30) + 标题列表可见 |
-| 小红书 | https://creator.xiaohongshu.com/publish/publish | ✅ 正常 | 发布页侧栏「草稿箱(N)」计数准确 |
+| 小红书 | https://creator.xiaohongshu.com/publish/publish | ❌ 仅本机 Profile | “草稿箱(N)”来自浏览器本地状态；同账号干净上下文不可见，不能作为云端草稿 |
 | smzdm | https://post.smzdm.com/tougao/（「我的草稿」） | ✅ 正常 | 标题 + 字数 + 图片数 + 创建时间完整展示 |
 | 知乎 | https://www.zhihu.com/creator/manage/creation/drafts | ⚠️ 平台侧 | Web 草稿箱 UI 显示「系统升级中，请稍后再试」，列表不可见；**我们的保存验证走 my_drafts API 兜底，正常**（平台侧问题，无法从本系统修复） |
 | 百家号 | https://baijiahao.baidu.com/builder/rc/manage（内容管理） | ⚠️ 入口深 | 草稿在 SPA 后台「内容管理-草稿」内，入口交互复杂；未发现展示异常证据 |
@@ -22,6 +22,8 @@
    - 百家号封面上传：filechooser 上传后预览不落图 → 自动化受限
    - 因此**投递草稿目前为纯文字**（图片块在部分平台无法自动上传）；用户手动粘贴/拖拽可补充
 3. **百家号 / ZOL 草稿箱入口**：SPA 深层菜单，自动化进入成本高；未发现展示异常。
+4. **小红书长文草稿非云端**：原隔离 Profile 可见的卡片不会随账号 Cookie 出现在
+   干净浏览器中；自动投递已关闭，只保留账号管理。
 
 ## 三、系统侧增强（已上线）
 

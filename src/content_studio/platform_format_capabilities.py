@@ -19,7 +19,6 @@ DELIVERY_PLATFORMS = (
     "zhihu",
     "smzdm",
     "baijiahao",
-    "xiaohongshu",
 )
 
 
@@ -104,9 +103,8 @@ class PlatformFormatCapabilities:
 # 2026-08-19：小黑盒、ZOL、知乎、什么值得买与百家号均已用同一份 v2 Word
 # 内容完成交错插图、标题映射和保存后重开 DOM 核验。ZOL 的独立重开证据
 # 为 22 个文字/章节块、7 张图片与 29 个有序 DOM token 完全一致。未证明的
-# heading level 仍保持关闭。2026-08-20 小红书已通过单图 text-image-text
-# 草稿重开验收；随后同一份 29-token Word 又完成 5 个 H2、7 张图片的
-# 保存后重开核验，因此开放 H2 与 image_order，其他标题层级仍关闭。
+# heading level 仍保持关闭。小红书曾通过同一 Profile 的本地卡片重开，
+# 但 2026-08-21 跨浏览器复核证明该卡片不是云端草稿，已退出投递注册表。
 DEFAULT_PLATFORM_FORMAT_CAPABILITIES = PlatformFormatCapabilities(
     {
         "xiaoheihe": PlatformFormatDeclaration(
@@ -131,11 +129,6 @@ DEFAULT_PLATFORM_FORMAT_CAPABILITIES = PlatformFormatCapabilities(
         ),
         "baijiahao": PlatformFormatDeclaration(
             "baijiahao",
-            frozenset({"heading", "image_order"}),
-            frozenset({2}),
-        ),
-        "xiaohongshu": PlatformFormatDeclaration(
-            "xiaohongshu",
             frozenset({"heading", "image_order"}),
             frozenset({2}),
         ),

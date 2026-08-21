@@ -122,8 +122,10 @@ def build_acceptance_app(
         raise ValueError("必须使用固定确认词 DRAFT_ONLY")
     selected = _normalize_platforms(platforms)
     normalized_resume_title = " ".join(str(xhs_resume_title or "").split())
-    if normalized_resume_title and selected != ("xiaohongshu",):
-        raise ValueError("小红书草稿恢复只允许单平台 DRAFT-only 验收")
+    if normalized_resume_title:
+        raise ValueError(
+            "XHS_CLOUD_DRAFT_UNAVAILABLE: 小红书本地 Profile 草稿不能用于云端验收"
+        )
     _assert_draft_only_settings()
 
     # 所有验收门通过后才导入并创建 Flask 应用，失败路径不会初始化路由、
@@ -180,23 +182,13 @@ def build_acceptance_app(
                 frozenset({"heading", "image_order"}),
                 frozenset({2}),
             )
-        elif platform == "xiaohongshu":
-            # 真实只读探测已冻结小红书长文 H2 工具栏的唯一 SVG 指纹。
-            # 仅在本次 DRAFT-only 验收进程临时放行 H2；生产默认能力必须
-            # 等完整 Word 保存后重开证据再晋级。
-            declarations[platform] = PlatformFormatDeclaration(
-                platform,
-                FEATURE_KEYS,
-                frozenset({2}),
-            )
         else:
             declarations[platform] = FEATURE_KEYS
     content_state.service.platform_format_capabilities = PlatformFormatCapabilities(declarations)
 
-    # 验收进程继续显式注入 ZOL 已验证标题路径，以及小红书唯一同名草稿
-    # 的显式恢复。ZOL 生产内容投递已在真实验收后使用同一标题路径；
-    # 小红书恢复参数仍然只允许出现在验收进程。
-    if "zol" in selected or normalized_resume_title:
+    # 验收进程继续显式注入 ZOL 已验证标题路径。小红书本地 Profile 草稿
+    # 已从投递目录移除，不能再通过验收参数绕开云端实体要求。
+    if "zol" in selected:
         account_state = app.extensions.get("account_sessions")
         if account_state is None or not hasattr(account_state, "accounts"):
             raise RuntimeError("账号会话运行时未注册")
@@ -210,17 +202,6 @@ def build_acceptance_app(
                     profile_dir=account.profile_path,
                     strict_profile_lock=True,
                     enable_heading_experiment=True,
-                )
-            if (
-                getattr(account, "platform", "") == "xiaohongshu"
-                and normalized_resume_title
-            ):
-                from platforms.xiaohongshu import XiaohongshuPlatform
-
-                return XiaohongshuPlatform(
-                    profile_dir=account.profile_path,
-                    strict_profile_lock=True,
-                    resume_existing_title=normalized_resume_title,
                 )
             return original_factory(account)
 
@@ -266,7 +247,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--xhs-resume-title",
         default="",
-        help="仅限小红书 DRAFT-only：恢复一个标题精确匹配且唯一的已有草稿",
+        help="已停用：小红书网页长文只有 Profile 本地草稿，传入即拒绝",
     )
     return parser
 

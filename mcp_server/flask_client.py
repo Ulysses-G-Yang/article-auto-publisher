@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 from typing import Any
 from urllib.parse import quote
@@ -176,6 +177,56 @@ class FlaskClient:
             "GET",
             path,
             params={"limit": limit},
+            headers=self._internal_headers(),
+        )
+        return payload if isinstance(payload, dict) else {}
+
+    async def create_draft_delivery(
+        self,
+        file_path: str,
+        targets: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        """把受控临时 DOCX 提交到 MCP 专用 Content Studio 草稿入口。"""
+
+        client = await self._get_client()
+        try:
+            with open(file_path, "rb") as source:
+                response = await client.post(
+                    "/api/internal/mcp/draft-deliveries",
+                    files={
+                        "file": (
+                            "article.docx",
+                            source,
+                            "application/vnd.openxmlformats-officedocument."
+                            "wordprocessingml.document",
+                        )
+                    },
+                    data={"targets": json.dumps({"targets": targets})},
+                    headers=self._internal_headers(),
+                    timeout=180,
+                )
+        except httpx.TimeoutException as exc:
+            raise FlaskClientError("TIMEOUT", "Content Studio 草稿提交超时") from exc
+        except httpx.RequestError as exc:
+            raise FlaskClientError("UNAVAILABLE", "无法连接 Content Studio 服务") from exc
+
+        try:
+            payload = response.json()
+        except ValueError:
+            payload = None
+        if response.status_code >= 400:
+            raise FlaskClientError(
+                self._error_code(response.status_code, internal=True),
+                self._http_error_message(response.status_code, payload),
+                status_code=response.status_code,
+            )
+        return payload if isinstance(payload, dict) else {}
+
+    async def get_draft_delivery_plan(self, plan_id: str) -> dict[str, Any]:
+        path = f"/api/internal/mcp/delivery-plans/{quote(str(plan_id), safe='')}"
+        payload = await self._request(
+            "GET",
+            path,
             headers=self._internal_headers(),
         )
         return payload if isinstance(payload, dict) else {}

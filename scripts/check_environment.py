@@ -9,7 +9,6 @@ import socket
 import sys
 from pathlib import Path
 
-
 ROOT = Path(__file__).resolve().parents[1]
 REQUIRED_MODULES = (
     "flask",
@@ -69,6 +68,14 @@ def _production_checks() -> list[str]:
         problems.append("生产环境必须设置 MCP_ALLOWED_HOSTS")
     if not os.getenv("MCP_FILE_SERVICE_ALLOWED_HOSTS", "").strip():
         problems.append("生产环境必须设置 MCP_FILE_SERVICE_ALLOWED_HOSTS")
+    draft_delivery_enabled = os.getenv(
+        "ARTICLEOPS_MCP_DRAFT_DELIVERY_ENABLED", "false"
+    ).strip().lower() in {"1", "true", "yes", "on"}
+    if draft_delivery_enabled:
+        if len(os.getenv("ARTICLEOPS_MCP_INTERNAL_TOKEN", "")) < 32:
+            problems.append("启用 MCP 草稿投递时必须配置独立的 32 位以上内部令牌")
+        if not os.getenv("ARTICLEOPS_MCP_ALLOWED_ACCOUNT_IDS", "").strip():
+            problems.append("启用 MCP 草稿投递时必须配置明确的账号 ID 白名单")
     return problems
 
 

@@ -17,7 +17,7 @@
       "include_instructions": true,
       "timeout": 10,
       "read_timeout": 300,
-      "description": "上传 docx 文章并自动发布到 ZOL 和小黑盒平台，支持账号登录管理、任务状态查询和发布日志查看"
+      "description": "将受控 DOCX 保存到 ArticleOps 已验证的平台账号草稿，并查询账号状态、投递结果和脱敏日志；不开放公开发布"
     }
   }
 }
@@ -76,13 +76,16 @@ MCP_TRUSTED_PROXY_IPS=<受控反向代理IP，可选>
 ```text
 ARTICLEOPS_MCP_INTERNAL_TOKEN=<至少 32 个字符的随机值>
 ARTICLEOPS_MCP_ALLOWED_ACCOUNT_IDS=<允许读取的 account_id，逗号分隔>
+ARTICLEOPS_MCP_DRAFT_DELIVERY_ENABLED=false
 MCP_LEGACY_MUTATIONS_ENABLED=false
 ```
 
-两项缺一都会使内部账号接口以 `MCP_ACCESS_NOT_CONFIGURED` 失败。token 只在
-MCP Adapter 到 Flask 的两条 `/api/internal/mcp/...` 请求中发送，不会附加到
+token 或账号白名单缺失会使内部接口以 `MCP_ACCESS_NOT_CONFIGURED` 失败。token 只在
+MCP Adapter 到 Flask 的 `/api/internal/mcp/...` 请求中发送，不会附加到
 旧 REST 接口，也不会写入日志、错误响应或工具结果；账号白名单只在 Flask 端
-解释和执行。请通过安全的进程环境注入，不要写进仓库配置文件。
+解释和执行。把 `ARTICLEOPS_MCP_DRAFT_DELIVERY_ENABLED` 显式改为 `true` 才会给
+白名单账号授予 `draft.create`；该边界从不授予公开发布权限。请通过安全的进程
+环境注入，不要写进仓库配置文件。
 
 `MCP_LEGACY_MUTATIONS_ENABLED` 只有 `true`、`1`、`yes`、`on`（忽略大小写）
 会开启，默认关闭。它是旧平台级登录、DOCX 发布任务、恢复任务、退出账号和锁
@@ -104,6 +107,9 @@ MCP Adapter 到 Flask 的两条 `/api/internal/mcp/...` 请求中发送，不会
 
 ### 异步工具
 
+- `start_article_draft_delivery(source_download_url, targets, client_request_id)` →
+  `get_article_draft_delivery_result(task_id)`：当前 Content Studio 草稿入口；支持
+  小黑盒、ZOL、知乎、微博、什么值得买和百家号，只保存草稿。
 - `[LEGACY MUTATION] start_login(platform, force)` → `get_login_result(task_id)`：旧登录入口，默认关闭。
 - `[LEGACY MUTATION] publish_article(source_download_url, platforms)` → `get_publish_result(task_id)`：旧 DOCX 发布入口，默认关闭。
 
@@ -113,11 +119,17 @@ MCP Adapter 到 Flask 的两条 `/api/internal/mcp/...` 请求中发送，不会
 - `[LEGACY MUTATION] logout_account(platform)`：旧账号退出入口，默认关闭。
 - `[LEGACY MUTATION] cleanup_locks`：旧 Profile 锁清理入口，默认关闭。
 
-所有异步工具都返回 `cs-admin-async-task/v1` 的 `async_task` 信息。MCP Server 会在 SQLite 中持久化 MCP task id 与 Flask task id 的映射，重启后仍可继续轮询。
+所有异步工具都返回 `cs-admin-async-task/v1` 的 `async_task` 信息。MCP Server 会在
+SQLite 中持久化 MCP task id 与 Content Studio plan id 的映射，重启后仍可继续轮询。
+当前草稿入口要求 CS_Admin 为每次业务意图生成稳定 `client_request_id`；同一个 ID
+重复调用只返回原任务，参数不同则拒绝，提交超时会标记结果未知且禁止自动重试。
 
 ## 文件下载边界
 
-`publish_article` 的 `source_download_url` 只用于本次 CS_Admin 注入的 HTTP(S) 临时文件地址，不提供通用 URL 抓取工具；不接受 `file://`、账号密码 URL 或本地绝对路径。文件下载超时为 30 秒，大小上限为 50 MB，处理完成后临时文件自动删除。
+`start_article_draft_delivery` 和旧 `publish_article` 的 `source_download_url` 只用于
+本次 CS_Admin 注入的 HTTP(S) 临时文件地址，不提供通用 URL 抓取工具；不接受
+`file://`、账号密码 URL 或本地绝对路径。文件下载超时为 30 秒，大小上限为
+50 MB，处理完成后临时文件自动删除。
 
 返回结果不会包含 Cookie、密钥、绝对路径、完整配置或本地原始文件内容。
 
@@ -126,7 +138,9 @@ MCP Adapter 到 Flask 的两条 `/api/internal/mcp/...` 请求中发送，不会
 1. `GET /healthz` 返回 `status=ok`，说明 MCP 进程和 Host 校验已启动。
 2. 如果工具返回 `UNAVAILABLE`，确认 Flask 服务已在 `FLASK_BASE_URL` 启动。
 3. 如果出现 `421 Invalid Host header`，把 CS_Admin 实际访问 MCP 使用的域名加入 `MCP_ALLOWED_HOSTS` 后重启 MCP Server；反向代理场景同时配置 `MCP_TRUSTED_PROXY_IPS`。
-4. 如果发布任务返回 `awaiting_user_action`，按消息完成扫码或填写社区/话题，再让 CS_Admin 继续轮询或调用 `resume_task`。
+4. 当前 Content Studio 工具只保存草稿；若目标返回 `LOGIN_REQUIRED`，由管理员在
+   ArticleOps 账号页完成登录后使用新的 `client_request_id` 发起人工确认后的新任务，
+   不得自动重放结果未知的旧任务。
 
 ## 交付文件
 

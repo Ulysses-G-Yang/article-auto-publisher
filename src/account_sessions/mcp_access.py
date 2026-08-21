@@ -1,8 +1,8 @@
-"""受控的内部 MCP 账号级只读访问边界。
+"""受控的内部 MCP 账号级访问边界。
 
 该模块故意独立于 ``LOCAL_WEB_CONTEXT``：MCP 只能使用启动时显式配置的
-Bearer token 和账号白名单读取公开账号投影、账号活动日志。这里不保存、不
-返回也不记录 token，认证失败统一返回稳定的安全错误码。
+Bearer token 和账号白名单读取公开投影。只有另一个显式开关开启时，才额外
+授予这些白名单账号的平台草稿能力；公开发布权限永远不在此边界授予。
 """
 
 from __future__ import annotations
@@ -17,6 +17,7 @@ from account_sessions.permissions import AccessContext
 
 MCP_INTERNAL_TOKEN_ENV = "ARTICLEOPS_MCP_INTERNAL_TOKEN"
 MCP_ALLOWED_ACCOUNT_IDS_ENV = "ARTICLEOPS_MCP_ALLOWED_ACCOUNT_IDS"
+MCP_DRAFT_DELIVERY_ENABLED_ENV = "ARTICLEOPS_MCP_DRAFT_DELIVERY_ENABLED"
 MIN_INTERNAL_TOKEN_LENGTH = 32
 MAX_INTERNAL_TOKEN_LENGTH = 512
 MAX_ACCOUNT_ID_LENGTH = 128
@@ -58,6 +59,7 @@ class MCPInternalAccessSettings:
 
     internal_token: str = field(repr=False)
     allowed_account_ids: frozenset[str] = field(default_factory=frozenset)
+    draft_delivery_enabled: bool = False
 
     @property
     def configured(self) -> bool:
@@ -92,11 +94,15 @@ def load_internal_access_settings(
     """从环境读取配置；缺失或空白账号集合保持 fail-closed。"""
 
     values = os.environ if environ is None else environ
+    draft_delivery_enabled = str(
+        values.get(MCP_DRAFT_DELIVERY_ENABLED_ENV, "")
+    ).strip().lower() in {"1", "true", "yes", "on"}
     return MCPInternalAccessSettings(
         internal_token=str(values.get(MCP_INTERNAL_TOKEN_ENV, "")).strip(),
         allowed_account_ids=_parse_allowed_account_ids(
             values.get(MCP_ALLOWED_ACCOUNT_IDS_ENV)
         ),
+        draft_delivery_enabled=draft_delivery_enabled,
     )
 
 
@@ -135,9 +141,12 @@ class MCPInternalAccessResolver:
         ):
             raise MCPAccessDeniedError()
 
+        capabilities = {"session.read", "logs.read"}
+        if settings.draft_delivery_enabled:
+            capabilities.add("draft.create")
         return AccessContext(
             actor_id="articleops-mcp",
             source="MCP",
-            capabilities=frozenset({"session.read", "logs.read"}),
+            capabilities=frozenset(capabilities),
             allowed_account_ids=settings.allowed_account_ids,
         )

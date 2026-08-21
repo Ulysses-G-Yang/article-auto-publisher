@@ -1,9 +1,9 @@
 # 自动化文章发布 MCP API 接口文档
 
-> 文档版本：`1.0.0`  
-> Server ID：`content.article-publisher`  
-> 工具数量：`12`  
-> 适用平台：ZOL、小黑盒
+> 文档版本：`1.1.0`
+> Server ID：`content.article-publisher`
+> 工具数量：`16`
+> 草稿平台：小黑盒、ZOL、知乎、微博、什么值得买、百家号
 
 ## 1. 接入信息
 
@@ -29,7 +29,7 @@ Invoke-RestMethod -Uri 'http://10.0.0.28:8765/healthz' -TimeoutSec 5
 {
   "status": "ok",
   "server_id": "content.article-publisher",
-  "version": "1.0.0"
+  "version": "1.1.0"
 }
 ```
 
@@ -47,7 +47,7 @@ Invoke-RestMethod -Uri 'http://10.0.0.28:8765/healthz' -TimeoutSec 5
       "include_instructions": true,
       "timeout": 10,
       "read_timeout": 300,
-      "description": "上传 docx 文章并自动发布到 ZOL 和小黑盒平台，支持账号登录管理、任务状态查询和发布日志查看"
+      "description": "将受控 DOCX 保存到 ArticleOps 已验证的平台账号草稿，并查询账号状态、投递结果和脱敏日志；不开放公开发布"
     }
   }
 }
@@ -96,23 +96,28 @@ asyncio.run(main())
 | `RESOURCE_RESTRICTED` | 文件白名单、权限或资源范围受限 | 检查 CS_Admin 文件服务和授权 |
 | `UNAVAILABLE` | Flask 或文件服务不可用 | 检查服务后稍后重试 |
 | `TIMEOUT` | 请求或文件传输超时 | 查询异步任务，避免重复创建 |
+| `REQUEST_KEY_CONFLICT` | 同一 client_request_id 被用于不同内容或目标 | 使用原参数查询，或为新的人工意图生成新 ID |
+| `SUBMISSION_RESULT_UNKNOWN` | 提交超时或中断，无法证明是否已创建平台操作 | 人工核对，禁止自动重试 |
 | `INTERNAL_ERROR` | MCP 内部异常 | 用 `request_id` 查脱敏日志 |
 
 ## 5. 异步任务约定
 
-登录和文章发布不会在一次工具调用中等待浏览器结束：
+当前草稿投递和旧兼容流程都使用异步协议：
 
-1. 仅在明确开启旧兼容开关时，调用 `start_login` 或 `publish_article`，获得 MCP `task_id`。
-2. 按返回的 `async_task.poll_tool` 调用 `get_login_result` 或 `get_publish_result`。
-3. 登录任务每 3 秒轮询，发布任务每 10 秒轮询。
+1. 调用 `start_article_draft_delivery`，获得 MCP `task_id`。
+2. 按返回的 `async_task.poll_tool` 调用 `get_article_draft_delivery_result`。
+3. 草稿投递每 10 秒轮询；查询工具幂等，不会重复创建计划或平台操作。
 4. `status=completed` 读取 `result`；`status=failed` 读取脱敏错误；`status=awaiting_user_action` 按消息完成扫码或社区/话题选择。
-5. MCP task_id 与 Flask task_id 持久化到 SQLite，MCP 重启后可以继续查询。
+5. MCP task_id 与 Content Studio plan id 持久化到 SQLite，MCP 重启后可以继续查询。
 
 发布任务状态包括：`pending`、`running`、`awaiting_user_action`、`completed`、`failed`。小黑盒缺少社区或话题时不会误报成功，必须调用 `resume_task` 后再继续。
 
 ## 6. 文件传输约定
 
-`publish_article` 不接收本地路径，只接收 CS_Admin 文件服务生成的临时 `source_download_url` 和可选平台列表。文件服务主机必须配置在 `MCP_FILE_SERVICE_ALLOWED_HOSTS` 白名单内；不允许 URL 账号密码、`file://`、任意开放网址抓取或跨白名单重定向。
+`start_article_draft_delivery` 不接收本地路径，只接收 CS_Admin 文件服务生成的临时
+`source_download_url` 和账号目标。文件服务主机必须配置在
+`MCP_FILE_SERVICE_ALLOWED_HOSTS` 白名单内；不允许 URL 账号密码、`file://`、任意
+开放网址抓取或跨白名单重定向。
 
 单文件最大 50 MB，下载超时 30 秒，处理完成后临时文件自动删除。
 
@@ -120,17 +125,19 @@ asyncio.run(main())
 
 MCP 不暴露任意命令、SQL、本地路径、Cookie 内容、浏览器 Profile、密码或 Token。`cleanup_locks` 只清理 Chrome Profile 的 Singleton 锁文件，不杀 Chrome 进程、不删除 Cookie。
 
-### 7.1 账号级只读边界
+### 7.1 账号级访问边界
 
-新的 `list_platform_accounts` 和 `get_account_activity` 只通过 Flask 的内部
+新的查询和草稿工具只通过 Flask 的内部
 `/api/internal/mcp/...` 端点工作。Flask 端要求 `Authorization: Bearer <token>`，
 并以 `ARTICLEOPS_MCP_ALLOWED_ACCOUNT_IDS` 做账号级白名单；token 至少 32 个字符，
 缺少 token 或白名单时返回 `MCP_ACCESS_NOT_CONFIGURED`，token 错误返回
 `MCP_ACCESS_DENIED`。活动 `limit` 必须在 1 到 200 之间。
 
-MCP Adapter 只把 token 注入上述两个内部请求，绝不附加到旧 REST 请求。返回值
+MCP Adapter 只把 token 注入上述内部请求，绝不附加到旧 REST 请求。返回值
 只允许 `public_account` 和 `list_activity` 的公开字段，并在 MCP 边界再次脱敏；
-禁止 profile_path、原始 platform_user_id、Cookie、Token。旧的登录、退出、清理、
+禁止 profile_path、原始 platform_user_id、Cookie、Token。设置
+`ARTICLEOPS_MCP_DRAFT_DELIVERY_ENABLED=true` 后只额外授予白名单账号
+`draft.create`，不授予 `publish.request` 或 `publish.execute`。旧的登录、退出、清理、
 发布工具保留作兼容，均标记为 `LEGACY`，不能替代新的只读入口。
 
 ### 7.2 旧变更工具开关
@@ -154,6 +161,8 @@ MCP_LEGACY_MUTATIONS_ENABLED=true
 
 | 分类 | 工具 |
 | --- | --- |
+| 当前草稿投递 | `start_article_draft_delivery`、`get_article_draft_delivery_result` |
+| 账号级查询 | `list_platform_accounts`、`get_account_activity` |
 | 查询 | `list_accounts`、`list_articles`、`list_tasks`、`get_task_logs`、`get_queue_status` |
 | 登录 | `start_login`、`get_login_result` |
 | 发布 | `publish_article`、`get_publish_result`、`resume_task` |
@@ -162,6 +171,27 @@ MCP_LEGACY_MUTATIONS_ENABLED=true
 所有工具的输入 Schema 都是闭合对象：`additionalProperties: false`。
 
 ## 9. 完整工具接口
+
+### `start_article_draft_delivery`
+
+把一个 CS_Admin 临时 DOCX 保存到一个或多个已授权账号的“平台草稿”。不接受
+`mode` 字段，因此无法请求公开发布。
+
+| 参数 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `source_download_url` | string | 是 | CS_Admin 注入的白名单临时下载地址 |
+| `targets` | array | 是 | 1～50 个 `{platform, account_id, persist_login?}` 草稿目标；账号不能重复 |
+| `client_request_id` | string | 是 | 8～128 位稳定幂等键；同一业务意图重复调用必须保持不变 |
+
+`platform` 只允许小黑盒、ZOL、知乎、微博、什么值得买和百家号。首次调用会先持久化
+MCP 任务，再下载 DOCX、冻结 ContentVersion、创建 DeliveryPlan 并异步执行。网络
+超时返回 `SUBMISSION_RESULT_UNKNOWN`，相同请求不会再次提交平台操作。
+
+### `get_article_draft_delivery_result`
+
+参数 `task_id` 为启动工具返回的 MCP task id。返回统一的 `pending`、`running`、
+`completed` 或 `failed`，以及逐平台 `status`、草稿地址或脱敏错误。该工具只读取并
+对账现有计划，符合 `cs-admin-async-task/v1`，不会产生新的草稿副作用。
 
 ### `list_accounts`
 
@@ -253,6 +283,9 @@ $env:MCP_BIND_HOST = '10.0.0.28'
 $env:MCP_PORT = '8765'
 $env:MCP_ALLOWED_HOSTS = '10.0.0.28'
 $env:MCP_FILE_SERVICE_ALLOWED_HOSTS = 'dev.sccsai.com'
+$env:ARTICLEOPS_MCP_INTERNAL_TOKEN = '<单独生成的至少32位随机值>'
+$env:ARTICLEOPS_MCP_ALLOWED_ACCOUNT_IDS = '<获准投递的account_id，逗号分隔>'
+$env:ARTICLEOPS_MCP_DRAFT_DELIVERY_ENABLED = 'true'
 python -m mcp_server.server
 ```
 

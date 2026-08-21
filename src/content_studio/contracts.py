@@ -79,6 +79,20 @@ class DraftTargetInput(StrictModel):
     persist_login: bool | None = None
 
 
+class MCPDraftTargetInput(StrictModel):
+    """CS_Admin MCP 仅草稿目标；调用方不能传入 PUBLISH 模式。"""
+
+    platform: PlatformName
+    account_id: str = Field(min_length=36, max_length=36)
+    persist_login: bool | None = None
+
+
+class MCPDraftDeliveryRequest(StrictModel):
+    """随受控 DOCX 上传提交的账号目标清单。"""
+
+    targets: list[MCPDraftTargetInput] = Field(min_length=1, max_length=50)
+
+
 class CreateDraftRequest(StrictModel):
     title: str = Field(default="", max_length=200)
     blocks: list[ContentBlockInput] | None = Field(default=None, max_length=2_000)

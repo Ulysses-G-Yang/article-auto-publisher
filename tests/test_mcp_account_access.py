@@ -62,6 +62,24 @@ def test_resolver_is_independent_from_local_web_and_fail_closed(monkeypatch):
         MCPInternalAccessResolver().resolve(headers())
 
 
+def test_resolver_grants_only_draft_capability_when_explicitly_enabled():
+    resolver = MCPInternalAccessResolver(
+        environ={
+            "ARTICLEOPS_MCP_INTERNAL_TOKEN": TOKEN,
+            "ARTICLEOPS_MCP_ALLOWED_ACCOUNT_IDS": "allowed-a",
+            "ARTICLEOPS_MCP_DRAFT_DELIVERY_ENABLED": "true",
+        }
+    )
+
+    context = resolver.resolve(headers())
+
+    assert context.capabilities == frozenset(
+        {"session.read", "logs.read", "draft.create"}
+    )
+    assert "publish.request" not in context.capabilities
+    assert "publish.execute" not in context.capabilities
+
+
 def test_resolver_rejects_unbounded_or_control_character_allowlist():
     too_long = "a" * 129
     for value in (too_long, "allowed\x00account", "allowed account"):
@@ -319,7 +337,7 @@ def test_new_mcp_tools_are_closed_read_only_and_reproject_output(tmp_path: Path)
         TaskStore(tmp_path / "tasks.db"),
     )
     tools = run(server.list_tools())
-    assert len(tools) == 14
+    assert len(tools) == 16
     assert all(tool.input_schema.get("additionalProperties") is False for tool in tools)
     by_name = {tool.name: tool for tool in tools}
     assert "MCP 白名单" in by_name["list_platform_accounts"].description

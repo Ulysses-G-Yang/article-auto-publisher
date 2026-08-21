@@ -1,6 +1,7 @@
 """Content Studio Flask Blueprint。"""
 
 import atexit
+import json
 import logging
 from collections.abc import Coroutine
 from pathlib import Path
@@ -12,7 +13,12 @@ from pydantic import ValidationError
 
 from account_sessions.contracts import ArticleInput, DeliveryRequest
 from account_sessions.errors import AccountSessionError, ConfirmationRequiredError
+from account_sessions.mcp_access import (
+    MCPInternalAccessResolver,
+    MCPRequestValidationError,
+)
 from account_sessions.permissions import LOCAL_WEB_CONTEXT, PermissionDeniedError
+from account_sessions.platform_catalog import DELIVERY_ENABLED_PLATFORMS
 from account_sessions.runtime import AccountRuntime
 from account_sessions.security import safe_error_message
 from content_studio.assets import AssetStore
@@ -22,6 +28,7 @@ from content_studio.contracts import (
     DraftListQuery,
     ExecuteDeliveryPlanRequest,
     LegacyArticleListQuery,
+    MCPDraftDeliveryRequest,
     PatchDraftRequest,
     ReplaceTargetsRequest,
 )
@@ -383,6 +390,7 @@ def create_content_studio_blueprint(
     legacy_source=None,
     runtime: AccountRuntime | None = None,
     platform_format_capabilities: PlatformFormatCapabilities | None = None,
+    mcp_access_resolver: MCPInternalAccessResolver | None = None,
 ) -> Blueprint:
     blueprint = Blueprint("content_studio", __name__)
     state = ContentStudioRuntimeState(
@@ -394,6 +402,7 @@ def create_content_studio_blueprint(
         runtime=runtime,
         platform_format_capabilities=platform_format_capabilities,
     )
+    mcp_resolver = mcp_access_resolver or MCPInternalAccessResolver()
 
     @blueprint.record_once
     def register_state(setup_state) -> None:
@@ -429,6 +438,103 @@ def create_content_studio_blueprint(
         return jsonify(
             state.run(state.service.import_docx(data, upload.filename), timeout=120)
         ), 201
+
+    @blueprint.post("/api/internal/mcp/draft-deliveries")
+    def create_internal_mcp_draft_delivery():
+        """从受控 DOCX 创建并执行只含 DRAFT 目标的 Content Studio 计划。"""
+
+        access = mcp_resolver.resolve(request.headers)
+        upload = request.files.get("file")
+        if upload is None or not upload.filename:
+            raise MCPRequestValidationError("必须提供 DOCX 文件")
+        if not upload.filename.lower().endswith(".docx"):
+            raise MCPRequestValidationError("只允许 DOCX 文件")
+        raw_targets = request.form.get("targets", "")
+        try:
+            decoded_targets = json.loads(raw_targets)
+        except (TypeError, ValueError) as exc:
+            raise MCPRequestValidationError("targets 必须是 JSON 对象") from exc
+        payload = MCPDraftDeliveryRequest.model_validate(decoded_targets)
+        for target in payload.targets:
+            if target.platform not in DELIVERY_ENABLED_PLATFORMS:
+                raise MCPRequestValidationError(
+                    f"平台 {target.platform} 尚未开放草稿投递"
+                )
+            # 同时执行显式草稿能力门和账号白名单门；永远不授予 publish.execute。
+            access.require("draft.create", target.account_id)
+
+        draft = state.run(
+            state.service.import_docx(upload.read(), upload.filename),
+            timeout=120,
+        )
+        target_request = ReplaceTargetsRequest(
+            revision=draft["revision"],
+            targets=[
+                {
+                    "platform": target.platform,
+                    "account_id": target.account_id,
+                    "mode": "DRAFT",
+                    "persist_login": target.persist_login,
+                }
+                for target in payload.targets
+            ],
+        )
+        targeted = state.run(
+            state.service.replace_targets(draft["draft_id"], target_request, access)
+        )
+        plan = state.run(
+            state.service.create_delivery_plan(
+                draft["draft_id"],
+                targeted["revision"],
+                access,
+            )
+        )
+        result = state.run(
+            state.execute_plan(
+                plan["plan_id"],
+                ExecuteDeliveryPlanRequest(draft_batch_confirmed=True),
+                access,
+            ),
+            timeout=120,
+        )
+        return jsonify(
+            {
+                "draft_id": draft["draft_id"],
+                "plan": result,
+            }
+        ), 202
+
+    @blueprint.get("/api/internal/mcp/delivery-plans/<plan_id>")
+    def get_internal_mcp_delivery_plan(plan_id: str):
+        """按 MCP actor 和账号白名单读取、对账其自己的投递计划。"""
+
+        access = mcp_resolver.resolve(request.headers)
+
+        async def payload_with_operation_results():
+            plan = await state.reconcile_plan_operations(plan_id, access)
+            for target in plan.get("targets", []):
+                operation_id = target.get("operation_id")
+                if not operation_id:
+                    continue
+                operation = await state.account_state.delivery.get_operation(
+                    operation_id,
+                    access,
+                )
+                target.update(
+                    {
+                        "draft_url": operation.get("draft_url"),
+                        "article_mapping_status": operation.get(
+                            "article_mapping_status"
+                        ),
+                        "error_code": operation.get("error_code")
+                        or target.get("error_code"),
+                        "error_message": operation.get("error_message")
+                        or target.get("error_message"),
+                    }
+                )
+            return plan
+
+        return jsonify(state.run(payload_with_operation_results()))
 
     @blueprint.get("/api/content-sources/legacy-articles")
     def legacy_articles():

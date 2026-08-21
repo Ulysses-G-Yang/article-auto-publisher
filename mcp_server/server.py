@@ -163,10 +163,11 @@ def create_server(settings: MCPSettings | None = None) -> MCPServer:
     server = MCPServer(
         name=SERVER_ID,
         version=SERVER_VERSION,
-        description="自动化文章发布工具的 CS_Admin MCP Adapter",
+        description="ArticleOps Content Studio 的 CS_Admin MCP Adapter",
         instructions=(
-            "本服务只操作现有 Flask 服务，支持 ZOL 和小黑盒。登录和发布是异步任务，"
-            "必须按返回的 async_task.poll_tool 轮询；本服务不返回 Cookie、密钥或本地绝对路径。"
+            "本服务通过现有 Flask 服务查询白名单账号，并把受控 DOCX 保存为已验证平台草稿。"
+            "草稿投递是异步任务，必须按 async_task.poll_tool 轮询；不允许公开发布，"
+            "也不返回 Cookie、密钥或本机绝对路径。"
         ),
         lifespan=lifespan,
     )

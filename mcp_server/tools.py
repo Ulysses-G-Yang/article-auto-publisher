@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import re
+import sqlite3
 import tempfile
 import time
 import uuid
@@ -14,9 +17,12 @@ from urllib.parse import urlsplit
 
 import httpx
 from loguru import logger
-from pydantic import Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from account_sessions.platform_catalog import ACCOUNT_ENABLED_PLATFORMS
+from account_sessions.platform_catalog import (
+    ACCOUNT_ENABLED_PLATFORMS,
+    DELIVERY_ENABLED_PLATFORMS,
+)
 
 from . import SERVER_ID
 from .flask_client import FlaskClient, FlaskClientError, safe_error_message
@@ -34,17 +40,40 @@ InternalPlatform = Literal[
     "xiaohongshu",
     "douyin",
 ]
+DraftDeliveryPlatform = Literal[
+    "xiaoheihe",
+    "zol",
+    "zhihu",
+    "weibo",
+    "smzdm",
+    "baijiahao",
+]
 PositiveTaskId = Annotated[int, Field(gt=0)]
 AccountId = Annotated[str, Field(min_length=1, max_length=128)]
 ActivityLimit = Annotated[int, Field(ge=1, le=200)]
 TaskToken = Annotated[str, Field(min_length=1, max_length=128)]
 SourceDownloadURL = Annotated[str, Field(min_length=1, max_length=2048)]
+ClientRequestId = Annotated[
+    str,
+    Field(min_length=8, max_length=128, pattern=r"^[A-Za-z0-9._:-]+$"),
+]
 OptionalShortText = Annotated[str | None, Field(max_length=200)]
 DEFAULT_FILE_SERVICE_HOSTS = {"dev.sccsai.com"}
 SUPPORTED_PLATFORMS = {"zol", "xiaoheihe"}
 SUPPORTED_ACCOUNT_PLATFORMS = set(ACCOUNT_ENABLED_PLATFORMS)
 MAX_DOWNLOAD_BYTES = 50 * 1024 * 1024
 LEGACY_MCP_MUTATIONS_DISABLED = "LEGACY_MCP_MUTATIONS_DISABLED"
+CURRENT_DRAFT_PLATFORMS = set(DELIVERY_ENABLED_PLATFORMS)
+
+
+class DraftDeliveryTarget(BaseModel):
+    """CS_Admin 可选择的一个平台草稿目标。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    platform: DraftDeliveryPlatform
+    account_id: Annotated[str, Field(min_length=36, max_length=36)]
+    persist_login: bool | None = None
 
 
 class ToolFailure(RuntimeError):
@@ -251,6 +280,111 @@ def _new_task_id(prefix: str, suffix: str = "") -> str:
         parts.append(suffix)
     parts.extend([str(timestamp), unique])
     return "-".join(parts)
+
+
+def _safe_client_request_id(value: Any) -> str:
+    request_id = str(value or "").strip()
+    if not re.fullmatch(r"[A-Za-z0-9._:-]{8,128}", request_id):
+        raise ToolFailure(
+            "INVALID_ARGUMENT",
+            "client_request_id 必须为 8 到 128 位字母、数字、点、下划线、冒号或连字符",
+        )
+    return request_id
+
+
+def _draft_task_id(client_request_id: str) -> str:
+    digest = hashlib.sha256(client_request_id.encode("utf-8")).hexdigest()[:24]
+    return f"article-draft-{digest}"
+
+
+def _draft_request_fingerprint(
+    source_download_url: str,
+    targets: list[dict[str, Any]],
+) -> str:
+    canonical = json.dumps(
+        {"source_download_url": source_download_url, "targets": targets},
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _safe_plan_target(item: dict[str, Any]) -> dict[str, Any]:
+    target = {
+        "platform": _safe_text(item.get("platform")),
+        "account_display_name": _safe_text(item.get("account_display_name")),
+        "mode": "DRAFT",
+        "status": _safe_text(item.get("status")),
+        "operation_id": _safe_text(item.get("operation_id"), default="") or None,
+        "article_mapping_status": _safe_text(
+            item.get("article_mapping_status"), default=""
+        )
+        or None,
+        "error_code": _safe_text(item.get("error_code"), default="") or None,
+        "error_message": _safe_text(item.get("error_message"), default="") or None,
+    }
+    draft_url = item.get("draft_url")
+    if isinstance(draft_url, str) and draft_url.startswith(("http://", "https://")):
+        target["draft_url"] = draft_url[:1000]
+    return target
+
+
+def _draft_plan_result(plan: dict[str, Any]) -> dict[str, Any]:
+    source_targets = plan.get("targets")
+    targets = [
+        _safe_plan_target(item)
+        for item in source_targets or []
+        if isinstance(item, dict)
+    ]
+    return {
+        "plan_id": _safe_text(plan.get("plan_id"))[:128],
+        "overall_status": _safe_text(plan.get("status")),
+        "targets": targets,
+    }
+
+
+def _mcp_status_for_plan(plan_result: dict[str, Any]) -> tuple[str, str]:
+    status = str(plan_result.get("overall_status") or "").upper()
+    targets = plan_result.get("targets") or []
+    if status == "SUCCESS":
+        return "completed", "所有平台草稿均已保存并通过平台侧验证。"
+    if status == "PARTIAL_FAIL":
+        return "completed", "草稿投递已结束，部分平台成功、部分平台失败或结果未知。"
+    if status in {"FATAL", "FORMAT_REVIEW_REQUIRED"}:
+        return "failed", "草稿投递未成功，请查看各平台目标的错误状态。"
+    if any(
+        str(item.get("status") or "").upper()
+        in {"FAILED", "BLOCKED", "RESULT_UNKNOWN", "LOGIN_REQUIRED"}
+        for item in targets
+        if isinstance(item, dict)
+    ) and all(
+        str(item.get("status") or "").upper()
+        not in {"CREATING", "QUEUED", "RUNNING", "READY"}
+        for item in targets
+        if isinstance(item, dict)
+    ):
+        return "failed", "所有草稿目标均已进入失败、阻塞或结果未知状态。"
+    if status == "READY":
+        return "pending", "投递计划已创建，等待执行单启动。"
+    return "running", "平台草稿正在按目标账号执行，请继续轮询。"
+
+
+def _stored_draft_task_response(record: dict[str, Any]) -> dict[str, Any]:
+    response = {
+        "task_id": record["task_id"],
+        "status": record["status"],
+        "message": _safe_text(record.get("message")),
+    }
+    if isinstance(record.get("result"), dict):
+        response["result"] = record["result"]
+    if record["status"] in {"pending", "running"}:
+        response["async_task"] = _async_task_info(
+            record["task_id"],
+            "get_article_draft_delivery_result",
+            10,
+        )
+    return response
 
 
 def _async_task_info(task_id: str, poll_tool: str, interval: int) -> dict[str, Any]:
@@ -489,6 +623,211 @@ def register_tools(
         )
 
     handlers["get_account_activity"] = get_account_activity
+
+    @server.tool(
+        name="start_article_draft_delivery",
+        description=(
+            "将 CS_Admin 提供的受控 DOCX 按目标账号保存为平台草稿。只允许当前已验证的"
+            "草稿平台和 MCP 账号白名单；不接受本机路径、不公开发布。返回异步任务。"
+        ),
+        structured_output=True,
+    )
+    async def start_article_draft_delivery(
+        source_download_url: SourceDownloadURL,
+        targets: Annotated[list[DraftDeliveryTarget], Field(min_length=1, max_length=50)],
+        client_request_id: ClientRequestId,
+    ) -> dict[str, Any]:
+        async def operation() -> dict[str, Any]:
+            checked_request_id = _safe_client_request_id(client_request_id)
+            source_url = _validate_source_url(source_download_url)
+            normalized_targets: list[dict[str, Any]] = []
+            seen_accounts: set[str] = set()
+            for raw_target in targets:
+                try:
+                    target = (
+                        raw_target
+                        if isinstance(raw_target, DraftDeliveryTarget)
+                        else DraftDeliveryTarget.model_validate(raw_target)
+                    )
+                except ValidationError as exc:
+                    raise ToolFailure(
+                        "INVALID_ARGUMENT",
+                        "targets 不符合平台草稿目标契约",
+                    ) from exc
+                if target.platform not in CURRENT_DRAFT_PLATFORMS:
+                    raise ToolFailure(
+                        "INVALID_ARGUMENT",
+                        f"平台 {target.platform} 尚未开放 Content Studio 草稿投递",
+                    )
+                if target.account_id in seen_accounts:
+                    raise ToolFailure("INVALID_ARGUMENT", "同一账号不能重复添加为投递目标")
+                seen_accounts.add(target.account_id)
+                normalized_targets.append(
+                    {
+                        "platform": target.platform,
+                        "account_id": target.account_id,
+                        "persist_login": target.persist_login,
+                    }
+                )
+
+            task_id = _draft_task_id(checked_request_id)
+            fingerprint = _draft_request_fingerprint(source_url, normalized_targets)
+            existing = await store.get(task_id)
+            if existing is not None:
+                existing_fingerprint = (existing.get("metadata") or {}).get(
+                    "request_fingerprint"
+                )
+                if existing_fingerprint != fingerprint:
+                    raise ToolFailure(
+                        "REQUEST_KEY_CONFLICT",
+                        "client_request_id 已用于另一组内容或投递目标",
+                    )
+                return _stored_draft_task_response(existing)
+
+            try:
+                await store.create(
+                    task_id,
+                    "content_studio_draft_delivery",
+                    "pending",
+                    message="正在下载并冻结 DOCX，禁止重复提交相同 client_request_id。",
+                    metadata={
+                        "request_fingerprint": fingerprint,
+                        "target_platforms": [
+                            item["platform"] for item in normalized_targets
+                        ],
+                        "submission_deadline_epoch": int(time.time()) + 300,
+                    },
+                )
+            except sqlite3.IntegrityError as exc:
+                concurrent = await store.get(task_id)
+                if concurrent is None:
+                    raise ToolFailure(
+                        "INTERNAL_ERROR", "MCP 幂等任务读取失败"
+                    ) from exc
+                concurrent_fingerprint = (concurrent.get("metadata") or {}).get(
+                    "request_fingerprint"
+                )
+                if concurrent_fingerprint != fingerprint:
+                    raise ToolFailure(
+                        "REQUEST_KEY_CONFLICT",
+                        "client_request_id 已用于另一组内容或投递目标",
+                    ) from exc
+                return _stored_draft_task_response(concurrent)
+            try:
+                with tempfile.TemporaryDirectory(prefix="articleops-mcp-draft-") as temp_dir:
+                    source_path = Path(temp_dir) / "source.docx"
+                    await _download_docx(source_url, source_path)
+                    payload = await client.create_draft_delivery(
+                        str(source_path),
+                        normalized_targets,
+                    )
+                plan = payload.get("plan")
+                if not isinstance(plan, dict) or not plan.get("plan_id"):
+                    raise ToolFailure("INTERNAL_ERROR", "Content Studio 未返回投递计划")
+                plan_result = _draft_plan_result(plan)
+                metadata = {
+                    "request_fingerprint": fingerprint,
+                    "target_platforms": [item["platform"] for item in normalized_targets],
+                    "draft_id": _safe_text(payload.get("draft_id"))[:128],
+                    "plan_id": plan_result["plan_id"],
+                }
+                task_status, message = _mcp_status_for_plan(plan_result)
+                await store.update(
+                    task_id,
+                    status=task_status,
+                    message=message,
+                    metadata=metadata,
+                    result=plan_result if task_status not in {"pending", "running"} else None,
+                )
+            except (ToolFailure, FlaskClientError) as exc:
+                result_unknown = exc.code in {"TIMEOUT", "UNAVAILABLE"}
+                code = "SUBMISSION_RESULT_UNKNOWN" if result_unknown else exc.code
+                message = (
+                    "草稿提交结果未知；为避免重复平台草稿，禁止使用相同请求自动重试"
+                    if result_unknown
+                    else exc.message
+                )
+                await store.update(
+                    task_id,
+                    status="failed",
+                    message=message,
+                    result={"error": {"code": code, "message": message}},
+                )
+                raise ToolFailure(code, message) from exc
+
+            record = await store.get(task_id)
+            if record is None:
+                raise ToolFailure("INTERNAL_ERROR", "MCP 异步任务未能持久化")
+            return _stored_draft_task_response(record)
+
+        return await _execute(
+            "start_article_draft_delivery",
+            {
+                "source_download_url": source_download_url,
+                "targets": targets,
+                "client_request_id": client_request_id,
+            },
+            operation,
+        )
+
+    handlers["start_article_draft_delivery"] = start_article_draft_delivery
+
+    @server.tool(
+        name="get_article_draft_delivery_result",
+        description=(
+            "查询 start_article_draft_delivery 创建的持久化任务。该工具幂等，只读取并"
+            "对账既有计划，不会再次创建草稿或重放平台操作。"
+        ),
+        structured_output=True,
+    )
+    async def get_article_draft_delivery_result(
+        task_id: TaskToken,
+    ) -> dict[str, Any]:
+        async def operation() -> dict[str, Any]:
+            checked_task_id = str(task_id or "").strip()
+            record = await store.get(checked_task_id)
+            if not record or record.get("kind") != "content_studio_draft_delivery":
+                raise ToolFailure("NOT_FOUND", "草稿投递任务不存在")
+            metadata = record.get("metadata") or {}
+            plan_id = str(metadata.get("plan_id") or "").strip()
+            if not plan_id:
+                deadline = int(metadata.get("submission_deadline_epoch") or 0)
+                if deadline and int(time.time()) <= deadline:
+                    return _stored_draft_task_response(record)
+                message = "草稿提交进程中断且未取得计划 ID；结果未知，禁止自动重试"
+                await store.update(
+                    checked_task_id,
+                    status="failed",
+                    message=message,
+                    result={
+                        "error": {
+                            "code": "SUBMISSION_RESULT_UNKNOWN",
+                            "message": message,
+                        }
+                    },
+                )
+                updated = await store.get(checked_task_id)
+                return _stored_draft_task_response(updated or record)
+
+            plan = await client.get_draft_delivery_plan(plan_id)
+            plan_result = _draft_plan_result(plan)
+            task_status, message = _mcp_status_for_plan(plan_result)
+            await store.update(
+                checked_task_id,
+                status=task_status,
+                message=message,
+                result=plan_result if task_status not in {"pending", "running"} else None,
+            )
+            updated = await store.get(checked_task_id)
+            return _stored_draft_task_response(updated or record)
+
+        return await _execute(
+            "get_article_draft_delivery_result",
+            {"task_id": task_id},
+            operation,
+        )
+
+    handlers["get_article_draft_delivery_result"] = get_article_draft_delivery_result
 
     @server.tool(
         name="list_accounts",

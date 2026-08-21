@@ -159,6 +159,10 @@ if ((Test-Path -LiteralPath $envFile) -and -not $ForceConfig) {
     if ($LASTEXITCODE -ne 0 -or $secret.Length -lt 32) {
         throw "无法生成生产 APP_SECRET_KEY。"
     }
+    $mcpInternalToken = (& $pythonPath -c "import secrets; print(secrets.token_urlsafe(48))").Trim()
+    if ($LASTEXITCODE -ne 0 -or $mcpInternalToken.Length -lt 32) {
+        throw "无法生成 MCP 内部访问令牌。"
+    }
 
     $configLines = @(
         "`$env:APP_ENV = $(ConvertTo-PowerShellLiteral 'production')",
@@ -171,6 +175,9 @@ if ((Test-Path -LiteralPath $envFile) -and -not $ForceConfig) {
         "`$env:MCP_PORT = $(ConvertTo-PowerShellLiteral '8765')",
         "`$env:MCP_ALLOWED_HOSTS = $(ConvertTo-PowerShellLiteral ($allowedHosts -join ','))",
         "`$env:MCP_FILE_SERVICE_ALLOWED_HOSTS = $(ConvertTo-PowerShellLiteral $FileServiceHost)",
+        "`$env:ARTICLEOPS_MCP_INTERNAL_TOKEN = $(ConvertTo-PowerShellLiteral $mcpInternalToken)",
+        "`$env:ARTICLEOPS_MCP_ALLOWED_ACCOUNT_IDS = $(ConvertTo-PowerShellLiteral '')",
+        "`$env:ARTICLEOPS_MCP_DRAFT_DELIVERY_ENABLED = $(ConvertTo-PowerShellLiteral 'false')",
         "`$env:PUBLISH_AFTER_DRAFT = $(ConvertTo-PowerShellLiteral 'false')",
         "`$env:LEGACY_UPLOAD_QUEUE_ENABLED = $(ConvertTo-PowerShellLiteral 'false')",
         "`$env:ACCOUNT_SESSIONS_ALLOW_PUBLIC_PUBLISH = $(ConvertTo-PowerShellLiteral 'false')",

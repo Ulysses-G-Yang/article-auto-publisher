@@ -8,7 +8,7 @@
       "include_instructions": true,
       "timeout": 10,
       "read_timeout": 300,
-      "description": "上传 docx 文章并自动发布到 ZOL 和小黑盒平台，支持账号登录管理、任务状态查询和发布日志查看"
+      "description": "将受控 DOCX 保存到 ArticleOps 已验证的平台账号草稿，并查询账号状态、投递结果和脱敏日志；不开放公开发布"
     }
   }
 }

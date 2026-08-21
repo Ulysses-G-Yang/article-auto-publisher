@@ -237,8 +237,12 @@ def test_delivery_statuses_are_explicit_and_never_auto_retry_publish() -> None:
     docs = read("docs/frontend/CONTENT_STUDIO_UX.md")
 
     assert "CREATING: '正在创建执行单'" in script
-    assert "PARTIAL_FAIL: '部分失败'" in script
+    assert "PARTIAL_FAIL: '部分成功 / 部分失败'" in script
+    assert "SUCCESS: '全部成功'" in script
+    assert "FATAL: '全部失败'" in script
     assert "RESULT_UNKNOWN: '结果未知，需人工核对'" in script
+    assert "XHS_CLOUD_DRAFT_UNAVAILABLE" in script
+    assert "网页端无云端草稿" in script
     assert "DRAFT_SAVED_WITH_WARNINGS: '草稿已保存（有警告）'" in script
     assert "function targetNeedsRelogin(target)" in script
     assert "return '需要重新登录'" in script

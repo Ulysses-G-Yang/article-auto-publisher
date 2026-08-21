@@ -20,8 +20,8 @@
         return sourceRef ? `${source} · 文件/来源：${sourceRef}` : source;
     }
     const planStatusLabels = {
-        READY: '待执行', CREATING: '正在创建执行单', QUEUED: '已排队', RUNNING: '执行中', SUCCESS: '已完成',
-        PARTIAL_FAIL: '部分失败', FATAL: '执行失败', CONFIRMATION_REQUIRED: '待公开确认',
+        READY: '待执行', CREATING: '正在创建执行单', QUEUED: '已排队', RUNNING: '执行中', SUCCESS: '全部成功',
+        PARTIAL_FAIL: '部分成功 / 部分失败', FATAL: '全部失败', CONFIRMATION_REQUIRED: '待公开确认',
         DRAFT_SAVED: '平台草稿已保存', PUBLISHED: '已公开发布', BLOCKED: '已拦截', FAILED: '失败',
         DRAFT_SAVED_WITH_WARNINGS: '草稿已保存（有警告）',
         PUBLISHED_WITH_WARNINGS: '已发布（有警告）',
@@ -1626,6 +1626,7 @@
 
     function targetStatusLabel(target) {
         if (targetNeedsRelogin(target)) return '需要重新登录';
+        if (target?.error_code === 'XHS_CLOUD_DRAFT_UNAVAILABLE') return '网页端无云端草稿';
         return planStatusLabels[target.status] || target.status;
     }
 
@@ -1637,7 +1638,6 @@
             weibo: 'https://card.weibo.com/article/v5/editor#/draft',
             smzdm: 'https://post.smzdm.com/tougao/',
             baijiahao: 'https://baijiahao.baidu.com/builder/rc/manage',
-            xiaohongshu: 'https://creator.xiaohongshu.com/publish/publish',
             zol: 'https://post.zol.com.cn/v2/home',
         }[platform] || '';
     }
@@ -1646,6 +1646,12 @@
         if (isFormatBlockedTarget(target)) return formatTargetReason(target);
         if (targetNeedsRelogin(target)) {
             return '该账号登录态已失效，请到账号管理页重新登录后再创建新计划。';
+        }
+        if (target.error_code === 'XHS_CLOUD_DRAFT_UNAVAILABLE') {
+            return '小红书网页长文只保存在隔离浏览器本地，不能作为账号云端草稿；该目标未执行。';
+        }
+        if (target.error_code === 'DRAFT_BASELINE_UNAVAILABLE') {
+            return target.error_message || '保存前无法建立可靠草稿基线；平台写入已停止。';
         }
         if (target.status === 'RESULT_UNKNOWN') {
             return '结果未知，请先到平台人工核对；系统不会自动重试。';

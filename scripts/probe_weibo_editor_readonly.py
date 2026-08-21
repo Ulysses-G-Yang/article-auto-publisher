@@ -159,7 +159,7 @@ async def _identity_evidence(page, stored_id: str) -> dict:
 async def _inspect_body_image_dialog(platform: WeiboPlatform) -> dict:
     """只打开正文图片弹窗并返回脱敏结构，不选择或上传任何文件。"""
 
-    editor_image_count = int(
+    editor_raw_image_node_count = int(
         await platform.page.evaluate(
             """() => document.querySelectorAll(
                 '.tiptap img, .ProseMirror img'
@@ -167,11 +167,12 @@ async def _inspect_body_image_dialog(platform: WeiboPlatform) -> dict:
         )
         or 0
     )
+    editor_semantic_image_count = await platform._semantic_editor_image_count()
     image_trigger = await platform._find_body_image_trigger()
     await image_trigger.click(timeout=5000)
     await asyncio.sleep(0.75)
     state = await platform.page.evaluate(
-        r"""(editorImageCount) => {
+        r"""(editorCounts) => {
             const visible = (node) => {
                 const rect = node.getBoundingClientRect();
                 const style = getComputedStyle(node);
@@ -187,7 +188,8 @@ async def _inspect_body_image_dialog(platform: WeiboPlatform) -> dict:
                 (image) => image.currentSrc || image.getAttribute('src') || ''
             );
             return {
-                editor_image_count: editorImageCount,
+                editor_raw_image_node_count: editorCounts.raw,
+                editor_semantic_image_count: editorCounts.semantic,
                 editor_unique_image_source_count: new Set(
                     editorSources.filter(Boolean)
                 ).size,
@@ -293,16 +295,220 @@ async def _inspect_body_image_dialog(platform: WeiboPlatform) -> dict:
                 }),
             };
         }""",
-        editor_image_count,
+        {
+            "raw": editor_raw_image_node_count,
+            "semantic": editor_semantic_image_count,
+        },
     )
     await platform.page.keyboard.press("Escape")
     return state if isinstance(state, dict) else {}
+
+
+async def _sample_editor_load_stability(page) -> dict:
+    """采样编辑器只读结构变化，确认异步草稿加载何时真正稳定。"""
+
+    changes: list[dict] = []
+    previous: dict | None = None
+    stable_samples = 0
+    for sample_index in range(40):
+        state = await page.evaluate(
+            r"""(selector) => {
+                const title = document.querySelector(
+                    "textarea[placeholder='请输入标题']"
+                );
+                const body = document.querySelector(selector);
+                const visibleSpinners = Array.from(document.querySelectorAll(
+                    '.wb-editor-spin, .n-spin-body'
+                )).filter((node) => {
+                    const rect = node.getBoundingClientRect();
+                    const style = getComputedStyle(node);
+                    return rect.width > 0 && rect.height > 0
+                        && style.display !== 'none' && style.visibility !== 'hidden';
+                });
+                const match = location.hash.match(/^#\/draft\/(\d+)$/);
+                return {
+                    draft_id_present: Boolean(match && match[1] !== '0'),
+                    title_length: title ? title.value.length : null,
+                    body_trimmed_length: body
+                        ? (body.innerText || '').trim().length : null,
+                    raw_image_node_count: body
+                        ? body.querySelectorAll('img').length : null,
+                    h2_count: body ? body.querySelectorAll('h2').length : null,
+                    child_count: body ? body.children.length : null,
+                    visible_spinner_count: visibleSpinners.length,
+                };
+            }""",
+            BODY_DOM_SELECTOR,
+        )
+        normalized = state if isinstance(state, dict) else {}
+        if normalized == previous:
+            stable_samples += 1
+        else:
+            changes.append({"sample": sample_index, **normalized})
+            previous = normalized
+            stable_samples = 1
+        await asyncio.sleep(0.25)
+    return {"changes": changes, "final_stable_samples": stable_samples}
+
+
+async def _inspect_existing_library_insert_shape(platform: WeiboPlatform) -> dict:
+    """在写请求被阻断时，本地插入一张库内图片并返回脱敏 DOM 形状。
+
+    本探测不上传文件、不保存、不发布；调用方必须已经拦截全部非只读请求。
+    结束时刷新页面，从平台已有草稿恢复编辑器，避免保留本地临时改动。
+    """
+
+    page = platform.page
+    before = await page.evaluate(
+        r"""(selector) => {
+            const root = document.querySelector(selector);
+            return root ? {
+                child_count: root.children.length,
+                raw_image_count: root.querySelectorAll('img').length,
+            } : null;
+        }""",
+        BODY_DOM_SELECTOR,
+    )
+    if not isinstance(before, dict):
+        return {"status": "BODY_EDITOR_NOT_FOUND"}
+    before["semantic_image_count"] = (
+        await platform._semantic_editor_image_count()
+    )
+
+    trigger = await platform._find_body_image_trigger()
+    await trigger.click(timeout=5000)
+    dialog = page.locator(".n-dialog:visible")
+    if await dialog.count() != 1:
+        return {"status": "IMAGE_DIALOG_NOT_UNIQUE", "before": before}
+    dialog = dialog.first
+    try:
+        await dialog.locator(".n-spin-body").first.wait_for(
+            state="hidden",
+            timeout=15000,
+        )
+    except Exception:
+        return {"status": "IMAGE_LIBRARY_UNSTABLE", "before": before}
+
+    items = dialog.locator(".image-list .image-item")
+    item_count = await items.count()
+    selected = dialog.locator(".image-list .image-item.is-selected")
+    if item_count < 1 or await selected.count() != 0:
+        return {
+            "status": "IMAGE_LIBRARY_SELECTION_UNSAFE",
+            "before": before,
+            "library_item_count": item_count,
+            "selected_item_count": await selected.count(),
+        }
+    await items.first.click(timeout=5000)
+    for _ in range(20):
+        if await selected.count() == 1:
+            break
+        await asyncio.sleep(0.25)
+    if await selected.count() != 1:
+        return {
+            "status": "IMAGE_LIBRARY_SELECTION_FAILED",
+            "before": before,
+            "library_item_count": item_count,
+        }
+
+    insert_matches = []
+    buttons = dialog.locator("button")
+    for index in range(await buttons.count()):
+        button = buttons.nth(index)
+        if (
+            await button.is_visible()
+            and await button.is_enabled()
+            and " ".join((await button.inner_text()).split()) == "插入"
+        ):
+            insert_matches.append(button)
+    if len(insert_matches) != 1:
+        return {
+            "status": "IMAGE_INSERT_BUTTON_NOT_UNIQUE",
+            "before": before,
+            "library_item_count": item_count,
+        }
+    await insert_matches[0].click(timeout=5000)
+    await asyncio.sleep(1)
+    inserted_shape = await page.evaluate(
+        r"""(args) => {
+            const root = document.querySelector(args.selector);
+            if (!root) return null;
+            const visible = (node) => {
+                const rect = node.getBoundingClientRect();
+                const style = getComputedStyle(node);
+                return rect.width > 0 && rect.height > 0
+                    && style.display !== 'none'
+                    && style.visibility !== 'hidden';
+            };
+            return {
+                child_count: root.children.length,
+                raw_image_count: root.querySelectorAll('img').length,
+                children: Array.from(root.children).map((node, index) => ({
+                        index,
+                        tag: node.tagName.toLowerCase(),
+                        class_name: String(node.className || '').slice(0, 160),
+                        text_length: (node.innerText || node.textContent || '')
+                            .trim().length,
+                        image_count: node.matches('img')
+                            ? 1 : node.querySelectorAll('img').length,
+                        images: Array.from(
+                            node.matches('img') ? [node] : node.querySelectorAll('img')
+                        ).map((image) => ({
+                            class_name: String(image.className || '').slice(0, 160),
+                            visible: visible(image),
+                            natural_width: image.naturalWidth,
+                            natural_height: image.naturalHeight,
+                            parent_tag: image.parentElement?.tagName.toLowerCase() || '',
+                            parent_class: String(
+                                image.parentElement?.className || ''
+                            ).slice(0, 160),
+                            attribute_names: Array.from(image.attributes)
+                                .map((attr) => attr.name)
+                                .filter((name) => !['src', 'data-src'].includes(name))
+                                .sort(),
+                        })),
+                    })),
+            };
+        }""",
+        {
+            "selector": BODY_DOM_SELECTOR,
+        },
+    )
+    if isinstance(inserted_shape, dict):
+        inserted_shape["semantic_image_count"] = (
+            await platform._semantic_editor_image_count()
+        )
+    await page.reload(wait_until="domcontentloaded", timeout=30000)
+    await asyncio.sleep(3)
+    restored = await page.evaluate(
+        r"""(selector) => {
+            const root = document.querySelector(selector);
+            return root ? {
+                child_count: root.children.length,
+                raw_image_count: root.querySelectorAll('img').length,
+            } : null;
+        }""",
+        BODY_DOM_SELECTOR,
+    )
+    if isinstance(restored, dict):
+        restored["semantic_image_count"] = (
+            await platform._semantic_editor_image_count()
+        )
+    return {
+        "status": "LOCAL_INSERT_INSPECTED_AND_RELOADED",
+        "before": before,
+        "inserted_shape": inserted_shape,
+        "restored": restored,
+        "library_item_count": item_count,
+    }
 
 
 async def run_probe(
     expected_title: str = "",
     *,
     inspect_image_dialog: bool = False,
+    inspect_load_stability: bool = False,
+    inspect_existing_library_insert_shape: bool = False,
 ) -> dict:
     account = _load_only_account()
     platform = WeiboPlatform(
@@ -437,7 +643,13 @@ async def run_probe(
                             normalized_expected_title,
                         )
                         if expected_card.get("clicked"):
-                            await asyncio.sleep(3)
+                            load_stability = (
+                                await _sample_editor_load_stability(platform.page)
+                                if inspect_load_stability
+                                else None
+                            )
+                            if not inspect_load_stability:
+                                await asyncio.sleep(3)
                             expected_state = await platform.page.evaluate(
                                 """(args) => {
                                     const title = document.querySelector(
@@ -451,7 +663,7 @@ async def run_probe(
                                         body_trimmed_length: body
                                             ? (body.innerText || '').trim().length
                                             : null,
-                                        image_count: body
+                                        raw_image_node_count: body
                                             ? body.querySelectorAll('img').length
                                             : null,
                                         h2_count: body
@@ -477,9 +689,18 @@ async def run_probe(
                                     "title": normalized_expected_title,
                                 },
                             )
+                            if isinstance(expected_state, dict):
+                                expected_state["semantic_image_count"] = (
+                                    await platform._semantic_editor_image_count()
+                                )
                             image_dialog_state = (
                                 await _inspect_body_image_dialog(platform)
                                 if inspect_image_dialog
+                                else None
+                            )
+                            local_insert_shape = (
+                                await _inspect_existing_library_insert_shape(platform)
+                                if inspect_existing_library_insert_shape
                                 else None
                             )
                             return {
@@ -488,7 +709,9 @@ async def run_probe(
                                 "identity_warning": identity_warning,
                                 "expected_title_count": expected_card.get("count"),
                                 "expected_draft_state": expected_state,
+                                "load_stability": load_stability,
                                 "image_dialog_state": image_dialog_state,
+                                "local_insert_shape": local_insert_shape,
                                 "blocked_mutation_paths": sorted(set(blocked_paths)),
                             }
                         if int(expected_card.get("count") or 0) > 1:
@@ -933,12 +1156,26 @@ def main() -> int:
         action="store_true",
         help="只打开正文图片弹窗并返回脱敏结构，不选择文件或保存",
     )
+    parser.add_argument(
+        "--inspect-load-stability",
+        action="store_true",
+        help="只采样草稿打开后的字数、图片数和加载遮罩变化",
+    )
+    parser.add_argument(
+        "--inspect-existing-library-insert-shape",
+        action="store_true",
+        help="阻断写请求后，本地插入一张库内图片并返回脱敏 DOM 形状",
+    )
     args = parser.parse_args()
     try:
         result = asyncio.run(
             run_probe(
                 args.expected_title,
                 inspect_image_dialog=args.inspect_image_dialog,
+                inspect_load_stability=args.inspect_load_stability,
+                inspect_existing_library_insert_shape=(
+                    args.inspect_existing_library_insert_shape
+                ),
             )
         )
     except ProbeError as exc:

@@ -5,6 +5,7 @@ import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
+from statistics import median
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -206,10 +207,21 @@ class DocxParser:
         image_paths: list[Path] = []
         rich_blocks: list[dict[str, Any]] = []
         current_list_key: tuple[bool, int] | None = None
+        body_font_size = self._body_font_size_points(doc)
+        first_text_paragraph = next(
+            (paragraph._p for paragraph in doc.paragraphs if paragraph.text.strip()),
+            None,
+        )
 
         for child in doc.element.body:
             if child.tag == qn("w:p"):
                 paragraph = Paragraph(child, doc)
+                inferred_heading_level = None
+                if child is not first_text_paragraph:
+                    inferred_heading_level = self._visual_heading_level(
+                        paragraph,
+                        body_font_size,
+                    )
                 block = self._rich_paragraph(
                     paragraph,
                     doc,
@@ -218,6 +230,7 @@ class DocxParser:
                     image_counter,
                     image_paths,
                     block_counter,
+                    inferred_heading_level=inferred_heading_level,
                 )
                 list_info = self._list_info(paragraph, doc)
                 if list_info is not None:
@@ -296,9 +309,11 @@ class DocxParser:
         block_counter: list[int],
         *,
         hyperlink_target: str | None = None,
+        inferred_heading_level: int | None = None,
     ) -> dict[str, Any]:
         style_name = paragraph.style.name if paragraph.style else None
-        level = self._heading_level(style_name)
+        explicit_level = self._heading_level(style_name)
+        level = explicit_level if explicit_level is not None else inferred_heading_level
         block: dict[str, Any] = {
             "kind": "heading" if level is not None else "paragraph",
             "block_id": self._next_block_id(block_counter),
@@ -337,6 +352,19 @@ class DocxParser:
                             link_title,
                         )
                     )
+        if explicit_level is None and inferred_heading_level is not None:
+            # 整段粗体是视觉标题的结构信号，而不是平台必须支持的正文强调。
+            # 只移除已由保守识别器证明为结构用途的 bold；其它行内 mark 从不
+            # 在这里降级或吞掉。
+            for child in block["children"]:
+                marks = child.get("marks")
+                if not isinstance(marks, list) or "bold" not in marks:
+                    continue
+                remaining = [mark for mark in marks if mark != "bold"]
+                if remaining:
+                    child["marks"] = remaining
+                else:
+                    child.pop("marks", None)
         return block
 
     def _rich_run_children(
@@ -513,6 +541,113 @@ class DocxParser:
         if "code" in " ".join(str(style_name).split()).casefold():
             marks.append("code")
         return tuple(marks)
+
+    @classmethod
+    def _body_font_size_points(cls, doc) -> float | None:
+        """推断正文基准字号；证据不足时返回 ``None`` 并拒绝视觉标题晋级。
+
+        只采集非全粗体段落中的普通文字 run，避免标题本身抬高基准。字号可以
+        来自 run、字符样式或段落样式，但不会凭文件名、段落位置或固定 11pt
+        猜测正文格式。
+        """
+
+        sizes: list[float] = []
+        paragraphs = [paragraph for paragraph in doc.paragraphs if paragraph.text.strip()]
+        for paragraph in paragraphs[1:]:
+            if cls._heading_level(
+                paragraph.style.name if paragraph.style else None
+            ) is not None:
+                continue
+            text_runs = [run for run in paragraph.runs if run.text.strip()]
+            if not text_runs or all(cls._effective_bold(run, paragraph) for run in text_runs):
+                continue
+            for run in text_runs:
+                if cls._effective_bold(run, paragraph):
+                    continue
+                size = cls._effective_font_size_points(run, paragraph)
+                if size is not None:
+                    sizes.append(size)
+        return float(median(sizes)) if sizes else None
+
+    @classmethod
+    def _visual_heading_level(
+        cls,
+        paragraph: Paragraph,
+        body_font_size: float | None,
+    ) -> int | None:
+        """把有充分排版证据的普通样式小标题归一化为语义 H2。
+
+        识别条件有意保守：整段文字必须全部粗体、字号显著高于本文正文基准，
+        且不得包含图片、链接、换行或其它行内强调。普通粗体提示语和局部加粗
+        仍保留为 ``marks``，继续由格式能力门审查。
+        """
+
+        if body_font_size is None:
+            return None
+        text = paragraph.text.strip()
+        if not text or len(text) > 120 or "\n" in text or "\r" in text:
+            return None
+        if any(node.tag == A_BLIP for node in paragraph._p.iter()):
+            return None
+        if paragraph._p.find(qn("w:hyperlink")) is not None:
+            return None
+
+        text_runs = [run for run in paragraph.runs if run.text.strip()]
+        if not text_runs or not all(
+            cls._effective_bold(run, paragraph) for run in text_runs
+        ):
+            return None
+        if any(
+            bool(run.italic) or bool(run.underline) or bool(run.font.strike)
+            for run in text_runs
+        ):
+            return None
+
+        sizes = [
+            size
+            for run in text_runs
+            if (size := cls._effective_font_size_points(run, paragraph)) is not None
+        ]
+        if len(sizes) != len(text_runs):
+            return None
+        heading_size = float(median(sizes))
+        if heading_size < body_font_size + 1.0:
+            return None
+        if heading_size < body_font_size * 1.12:
+            return None
+        return 2
+
+    @staticmethod
+    def _effective_bold(run: Run, paragraph: Paragraph) -> bool:
+        for value in (
+            run.bold,
+            getattr(getattr(run, "style", None), "font", None).bold
+            if getattr(run, "style", None) is not None
+            else None,
+            getattr(getattr(paragraph, "style", None), "font", None).bold
+            if getattr(paragraph, "style", None) is not None
+            else None,
+        ):
+            if value is not None:
+                return bool(value)
+        return False
+
+    @staticmethod
+    def _effective_font_size_points(
+        run: Run,
+        paragraph: Paragraph,
+    ) -> float | None:
+        candidates = [run.font.size]
+        run_style = getattr(run, "style", None)
+        paragraph_style = getattr(paragraph, "style", None)
+        candidates.append(run_style.font.size if run_style is not None else None)
+        candidates.append(
+            paragraph_style.font.size if paragraph_style is not None else None
+        )
+        for size in candidates:
+            if size is not None:
+                return float(size.pt)
+        return None
 
     @staticmethod
     def _heading_level(style_name: str | None) -> int | None:

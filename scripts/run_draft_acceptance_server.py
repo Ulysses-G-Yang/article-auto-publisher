@@ -193,8 +193,9 @@ def build_acceptance_app(
             declarations[platform] = FEATURE_KEYS
     content_state.service.platform_format_capabilities = PlatformFormatCapabilities(declarations)
 
-    # 实验能力只注入当前验收进程：ZOL 标题实验，以及小红书唯一同名草稿
-    # 的显式恢复。生产工厂不接受这两个开关。
+    # 验收进程继续显式注入 ZOL 已验证标题路径，以及小红书唯一同名草稿
+    # 的显式恢复。ZOL 生产内容投递已在真实验收后使用同一标题路径；
+    # 小红书恢复参数仍然只允许出现在验收进程。
     if "zol" in selected or normalized_resume_title:
         account_state = app.extensions.get("account_sessions")
         if account_state is None or not hasattr(account_state, "accounts"):

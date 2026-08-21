@@ -180,7 +180,7 @@ def test_non_zol_acceptance_keeps_original_factory(monkeypatch: pytest.MonkeyPat
     assert state.delivery.platform_factory is original_factory
 
 
-def test_production_platform_factory_never_enables_zol_heading_experiment(
+def test_production_platform_factory_enables_verified_zol_heading_path(
     tmp_path: Path,
 ):
     from account_sessions.account_service import _platform_instance
@@ -188,7 +188,7 @@ def test_production_platform_factory_never_enables_zol_heading_experiment(
     account = SimpleNamespace(platform="zol", profile_path=str(tmp_path / "zol"))
     platform = _platform_instance(account)
 
-    assert platform.enable_heading_experiment is False
+    assert platform.enable_heading_experiment is True
 
 
 @pytest.mark.parametrize("raw", ["true", "1", "yes", "on", " TRUE "])

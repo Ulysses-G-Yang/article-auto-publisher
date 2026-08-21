@@ -697,7 +697,10 @@ def _platform_instance(account: PlatformAccount):
     if account.platform == "zol":
         from platforms.zol import ZOLPlatform
 
-        return ZOLPlatform(**kwargs)
+        # 2026-08-19 已用真实草稿证明 ZOL 自有章节标题控件可持久化 H2，
+        # 且 7 张正文图片保存后重开仍保持 29-token 图文顺序。生产内容投递
+        # 必须启用同一条已验收路径，不能继续只在验收脚本中打开。
+        return ZOLPlatform(enable_heading_experiment=True, **kwargs)
     if account.platform == "zhihu":
         from platforms.zhihu import ZhihuPlatform
 

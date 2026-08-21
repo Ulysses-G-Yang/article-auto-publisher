@@ -302,6 +302,11 @@ def test_default_capabilities_match_real_platform_evidence() -> None:
         2,
         3,
     }
+    assert DEFAULT_PLATFORM_FORMAT_CAPABILITIES.get("zol").supported == {
+        "heading",
+        "image_order",
+    }
+    assert DEFAULT_PLATFORM_FORMAT_CAPABILITIES.get("zol").heading_levels == {2}
     assert DEFAULT_PLATFORM_FORMAT_CAPABILITIES.get("zhihu").supported == {
         "heading",
         "image_order",
@@ -325,6 +330,7 @@ def test_default_capabilities_match_real_platform_evidence() -> None:
     for platform in DELIVERY_PLATFORMS:
         if platform not in {
             "xiaoheihe",
+            "zol",
             "zhihu",
             "smzdm",
             "baijiahao",

@@ -20,12 +20,12 @@ from platforms.zol import ZOLPlatform
 from tests.test_regression import FakeFrame, FakeLocator, FakePage
 
 
-def test_default_zol_format_capability_remains_closed() -> None:
+def test_default_zol_format_capability_matches_real_draft_evidence() -> None:
     declaration = DEFAULT_PLATFORM_FORMAT_CAPABILITIES.get("zol")
 
     assert declaration is not None
-    assert declaration.supported == frozenset()
-    assert declaration.heading_levels == frozenset()
+    assert declaration.supported == frozenset({"heading", "image_order"})
+    assert declaration.heading_levels == frozenset({2})
 
 
 def test_seven_image_positions_map_exactly_without_fallback_to_first_image() -> None:

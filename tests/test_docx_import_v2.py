@@ -13,12 +13,16 @@ from docx import Document
 from docx.opc.constants import RELATIONSHIP_TYPE as RT
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
-from docx.shared import Inches
+from docx.shared import Inches, Pt
 from PIL import Image
 
 from content_studio.assets import AssetStore
+from content_studio.content_document import delivery_features, delivery_heading_levels
 from content_studio.errors import ContentAssetError
 from content_studio.importers import DocxImportAdapter
+from content_studio.platform_format_capabilities import (
+    DEFAULT_PLATFORM_FORMAT_CAPABILITIES,
+)
 from core.docx_parser import DocxParser
 
 
@@ -101,6 +105,63 @@ def _make_floating_image_doc(tmp_path: Path) -> bytes:
     return output.getvalue()
 
 
+def _make_visual_heading_doc(
+    tmp_path: Path,
+    *,
+    body_points: float,
+    heading_points: float,
+    include_nonstructural_marks: bool = True,
+) -> bytes:
+    document = Document()
+
+    title = document.add_paragraph()
+    title_run = title.add_run("视觉主标题")
+    title_run.bold = True
+    title_run.font.size = Pt(20)
+
+    body = document.add_paragraph()
+    body_run = body.add_run("第一段普通正文")
+    body_run.font.size = Pt(body_points)
+
+    image_paragraph = document.add_paragraph()
+    image_paragraph.add_run().add_picture(
+        str(_image_path(tmp_path, "visual-heading.png")),
+        width=Inches(0.3),
+    )
+
+    visual_heading = document.add_paragraph()
+    visual_heading_run = visual_heading.add_run("视觉二级标题")
+    visual_heading_run.bold = True
+    visual_heading_run.font.size = Pt(heading_points)
+
+    second_body = document.add_paragraph()
+    second_body_run = second_body.add_run("第二段普通正文")
+    second_body_run.font.size = Pt(body_points)
+
+    second_image_paragraph = document.add_paragraph()
+    second_image_paragraph.add_run().add_picture(
+        str(_image_path(tmp_path, "visual-heading-second.png")),
+        width=Inches(0.3),
+    )
+
+    if include_nonstructural_marks:
+        callout = document.add_paragraph()
+        callout_run = callout.add_run("同字号粗体提示不能冒充标题")
+        callout_run.bold = True
+        callout_run.font.size = Pt(body_points)
+
+        mixed = document.add_paragraph()
+        mixed_bold = mixed.add_run("局部粗体")
+        mixed_bold.bold = True
+        mixed_bold.font.size = Pt(heading_points)
+        mixed_plain = mixed.add_run("仍然是正文")
+        mixed_plain.font.size = Pt(heading_points)
+
+    output = io.BytesIO()
+    document.save(output)
+    return output.getvalue()
+
+
 def _run(coro):
     return asyncio.run(coro)
 
@@ -144,6 +205,82 @@ def test_parser_v2_marks_floating_image(tmp_path: Path) -> None:
     image = parsed.document_v2["blocks"][0]["children"][0]
     assert image["kind"] == "image"
     assert image["anchor"] == {"kind": "floating"}
+
+
+@pytest.mark.parametrize(
+    ("body_points", "heading_points"),
+    [(11, 14), (12, 15.5)],
+)
+def test_parser_v2_promotes_only_strong_visual_heading_evidence(
+    tmp_path: Path,
+    body_points: float,
+    heading_points: float,
+) -> None:
+    source = tmp_path / "visual-heading.docx"
+    source.write_bytes(
+        _make_visual_heading_doc(
+            tmp_path,
+            body_points=body_points,
+            heading_points=heading_points,
+        )
+    )
+
+    parsed = DocxParser(
+        images_dir=str(tmp_path / "parser-images")
+    ).parse_document_v2(str(source))
+    blocks_by_text = {
+        "".join(
+            child.get("text", "")
+            for child in block.get("children", [])
+            if child.get("kind") == "text"
+        ): block
+        for block in parsed.document_v2["blocks"]
+        if block.get("kind") in {"paragraph", "heading"}
+    }
+
+    title = blocks_by_text["视觉主标题"]
+    assert title["kind"] == "paragraph"
+    assert title["children"][0]["marks"] == ["bold"]
+
+    heading = blocks_by_text["视觉二级标题"]
+    assert heading["kind"] == "heading"
+    assert heading["level"] == 2
+    assert "marks" not in heading["children"][0]
+
+    callout = blocks_by_text["同字号粗体提示不能冒充标题"]
+    assert callout["kind"] == "paragraph"
+    assert callout["children"][0]["marks"] == ["bold"]
+
+    mixed = blocks_by_text["局部粗体仍然是正文"]
+    assert mixed["kind"] == "paragraph"
+    assert mixed["children"][0]["marks"] == ["bold"]
+    assert "marks" not in mixed["children"][1]
+
+
+def test_visual_heading_normalization_unblocks_verified_zol_contract(
+    tmp_path: Path,
+) -> None:
+    data = _make_visual_heading_doc(
+        tmp_path,
+        body_points=11,
+        heading_points=14,
+        include_nonstructural_marks=False,
+    )
+    adapter = DocxImportAdapter(
+        AssetStore(tmp_path / "assets"),
+        work_root=tmp_path / "work",
+    )
+
+    _title, _blocks, assets, document = _run(
+        adapter.parse_v2(data, "visual-heading.docx")
+    )
+    declaration = DEFAULT_PLATFORM_FORMAT_CAPABILITIES.get("zol")
+
+    assert len(assets) == 2
+    assert delivery_features(document) == frozenset({"heading", "image_order"})
+    assert delivery_heading_levels(document) == frozenset({2})
+    assert delivery_features(document) - declaration.supported == set()
+    assert delivery_heading_levels(document) - declaration.heading_levels == set()
 
 
 def test_importer_resolves_assets_before_validation_and_projects_order(tmp_path: Path) -> None:

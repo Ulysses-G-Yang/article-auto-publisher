@@ -1682,8 +1682,8 @@ class ZOLPlatform(BasePlatform):
             )
         if not self.enable_heading_experiment:
             raise ContentValidationError(
-                "ZOL_HEADING_UNVERIFIED: ZOL 尚无正文标题输入和 DOM 回读证据，"
-                "拒绝将 heading 按普通文本写入（levels="
+                "ZOL_HEADING_UNVERIFIED: 当前运行实例未启用已真实验收的 "
+                "ZOL H2 输入与 DOM 回读路径，拒绝降级成普通文本（levels="
                 + ",".join(levels)
                 + ")"
             )
@@ -1717,10 +1717,9 @@ class ZOLPlatform(BasePlatform):
     ) -> bool:
         """只接受真实编辑器回读的图片位置序列，不接受适配器自报字段。
 
-        当前 ZOL DOM 证据尚未证明能稳定关联正文图片和冻结块位置，因此
-        ``observed_positions`` 暂时只能是 ``None``，多图结果必须保持失败
-        状态。后续拿到编辑器 bundle/DOM 证据后，接入方必须把真实回读序列
-        传入此 helper，再允许多图进入 ``completed``。
+        生产富文档路径使用 ``_read_editor_dom_tokens`` 与
+        ``_content_tokens_match`` 校验完整图文 token；这个小 helper 仅保留给
+        位置序列调用方，缺少真实回读时继续 fail closed。
         """
 
         return observed_positions is not None and list(expected_positions) == list(

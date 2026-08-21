@@ -52,12 +52,25 @@ from content_studio.service import (
     SEED_TITLE,
     ContentStudioService,
     _content_hash,
+    _plan_status,
 )
 from content_studio.web import create_content_studio_blueprint
 
 
 def run(coroutine):
     return asyncio.run(coroutine)
+
+
+@pytest.mark.parametrize(
+    ("statuses", "expected"),
+    [
+        (["RESULT_UNKNOWN"], "FATAL"),
+        (["DRAFT_SAVED", "RESULT_UNKNOWN"], "PARTIAL_FAIL"),
+        (["FAILED", "RESULT_UNKNOWN"], "FATAL"),
+    ],
+)
+def test_plan_status_never_leaves_result_unknown_executing(statuses, expected):
+    assert _plan_status(statuses) == expected
 
 
 def image_bytes(image_format: str = "PNG") -> bytes:

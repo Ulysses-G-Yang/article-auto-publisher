@@ -393,6 +393,35 @@ def test_weibo_create_response_without_new_id_is_result_unknown() -> None:
         asyncio.run(platform.navigate_to_editor())
 
 
+def test_weibo_media_failure_after_draft_creation_is_result_unknown() -> None:
+    events: list[str] = []
+    platform, _editor = _ordered_platform(events)
+    platform._active_draft_id = "4182999"
+    platform._upload_image = AsyncMock(
+        return_value={
+            "success": False,
+            "error_code": "WEIBO_EDITOR_IMAGE_COUNT_UNCHANGED",
+            "error": "图片数量未增加",
+        }
+    )
+    blocks = [
+        {"type": "text", "text": "开头", "position": 0},
+        {"type": "image", "position": 1},
+    ]
+    images = [{"position_index": 1, "local_path": "D:/one.png"}]
+
+    with pytest.raises(DraftResultUnknownError) as caught:
+        asyncio.run(platform.fill_content(blocks, images))
+
+    assert caught.value.error_code == "DRAFT_RESULT_UNKNOWN"
+    assert caught.value.media_progress == {
+        "expected_images": 1,
+        "uploaded_images": 0,
+        "failed_image_count": 1,
+        "media_status": "failed",
+    }
+
+
 class _Route:
     def __init__(self) -> None:
         self.abort = AsyncMock()

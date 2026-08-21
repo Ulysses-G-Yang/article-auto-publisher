@@ -1426,8 +1426,13 @@ def _plan_status(statuses: list[str]) -> str:
         return "AWAITING_CONFIRMATION"
     active_or_success = {"QUEUED", "RUNNING", "DRAFT_SAVED", "PUBLISHED"}
     failures = {"FAILED", "BLOCKED"}
+    unknown = "RESULT_UNKNOWN"
     if all(status in {"DRAFT_SAVED", "PUBLISHED"} for status in statuses):
         return "SUCCESS"
+    if all(status == unknown for status in statuses):
+        return "FATAL"
+    if any(status == unknown for status in statuses):
+        return "PARTIAL_FAIL"
     if any(status in failures for status in statuses) and any(
         status in active_or_success for status in statuses
     ):

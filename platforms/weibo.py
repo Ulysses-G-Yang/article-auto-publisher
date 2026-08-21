@@ -500,6 +500,7 @@ class WeiboPlatform(BasePlatform):
                 raise DraftResultUnknownError(
                     "DRAFT_RESULT_UNKNOWN: 微博创建响应已返回但无法绑定新的草稿 ID"
                 )
+            self._active_draft_id = draft_id
             editor_state = await self.page.evaluate(
                 """(selector) => {
                     const title = document.querySelector(
@@ -520,10 +521,9 @@ class WeiboPlatform(BasePlatform):
             if normalize_for_comparison(editor_state.get("title")) or (
                 normalize_for_comparison(editor_state.get("body"))
             ):
-                raise DraftBaselineError(
-                    "DRAFT_BASELINE_FAILED: 微博新草稿编辑器不是空白状态"
+                raise DraftResultUnknownError(
+                    "DRAFT_RESULT_UNKNOWN: 微博新草稿已创建但编辑器不是空白状态，禁止重试"
                 )
-            self._active_draft_id = draft_id
         except (DraftBaselineError, DraftResultUnknownError):
             raise
         except BrowserLifecycleError:
@@ -562,13 +562,38 @@ class WeiboPlatform(BasePlatform):
                 raise RuntimeError("标题回读不一致")
         except Exception as exc:
             if self._exception_means_browser_closed(exc):
+                if self._active_draft_id:
+                    raise DraftResultUnknownError(
+                        "DRAFT_RESULT_UNKNOWN: 微博新草稿已创建但填写标题时页面关闭，禁止重试"
+                    ) from exc
                 raise BrowserLifecycleError(
                     "BROWSER_CONTEXT_CLOSED: 微博填写标题时页面已关闭"
+                ) from exc
+            if self._active_draft_id:
+                raise DraftResultUnknownError(
+                    "DRAFT_RESULT_UNKNOWN: 微博新草稿已创建但标题未能完整验证，禁止重试"
                 ) from exc
             logger.error("微博标题填写失败: {}", exc)
             raise SelectorError("微博标题输入框未找到或填写失败") from exc
 
     async def fill_content(self, content_blocks: list, images: list):
+        """把创建后所有正文异常统一升级为结果未知，禁止重复建稿。"""
+
+        try:
+            return await self._fill_content_impl(content_blocks, images)
+        except DraftResultUnknownError:
+            raise
+        except Exception as exc:
+            if not self._active_draft_id:
+                raise
+            error = DraftResultUnknownError(
+                "DRAFT_RESULT_UNKNOWN: 微博新草稿已创建但正文未完整验证，"
+                "平台可能已自动保存部分内容，禁止重试"
+            )
+            self._attach_media_progress(error)
+            raise error from exc
+
+    async def _fill_content_impl(self, content_blocks: list, images: list):
         """按冻结 ContentVersion 的原始顺序写入微博 TipTap 图文。"""
 
         self._require_page_alive("微博填写正文")
@@ -789,7 +814,7 @@ class WeiboPlatform(BasePlatform):
             "media_status": self._media_status(expected, uploaded, failed),
         }
 
-    def _attach_media_progress(self, exc: ContentValidationError) -> None:
+    def _attach_media_progress(self, exc: Exception) -> None:
         progress = safe_media_progress(self._media_progress_state)
         if progress is not None:
             exc.media_progress = progress

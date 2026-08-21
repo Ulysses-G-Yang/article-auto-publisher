@@ -156,7 +156,7 @@ async def _identity_evidence(page, stored_id: str) -> dict:
     }
 
 
-async def run_probe() -> dict:
+async def run_probe(expected_title: str = "") -> dict:
     account = _load_only_account()
     platform = WeiboPlatform(
         profile_dir=account.profile_path,
@@ -268,6 +268,84 @@ async def run_probe() -> dict:
 
                 await platform.page.route("**/*", block_mutations)
                 try:
+                    normalized_expected_title = str(expected_title or "").strip()
+                    if normalized_expected_title:
+                        expected_card = await platform.page.evaluate(
+                            r"""(title) => {
+                                const visible = (node) => {
+                                    const rect = node.getBoundingClientRect();
+                                    const style = getComputedStyle(node);
+                                    return rect.width > 0 && rect.height > 0
+                                        && style.display !== 'none'
+                                        && style.visibility !== 'hidden';
+                                };
+                                const matches = Array.from(
+                                    document.querySelectorAll('.list-item')
+                                ).filter((card) => visible(card)
+                                    && (card.innerText || '').split(/\r?\n/, 1)[0].trim()
+                                        === title);
+                                if (matches.length === 1) matches[0].click();
+                                return {count: matches.length, clicked: matches.length === 1};
+                            }""",
+                            normalized_expected_title,
+                        )
+                        if expected_card.get("clicked"):
+                            await asyncio.sleep(3)
+                            expected_state = await platform.page.evaluate(
+                                """(args) => {
+                                    const title = document.querySelector(
+                                        "textarea[placeholder='请输入标题']"
+                                    );
+                                    const body = document.querySelector(args.selector);
+                                    return {
+                                        title_exact: Boolean(
+                                            title && title.value === args.title
+                                        ),
+                                        body_trimmed_length: body
+                                            ? (body.innerText || '').trim().length
+                                            : null,
+                                        image_count: body
+                                            ? body.querySelectorAll('img').length
+                                            : null,
+                                        h2_count: body
+                                            ? body.querySelectorAll('h2').length
+                                            : null,
+                                        child_shape: body
+                                            ? Array.from(body.children).slice(0, 80)
+                                                .map((node) => ({
+                                                    tag: node.tagName.toLowerCase(),
+                                                    images: node.matches('img')
+                                                        ? 1
+                                                        : node.querySelectorAll('img').length,
+                                                    text_length: (
+                                                        node.innerText || node.textContent || ''
+                                                    ).trim().length,
+                                                }))
+                                            : [],
+                                        url: location.href,
+                                    };
+                                }""",
+                                {
+                                    "selector": BODY_DOM_SELECTOR,
+                                    "title": normalized_expected_title,
+                                },
+                            )
+                            return {
+                                "status": "EXPECTED_DRAFT_FOUND_READ_ONLY",
+                                "display_name": account.display_name,
+                                "identity_warning": identity_warning,
+                                "expected_title_count": expected_card.get("count"),
+                                "expected_draft_state": expected_state,
+                                "blocked_mutation_paths": sorted(set(blocked_paths)),
+                            }
+                        if int(expected_card.get("count") or 0) > 1:
+                            return {
+                                "status": "EXPECTED_DRAFT_AMBIGUOUS",
+                                "display_name": account.display_name,
+                                "expected_title_count": expected_card.get("count"),
+                                "blocked_mutation_paths": sorted(set(blocked_paths)),
+                            }
+
                     write_button = platform.page.get_by_role(
                         "button",
                         name="写文章",
@@ -692,13 +770,21 @@ async def run_probe() -> dict:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.parse_args()
+    parser.add_argument(
+        "--expected-title",
+        default="",
+        help="只读打开标题精确匹配且唯一的既有草稿，并仅返回结构摘要",
+    )
+    args = parser.parse_args()
     try:
-        result = asyncio.run(run_probe())
+        result = asyncio.run(run_probe(args.expected_title))
     except ProbeError as exc:
         result = {"status": str(exc)}
     print(json.dumps(result, ensure_ascii=True, separators=(",", ":")))
-    return 0 if result.get("status") == "VERIFIED_READ_ONLY" else 2
+    return 0 if result.get("status") in {
+        "VERIFIED_READ_ONLY",
+        "EXPECTED_DRAFT_FOUND_READ_ONLY",
+    } else 2
 
 
 if __name__ == "__main__":

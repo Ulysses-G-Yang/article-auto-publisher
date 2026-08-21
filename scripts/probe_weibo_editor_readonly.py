@@ -156,7 +156,154 @@ async def _identity_evidence(page, stored_id: str) -> dict:
     }
 
 
-async def run_probe(expected_title: str = "") -> dict:
+async def _inspect_body_image_dialog(platform: WeiboPlatform) -> dict:
+    """只打开正文图片弹窗并返回脱敏结构，不选择或上传任何文件。"""
+
+    editor_image_count = int(
+        await platform.page.evaluate(
+            """() => document.querySelectorAll(
+                '.tiptap img, .ProseMirror img'
+            ).length"""
+        )
+        or 0
+    )
+    image_trigger = await platform._find_body_image_trigger()
+    await image_trigger.click(timeout=5000)
+    await asyncio.sleep(0.75)
+    state = await platform.page.evaluate(
+        r"""(editorImageCount) => {
+            const visible = (node) => {
+                const rect = node.getBoundingClientRect();
+                const style = getComputedStyle(node);
+                return rect.width > 0 && rect.height > 0
+                    && style.display !== 'none' && style.visibility !== 'hidden';
+            };
+            const dialogs = Array.from(document.querySelectorAll('.n-dialog'))
+                .filter(visible);
+            const editorImages = Array.from(document.querySelectorAll(
+                '.tiptap img, .ProseMirror img'
+            ));
+            const editorSources = editorImages.map(
+                (image) => image.currentSrc || image.getAttribute('src') || ''
+            );
+            return {
+                editor_image_count: editorImageCount,
+                editor_unique_image_source_count: new Set(
+                    editorSources.filter(Boolean)
+                ).size,
+                editor_image_dimensions: editorImages.map((image) => ({
+                    natural_width: Number(image.naturalWidth || 0),
+                    natural_height: Number(image.naturalHeight || 0),
+                })),
+                script_resources: performance.getEntriesByType('resource')
+                    .filter((entry) => entry.initiatorType === 'script')
+                    .map((entry) => {
+                        try {
+                            const url = new URL(entry.name);
+                            return url.origin + url.pathname;
+                        } catch (_error) {
+                            return '';
+                        }
+                    }).filter(Boolean).slice(0, 80),
+                dialog_count: dialogs.length,
+                dialogs: dialogs.map((dialog) => {
+                    const inputs = Array.from(
+                        dialog.querySelectorAll('input[type=file]')
+                    );
+                    const buttons = Array.from(dialog.querySelectorAll('button'))
+                        .filter(visible).map((button) => ({
+                            text: (button.innerText || '').trim().slice(0, 24),
+                            enabled: !button.disabled
+                                && button.getAttribute('aria-disabled') !== 'true',
+                            class_name: String(button.className || '').slice(0, 160),
+                        }));
+                    const images = Array.from(dialog.querySelectorAll('img'))
+                        .filter(visible).map((image) => {
+                            const owner = image.closest(
+                                '[aria-selected], [role=option], label, '
+                                + '[class*="item" i], [class*="image" i], '
+                                + '[class*="pic" i], [class*="upload" i]'
+                            ) || image.parentElement;
+                            const className = String(owner?.className || '').slice(0, 180);
+                            const rect = image.getBoundingClientRect();
+                            const ancestorChain = [];
+                            let ancestor = image.parentElement;
+                            while (ancestor && ancestor !== dialog
+                                && ancestorChain.length < 6) {
+                                ancestorChain.push({
+                                    tag: ancestor.tagName.toLowerCase(),
+                                    class_name: String(ancestor.className || '').slice(0, 180),
+                                    role: ancestor.getAttribute('role') || '',
+                                    aria_selected: ancestor.getAttribute('aria-selected') || '',
+                                    aria_checked: ancestor.getAttribute('aria-checked') || '',
+                                    cursor: getComputedStyle(ancestor).cursor,
+                                });
+                                ancestor = ancestor.parentElement;
+                            }
+                            return {
+                                owner_tag: owner?.tagName.toLowerCase() || '',
+                                owner_class: className,
+                                aria_selected: owner?.getAttribute('aria-selected') || '',
+                                selected_by_class: /selected|active|checked|chosen/i
+                                    .test(className),
+                                width: Math.round(rect.width),
+                                height: Math.round(rect.height),
+                                natural_width: Number(image.naturalWidth || 0),
+                                natural_height: Number(image.naturalHeight || 0),
+                                matches_editor_image_count: editorSources.filter(
+                                    (source) => source
+                                        && source === (image.currentSrc
+                                            || image.getAttribute('src') || '')
+                                ).length,
+                                ancestor_chain: ancestorChain,
+                            };
+                        });
+                    const knownLabels = new Set([
+                        '图片库', '上传', '插入', '取消', '本地上传', '我的图片',
+                    ]);
+                    const labels = Array.from(dialog.querySelectorAll(
+                        '[role=tab], [role=option], button, span, div'
+                    )).filter((node) => visible(node)
+                        && knownLabels.has((node.innerText || '').trim()))
+                        .map((node) => (node.innerText || '').trim());
+                    const selectedNodes = Array.from(dialog.querySelectorAll(
+                        '[aria-selected=true], [aria-checked=true], '
+                        + '[class*="selected" i], [class*="checked" i], '
+                        + '[class*="active" i]'
+                    )).filter(visible);
+                    return {
+                        dialog_class: String(dialog.className || '').slice(0, 180),
+                        known_labels: Array.from(new Set(labels)),
+                        file_inputs: inputs.map((input) => ({
+                            accept: String(input.accept || '').slice(0, 160),
+                            multiple: Boolean(input.multiple),
+                            visible: visible(input),
+                            parent_class: String(
+                                input.parentElement?.className || ''
+                            ).slice(0, 180),
+                        })),
+                        buttons,
+                        visible_image_count: images.length,
+                        images: images.slice(0, 40),
+                        selected_node_count: selectedNodes.length,
+                        selected_node_classes: selectedNodes.slice(0, 20).map(
+                            (node) => String(node.className || '').slice(0, 180)
+                        ),
+                    };
+                }),
+            };
+        }""",
+        editor_image_count,
+    )
+    await platform.page.keyboard.press("Escape")
+    return state if isinstance(state, dict) else {}
+
+
+async def run_probe(
+    expected_title: str = "",
+    *,
+    inspect_image_dialog: bool = False,
+) -> dict:
     account = _load_only_account()
     platform = WeiboPlatform(
         profile_dir=account.profile_path,
@@ -330,12 +477,18 @@ async def run_probe(expected_title: str = "") -> dict:
                                     "title": normalized_expected_title,
                                 },
                             )
+                            image_dialog_state = (
+                                await _inspect_body_image_dialog(platform)
+                                if inspect_image_dialog
+                                else None
+                            )
                             return {
                                 "status": "EXPECTED_DRAFT_FOUND_READ_ONLY",
                                 "display_name": account.display_name,
                                 "identity_warning": identity_warning,
                                 "expected_title_count": expected_card.get("count"),
                                 "expected_draft_state": expected_state,
+                                "image_dialog_state": image_dialog_state,
                                 "blocked_mutation_paths": sorted(set(blocked_paths)),
                             }
                         if int(expected_card.get("count") or 0) > 1:
@@ -775,9 +928,19 @@ def main() -> int:
         default="",
         help="只读打开标题精确匹配且唯一的既有草稿，并仅返回结构摘要",
     )
+    parser.add_argument(
+        "--inspect-image-dialog",
+        action="store_true",
+        help="只打开正文图片弹窗并返回脱敏结构，不选择文件或保存",
+    )
     args = parser.parse_args()
     try:
-        result = asyncio.run(run_probe(args.expected_title))
+        result = asyncio.run(
+            run_probe(
+                args.expected_title,
+                inspect_image_dialog=args.inspect_image_dialog,
+            )
+        )
     except ProbeError as exc:
         result = {"status": str(exc)}
     print(json.dumps(result, ensure_ascii=True, separators=(",", ":")))

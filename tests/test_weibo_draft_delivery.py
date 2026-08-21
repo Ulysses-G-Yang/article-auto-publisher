@@ -96,6 +96,46 @@ def test_weibo_writes_text_and_images_in_frozen_block_order() -> None:
     platform._validate_dom_exact.assert_awaited_once_with(blocks, phase="正文最终")
 
 
+def test_weibo_writes_seven_images_and_five_h2_blocks_once_each() -> None:
+    events: list[str] = []
+    platform, _editor = _ordered_platform(events)
+    blocks: list[dict] = [{"type": "text", "text": "开头", "position": 0}]
+    images = []
+    position = 1
+    for image_index in range(7):
+        blocks.append({"type": "image", "position": position})
+        images.append(
+            {
+                "position_index": position,
+                "local_path": f"D:/controlled/{image_index + 1}.png",
+            }
+        )
+        position += 1
+        if image_index < 5:
+            blocks.append(
+                {
+                    "type": "heading",
+                    "level": 2,
+                    "text": f"章节 {image_index + 1}",
+                    "position": position,
+                }
+            )
+            position += 1
+    blocks.append({"type": "text", "text": "结尾", "position": position})
+    _editor.text = "\n".join(
+        ["开头", *(f"章节 {index}" for index in range(1, 6)), "结尾"]
+    )
+
+    result = asyncio.run(platform.fill_content(blocks, images))
+
+    assert result["media_status"] == "completed"
+    assert result["expected_images"] == 7
+    assert result["uploaded_images"] == 7
+    assert platform._upload_image.await_count == 7
+    assert platform._apply_h2_to_current_block.await_count == 5
+    assert platform._validate_dom_prefix.await_count == 7
+
+
 def test_weibo_never_falls_back_to_the_first_unmatched_image() -> None:
     events: list[str] = []
     platform, _editor = _ordered_platform(events)
@@ -195,6 +235,182 @@ class _UiNode:
         )
 
 
+class _UploadItem:
+    def __init__(self, page) -> None:
+        self.page = page
+        self.click = AsyncMock(side_effect=self._click)
+
+    async def _click(self, **_kwargs) -> None:
+        self.page.selected = True
+
+    async def evaluate(self, _script: str) -> dict:
+        return {"failed": self.page.upload_failed, "ready": not self.page.upload_failed}
+
+    async def get_attribute(self, name: str) -> str:
+        assert name == "class"
+        return "image-item is-selected" if self.page.selected else "image-item"
+
+
+class _UploadInput:
+    def __init__(self, page) -> None:
+        self.page = page
+        self.first = self
+        self.set_input_files = AsyncMock(side_effect=self._set_input_files)
+
+    async def count(self) -> int:
+        return 1
+
+    async def get_attribute(self, name: str) -> str:
+        assert name == "accept"
+        return ".jpg,.jpeg,.bmp,.gif,.png,.heic"
+
+    async def _set_input_files(self, _path: str, **_kwargs) -> None:
+        self.page.uploaded = True
+
+
+class _HiddenSpinner:
+    first = None
+
+    def __init__(self) -> None:
+        self.first = self
+
+    async def wait_for(self, *, state: str, timeout: int) -> None:
+        assert (state, timeout) == ("hidden", 15000)
+
+
+class _UploadItems:
+    def __init__(self, page) -> None:
+        self.page = page
+        self.first = _UploadItem(page)
+
+    async def count(self) -> int:
+        if not self.page.uploaded:
+            return 1
+        return 3 if self.page.ambiguous_new_items else 2
+
+
+class _SelectedUploadItems:
+    def __init__(self, page) -> None:
+        self.page = page
+
+    async def count(self) -> int:
+        return 1 if self.page.selected else 0
+
+
+class _InsertButton:
+    def __init__(self, page) -> None:
+        self.page = page
+        self.click = AsyncMock(side_effect=self._click)
+
+    async def _click(self, **_kwargs) -> None:
+        self.page.dialog_visible = False
+        self.page.editor_image_count += 1
+
+    async def is_visible(self) -> bool:
+        return True
+
+    async def is_enabled(self) -> bool:
+        return self.page.selected
+
+    async def inner_text(self) -> str:
+        return "插入"
+
+
+class _UploadDialog:
+    def __init__(self, page) -> None:
+        self.page = page
+        self.input = _UploadInput(page)
+        self.items = _UploadItems(page)
+        self.selected_items = _SelectedUploadItems(page)
+        self.insert_button = _InsertButton(page)
+
+    async def is_visible(self) -> bool:
+        return self.page.dialog_visible
+
+    async def inner_text(self) -> str:
+        return "图片库 上传 取消 插入"
+
+    def locator(self, selector: str):
+        if selector == ".n-spin-body":
+            return _HiddenSpinner()
+        if selector == "input[type=file]":
+            return self.input
+        if selector == ".image-list .image-item":
+            return self.items
+        if selector == ".image-list .image-item.is-selected":
+            return self.selected_items
+        if selector == "button":
+            return _Nodes([self.insert_button])
+        raise AssertionError(f"unexpected dialog selector: {selector}")
+
+
+class _UploadDialogs:
+    def __init__(self, page, dialog: _UploadDialog) -> None:
+        self.page = page
+        self.dialog = dialog
+
+    async def count(self) -> int:
+        return 1 if self.page.dialog_visible else 0
+
+    def nth(self, index: int):
+        assert index == 0
+        return self.dialog
+
+
+class _UploadPage:
+    def __init__(self, *, ambiguous_new_items: bool = False) -> None:
+        self.dialog_visible = True
+        self.uploaded = False
+        self.selected = False
+        self.upload_failed = False
+        self.ambiguous_new_items = ambiguous_new_items
+        self.editor_image_count = 2
+        self.dialog = _UploadDialog(self)
+        self.dialogs = _UploadDialogs(self, self.dialog)
+
+    async def evaluate(self, _script: str):
+        return self.editor_image_count
+
+    def locator(self, selector: str):
+        assert selector == ".n-dialog:visible"
+        return self.dialogs
+
+
+def test_weibo_upload_selects_only_the_new_ready_album_item() -> None:
+    page = _UploadPage()
+    trigger = _UiNode("")
+    platform = WeiboPlatform()
+    platform.page = page
+    platform._find_body_image_trigger = AsyncMock(return_value=trigger)
+
+    with patch("platforms.weibo.asyncio.sleep", new=AsyncMock()):
+        result = asyncio.run(platform._upload_image("D:/controlled/third.png"))
+
+    assert result == {"success": True, "error": "", "observed_image_count": 3}
+    page.dialog.input.set_input_files.assert_awaited_once_with(
+        "D:/controlled/third.png",
+        timeout=15000,
+    )
+    page.dialog.items.first.click.assert_awaited_once_with(timeout=5000)
+    page.dialog.insert_button.click.assert_awaited_once_with(timeout=5000)
+
+
+def test_weibo_upload_fails_closed_when_more_than_one_new_item_appears() -> None:
+    page = _UploadPage(ambiguous_new_items=True)
+    trigger = _UiNode("")
+    platform = WeiboPlatform()
+    platform.page = page
+    platform._find_body_image_trigger = AsyncMock(return_value=trigger)
+
+    with patch("platforms.weibo.asyncio.sleep", new=AsyncMock()):
+        result = asyncio.run(platform._upload_image("D:/controlled/third.png"))
+
+    assert result["error_code"] == "WEIBO_BODY_IMAGE_ITEM_COUNT_AMBIGUOUS"
+    page.dialog.input.set_input_files.assert_awaited_once()
+    page.dialog.items.first.click.assert_not_awaited()
+    page.dialog.insert_button.click.assert_not_awaited()
+
+
 def test_weibo_h2_uses_unique_verified_menu_and_checks_dom_tag() -> None:
     trigger = _UiNode("正文")
     option = _UiNode("标题 2")
@@ -281,15 +497,16 @@ class _Response:
 
 
 class _PreflightPage:
-    def __init__(self) -> None:
+    def __init__(self, *, match_count: int = 0) -> None:
         self.goto = AsyncMock()
         self.wait_for_function = AsyncMock()
         self.expression = ""
+        self.match_count = match_count
 
     async def evaluate(self, expression: str, title: str) -> int:
         self.expression = expression
         assert title == "唯一标题"
-        return 0
+        return self.match_count
 
 
 def test_weibo_preflight_keeps_javascript_newline_regex_literal() -> None:
@@ -301,6 +518,105 @@ def test_weibo_preflight_keeps_javascript_newline_regex_literal() -> None:
 
     assert r".split(/\r?\n/, 1)" in page.expression
     assert "\r" not in page.expression
+
+
+class _ResumeField:
+    def __init__(self, title: str) -> None:
+        self.title = title
+
+    async def count(self) -> int:
+        return 1
+
+    async def is_visible(self) -> bool:
+        return True
+
+    async def input_value(self) -> str:
+        return self.title
+
+
+class _ResumeLocator:
+    def __init__(self, node: _ResumeField) -> None:
+        self.first = node
+
+
+class _ResumePage:
+    def __init__(self, *, match_count: int = 1, draft_id: str = "4183864") -> None:
+        self.match_count = match_count
+        self.draft_id = draft_id
+        self.title_field = _ResumeField("唯一标题")
+        self.body = _ResumeField("")
+        self.goto = AsyncMock()
+        self.wait_for_function = AsyncMock()
+        self.wait_for_selector = AsyncMock()
+        self.evaluate_calls = 0
+
+    async def evaluate(self, script: str, argument=None):
+        self.evaluate_calls += 1
+        if "return Array.from" in script and "matches[0].click" not in script:
+            assert argument == "唯一标题"
+            return self.match_count
+        if "matches[0].click" in script:
+            assert argument == "唯一标题"
+            return self.match_count == 1
+        if "location.hash.match" in script:
+            return self.draft_id
+        raise AssertionError("unexpected resume evaluate call")
+
+    def locator(self, selector: str):
+        if selector == "textarea[placeholder='请输入标题']":
+            return _ResumeLocator(self.title_field)
+        if selector == "div.tiptap.ProseMirror:visible":
+            return _ResumeLocator(self.body)
+        raise AssertionError(f"unexpected resume selector: {selector}")
+
+    def get_by_role(self, *_args, **_kwargs):
+        raise AssertionError("恢复现有草稿不得触发写文章按钮")
+
+    def expect_response(self, *_args, **_kwargs):
+        raise AssertionError("恢复现有草稿不得等待 create 请求")
+
+
+def test_weibo_resume_requires_unique_title_and_exact_draft_id() -> None:
+    page = _ResumePage()
+    platform = WeiboPlatform(
+        resume_existing_title="唯一标题",
+        resume_existing_draft_id="4183864",
+    )
+    platform.page = page
+
+    asyncio.run(platform.preflight_delivery("唯一标题"))
+    asyncio.run(platform.navigate_to_editor())
+    asyncio.run(platform.fill_title("唯一标题"))
+
+    assert platform._editing_existing_draft is True
+    assert platform._draft_title_baseline_count == 1
+    assert platform._active_draft_id == "4183864"
+    page.goto.assert_awaited_once()
+
+
+@pytest.mark.parametrize("match_count", [0, 2])
+def test_weibo_resume_rejects_missing_or_ambiguous_title(match_count: int) -> None:
+    page = _PreflightPage(match_count=match_count)
+    platform = WeiboPlatform(
+        resume_existing_title="唯一标题",
+        resume_existing_draft_id="4183864",
+    )
+    platform.page = page
+
+    with pytest.raises(DraftBaselineError, match="标题不唯一"):
+        asyncio.run(platform.preflight_delivery("唯一标题"))
+
+
+def test_weibo_resume_rejects_unexpected_draft_id() -> None:
+    page = _ResumePage(draft_id="4183999")
+    platform = WeiboPlatform(
+        resume_existing_title="唯一标题",
+        resume_existing_draft_id="4183864",
+    )
+    platform.page = page
+
+    with pytest.raises(DraftBaselineError, match="ID"):
+        asyncio.run(platform.preflight_delivery("唯一标题"))
 
 
 class _CreateResponse:
@@ -414,6 +730,8 @@ def test_weibo_media_failure_after_draft_creation_is_result_unknown() -> None:
         asyncio.run(platform.fill_content(blocks, images))
 
     assert caught.value.error_code == "DRAFT_RESULT_UNKNOWN"
+    assert caught.value.media_error_code == "WEIBO_EDITOR_IMAGE_COUNT_UNCHANGED"
+    assert "stage=WEIBO_EDITOR_IMAGE_COUNT_UNCHANGED" in str(caught.value)
     assert caught.value.media_progress == {
         "expected_images": 1,
         "uploaded_images": 0,

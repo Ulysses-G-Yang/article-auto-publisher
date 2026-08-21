@@ -66,10 +66,19 @@ class WeiboPlatform(BasePlatform):
     LOGIN_POLL_ATTEMPTS = 40
     LOGIN_POLL_INTERVAL_SECONDS = 3
 
-    def __init__(self, **kwargs):
+    def __init__(
+        self,
+        *,
+        resume_existing_title: str | None = None,
+        resume_existing_draft_id: str | None = None,
+        **kwargs,
+    ):
         super().__init__(**kwargs)
         self.last_login_error = ""
         self._identity_payload: dict[str, str | int | bool] | None = None
+        self._resume_existing_title = str(resume_existing_title or "").strip()
+        self._resume_existing_draft_id = str(resume_existing_draft_id or "").strip()
+        self._editing_existing_draft = False
         self._preflight_title = ""
         self._active_draft_id = ""
         self._draft_title_baseline_count: int | None = None
@@ -80,6 +89,7 @@ class WeiboPlatform(BasePlatform):
     async def initialize(self):
         await super().initialize()
         self._identity_payload = None
+        self._editing_existing_draft = False
         self._preflight_title = ""
         self._active_draft_id = ""
         self._draft_title_baseline_count = None
@@ -334,7 +344,7 @@ class WeiboPlatform(BasePlatform):
         )
 
     async def preflight_delivery(self, title: str) -> None:
-        """在创建草稿前冻结标题并证明没有同名草稿。"""
+        """冻结标题，并证明新建或显式恢复的唯一草稿基线。"""
 
         self._require_page_alive("微博草稿基线检查")
         expected_title = str(title or "").strip()
@@ -389,12 +399,92 @@ class WeiboPlatform(BasePlatform):
             raise DraftBaselineError(
                 "DRAFT_BASELINE_FAILED: 微博无法确认同名草稿基线"
             ) from exc
+        self._editing_existing_draft = False
+        if self._resume_existing_title:
+            if expected_title != self._resume_existing_title or matches != 1:
+                raise DraftBaselineError(
+                    "DRAFT_BASELINE_FAILED: 微博待恢复草稿标题不唯一或与冻结标题不一致"
+                )
+            await self._open_resumed_draft(expected_title)
+            self._preflight_title = expected_title
+            self._draft_title_baseline_count = 1
+            self._editing_existing_draft = True
+            return
         if matches:
             raise DraftBaselineError(
                 "DRAFT_BASELINE_FAILED: 微博已存在同名草稿，禁止自动重复创建"
             )
         self._preflight_title = expected_title
         self._draft_title_baseline_count = 0
+
+    async def _open_resumed_draft(self, expected_title: str) -> None:
+        """只打开唯一精确标题草稿，并把当前编辑器绑定到预期 draft ID。"""
+
+        clicked = await self.page.evaluate(
+            r"""(title) => {
+                const visible = (node) => {
+                    const rect = node.getBoundingClientRect();
+                    const style = getComputedStyle(node);
+                    return rect.width > 0 && rect.height > 0
+                        && style.display !== 'none' && style.visibility !== 'hidden';
+                };
+                const matches = Array.from(
+                    document.querySelectorAll('.list-item')
+                ).filter((card) => visible(card)
+                    && (card.innerText || '').split(/\r?\n/, 1)[0].trim() === title);
+                if (matches.length !== 1) return false;
+                matches[0].click();
+                return true;
+            }""",
+            expected_title,
+        )
+        if not clicked:
+            raise DraftBaselineError(
+                "DRAFT_BASELINE_FAILED: 微博待恢复草稿无法唯一打开"
+            )
+        await self.page.wait_for_function(
+            r"""() => /^#\/draft\/\d+$/.test(location.hash)
+                && !location.hash.endsWith('/0')""",
+            timeout=20000,
+        )
+        await self.page.wait_for_selector(
+            "textarea[placeholder='请输入标题']",
+            state="visible",
+            timeout=20000,
+        )
+        await self.page.wait_for_selector(
+            BODY_SELECTOR,
+            state="visible",
+            timeout=20000,
+        )
+        draft_id = str(
+            await self.page.evaluate(
+                r"""() => {
+                    const match = location.hash.match(/^#\/draft\/(\d+)$/);
+                    return match ? match[1] : '';
+                }"""
+            )
+            or ""
+        )
+        if not draft_id.isdigit() or int(draft_id) <= 0:
+            raise DraftBaselineError(
+                "DRAFT_BASELINE_FAILED: 微博待恢复草稿 ID 无效"
+            )
+        if (
+            self._resume_existing_draft_id
+            and draft_id != self._resume_existing_draft_id
+        ):
+            raise DraftBaselineError(
+                "DRAFT_BASELINE_FAILED: 微博待恢复草稿 ID 与验收门不一致"
+            )
+        title_field = self.page.locator(
+            "textarea[placeholder='请输入标题']"
+        ).first
+        if str(await title_field.input_value()).strip() != expected_title:
+            raise DraftBaselineError(
+                "DRAFT_BASELINE_FAILED: 微博待恢复草稿标题回读不一致"
+            )
+        self._active_draft_id = draft_id
 
     async def navigate_to_editor(self):
         """打开微博头条文章编辑器：草稿箱视图 → 真实点击「写文章」。
@@ -404,6 +494,9 @@ class WeiboPlatform(BasePlatform):
         id 为空、服务端返回参数错误）。创建后标题/正文字段即可填写。
         """
         self._require_page_alive("微博打开编辑器")
+        if self._editing_existing_draft:
+            await self._verify_current_resumed_draft()
+            return
         if not self._preflight_title or self._draft_title_baseline_count != 0:
             raise DraftBaselineError(
                 "DRAFT_BASELINE_FAILED: 微博缺少唯一标题草稿基线"
@@ -543,6 +636,43 @@ class WeiboPlatform(BasePlatform):
                 ) from exc
             raise SelectorError("微博头条文章编辑器未找到标题输入框") from exc
 
+    async def _verify_current_resumed_draft(self) -> None:
+        """任何覆盖写入前再次证明页面仍是验收门绑定的那一篇草稿。"""
+
+        expected_id = self._active_draft_id
+        if (
+            not self._preflight_title
+            or self._draft_title_baseline_count != 1
+            or not expected_id.isdigit()
+        ):
+            raise DraftBaselineError(
+                "DRAFT_BASELINE_FAILED: 微博现有草稿恢复基线不完整"
+            )
+        current_id = str(
+            await self.page.evaluate(
+                r"""() => {
+                    const match = location.hash.match(/^#\/draft\/(\d+)$/);
+                    return match ? match[1] : '';
+                }"""
+            )
+            or ""
+        )
+        title_field = self.page.locator(
+            "textarea[placeholder='请输入标题']"
+        ).first
+        editor = self.page.locator(BODY_SELECTOR).first
+        if (
+            current_id != expected_id
+            or await title_field.count() != 1
+            or not await title_field.is_visible()
+            or str(await title_field.input_value()).strip() != self._preflight_title
+            or await editor.count() != 1
+            or not await editor.is_visible()
+        ):
+            raise DraftBaselineError(
+                "DRAFT_BASELINE_FAILED: 微博当前页面不是验收门绑定的现有草稿"
+            )
+
     async def fill_title(self, title: str):
         """填写微博头条文章标题（textarea，placeholder「请输入标题」，0/32）。"""
 
@@ -552,6 +682,9 @@ class WeiboPlatform(BasePlatform):
             raise DraftBaselineError(
                 "DRAFT_BASELINE_FAILED: 微博标题与预检冻结标题不一致"
             )
+        if self._editing_existing_draft:
+            await self._verify_current_resumed_draft()
+            return
         title_field = self.page.locator("textarea[placeholder='请输入标题']").first
         try:
             if await title_field.count() == 0 or not await title_field.is_visible():
@@ -586,10 +719,15 @@ class WeiboPlatform(BasePlatform):
         except Exception as exc:
             if not self._active_draft_id:
                 raise
-            error = DraftResultUnknownError(
-                "DRAFT_RESULT_UNKNOWN: 微博新草稿已创建但正文未完整验证，"
-                "平台可能已自动保存部分内容，禁止重试"
+            media_error_code = str(
+                getattr(exc, "media_error_code", "WEIBO_CONTENT_WRITE_FAILED")
             )
+            error = DraftResultUnknownError(
+                "DRAFT_RESULT_UNKNOWN: 微博当前草稿正文未完整验证，"
+                "平台可能已自动保存部分内容，禁止重试；"
+                f"stage={media_error_code}"
+            )
+            error.media_error_code = media_error_code
             self._attach_media_progress(error)
             raise error from exc
 
@@ -598,6 +736,8 @@ class WeiboPlatform(BasePlatform):
 
         self._require_page_alive("微博填写正文")
         expected_images = self._validate_delivery_blocks(content_blocks, images)
+        if self._editing_existing_draft:
+            await self._verify_current_resumed_draft()
         self._media_progress_state = {
             "expected_images": expected_images,
             "uploaded_images": 0,
@@ -702,9 +842,11 @@ class WeiboPlatform(BasePlatform):
                     uploaded_images,
                     len(failed_images),
                 )
+                media_error_code = str(failed_images[-1]["error_code"])
                 error = ContentValidationError(
                     "WEIBO_MEDIA_INCOMPLETE: 微博正文图片未完整写入，已停止且禁止自动重试"
                 )
+                error.media_error_code = media_error_code
                 self._attach_media_progress(error)
                 raise error
             uploaded_images += 1
@@ -1166,6 +1308,19 @@ class WeiboPlatform(BasePlatform):
                     "error": "微博正文图片弹窗不存在或不唯一",
                 }
             dialog = dialog_matches[0]
+            try:
+                await dialog.locator(".n-spin-body").first.wait_for(
+                    state="hidden",
+                    timeout=15000,
+                )
+            except Exception as exc:
+                if self._exception_means_browser_closed(exc):
+                    raise
+                return {
+                    "success": False,
+                    "error_code": "WEIBO_BODY_IMAGE_LIBRARY_UNSTABLE",
+                    "error": "微博图片库初始加载未完成",
+                }
             inputs = dialog.locator("input[type=file]")
             if await inputs.count() != 1:
                 return {
@@ -1189,7 +1344,108 @@ class WeiboPlatform(BasePlatform):
                     "error_code": "WEIBO_BODY_IMAGE_INPUT_INVALID",
                     "error": "微博正文图片文件控件类型无法确认",
                 }
+
+            # 微博当前 AlbumList 会异步加载账号图片库。必须先得到稳定基线，
+            # 再以“恰好多出一个新 item”证明后续点击的是本次上传，而不是旧图。
+            image_items = dialog.locator(".image-list .image-item")
+            baseline_count = None
+            previous_count = None
+            stable_reads = 0
+            for _ in range(20):
+                observed_count = await image_items.count()
+                if observed_count == previous_count:
+                    stable_reads += 1
+                else:
+                    previous_count = observed_count
+                    stable_reads = 1
+                if stable_reads >= 3:
+                    baseline_count = observed_count
+                    break
+                await asyncio.sleep(0.25)
+            if baseline_count is None:
+                return {
+                    "success": False,
+                    "error_code": "WEIBO_BODY_IMAGE_LIBRARY_UNSTABLE",
+                    "error": "微博图片库基线无法稳定确认",
+                }
             await body_input.set_input_files(str(image_path), timeout=15000)
+
+            # 2026-08-21 当前官方编辑器逻辑：上传成功只会新增 image-item，
+            # 还必须点中该项（class=is-selected）才会启用“插入”。官方上传
+            # 请求自身允许 120 秒；这里只等待同一次上传完成，绝不重试选文件。
+            uploaded_item = None
+            for _ in range(240):
+                observed_count = await image_items.count()
+                if observed_count > baseline_count + 1:
+                    return {
+                        "success": False,
+                        "error_code": "WEIBO_BODY_IMAGE_ITEM_COUNT_AMBIGUOUS",
+                        "error": "微博图片库出现多个无法归属本次上传的新条目",
+                    }
+                if observed_count == baseline_count + 1:
+                    candidate = image_items.first
+                    upload_state = await candidate.evaluate(
+                        """item => {
+                            const image = item.querySelector('img');
+                            const source = image
+                                ? (image.currentSrc || image.getAttribute('src') || '')
+                                : '';
+                            const failed = (item.innerText || '').includes('上传失败');
+                            const spinner = item.querySelector(
+                                '.n-spin, .n-spin-body, .n-spin-content, [class*=loading]'
+                            );
+                            return {
+                                failed,
+                                ready: Boolean(
+                                    image && !failed && !spinner
+                                    && !source.startsWith('blob:')
+                                    && /^https?:/i.test(source)
+                                    && image.complete && image.naturalWidth > 0
+                                ),
+                            };
+                        }"""
+                    )
+                    if isinstance(upload_state, dict) and upload_state.get("failed"):
+                        return {
+                            "success": False,
+                            "error_code": "WEIBO_BODY_IMAGE_UPLOAD_REJECTED",
+                            "error": "微博图片库明确报告本次图片上传失败",
+                        }
+                    if isinstance(upload_state, dict) and upload_state.get("ready"):
+                        uploaded_item = candidate
+                        break
+                await asyncio.sleep(0.5)
+            if uploaded_item is None:
+                return {
+                    "success": False,
+                    "error_code": "WEIBO_BODY_IMAGE_UPLOAD_TIMEOUT",
+                    "error": "微博图片在单次上传等待窗口内未完成",
+                }
+
+            selected_items = dialog.locator(".image-list .image-item.is-selected")
+            if await selected_items.count() != 0:
+                return {
+                    "success": False,
+                    "error_code": "WEIBO_BODY_IMAGE_SELECTION_DIRTY",
+                    "error": "微博图片弹窗在选择前存在无法归属的旧选中项",
+                }
+            await uploaded_item.click(timeout=5000)
+            selection_confirmed = False
+            for _ in range(20):
+                if await selected_items.count() == 1:
+                    selected_class = str(
+                        await uploaded_item.get_attribute("class") or ""
+                    )
+                    if "is-selected" in selected_class.split():
+                        selection_confirmed = True
+                        break
+                await asyncio.sleep(0.25)
+            if not selection_confirmed:
+                return {
+                    "success": False,
+                    "error_code": "WEIBO_BODY_IMAGE_SELECTION_FAILED",
+                    "error": "微博本次新上传图片未形成唯一选中状态",
+                }
 
             insert_button = None
             for _ in range(30):
@@ -1216,6 +1472,18 @@ class WeiboPlatform(BasePlatform):
                     "error": "微博正文图片上传后唯一插入按钮未就绪",
                 }
             await insert_button.click(timeout=5000)
+            dialog_closed = False
+            for _ in range(20):
+                if await dialogs.count() == 0:
+                    dialog_closed = True
+                    break
+                await asyncio.sleep(0.25)
+            if not dialog_closed:
+                return {
+                    "success": False,
+                    "error_code": "WEIBO_BODY_IMAGE_DIALOG_DID_NOT_CLOSE",
+                    "error": "微博插入图片后弹窗未关闭",
+                }
             after = before
             for _ in range(10):
                 await asyncio.sleep(1)
@@ -1369,10 +1637,11 @@ class WeiboPlatform(BasePlatform):
 
         self._require_page_alive("微博保存草稿")
         expected_title = str(title or "").strip()
+        expected_baseline_count = 1 if self._editing_existing_draft else 0
         if (
             not expected_title
             or expected_title != self._preflight_title
-            or self._draft_title_baseline_count != 0
+            or self._draft_title_baseline_count != expected_baseline_count
         ):
             raise DraftBaselineError(
                 "DRAFT_BASELINE_FAILED: 微博缺少与本次一致的唯一标题基线"

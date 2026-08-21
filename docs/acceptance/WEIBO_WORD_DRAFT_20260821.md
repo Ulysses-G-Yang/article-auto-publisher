@@ -118,3 +118,23 @@ Content Studio 成功冻结了 29 个有序块和 7 张图片。微博创建接�
 结论：本指定 Word 在微博账号“天上的羊咩咩”上的“原草稿覆盖 → 7 图/5 H2 完整
 写入 → 保存一次 → 重开同一实体验证”P0 链路真实验收通过。生产平台目录是否正式
 启用微博投递，应在合并本分支并更新发布包时单独处理，不与本次真实平台副作用混做。
+
+## 标准 Content Studio 流程复验与生产晋级
+
+适配器级原草稿覆盖通过后，又使用正式 Content Studio API 完成了一次独立的
+端到端复验，确认不是验收脚本特例：
+
+- 源文件 SHA-256：`82fca555865565400edf0481ac9753a10fd241edb4f2dfe`（截断展示）。
+- 冻结内容：30 个 canonical document block、7 张正文图片、5 个 H2；封面策略
+  为 `NONE`。
+- ContentDraft：`0da141ce-…`；DeliveryPlan：`a9acf3a0-…`。
+- DeliveryOperation：`8fc72c71-…`，只执行一次，最终状态 `DRAFT_SAVED`。
+- 微博返回唯一新云端草稿 ID `4184233`，保存接口 HTTP 200、业务 code `100000`。
+- 计划最终状态 `SUCCESS`，文章映射审计状态 `SUCCEEDED`。
+- 适配器在保存后重开同一 draft ID，再次通过 22 个文本段落、7 张语义正文图、
+  5 个 H2 及完整顺序校验。
+- `PUBLISH_AFTER_DRAFT` 与 `ACCOUNT_SESSIONS_ALLOW_PUBLIC_PUBLISH` 全程关闭；没有
+  公开发布请求，也没有失败后的自动重试。
+
+基于上述双重证据，微博从 v0.4.3 起进入生产草稿投递目录，格式能力只声明
+`heading(H2)` 与 `image_order`。公开发布仍保持关闭，且 `publish_now()` 继续拒绝执行。

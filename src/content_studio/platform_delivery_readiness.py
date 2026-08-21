@@ -1,4 +1,4 @@
-"""五个平台真实投递就绪度的只读证据清单。
+"""六个平台真实投递就绪度的只读证据清单。
 
 本模块只描述已发生的验收事实，不参与账号选择、投递编排或平台适配器执行。
 尤其要区分“代码存在”“单元测试通过”和“真实平台验收通过”：默认清单只把
@@ -63,6 +63,8 @@ _ZHIHU_WORD_EVIDENCE = (
     "docs/acceptance/ZHIHU_WORD_DRAFT_20260819.md",
     "codex_handoff_20260817.md",
 )
+_WEIBO_WORD_DATE = date(2026, 8, 21)
+_WEIBO_WORD_EVIDENCE = ("docs/acceptance/WEIBO_WORD_DRAFT_20260821.md",)
 _SMZDM_WORD_DATE = date(2026, 8, 19)
 _SMZDM_WORD_EVIDENCE = (
     "docs/acceptance/SMZDM_WORD_DRAFT_20260819.md",
@@ -353,6 +355,47 @@ PLATFORM_DELIVERY_READINESS: tuple[PlatformDeliveryReadiness, ...] = (
                 "unique_api_draft_id_and_29_ordered_tokens_reopened",
                 _ZHIHU_WORD_DATE,
                 _ZHIHU_WORD_EVIDENCE,
+            ),
+        },
+    ),
+    _build_platform(
+        "weibo",
+        facet_overrides={
+            "account_session": (
+                ReadinessStatus.REAL_VERIFIED,
+                "account_active_valid_during_standard_content_studio_acceptance",
+                _WEIBO_WORD_DATE,
+                _WEIBO_WORD_EVIDENCE,
+            ),
+            "editor_entry": (
+                ReadinessStatus.REAL_VERIFIED,
+                "real_weibo_longform_editor_entry_passed",
+                _WEIBO_WORD_DATE,
+                _WEIBO_WORD_EVIDENCE,
+            ),
+            "text_draft": (
+                ReadinessStatus.REAL_VERIFIED,
+                "real_reopen_verified_22_text_blocks_and_5_h2",
+                _WEIBO_WORD_DATE,
+                _WEIBO_WORD_EVIDENCE,
+            ),
+            "body_images": (
+                ReadinessStatus.REAL_VERIFIED,
+                "real_reopen_verified_7_semantic_ordered_body_images",
+                _WEIBO_WORD_DATE,
+                _WEIBO_WORD_EVIDENCE,
+            ),
+            "cover": (
+                ReadinessStatus.NOT_APPLICABLE,
+                "cover_none_is_valid_for_current_weibo_longform_draft_contract",
+                _WEIBO_WORD_DATE,
+                _WEIBO_WORD_EVIDENCE,
+            ),
+            "draft_verification": (
+                ReadinessStatus.REAL_VERIFIED,
+                "standard_plan_unique_cloud_draft_id_and_reopen_verified",
+                _WEIBO_WORD_DATE,
+                _WEIBO_WORD_EVIDENCE,
             ),
         },
     ),

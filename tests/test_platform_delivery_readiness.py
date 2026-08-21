@@ -30,6 +30,7 @@ EXPECTED_PLATFORMS = (
     "xiaoheihe",
     "zol",
     "zhihu",
+    "weibo",
     "smzdm",
     "baijiahao",
 )
@@ -171,6 +172,25 @@ def test_smzdm_word_draft_is_promoted_only_after_persisted_reopen_evidence() -> 
     assert not can_run_complete_word_draft("smzdm")
 
 
+def test_weibo_word_draft_is_promoted_after_standard_plan_reopen_evidence() -> None:
+    record = readiness_by_platform()["weibo"]
+    for facet_name in (
+        "account_session",
+        "editor_entry",
+        "text_draft",
+        "body_images",
+        "draft_verification",
+    ):
+        facet = record.facets[facet_name]
+        assert facet.status is ReadinessStatus.REAL_VERIFIED
+        assert facet.last_real_check.isoformat() == "2026-08-21"
+        assert "WEIBO_WORD_DRAFT_20260821.md" in " ".join(facet.evidence_refs)
+
+    assert record.facets["cover"].status is ReadinessStatus.NOT_APPLICABLE
+    assert can_run_stable_image_draft("weibo")
+    assert can_run_complete_word_draft("weibo")
+
+
 def test_baijiahao_word_draft_is_promoted_after_persisted_reopen_evidence() -> None:
     record = readiness_by_platform()["baijiahao"]
     for facet_name in (
@@ -200,6 +220,7 @@ def test_baijiahao_word_draft_is_promoted_after_persisted_reopen_evidence() -> N
         ("zhihu", True),
         ("xiaoheihe", True),
         ("zol", True),
+        ("weibo", True),
         ("smzdm", True),
         ("baijiahao", True),
         ("xiaohongshu", False),
@@ -215,10 +236,11 @@ def test_can_run_stable_image_draft_is_read_only_evidence_computation(
 
 def test_can_run_complete_word_draft_requires_real_cover_evidence() -> None:
     assert can_run_complete_word_draft("baijiahao")
+    assert can_run_complete_word_draft("weibo")
     assert all(
         not can_run_complete_word_draft(platform)
         for platform in EXPECTED_PLATFORMS
-        if platform != "baijiahao"
+        if platform not in {"baijiahao", "weibo"}
     )
     # 知乎已通过稳定带图草稿，但封面没有真实验收，不能宣称完整 Word 闭环完成。
     assert readiness_by_platform()["zhihu"].facets["cover"].status is (

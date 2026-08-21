@@ -1,8 +1,8 @@
 """Content Studio 的平台格式能力声明。
 
 能力声明是投递安全边界的一部分：只有真实页面和适配器证据才能晋级 v2
-富文档能力。当前小黑盒已通过真实输入规则证明正文 H2/H3；其他标题层级、
-列表、表格等能力仍未声明。未知平台没有声明时必须保持 fail-closed。
+富文档能力。当前小黑盒已证明正文 H2/H3；微博及其余已启用平台仅声明
+真实重开证据覆盖的 H2 和图片顺序。其他能力仍保持 fail-closed。
 """
 
 from __future__ import annotations
@@ -17,6 +17,7 @@ DELIVERY_PLATFORMS = (
     "xiaoheihe",
     "zol",
     "zhihu",
+    "weibo",
     "smzdm",
     "baijiahao",
 )
@@ -103,7 +104,9 @@ class PlatformFormatCapabilities:
 # 2026-08-19：小黑盒、ZOL、知乎、什么值得买与百家号均已用同一份 v2 Word
 # 内容完成交错插图、标题映射和保存后重开 DOM 核验。ZOL 的独立重开证据
 # 为 22 个文字/章节块、7 张图片与 29 个有序 DOM token 完全一致。未证明的
-# heading level 仍保持关闭。小红书曾通过同一 Profile 的本地卡片重开，
+# heading level 仍保持关闭。2026-08-21 微博又通过标准 Content Studio 流程
+# 完成 22 个文本段落、7 张语义正文图、5 个 H2 和唯一云端草稿重开核验。
+# 小红书曾通过同一 Profile 的本地卡片重开，
 # 但 2026-08-21 跨浏览器复核证明该卡片不是云端草稿，已退出投递注册表。
 DEFAULT_PLATFORM_FORMAT_CAPABILITIES = PlatformFormatCapabilities(
     {
@@ -119,6 +122,11 @@ DEFAULT_PLATFORM_FORMAT_CAPABILITIES = PlatformFormatCapabilities(
         ),
         "zhihu": PlatformFormatDeclaration(
             "zhihu",
+            frozenset({"heading", "image_order"}),
+            frozenset({2}),
+        ),
+        "weibo": PlatformFormatDeclaration(
+            "weibo",
             frozenset({"heading", "image_order"}),
             frozenset({2}),
         ),

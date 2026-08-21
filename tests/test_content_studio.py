@@ -327,6 +327,11 @@ def test_default_capabilities_match_real_platform_evidence() -> None:
         "image_order",
     }
     assert DEFAULT_PLATFORM_FORMAT_CAPABILITIES.get("zhihu").heading_levels == {2}
+    assert DEFAULT_PLATFORM_FORMAT_CAPABILITIES.get("weibo").supported == {
+        "heading",
+        "image_order",
+    }
+    assert DEFAULT_PLATFORM_FORMAT_CAPABILITIES.get("weibo").heading_levels == {2}
     assert DEFAULT_PLATFORM_FORMAT_CAPABILITIES.get("smzdm").supported == {
         "heading",
         "image_order",
@@ -343,6 +348,7 @@ def test_default_capabilities_match_real_platform_evidence() -> None:
             "xiaoheihe",
             "zol",
             "zhihu",
+            "weibo",
             "smzdm",
             "baijiahao",
         }:
@@ -1249,7 +1255,7 @@ def test_format_review_target_does_not_reopen_when_capability_changes(
     run(account_db.dispose())
 
 
-def test_v2_undeclared_weibo_target_is_reviewed_and_never_executed(
+def test_v2_verified_weibo_target_is_ready_and_can_queue_draft(
     tmp_path: Path,
 ) -> None:
     account_db = AccountDatabase(sqlite_url(tmp_path / "accounts.db"))
@@ -1273,15 +1279,18 @@ def test_v2_undeclared_weibo_target_is_reviewed_and_never_executed(
             session.add(account)
         await service.initialize()
         draft = await service.create_draft(
-            CreateDraftRequest(title="微博未声明", blocks=[])
+            CreateDraftRequest(title="微博格式已验证", blocks=[])
         )
         current = await service.patch_draft(
             draft["draft_id"],
             PatchDraftRequest(
                 revision=draft["revision"],
-                title="微博未声明",
+                title="微博格式已验证",
                 content_schema_version=2,
-                document=delivery_v2_document("微博未声明"),
+                document=delivery_v2_document(
+                    "微博格式已验证",
+                    body_heading=True,
+                ),
             ),
         )
         current = await service.replace_targets(
@@ -1305,8 +1314,8 @@ def test_v2_undeclared_weibo_target_is_reviewed_and_never_executed(
     plan = run(scenario())
     target = plan["targets"][0]
     assert target["platform"] == "weibo"
-    assert target["status"] == "FORMAT_REVIEW_REQUIRED"
-    assert target["error_code"] == "PLATFORM_FORMAT_CAPABILITIES_UNDECLARED"
+    assert target["status"] == "READY"
+    assert target["error_code"] is None
 
     fake_state = FakeAccountState(accounts, delivery)
     from content_studio.contracts import ExecuteDeliveryPlanRequest
@@ -1322,9 +1331,10 @@ def test_v2_undeclared_weibo_target_is_reviewed_and_never_executed(
             LOCAL_WEB_CONTEXT,
         )
     )
-    assert delivery.calls == []
-    assert result["targets"][0]["operation_id"] is None
-    assert result["targets"][0]["status"] == "FORMAT_REVIEW_REQUIRED"
+    assert len(delivery.calls) == 1
+    assert delivery.calls[0][0].platform == "weibo"
+    assert result["targets"][0]["operation_id"] is not None
+    assert result["targets"][0]["status"] == "QUEUED"
     run(service.database.dispose())
     run(account_db.dispose())
 

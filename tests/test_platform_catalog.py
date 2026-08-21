@@ -55,12 +55,13 @@ def test_platform_catalog_freezes_public_capability_contract() -> None:
         "xiaohongshu",
         "douyin",
     )
-    # weibo 曾误触发公开发布，投递已停用（account 可用，delivery 关闭），
-    # 修复并通过真实验收后才允许重新加入 DELIVERY_ENABLED_PLATFORMS。
+    # 微博已完成公开发布旁路保护、完整 Word 草稿重开和标准计划真实验收；
+    # 只开放草稿能力，公开发布仍由独立总开关保持关闭。
     assert DELIVERY_ENABLED_PLATFORMS == (
         "xiaoheihe",
         "zol",
         "zhihu",
+        "weibo",
         "smzdm",
         "baijiahao",
     )
@@ -77,7 +78,7 @@ def test_platform_catalog_freezes_public_capability_contract() -> None:
     assert by_id["xiaohongshu"].delivery_enabled is False
     assert by_id["weibo"].status == "AVAILABLE"
     assert by_id["weibo"].account_enabled is True
-    assert by_id["weibo"].delivery_enabled is False
+    assert by_id["weibo"].delivery_enabled is True
     assert by_id["baijiahao"].status == "AVAILABLE"
     assert by_id["baijiahao"].account_enabled is True
     assert by_id["baijiahao"].delivery_enabled is True

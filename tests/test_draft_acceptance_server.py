@@ -110,7 +110,7 @@ def test_xiaohongshu_local_resume_is_not_an_acceptance_escape_hatch() -> None:
         )
 
 
-def test_weibo_acceptance_is_process_local_and_production_stays_disabled() -> None:
+def test_weibo_acceptance_uses_the_promoted_production_capability() -> None:
     app = acceptance.build_acceptance_app(("weibo",), "DRAFT_ONLY")
     registry = app.extensions["content_studio"].service.platform_format_capabilities
 
@@ -118,11 +118,11 @@ def test_weibo_acceptance_is_process_local_and_production_stays_disabled() -> No
     assert declaration.supported == frozenset({"heading", "image_order"})
     assert declaration.heading_levels == frozenset({2})
     assert registry.get("xiaoheihe").supported == frozenset()
-    assert DEFAULT_PLATFORM_FORMAT_CAPABILITIES.get("weibo") is None
+    assert DEFAULT_PLATFORM_FORMAT_CAPABILITIES.get("weibo") == declaration
 
     production_weibo = next(item for item in PLATFORM_CATALOG if item.id == "weibo")
     assert production_weibo.account_enabled is True
-    assert production_weibo.delivery_enabled is False
+    assert production_weibo.delivery_enabled is True
 
 
 def test_weibo_resume_identity_is_isolated_to_acceptance_factory() -> None:

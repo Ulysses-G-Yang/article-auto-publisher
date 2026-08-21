@@ -383,7 +383,7 @@ def test_delivery_projection_preserves_heading_levels_and_inline_image_order() -
     ]
 
 
-def test_delivery_projection_accepts_matching_word_heading_style_only() -> None:
+def test_delivery_projection_accepts_matching_or_normalized_heading_style() -> None:
     document = {
         "schema_version": 2,
         "title": "标题",
@@ -415,6 +415,13 @@ def test_delivery_projection_accepts_matching_word_heading_style_only() -> None:
     }
 
     assert project_to_delivery_blocks(document) == [
+        {"type": "heading", "text": "章节二", "position": 0, "level": 2},
+        {"type": "heading", "text": "章节三", "position": 1, "level": 3},
+    ]
+
+    legacy_inferred = json.loads(json.dumps(document))
+    legacy_inferred["blocks"][1]["style_name"] = "Normal"
+    assert project_to_delivery_blocks(legacy_inferred) == [
         {"type": "heading", "text": "章节二", "position": 0, "level": 2},
         {"type": "heading", "text": "章节三", "position": 1, "level": 3},
     ]

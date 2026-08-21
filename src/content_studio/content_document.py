@@ -1104,10 +1104,12 @@ def project_to_delivery_blocks(
             style_name = block.get("style_name")
             if kind == "heading":
                 # python-docx/Word 的 Heading 2/3 样式是标题层级的来源
-                # 证据，不是额外的段落样式能力。只允许它与 canonical
-                # level 精确对应；其他自定义/错配样式仍然 fail-closed。
+                # 证据，不是额外的段落样式能力。自动视觉标题归一化前的旧
+                # 冻结版本可能仍携带 neutral ``Normal`` 来源样式；canonical
+                # heading level 已单独通过格式能力门，因此允许这一兼容值。
+                # 其他自定义或错配 Heading 样式继续 fail-closed。
                 expected_style = f"Heading {level}"
-                if style_name not in (None, expected_style):
+                if style_name not in (None, "Normal", expected_style):
                     raise ContentDocumentValidationError(
                         "平台投影不支持与标题层级不匹配的段落样式；必须先通过格式能力门禁"
                     )

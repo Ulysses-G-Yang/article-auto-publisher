@@ -17,7 +17,11 @@ from docx.shared import Inches, Pt
 from PIL import Image
 
 from content_studio.assets import AssetStore
-from content_studio.content_document import delivery_features, delivery_heading_levels
+from content_studio.content_document import (
+    delivery_features,
+    delivery_heading_levels,
+    project_to_delivery_blocks,
+)
 from content_studio.errors import ContentAssetError
 from content_studio.importers import DocxImportAdapter
 from content_studio.platform_format_capabilities import (
@@ -245,6 +249,7 @@ def test_parser_v2_promotes_only_strong_visual_heading_evidence(
     heading = blocks_by_text["视觉二级标题"]
     assert heading["kind"] == "heading"
     assert heading["level"] == 2
+    assert "style_name" not in heading
     assert "marks" not in heading["children"][0]
 
     callout = blocks_by_text["同字号粗体提示不能冒充标题"]
@@ -281,6 +286,20 @@ def test_visual_heading_normalization_unblocks_verified_zol_contract(
     assert delivery_heading_levels(document) == frozenset({2})
     assert delivery_features(document) - declaration.supported == set()
     assert delivery_heading_levels(document) - declaration.heading_levels == set()
+    projected = project_to_delivery_blocks(document)
+    assert [block["type"] for block in projected] == [
+        "text",
+        "image",
+        "heading",
+        "text",
+        "image",
+    ]
+    assert projected[2] == {
+        "type": "heading",
+        "text": "视觉二级标题",
+        "position": 2,
+        "level": 2,
+    }
 
 
 def test_importer_resolves_assets_before_validation_and_projects_order(tmp_path: Path) -> None:

@@ -74,6 +74,8 @@ class SmzdmPlatform(BasePlatform):
         self._expected_persisted_blocks: list[dict] | None = None
         self._media_progress_state: dict[str, int] | None = None
         self._pending_cover_path = ""
+        self._preflight_title = ""
+        self._preflight_draft_ids: frozenset[str] | None = None
 
     async def initialize(self):
         await super().initialize()
@@ -1242,8 +1244,24 @@ class SmzdmPlatform(BasePlatform):
             "selection": {},
         }
 
+    async def preflight_delivery(self, title: str) -> None:
+        """在写入编辑器前冻结草稿箱实体基线。
+
+        什么值得买允许同名草稿，因此不能再用标题唯一性证明本次副作用。
+        这里记录所有可验证的 ``/edit/{draft_id}``，保存后只认唯一新增 ID。
+        """
+
+        expected_title = " ".join(str(title or "").split())
+        if not expected_title:
+            raise DraftResultUnknownError(
+                "DRAFT_BASELINE_UNAVAILABLE: smzdm 缺少可核验标题"
+            )
+        entities = await self._load_draft_entities_once()
+        self._preflight_title = expected_title
+        self._preflight_draft_ids = frozenset(entities)
+
     async def save_draft(self, title: str = "") -> str:
-        """强制刷新自动保存，定位唯一草稿实体并重开核验完整图文。"""
+        """强制刷新自动保存，按实体 ID 差集定位并重开核验完整图文。"""
 
         self._require_page_alive("smzdm 保存草稿")
         expected_title = " ".join(str(title or "").split())
@@ -1254,6 +1272,13 @@ class SmzdmPlatform(BasePlatform):
         if self._expected_persisted_blocks is None:
             raise DraftResultUnknownError(
                 "DRAFT_RESULT_UNKNOWN: smzdm 缺少冻结内容核验快照"
+            )
+        if (
+            self._preflight_draft_ids is None
+            or self._preflight_title != expected_title
+        ):
+            raise DraftResultUnknownError(
+                "DRAFT_BASELINE_UNAVAILABLE: smzdm 缺少与本次一致的草稿 ID 基线"
             )
         captured: dict = {}
 
@@ -1310,7 +1335,7 @@ class SmzdmPlatform(BasePlatform):
                 "DRAFT_RESULT_UNKNOWN: smzdm 本次未捕获到成功自动保存响应"
             )
         try:
-            edit_url = await self._find_unique_exact_draft(expected_title)
+            edit_url = await self._find_unique_new_draft()
             await self._verify_persisted_draft(expected_title, edit_url)
             return edit_url
         except DraftResultUnknownError:
@@ -1324,53 +1349,74 @@ class SmzdmPlatform(BasePlatform):
                 "DRAFT_RESULT_UNKNOWN: smzdm 持久化草稿核验失败"
             ) from exc
 
-    async def _find_unique_exact_draft(self, expected_title: str) -> str:
+    @staticmethod
+    def _validated_draft_entity(raw_url: str) -> tuple[str, str]:
+        """返回安全的 ``(draft_id, canonical_url)``，拒绝跨域和带参数地址。"""
+
+        edit_url = urljoin(DRAFTS_URL, str(raw_url or ""))
+        parts = urlsplit(edit_url)
+        match = re.fullmatch(r"/edit/([A-Za-z0-9_-]{1,128})", parts.path)
+        if (
+            parts.scheme != "https"
+            or parts.netloc != "post.smzdm.com"
+            or parts.username is not None
+            or parts.password is not None
+            or parts.query
+            or parts.fragment
+            or match is None
+        ):
+            raise DraftResultUnknownError(
+                "DRAFT_RESULT_UNKNOWN: smzdm 草稿实体编辑地址无效"
+            )
+        draft_id = match.group(1)
+        return draft_id, f"https://post.smzdm.com/edit/{draft_id}"
+
+    async def _load_draft_entities_once(
+        self,
+        *,
+        wait_for_new_ids: frozenset[str] | None = None,
+    ) -> dict[str, str]:
+        """只导航一次草稿箱，在当前 DOM 内等待实体集合稳定。"""
+
         try:
             await self.page.goto(
                 DRAFTS_URL,
                 wait_until="domcontentloaded",
                 timeout=30000,
             )
-            matches: list[str] = []
-            for attempt in range(5):
-                await self.simulator.random_delay(2, 4)
-                matches = await self.page.evaluate(
-                    """title => Array.from(document.querySelectorAll('.draft-list li'))
-                        .map(item => {
-                            const titleLink = item.querySelector('a.sub-title');
-                            const editLink = Array.from(item.querySelectorAll('a'))
-                                .find(link => (link.innerText || '').trim() === '继续编辑');
-                            return {
-                                title: (titleLink?.textContent || '').trim(),
-                                href: editLink?.href || ''
-                            };
-                        })
-                        .filter(item => item.title === title && item.href)
-                        .map(item => item.href)""",
-                    expected_title,
+            previous_ids: frozenset[str] | None = None
+            stable_samples = 0
+            latest: dict[str, str] = {}
+            for attempt in range(20):
+                raw_urls = await self.page.evaluate(
+                    """() => Array.from(document.querySelectorAll('.draft-list li'))
+                        .map(item => Array.from(item.querySelectorAll('a'))
+                            .find(link => (link.innerText || '').trim() === '继续编辑')
+                            ?.href || '')
+                        .filter(Boolean)"""
                 )
-                if len(matches) == 1:
-                    break
-                if attempt + 1 < 5:
-                    await self.page.reload(
-                        wait_until="domcontentloaded",
-                        timeout=30000,
-                    )
-            if len(matches) != 1:
-                raise DraftResultUnknownError(
-                    "DRAFT_RESULT_UNKNOWN: smzdm 未找到标题精确匹配的唯一草稿"
+                if not isinstance(raw_urls, list):
+                    raw_urls = []
+                latest = {}
+                for raw_url in raw_urls:
+                    draft_id, edit_url = self._validated_draft_entity(raw_url)
+                    latest[draft_id] = edit_url
+
+                current_ids = frozenset(latest)
+                has_new_entity = (
+                    wait_for_new_ids is None
+                    or bool(current_ids - wait_for_new_ids)
                 )
-            edit_url = urljoin(DRAFTS_URL, matches[0])
-            parts = urlsplit(edit_url)
-            if (
-                parts.scheme != "https"
-                or parts.netloc != "post.smzdm.com"
-                or not re.fullmatch(r"/edit/[A-Za-z0-9_-]{1,128}", parts.path)
-            ):
-                raise DraftResultUnknownError(
-                    "DRAFT_RESULT_UNKNOWN: smzdm 草稿实体编辑地址无效"
-                )
-            return edit_url
+                if current_ids == previous_ids and has_new_entity:
+                    stable_samples += 1
+                else:
+                    stable_samples = 0
+                if stable_samples >= 1:
+                    return latest
+                previous_ids = current_ids
+                if attempt + 1 < 20:
+                    await asyncio.sleep(0.5)
+            return latest
         except DraftResultUnknownError:
             raise
         except Exception as exc:
@@ -1381,6 +1427,22 @@ class SmzdmPlatform(BasePlatform):
             raise DraftResultUnknownError(
                 "DRAFT_RESULT_UNKNOWN: smzdm 草稿实体查询失败"
             ) from exc
+
+    async def _find_unique_new_draft(self) -> str:
+        """从保存前后 ID 集合差值中锁定本次唯一新增草稿。"""
+
+        baseline = self._preflight_draft_ids
+        if baseline is None:
+            raise DraftResultUnknownError(
+                "DRAFT_BASELINE_UNAVAILABLE: smzdm 缺少保存前草稿 ID 基线"
+            )
+        entities = await self._load_draft_entities_once(wait_for_new_ids=baseline)
+        new_ids = frozenset(entities) - baseline
+        if len(new_ids) != 1:
+            raise DraftResultUnknownError(
+                "DRAFT_RESULT_UNKNOWN: smzdm 无法唯一确认本次新增草稿实体"
+            )
+        return entities[next(iter(new_ids))]
 
     async def _verify_persisted_draft(
         self,

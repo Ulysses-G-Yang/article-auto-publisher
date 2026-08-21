@@ -217,8 +217,10 @@ def build_save_platform(response: FakeSaveResponse | None) -> SmzdmPlatform:
     platform.page = FakeSavePage(response)
     platform.simulator.random_delay = AsyncMock()
     platform._expected_persisted_blocks = [{"type": "text", "text": "正文"}]
+    platform._preflight_title = "同名草稿"
+    platform._preflight_draft_ids = frozenset({"existing-draft-id"})
     platform._current_body_editor = AsyncMock(return_value=FakeSaveEditor())
-    platform._find_unique_exact_draft = AsyncMock(
+    platform._find_unique_new_draft = AsyncMock(
         return_value="https://post.smzdm.com/edit/safe-draft-id"
     )
     platform._verify_persisted_draft = AsyncMock()
@@ -238,14 +240,14 @@ def test_smzdm_missing_current_save_response_is_result_unknown() -> None:
     with patch("platforms.smzdm.asyncio.sleep", new=AsyncMock()):
         with pytest.raises(DraftResultUnknownError):
             asyncio.run(platform.save_draft("同名草稿"))
-    platform._find_unique_exact_draft.assert_not_awaited()
+    platform._find_unique_new_draft.assert_not_awaited()
 
 
 def test_smzdm_requires_current_2xx_response_and_persisted_reopen() -> None:
     platform, result = run_save(FakeSaveResponse(204))
 
     assert result == "https://post.smzdm.com/edit/safe-draft-id"
-    platform._find_unique_exact_draft.assert_awaited_once_with("同名草稿")
+    platform._find_unique_new_draft.assert_awaited_once_with()
     platform._verify_persisted_draft.assert_awaited_once()
 
 
@@ -255,7 +257,7 @@ def test_smzdm_non_2xx_save_response_is_result_unknown() -> None:
     with patch("platforms.smzdm.asyncio.sleep", new=AsyncMock()):
         with pytest.raises(DraftResultUnknownError):
             asyncio.run(platform.save_draft("同名草稿"))
-    platform._find_unique_exact_draft.assert_not_awaited()
+    platform._find_unique_new_draft.assert_not_awaited()
 
 
 class _BaijiaSaveButtons:

@@ -315,16 +315,15 @@ def test_smzdm_reopen_rejects_missing_persisted_tail() -> None:
 
 
 class DraftListPage:
-    def __init__(self, matches: list[str]) -> None:
-        self.matches = matches
+    def __init__(self, entities: list[str]) -> None:
+        self.entities = entities
         self.goto = AsyncMock()
-        self.reload = AsyncMock()
 
-    async def evaluate(self, _script: str, _title: str) -> list[str]:
-        return list(self.matches)
+    async def evaluate(self, _script: str) -> list[str]:
+        return list(self.entities)
 
 
-def test_smzdm_duplicate_exact_titles_are_result_unknown() -> None:
+def test_smzdm_same_title_drafts_use_unique_new_entity_id() -> None:
     platform = SmzdmPlatform()
     platform.page = DraftListPage(
         [
@@ -332,10 +331,31 @@ def test_smzdm_duplicate_exact_titles_are_result_unknown() -> None:
             "https://post.smzdm.com/edit/second",
         ]
     )
-    platform.simulator.random_delay = AsyncMock()
 
-    with pytest.raises(DraftResultUnknownError, match="唯一草稿"):
-        asyncio.run(platform._find_unique_exact_draft("重复标题"))
+    with patch("platforms.smzdm.asyncio.sleep", new=AsyncMock()):
+        asyncio.run(platform.preflight_delivery("重复标题"))
+        platform.page.entities.append("https://post.smzdm.com/edit/new-draft")
+        result = asyncio.run(platform._find_unique_new_draft())
+
+    assert result == "https://post.smzdm.com/edit/new-draft"
+    assert platform._preflight_draft_ids == frozenset({"first", "second"})
+    assert platform.page.goto.await_count == 2
+
+
+def test_smzdm_multiple_new_entity_ids_are_result_unknown() -> None:
+    platform = SmzdmPlatform()
+    platform.page = DraftListPage(["https://post.smzdm.com/edit/existing"])
+    platform._preflight_draft_ids = frozenset({"existing"})
+    platform.page.entities.extend(
+        [
+            "https://post.smzdm.com/edit/new-one",
+            "https://post.smzdm.com/edit/new-two",
+        ]
+    )
+
+    with patch("platforms.smzdm.asyncio.sleep", new=AsyncMock()):
+        with pytest.raises(DraftResultUnknownError, match="唯一确认"):
+            asyncio.run(platform._find_unique_new_draft())
 
 
 @pytest.mark.parametrize(
@@ -347,9 +367,5 @@ def test_smzdm_duplicate_exact_titles_are_result_unknown() -> None:
     ],
 )
 def test_smzdm_rejects_unsafe_draft_edit_url(unsafe_url: str) -> None:
-    platform = SmzdmPlatform()
-    platform.page = DraftListPage([unsafe_url])
-    platform.simulator.random_delay = AsyncMock()
-
     with pytest.raises(DraftResultUnknownError, match="编辑地址无效"):
-        asyncio.run(platform._find_unique_exact_draft("唯一标题"))
+        SmzdmPlatform._validated_draft_entity(unsafe_url)

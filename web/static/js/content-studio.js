@@ -23,8 +23,15 @@
         READY: '待执行', CREATING: '正在创建执行单', QUEUED: '已排队', RUNNING: '执行中', SUCCESS: '已完成',
         PARTIAL_FAIL: '部分失败', FATAL: '执行失败', CONFIRMATION_REQUIRED: '待公开确认',
         DRAFT_SAVED: '平台草稿已保存', PUBLISHED: '已公开发布', BLOCKED: '已拦截', FAILED: '失败',
+        DRAFT_SAVED_WITH_WARNINGS: '草稿已保存（有警告）',
+        PUBLISHED_WITH_WARNINGS: '已发布（有警告）',
         RESULT_UNKNOWN: '结果未知，需人工核对', FORMAT_REVIEW_REQUIRED: '待格式复核',
+        AWAITING_CONFIRMATION: '等待公开确认', EXECUTING: '执行中',
     };
+    const reLoginErrorCodes = new Set([
+        'LOGIN_REQUIRED', 'SESSION_EXPIRED', 'ACCOUNT_SESSION_EXPIRED',
+    ]);
+    const MAX_PLAN_POLLS = 240;
     const formatErrorLabels = {
         CONTENT_FORMAT_UNSUPPORTED: '当前内容格式超出平台已验证能力',
         PLATFORM_FORMAT_CAPABILITIES_UNDECLARED: '平台格式能力尚未声明',
@@ -305,6 +312,7 @@
         state.pendingPublishTargets = [];
         state.activePublishTarget = null;
         clearTimeout(state.pollTimer);
+        state.pollCount = 0;
         byId('plan-result').classList.add('d-none');
     }
 
@@ -1608,8 +1616,17 @@
         if (isFormatBlockedTarget(target)) return 'text-bg-warning';
         if (['SUCCESS', 'DRAFT_SAVED', 'PUBLISHED'].includes(status)) return 'text-bg-success';
         if (['BLOCKED', 'FAILED', 'FATAL'].includes(status)) return 'text-bg-danger';
-        if (['PARTIAL_FAIL', 'CONFIRMATION_REQUIRED', 'RESULT_UNKNOWN', 'FORMAT_REVIEW_REQUIRED'].includes(status)) return 'text-bg-warning';
+        if (['PARTIAL_FAIL', 'CONFIRMATION_REQUIRED', 'RESULT_UNKNOWN', 'FORMAT_REVIEW_REQUIRED', 'DRAFT_SAVED_WITH_WARNINGS', 'PUBLISHED_WITH_WARNINGS'].includes(status)) return 'text-bg-warning';
         return 'text-bg-info';
+    }
+
+    function targetNeedsRelogin(target) {
+        return reLoginErrorCodes.has(String(target?.error_code || '').toUpperCase());
+    }
+
+    function targetStatusLabel(target) {
+        if (targetNeedsRelogin(target)) return '需要重新登录';
+        return planStatusLabels[target.status] || target.status;
     }
 
     function platformDraftBoxUrl(platform) {
@@ -1627,6 +1644,9 @@
 
     function planTargetDetail(target) {
         if (isFormatBlockedTarget(target)) return formatTargetReason(target);
+        if (targetNeedsRelogin(target)) {
+            return '该账号登录态已失效，请到账号管理页重新登录后再创建新计划。';
+        }
         if (target.status === 'RESULT_UNKNOWN') {
             return '结果未知，请先到平台人工核对；系统不会自动重试。';
         }
@@ -1654,8 +1674,8 @@
         byId('plan-targets').replaceChildren(...state.plan.targets.map(target => {
             const row = document.createElement('article'); row.className = `plan-target${isFormatBlockedTarget(target) ? ' is-format-review' : ''}`;
             const copy = document.createElement('div'); copy.className = 'plan-target-copy'; const strong = document.createElement('strong'); strong.textContent = `${platformLabel(target.platform)} · ${target.account_display_name || '平台账号'}`; const small = document.createElement('small'); small.textContent = planTargetDetail(target); copy.append(strong, small);
-            const actions = document.createElement('div'); actions.className = 'plan-target-actions'; const badge = document.createElement('span'); badge.className = `badge ${planBadge(target.status, target)}`; badge.textContent = planStatusLabels[target.status] || target.status; actions.appendChild(badge);
-            if (target.status === 'DRAFT_SAVED') {
+            const actions = document.createElement('div'); actions.className = 'plan-target-actions'; const badge = document.createElement('span'); badge.className = `badge ${planBadge(target.status, target)}`; badge.textContent = targetStatusLabel(target); actions.appendChild(badge);
+            if (['DRAFT_SAVED', 'DRAFT_SAVED_WITH_WARNINGS'].includes(target.status)) {
                 const draftBoxUrl = platformDraftBoxUrl(target.platform);
                 if (draftBoxUrl) {
                     const link = document.createElement('a');
@@ -1693,7 +1713,7 @@
             const response = await fetch(endpoint(root.dataset.planExecuteUrlTemplate, 'plan_id', state.plan.plan_id), { method: 'POST', headers: { 'Content-Type': 'application/json', Accept: 'application/json' }, body: JSON.stringify(safePayload) });
             const result = await response.json().catch(() => ({}));
             if (!response.ok && response.status !== 428) throw new Error(result.message || '投递计划执行失败');
-            state.plan = result; renderPlan();
+            state.plan = result; state.pollCount = 0; renderPlan();
             if (fromReview) coreModal('plan-review-modal').hide();
             const confirmations = result.targets.filter(target => target.confirmation_required && target.confirmation_token);
             if (confirmations.length) {
@@ -1727,7 +1747,11 @@
 
     function schedulePlanPoll() {
         clearTimeout(state.pollTimer);
-        if (!state.plan || state.pollCount >= 12) return;
+        if (!state.plan) return;
+        if (state.pollCount >= MAX_PLAN_POLLS) {
+            setMessage('execution-error', '仍有目标未进入终态，请稍后手动刷新计划；系统不会自动重试平台操作。');
+            return;
+        }
         state.pollTimer = setTimeout(async () => {
             state.pollCount += 1;
             try {

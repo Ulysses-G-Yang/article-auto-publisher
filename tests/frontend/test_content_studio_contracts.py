@@ -239,15 +239,15 @@ def test_delivery_statuses_are_explicit_and_never_auto_retry_publish() -> None:
     assert "CREATING: '正在创建执行单'" in script
     assert "PARTIAL_FAIL: '部分失败'" in script
     assert "RESULT_UNKNOWN: '结果未知，需人工核对'" in script
-    assert (
-        "'PARTIAL_FAIL', 'CONFIRMATION_REQUIRED', 'RESULT_UNKNOWN', "
-        "'FORMAT_REVIEW_REQUIRED'"
-    ) in script
+    assert "DRAFT_SAVED_WITH_WARNINGS: '草稿已保存（有警告）'" in script
+    assert "function targetNeedsRelogin(target)" in script
+    assert "return '需要重新登录'" in script
+    assert "const MAX_PLAN_POLLS = 240" in script
     assert "['CREATING', 'QUEUED', 'RUNNING']" in script
     assert "系统不会自动重试" in script
     assert "platformDraftBoxUrl" in script
     assert "查看平台草稿箱" in script
-    assert "target.status === 'DRAFT_SAVED'" in script
+    assert "['DRAFT_SAVED', 'DRAFT_SAVED_WITH_WARNINGS'].includes(target.status)" in script
     assert "retry-target" not in script
     assert "不提供公开发布自动重试按钮" in docs
 

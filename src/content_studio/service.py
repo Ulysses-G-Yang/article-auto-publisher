@@ -84,6 +84,33 @@ SEED_BODY = """凌晨三点十三分，我被公司的智能马桶叫醒了。
 
 “只要不解决问题，就永远不会制造成本。”"""
 
+PLAN_INCOMPLETE_TARGET_STATUSES = frozenset(
+    {"READY", "CREATING", "QUEUED", "RUNNING"}
+)
+PLAN_SUCCESS_TARGET_STATUSES = frozenset(
+    {
+        "DRAFT_SAVED",
+        "DRAFT_SAVED_WITH_WARNINGS",
+        "PUBLISHED",
+        "PUBLISHED_WITH_WARNINGS",
+    }
+)
+PLAN_FAILURE_TARGET_STATUSES = frozenset(
+    {"FAILED", "BLOCKED", "RESULT_UNKNOWN", "FORMAT_REVIEW_REQUIRED"}
+)
+PLAN_OPERATION_SYNC_STATUSES = frozenset(
+    {
+        "QUEUED",
+        "RUNNING",
+        "DRAFT_SAVED",
+        "DRAFT_SAVED_WITH_WARNINGS",
+        "PUBLISHED",
+        "PUBLISHED_WITH_WARNINGS",
+        "FAILED",
+        "RESULT_UNKNOWN",
+    }
+)
+
 
 class ContentStudioService:
     def __init__(
@@ -619,9 +646,8 @@ class ContentStudioService:
         """返回已确认但尚未完成的执行单，供进程重启后安全续跑。"""
 
         async with self.database.session() as session:
-            # RUNNING 可能已在平台产生副作用，绝不能自动重试；明确标记为
-            # 结果未知，等待人工在平台侧核对。
-            active = list(
+            # 先只读取关联键，不能在 Content Studio 写事务中跨库等待账号域。
+            rows = list(
                 (
                     await session.scalars(
                         select(DeliveryPlanTarget).where(
@@ -631,28 +657,68 @@ class ContentStudioService:
                     )
                 ).all()
             )
-            recoverable = []
-            for row in active:
+            active = [
+                {
+                    "plan_id": row.plan_id,
+                    "target_id": row.target_id,
+                    "operation_id": row.operation_id,
+                }
+                for row in rows
+                if row.operation_id
+            ]
+
+        recoverable = []
+        for item in active:
+            try:
                 operation = await account_delivery.get_operation(
-                    row.operation_id,
+                    item["operation_id"],
                     access,
                 )
-                if operation["status"] == "QUEUED":
-                    row.status = "QUEUED"
-                    recoverable.append(
-                        {
-                            "plan_id": row.plan_id,
-                            "target_id": row.target_id,
-                            "operation_id": row.operation_id,
-                        }
-                    )
-                    continue
-                if operation["status"] == "RESULT_UNKNOWN":
-                    row.status = "RESULT_UNKNOWN"
-                    row.error_code = "DELIVERY_RESULT_UNKNOWN"
-                    row.error_message = operation["error_message"]
-                    row.updated_at = _utc_now()
-            return recoverable
+            except Exception:
+                # 计划引用了执行单但账号域无法再给出状态，不能永远显示排队，
+                # 也不能重新执行可能已经产生副作用的平台操作。
+                await self.set_plan_target_result(
+                    item["plan_id"],
+                    item["target_id"],
+                    status="RESULT_UNKNOWN",
+                    operation_id=item["operation_id"],
+                    error_code="DELIVERY_OPERATION_UNAVAILABLE",
+                    error_message="执行单状态不可读取，请人工核对平台结果",
+                )
+                continue
+            operation_status = str(operation.get("status") or "")
+            if operation_status == "QUEUED":
+                recoverable.append(item)
+                continue
+            if operation_status == "RUNNING":
+                # 启动恢复绝不重放已经进入平台的操作。账号域通常会先把
+                # RUNNING 转成 RESULT_UNKNOWN；这里保留第二道 fail-closed。
+                await self.set_plan_target_result(
+                    item["plan_id"],
+                    item["target_id"],
+                    status="RESULT_UNKNOWN",
+                    operation_id=item["operation_id"],
+                    error_code="DELIVERY_RESULT_UNKNOWN",
+                    error_message="服务中断时平台操作正在执行，请人工核对平台结果",
+                )
+                continue
+            if operation_status in PLAN_OPERATION_SYNC_STATUSES:
+                await self.set_plan_target_result(
+                    item["plan_id"],
+                    item["target_id"],
+                    status=operation_status,
+                    operation_id=item["operation_id"],
+                    error_code=(
+                        operation.get("error_code")
+                        or (
+                            "DELIVERY_RESULT_UNKNOWN"
+                            if operation_status == "RESULT_UNKNOWN"
+                            else None
+                        )
+                    ),
+                    error_message=operation.get("error_message"),
+                )
+        return recoverable
 
     async def build_platform_content(
         self,
@@ -1416,24 +1482,26 @@ def _plan_status(statuses: list[str]) -> str:
     if not statuses or all(status == "READY" for status in statuses):
         return "READY"
     format_review = "FORMAT_REVIEW_REQUIRED"
-    if any(status == format_review for status in statuses):
-        if all(status == format_review for status in statuses):
-            return format_review
-        # 至少还有一个可执行或已执行目标；明确标记部分可执行，不能落到
-        # EXECUTING 这种会误导用户的通用状态。
-        return "PARTIAL_FAIL"
+    if all(status == format_review for status in statuses):
+        return format_review
+    if all(status in {"READY", format_review} for status in statuses):
+        # 计划尚未执行；格式待复核目标由 target 自身明确展示。此时不能把
+        # 整个计划提前标成已结束的 PARTIAL_FAIL。
+        return "READY"
     if any(status == "CONFIRMATION_REQUIRED" for status in statuses):
         return "AWAITING_CONFIRMATION"
-    active_or_success = {"QUEUED", "RUNNING", "DRAFT_SAVED", "PUBLISHED"}
-    failures = {"FAILED", "BLOCKED"}
-    if all(status in {"DRAFT_SAVED", "PUBLISHED"} for status in statuses):
+    if any(status in PLAN_INCOMPLETE_TARGET_STATUSES for status in statuses):
+        # 即使其他目标已经失败，也必须等所有目标进入终态后才能结束计划。
+        return "EXECUTING"
+    if all(status in PLAN_SUCCESS_TARGET_STATUSES for status in statuses):
         return "SUCCESS"
-    if any(status in failures for status in statuses) and any(
-        status in active_or_success for status in statuses
+    if all(status in PLAN_FAILURE_TARGET_STATUSES for status in statuses):
+        return "FATAL"
+    if all(
+        status in PLAN_SUCCESS_TARGET_STATUSES | PLAN_FAILURE_TARGET_STATUSES
+        for status in statuses
     ):
         return "PARTIAL_FAIL"
-    if all(status in failures for status in statuses):
-        return "FATAL"
     return "EXECUTING"
 
 

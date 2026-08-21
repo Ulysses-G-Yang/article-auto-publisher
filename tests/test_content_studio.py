@@ -8,6 +8,8 @@ import sqlite3
 import uuid
 from copy import deepcopy
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 from flask import Flask
@@ -1018,7 +1020,7 @@ def test_v2_format_gate_is_per_target_and_execute_skips_review_targets(
 
     plan = run(scenario())
     by_platform = {target["platform"]: target for target in plan["targets"]}
-    assert plan["status"] == "PARTIAL_FAIL"
+    assert plan["status"] == "READY"
     assert by_platform["xiaoheihe"]["status"] == "READY"
     assert by_platform["zol"]["status"] == "FORMAT_REVIEW_REQUIRED"
     assert by_platform["zol"]["error_code"] == "CONTENT_FORMAT_UNSUPPORTED"
@@ -1926,7 +1928,7 @@ def test_unexpected_target_failure_does_not_block_remaining_targets(tmp_path: Pa
         )
     )
     assert [target["status"] for target in result["targets"]] == ["FAILED", "QUEUED"]
-    assert result["status"] == "PARTIAL_FAIL"
+    assert result["status"] == "EXECUTING"
     assert "secret-value" not in result["targets"][0]["error_message"]
     assert len(delivery.calls) == 2
     run(service.database.dispose())
@@ -2071,5 +2073,117 @@ def test_plan_target_request_is_idempotent_and_running_becomes_unknown(
     assert recoverable == []
     assert updated["targets"][0]["status"] == "RESULT_UNKNOWN"
     assert updated["targets"][0]["error_code"] == "DELIVERY_RESULT_UNKNOWN"
+    assert updated["status"] == "FATAL"
     run(service.database.dispose())
     run(account_db.dispose())
+
+
+def test_plan_status_waits_for_every_target_to_reach_terminal_state() -> None:
+    from content_studio.service import _plan_status
+
+    assert _plan_status(["FAILED", "QUEUED"]) == "EXECUTING"
+    assert _plan_status(["RESULT_UNKNOWN", "RUNNING"]) == "EXECUTING"
+    assert _plan_status(["FAILED", "DRAFT_SAVED"]) == "PARTIAL_FAIL"
+    assert _plan_status(["RESULT_UNKNOWN", "BLOCKED"]) == "FATAL"
+    assert _plan_status(["DRAFT_SAVED_WITH_WARNINGS"]) == "SUCCESS"
+
+
+def test_plan_query_reconciles_failed_operation_and_relogin_reason() -> None:
+    from content_studio.web import ContentStudioRuntimeState
+
+    target = {
+        "target_id": "target-1",
+        "operation_id": "operation-1",
+        "status": "QUEUED",
+        "error_code": None,
+        "error_message": None,
+    }
+    updated = {
+        "plan_id": "plan-1",
+        "status": "FATAL",
+        "targets": [
+            {
+                **target,
+                "status": "FAILED",
+                "error_code": "LOGIN_REQUIRED",
+                "error_message": "账号登录态已失效",
+            }
+        ],
+    }
+    service = SimpleNamespace(
+        get_delivery_plan=AsyncMock(
+            side_effect=[
+                {"plan_id": "plan-1", "status": "EXECUTING", "targets": [target]},
+                updated,
+            ]
+        ),
+        set_plan_target_result=AsyncMock(),
+    )
+    delivery = SimpleNamespace(
+        get_operation=AsyncMock(
+            return_value={
+                "operation_id": "operation-1",
+                "status": "FAILED",
+                "error_code": "LOGIN_REQUIRED",
+                "error_message": "账号登录态已失效",
+            }
+        )
+    )
+    state = ContentStudioRuntimeState.__new__(ContentStudioRuntimeState)
+    state.account_state = SimpleNamespace(delivery=delivery)
+    state.service = service
+
+    result = run(state.reconcile_plan_operations("plan-1", LOCAL_WEB_CONTEXT))
+
+    assert result == updated
+    service.set_plan_target_result.assert_awaited_once_with(
+        "plan-1",
+        "target-1",
+        status="FAILED",
+        operation_id="operation-1",
+        error_code="LOGIN_REQUIRED",
+        error_message="账号登录态已失效",
+    )
+
+
+def test_plan_query_marks_missing_operation_result_unknown() -> None:
+    from content_studio.web import ContentStudioRuntimeState
+
+    target = {
+        "target_id": "target-missing",
+        "operation_id": "operation-missing",
+        "status": "QUEUED",
+        "error_code": None,
+        "error_message": None,
+    }
+    service = SimpleNamespace(
+        get_delivery_plan=AsyncMock(
+            side_effect=[
+                {"plan_id": "plan-missing", "status": "EXECUTING", "targets": [target]},
+                {
+                    "plan_id": "plan-missing",
+                    "status": "FATAL",
+                    "targets": [{**target, "status": "RESULT_UNKNOWN"}],
+                },
+            ]
+        ),
+        set_plan_target_result=AsyncMock(),
+    )
+    delivery = SimpleNamespace(
+        get_operation=AsyncMock(side_effect=RuntimeError("operation row missing"))
+    )
+    state = ContentStudioRuntimeState.__new__(ContentStudioRuntimeState)
+    state.account_state = SimpleNamespace(delivery=delivery)
+    state.service = service
+
+    result = run(state.reconcile_plan_operations("plan-missing", LOCAL_WEB_CONTEXT))
+
+    assert result["status"] == "FATAL"
+    service.set_plan_target_result.assert_awaited_once_with(
+        "plan-missing",
+        "target-missing",
+        status="RESULT_UNKNOWN",
+        operation_id="operation-missing",
+        error_code="DELIVERY_OPERATION_UNAVAILABLE",
+        error_message="执行单状态不可读取，请人工核对平台结果",
+    )

@@ -33,7 +33,10 @@ from content_studio.errors import (
 )
 from content_studio.importers import DocxImportAdapter, LegacyDatabaseSource
 from content_studio.platform_format_capabilities import PlatformFormatCapabilities
-from content_studio.service import ContentStudioService
+from content_studio.service import (
+    PLAN_OPERATION_SYNC_STATUSES,
+    ContentStudioService,
+)
 
 LOGGER = logging.getLogger(__name__)
 
@@ -246,7 +249,7 @@ class ContentStudioRuntimeState:
                     )
                 )
 
-        plan = await self.service.get_delivery_plan(plan_id, access)
+        plan = await self.reconcile_plan_operations(plan_id, access)
         response_targets = {target["target_id"]: target for target in plan["targets"]}
         for target in selected:
             response_targets[target["target_id"]].update(
@@ -258,6 +261,64 @@ class ContentStudioRuntimeState:
             )
         plan["targets"] = list(response_targets.values())
         return plan
+
+    async def reconcile_plan_operations(self, plan_id: str, access) -> dict:
+        """用账号域执行单真值修正 Content Studio 计划目标。
+
+        两个数据库采用最终一致性。后台协程可能在写回计划前中断，所以每次
+        查询计划都对仍处于 CREATING/QUEUED/RUNNING 的目标做一次只读对账。
+        已进入终态的目标不会被旧的活动状态倒退覆盖。
+        """
+
+        plan = await self.service.get_delivery_plan(plan_id, access)
+        for target in plan["targets"]:
+            operation_id = target.get("operation_id")
+            if not operation_id or target.get("status") not in {
+                "CREATING",
+                "QUEUED",
+                "RUNNING",
+            }:
+                continue
+            try:
+                operation = await self.account_state.delivery.get_operation(
+                    operation_id,
+                    access,
+                )
+            except Exception:
+                await self.service.set_plan_target_result(
+                    plan_id,
+                    target["target_id"],
+                    status="RESULT_UNKNOWN",
+                    operation_id=operation_id,
+                    error_code="DELIVERY_OPERATION_UNAVAILABLE",
+                    error_message="执行单状态不可读取，请人工核对平台结果",
+                )
+                continue
+            operation_status = str(operation.get("status") or "")
+            if operation_status not in PLAN_OPERATION_SYNC_STATUSES:
+                continue
+            if (
+                operation_status == target.get("status")
+                and operation.get("error_code") == target.get("error_code")
+                and operation.get("error_message") == target.get("error_message")
+            ):
+                continue
+            await self.service.set_plan_target_result(
+                plan_id,
+                target["target_id"],
+                status=operation_status,
+                operation_id=operation_id,
+                error_code=(
+                    operation.get("error_code")
+                    or (
+                        "DELIVERY_RESULT_UNKNOWN"
+                        if operation_status == "RESULT_UNKNOWN"
+                        else None
+                    )
+                ),
+                error_message=operation.get("error_message"),
+            )
+        return await self.service.get_delivery_plan(plan_id, access)
 
     async def _execute_operation_and_sync(
         self,
@@ -288,13 +349,11 @@ class ContentStudioRuntimeState:
             except Exception:
                 operation = None
 
-            if operation and operation.get("status") in {
-                "DRAFT_SAVED",
-                "DRAFT_SAVED_WITH_WARNINGS",
-                "PUBLISHED",
-                "PUBLISHED_WITH_WARNINGS",
-                "RESULT_UNKNOWN",
-            }:
+            if (
+                operation
+                and operation.get("status") in PLAN_OPERATION_SYNC_STATUSES
+                and operation.get("status") not in {"QUEUED", "RUNNING"}
+            ):
                 await self.service.set_plan_target_result(
                     plan_id,
                     target_id,
@@ -419,7 +478,7 @@ def create_content_studio_blueprint(
 
     @blueprint.get("/api/delivery-plans/<plan_id>")
     def get_delivery_plan(plan_id: str):
-        return jsonify(state.run(state.service.get_delivery_plan(plan_id, LOCAL_WEB_CONTEXT)))
+        return jsonify(state.run(state.reconcile_plan_operations(plan_id, LOCAL_WEB_CONTEXT)))
 
     @blueprint.post("/api/delivery-plans/<plan_id>/execute")
     def execute_delivery_plan(plan_id: str):

@@ -280,6 +280,29 @@ class _Response:
         return {"code": 100000}
 
 
+class _PreflightPage:
+    def __init__(self) -> None:
+        self.goto = AsyncMock()
+        self.wait_for_function = AsyncMock()
+        self.expression = ""
+
+    async def evaluate(self, expression: str, title: str) -> int:
+        self.expression = expression
+        assert title == "唯一标题"
+        return 0
+
+
+def test_weibo_preflight_keeps_javascript_newline_regex_literal() -> None:
+    page = _PreflightPage()
+    platform = WeiboPlatform()
+    platform.page = page
+
+    asyncio.run(platform.preflight_delivery("唯一标题"))
+
+    assert r".split(/\r?\n/, 1)" in page.expression
+    assert "\r" not in page.expression
+
+
 class _Route:
     def __init__(self) -> None:
         self.abort = AsyncMock()
@@ -333,6 +356,8 @@ class _SavePage:
                 await self.response_listener(_Response())
             return {"clicked": True, "count": 1}
         if "document.querySelectorAll('.list-item')" in script:
+            assert r".split(/\r?\n/, 1)" in script
+            assert "\r" not in script
             assert argument == "唯一标题"
             return {"clicked": True, "count": 1}
         raise AssertionError("unexpected evaluate call")

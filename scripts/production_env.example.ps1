@@ -1,4 +1,4 @@
-# ArticleOps Windows production configuration template.
+﻿# ArticleOps Windows production configuration template.
 # Copy this file to data\production_env.ps1, replace the secret and network
 # allowlist, then dot-source it before starting the Waitress/MCP processes.
 

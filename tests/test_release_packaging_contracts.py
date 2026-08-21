@@ -4,7 +4,19 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def read(relative_path: str) -> str:
-    return (ROOT / relative_path).read_text(encoding="utf-8")
+    return (ROOT / relative_path).read_text(encoding="utf-8-sig")
+
+
+def test_windows_powershell_scripts_have_utf8_bom_for_version_5_1() -> None:
+    for relative_path in (
+        "scripts/setup_windows.ps1",
+        "scripts/start_production_windows.ps1",
+        "scripts/stop_production_windows.ps1",
+        "scripts/production_env.example.ps1",
+        "scripts/build_release_windows.ps1",
+        "scripts/apply_upgrade_windows.ps1",
+    ):
+        assert (ROOT / relative_path).read_bytes().startswith(b"\xef\xbb\xbf")
 
 
 def test_windows_setup_selects_runtime_dependencies_for_source_packages() -> None:

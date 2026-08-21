@@ -19,8 +19,16 @@ class FakeFileInput:
     ) -> None:
         self.accept = accept
         self.visible = visible
-        self.set_input_files = AsyncMock(side_effect=error)
+        self.error = error
+        self.page = None
+        self.set_input_files = AsyncMock(side_effect=self._set_input_files)
         self.set_files = self.set_input_files
+
+    async def _set_input_files(self, *_args, **_kwargs) -> None:
+        if self.error is not None:
+            raise self.error
+        if self.page is not None:
+            self.page.uploaded = True
 
     async def get_attribute(self, name: str) -> str | None:
         return self.accept if name == "accept" else None
@@ -46,14 +54,18 @@ class FakeFileInputs:
 
 
 class FakeInsertButton:
-    def __init__(self) -> None:
-        self.click = AsyncMock()
+    def __init__(self, page) -> None:
+        self.page = page
+        self.click = AsyncMock(side_effect=self._click)
+
+    async def _click(self, **_kwargs) -> None:
+        self.page.dialog_visible = False
 
     async def is_visible(self) -> bool:
         return True
 
     async def is_enabled(self) -> bool:
-        return True
+        return self.page.selected
 
     async def inner_text(self) -> str:
         return "插入"
@@ -70,10 +82,56 @@ class FakeItems:
         return self.items[index]
 
 
+class FakeHiddenSpinner:
+    first = None
+
+    def __init__(self) -> None:
+        self.first = self
+
+    async def wait_for(self, *, state: str, timeout: int) -> None:
+        assert (state, timeout) == ("hidden", 15000)
+
+
+class FakeAlbumItem:
+    def __init__(self, page) -> None:
+        self.page = page
+        self.click = AsyncMock(side_effect=self._click)
+
+    async def _click(self, **_kwargs) -> None:
+        self.page.selected = True
+
+    async def evaluate(self, _script: str) -> dict:
+        return {"failed": False, "ready": True}
+
+    async def get_attribute(self, name: str) -> str:
+        assert name == "class"
+        return "image-item is-selected" if self.page.selected else "image-item"
+
+
+class FakeAlbumItems:
+    def __init__(self, page) -> None:
+        self.page = page
+        self.first = FakeAlbumItem(page)
+
+    async def count(self) -> int:
+        return 1 if self.page.uploaded else 0
+
+
+class FakeSelectedAlbumItems:
+    def __init__(self, page) -> None:
+        self.page = page
+
+    async def count(self) -> int:
+        return 1 if self.page.selected else 0
+
+
 class FakeImageDialog:
-    def __init__(self, inputs: list[FakeFileInput]) -> None:
+    def __init__(self, page, inputs: list[FakeFileInput]) -> None:
+        self.page = page
         self.inputs = FakeFileInputs(inputs)
-        self.insert = FakeInsertButton()
+        self.items = FakeAlbumItems(page)
+        self.selected_items = FakeSelectedAlbumItems(page)
+        self.insert = FakeInsertButton(page)
 
     async def is_visible(self) -> bool:
         return True
@@ -82,15 +140,36 @@ class FakeImageDialog:
         return "图片库 上传 手机传图 插入"
 
     def locator(self, selector: str):
+        if selector == ".n-spin-body":
+            return FakeHiddenSpinner()
         if selector == "input[type=file]":
             return self.inputs
+        if selector == ".image-list .image-item":
+            return self.items
+        if selector == ".image-list .image-item.is-selected":
+            return self.selected_items
         if selector == "button":
             return FakeItems([self.insert])
         raise AssertionError(f"unexpected dialog selector: {selector}")
 
 
+class FakeDialogs:
+    def __init__(self, page) -> None:
+        self.page = page
+
+    async def count(self) -> int:
+        return 1 if self.page.dialog_visible else 0
+
+    def nth(self, index: int):
+        assert index == 0
+        return self.page.dialog
+
+
 class FakeUploadPage:
     def __init__(self, inputs: list[FakeFileInput], image_counts: list[int]) -> None:
+        self.dialog_visible = True
+        self.uploaded = False
+        self.selected = False
         image_inputs = [
             item
             for item in inputs
@@ -99,8 +178,10 @@ class FakeUploadPage:
                 for suffix in (".jpg", ".jpeg", ".png", ".gif", ".bmp", ".heic")
             )
         ]
-        self.dialog = FakeImageDialog(image_inputs)
-        self.dialogs = FakeItems([self.dialog])
+        for item in image_inputs:
+            item.page = self
+        self.dialog = FakeImageDialog(self, image_inputs)
+        self.dialogs = FakeDialogs(self)
         self.image_counts = iter(image_counts)
         self.last_image_count = image_counts[-1] if image_counts else 0
         self.trigger = type("Trigger", (), {"click": AsyncMock()})()

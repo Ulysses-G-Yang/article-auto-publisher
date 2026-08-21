@@ -134,6 +134,8 @@ def build_acceptance_app(
     confirmation: str,
     *,
     xhs_resume_title: str = "",
+    weibo_resume_title: str = "",
+    weibo_resume_draft_id: str = "",
 ):
     """构造仅对指定平台开放格式能力的验收应用。
 
@@ -145,9 +147,20 @@ def build_acceptance_app(
     if confirmation != CONFIRMATION_WORD:
         raise ValueError("必须使用固定确认词 DRAFT_ONLY")
     selected = _normalize_platforms(platforms)
-    normalized_resume_title = " ".join(str(xhs_resume_title or "").split())
-    if normalized_resume_title and selected != ("xiaohongshu",):
+    normalized_xhs_resume_title = " ".join(str(xhs_resume_title or "").split())
+    normalized_weibo_resume_title = str(weibo_resume_title or "").strip()
+    normalized_weibo_resume_draft_id = str(weibo_resume_draft_id or "").strip()
+    if normalized_xhs_resume_title and selected != ("xiaohongshu",):
         raise ValueError("小红书草稿恢复只允许单平台 DRAFT-only 验收")
+    if bool(normalized_weibo_resume_title) != bool(normalized_weibo_resume_draft_id):
+        raise ValueError("微博草稿恢复必须同时指定精确标题和 draft ID")
+    if normalized_weibo_resume_title and selected != ("weibo",):
+        raise ValueError("微博草稿恢复只允许单平台 DRAFT-only 验收")
+    if normalized_weibo_resume_draft_id and (
+        not normalized_weibo_resume_draft_id.isdigit()
+        or int(normalized_weibo_resume_draft_id) <= 0
+    ):
+        raise ValueError("微博待恢复 draft ID 必须是正整数")
     _assert_draft_only_settings()
 
     # 所有验收门通过后才导入并创建 Flask 应用，失败路径不会初始化路由、
@@ -235,7 +248,11 @@ def build_acceptance_app(
 
     # 实验能力只注入当前验收进程：ZOL 标题实验，以及小红书唯一同名草稿
     # 的显式恢复。生产工厂不接受这两个开关。
-    if "zol" in selected or normalized_resume_title:
+    if (
+        "zol" in selected
+        or normalized_xhs_resume_title
+        or normalized_weibo_resume_title
+    ):
         account_state = app.extensions.get("account_sessions")
         if account_state is None or not hasattr(account_state, "accounts"):
             raise RuntimeError("账号会话运行时未注册")
@@ -252,14 +269,26 @@ def build_acceptance_app(
                 )
             if (
                 getattr(account, "platform", "") == "xiaohongshu"
-                and normalized_resume_title
+                and normalized_xhs_resume_title
             ):
                 from platforms.xiaohongshu import XiaohongshuPlatform
 
                 return XiaohongshuPlatform(
                     profile_dir=account.profile_path,
                     strict_profile_lock=True,
-                    resume_existing_title=normalized_resume_title,
+                    resume_existing_title=normalized_xhs_resume_title,
+                )
+            if (
+                getattr(account, "platform", "") == "weibo"
+                and normalized_weibo_resume_title
+            ):
+                from platforms.weibo import WeiboPlatform
+
+                return WeiboPlatform(
+                    profile_dir=account.profile_path,
+                    strict_profile_lock=True,
+                    resume_existing_title=normalized_weibo_resume_title,
+                    resume_existing_draft_id=normalized_weibo_resume_draft_id,
                 )
             return original_factory(account)
 
@@ -307,6 +336,16 @@ def _parser() -> argparse.ArgumentParser:
         default="",
         help="仅限小红书 DRAFT-only：恢复一个标题精确匹配且唯一的已有草稿",
     )
+    parser.add_argument(
+        "--weibo-resume-title",
+        default="",
+        help="仅限微博 DRAFT-only：恢复一个标题精确匹配且唯一的已有草稿",
+    )
+    parser.add_argument(
+        "--weibo-resume-draft-id",
+        default="",
+        help="仅限微博 DRAFT-only：与恢复标题绑定的正整数 draft ID",
+    )
     return parser
 
 
@@ -316,6 +355,8 @@ def main(argv: Sequence[str] | None = None) -> None:
         args.platform,
         args.confirmation,
         xhs_resume_title=args.xhs_resume_title,
+        weibo_resume_title=args.weibo_resume_title,
+        weibo_resume_draft_id=args.weibo_resume_draft_id,
     )
     app.config["DRAFT_ACCEPTANCE_PLATFORMS"] = tuple(args.platform)
     run_acceptance_server(app, args.port)

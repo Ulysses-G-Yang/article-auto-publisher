@@ -144,6 +144,45 @@ def test_xiaohongshu_resume_title_is_isolated_to_acceptance_factory() -> None:
         )
 
 
+def test_weibo_resume_identity_is_isolated_to_acceptance_factory() -> None:
+    app = acceptance.build_acceptance_app(
+        ("weibo",),
+        "DRAFT_ONLY",
+        weibo_resume_title=" 唯一恢复标题 ",
+        weibo_resume_draft_id="4183864",
+    )
+    account = SimpleNamespace(
+        platform="weibo",
+        profile_path="D:/isolated/weibo-profile",
+    )
+    platform = app.extensions["account_sessions"].accounts.platform_factory(account)
+
+    assert platform._resume_existing_title == "唯一恢复标题"
+    assert platform._resume_existing_draft_id == "4183864"
+    assert platform.strict_profile_lock is True
+
+    with pytest.raises(ValueError, match="单平台"):
+        acceptance.build_acceptance_app(
+            ("weibo", "zol"),
+            "DRAFT_ONLY",
+            weibo_resume_title="唯一恢复标题",
+            weibo_resume_draft_id="4183864",
+        )
+    with pytest.raises(ValueError, match="同时指定"):
+        acceptance.build_acceptance_app(
+            ("weibo",),
+            "DRAFT_ONLY",
+            weibo_resume_title="唯一恢复标题",
+        )
+    with pytest.raises(ValueError, match="正整数"):
+        acceptance.build_acceptance_app(
+            ("weibo",),
+            "DRAFT_ONLY",
+            weibo_resume_title="唯一恢复标题",
+            weibo_resume_draft_id="not-an-id",
+        )
+
+
 @pytest.mark.parametrize(
     "platforms",
     [(), ("",), ("not-a-platform",), ("xiaoheihe", "xiaoheihe")],

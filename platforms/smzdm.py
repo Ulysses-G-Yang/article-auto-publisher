@@ -633,9 +633,19 @@ class SmzdmPlatform(BasePlatform):
         到键盘碰运气。
         """
 
-        editor = await self._current_body_editor()
+        safe_reasons = {
+            "editor-view-unavailable",
+            "paragraph-node-unavailable",
+            "transaction-result-invalid",
+            "transaction-evaluation-failed",
+            "dom-tail-not-ready",
+        }
+        last_reason = "dom-tail-not-ready"
         try:
-            mutation = await editor.evaluate(
+            for attempt in range(self.POST_IMAGE_PARAGRAPH_POLL_ATTEMPTS):
+                editor = await self._current_body_editor()
+                try:
+                    mutation = await editor.evaluate(
                 """root => {
                     const domTailIsParagraph = () => {
                         const tail = root.lastElementChild;
@@ -650,10 +660,16 @@ class SmzdmPlatform(BasePlatform):
                     // 回到 DocViewDesc 后才能取得真正的 EditorView；这是模型
                     // 写入，不是直接篡改 DOM。
                     let descriptor = root.pmViewDesc || null;
-                    while (descriptor && descriptor.parent) {
-                        descriptor = descriptor.parent;
+                    if (!descriptor) {
+                        const node = Array.from(root.querySelectorAll('*'))
+                            .find(candidate => candidate.pmViewDesc);
+                        descriptor = node ? node.pmViewDesc : null;
                     }
-                    const view = (descriptor && descriptor.view) || root.editorView;
+                    let view = root.editorView || null;
+                    while (descriptor) {
+                        if (descriptor.view) view = descriptor.view;
+                        descriptor = descriptor.parent || null;
+                    }
                     if (!view || !view.state || !view.state.doc ||
                         !view.state.schema || typeof view.dispatch !== 'function') {
                         return {ok: false, reason: 'editor-view-unavailable'};
@@ -664,7 +680,20 @@ class SmzdmPlatform(BasePlatform):
                     }
 
                     const modelTail = view.state.doc.lastChild;
-                    if (modelTail && modelTail.type === paragraphType) {
+                    let modelTailHasImage = false;
+                    if (modelTail && typeof modelTail.descendants === 'function') {
+                        modelTail.descendants(node => {
+                            if (node.type && node.type.name === 'image') {
+                                modelTailHasImage = true;
+                                return false;
+                            }
+                            return !modelTailHasImage;
+                        });
+                    }
+                    // 图片通常是 paragraph 内的 inline atom。仅判断末节点类型
+                    // 会把 <p><img></p> 误认为可输入段落，必须确认其中无图片。
+                    if (modelTail && modelTail.type === paragraphType
+                        && !modelTailHasImage) {
                         if (typeof view.focus === 'function') view.focus();
                         return {ok: true, action: 'existing-model'};
                     }
@@ -688,37 +717,60 @@ class SmzdmPlatform(BasePlatform):
                     if (typeof view.focus === 'function') view.focus();
                     return {ok: true, action: 'inserted'};
                 }"""
-            )
-            if not isinstance(mutation, dict) or mutation.get("ok") is not True:
-                raise RuntimeError("ProseMirror EditorView 或 paragraph 节点不可用")
-
-            # dispatch 通常同步更新 DOM，但图片上传组件可能随后替换根节点。
-            # 有界轮询且每次重新取得 editor，避免把成功 transaction 误报失败。
-            for attempt in range(self.POST_IMAGE_PARAGRAPH_POLL_ATTEMPTS):
-                editor = await self._current_body_editor()
-                tail_ready = bool(
-                    await editor.evaluate(
-                        """root => {
-                            const tail = root.lastElementChild;
-                            return !!tail && tail.tagName.toLowerCase() === 'p'
-                                && tail.querySelectorAll('img').length === 0;
-                        }"""
                     )
+                except Exception as exc:
+                    if self._exception_means_browser_closed(exc):
+                        raise BrowserLifecycleError(
+                            "BROWSER_CONTEXT_CLOSED: smzdm 图片后创建正文段落时页面已关闭"
+                        ) from exc
+                    mutation = None
+                    last_reason = "transaction-evaluation-failed"
+                mutation_ok = (
+                    isinstance(mutation, dict) and mutation.get("ok") is True
                 )
-                if tail_ready:
-                    return
+                if mutation_ok:
+                    last_reason = "dom-tail-not-ready"
+                elif isinstance(mutation, dict):
+                    reason = str(mutation.get("reason") or "")
+                    last_reason = reason if reason in safe_reasons else "transaction-result-invalid"
+                else:
+                    last_reason = "transaction-result-invalid"
+
+                if mutation_ok:
+                    # 图片上传组件可能异步替换编辑器根节点。每轮都重新取得
+                    # 当前 editor；下一轮会重新执行幂等 transaction。
+                    editor = await self._current_body_editor()
+                    tail_ready = bool(
+                        await editor.evaluate(
+                            """root => {
+                                const tail = root.lastElementChild;
+                                return !!tail && tail.tagName.toLowerCase() === 'p'
+                                    && tail.querySelectorAll('img').length === 0;
+                            }"""
+                        )
+                    )
+                    if tail_ready:
+                        return
                 if attempt + 1 < self.POST_IMAGE_PARAGRAPH_POLL_ATTEMPTS:
                     await asyncio.sleep(
                         self.POST_IMAGE_PARAGRAPH_POLL_INTERVAL_SECONDS
                     )
-            raise RuntimeError("图片后正文段落未在有界时间内建立")
+            raise ContentValidationError(
+                "SMZDM_POST_IMAGE_PARAGRAPH_FAILED: 图片后无法建立正文插入点; "
+                f"reason={last_reason}"
+            )
+        except ContentValidationError:
+            raise
+        except BrowserLifecycleError:
+            raise
         except Exception as exc:
             if self._exception_means_browser_closed(exc):
                 raise BrowserLifecycleError(
                     "BROWSER_CONTEXT_CLOSED: smzdm 图片后创建正文段落时页面已关闭"
                 ) from exc
             raise ContentValidationError(
-                "SMZDM_POST_IMAGE_PARAGRAPH_FAILED: 图片后无法建立正文插入点"
+                "SMZDM_POST_IMAGE_PARAGRAPH_FAILED: 图片后无法建立正文插入点; "
+                "reason=transaction-evaluation-failed"
             ) from exc
 
     @staticmethod

@@ -183,6 +183,8 @@ def test_smzdm_creates_real_paragraph_with_prosemirror_transaction() -> None:
 
     transaction_script = editor.evaluate.await_args_list[0].args[0]
     assert "root.pmViewDesc" in transaction_script
+    assert "candidate.pmViewDesc" in transaction_script
+    assert "modelTailHasImage" in transaction_script
     assert "view.state.tr.insert" in transaction_script
     assert "view.dispatch(transaction.scrollIntoView())" in transaction_script
     assert "ArrowDown" not in transaction_script
@@ -196,7 +198,9 @@ def test_smzdm_waits_for_async_paragraph_after_image_atom() -> None:
             side_effect=[
                 {"ok": True, "action": "inserted"},
                 False,
+                {"ok": True, "action": "existing-model"},
                 False,
+                {"ok": True, "action": "existing"},
                 True,
             ]
         ),
@@ -208,7 +212,7 @@ def test_smzdm_waits_for_async_paragraph_after_image_atom() -> None:
     with patch("platforms.smzdm.asyncio.sleep", new=AsyncMock()) as sleep:
         asyncio.run(platform._create_paragraph_after_image())
 
-    assert editor.evaluate.await_count == 4
+    assert editor.evaluate.await_count == 6
     assert sleep.await_count == 2
 
 
@@ -219,16 +223,17 @@ def test_smzdm_fails_closed_when_prosemirror_view_is_unavailable() -> None:
         )
     )
     platform = SmzdmPlatform()
+    platform.POST_IMAGE_PARAGRAPH_POLL_ATTEMPTS = 2
     platform.page = SimpleNamespace()
     platform._current_body_editor = AsyncMock(return_value=editor)
 
     with pytest.raises(
         ContentValidationError,
-        match="SMZDM_POST_IMAGE_PARAGRAPH_FAILED",
+        match="reason=editor-view-unavailable",
     ):
         asyncio.run(platform._create_paragraph_after_image())
 
-    assert editor.evaluate.await_count == 1
+    assert editor.evaluate.await_count == 2
 
 
 def test_smzdm_fails_closed_when_post_image_paragraph_never_appears() -> None:
@@ -237,7 +242,9 @@ def test_smzdm_fails_closed_when_post_image_paragraph_never_appears() -> None:
             side_effect=[
                 {"ok": True, "action": "inserted"},
                 False,
+                {"ok": True, "action": "inserted"},
                 False,
+                {"ok": True, "action": "inserted"},
                 False,
             ]
         ),
@@ -250,11 +257,11 @@ def test_smzdm_fails_closed_when_post_image_paragraph_never_appears() -> None:
     with patch("platforms.smzdm.asyncio.sleep", new=AsyncMock()):
         with pytest.raises(
             ContentValidationError,
-            match="SMZDM_POST_IMAGE_PARAGRAPH_FAILED",
+            match="reason=dom-tail-not-ready",
         ):
             asyncio.run(platform._create_paragraph_after_image())
 
-    assert editor.evaluate.await_count == 4
+    assert editor.evaluate.await_count == 6
 
 
 class PersistedTitle:

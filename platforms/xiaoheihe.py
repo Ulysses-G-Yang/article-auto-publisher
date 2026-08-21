@@ -46,6 +46,8 @@ class XiaoheihePlatform(BasePlatform):
     DRAFTS_URL = "https://www.xiaoheihe.cn/creator/draft"
     DRAFT_VERIFY_ATTEMPTS = 3
     DRAFT_CONTENT_POLL_DELAYS = (1.0, 2.0, 3.0)
+    IDENTITY_CAPTURE_ATTEMPTS = 6
+    IDENTITY_CAPTURE_INTERVAL_SECONDS = 0.5
     PUBLISH_NOW_BTN = "button.editor-publish__btn.main-btn"        # 发布
     IMAGE_LOCAL_UPLOAD = (
         ".editor-model__image-model .model-image__local-box "
@@ -162,36 +164,40 @@ class XiaoheihePlatform(BasePlatform):
             pass
 
     async def fetch_identity_payload(self) -> dict:
-        """返回 restore_login 捕获/重放的最小平台身份；缺失时如实返回未确认。"""
+        """有界等待 restore_login 身份，避免一次异步/网络抖动产生假失败。"""
 
-        payload = getattr(self, "_restore_profile", None)
-        if isinstance(payload, dict) and payload.get("ok"):
-            return dict(payload)
-        url = getattr(self, "_restore_url", None)
-        if not url:
+        if self.page is None:
             return {"ok": False, "user_id": "", "display_name": ""}
-        try:
-            result = await self.page.evaluate(
-                """async (u) => {
-                    try {
-                        const response = await fetch(u, { credentials: 'include' });
-                        const body = await response.json().catch(() => ({}));
-                        const profile = (body && body.result && body.result.profile) || {};
-                        return {
-                            ok: Boolean(response.ok && profile.nickname && profile.heybox_id),
-                            user_id: profile.heybox_id ? String(profile.heybox_id) : '',
-                            display_name: profile.nickname ? String(profile.nickname) : '',
-                        };
-                    } catch (_) {
-                        return { ok: false, user_id: '', display_name: '' };
-                    }
-                }""",
-                url,
-            )
-            if isinstance(result, dict) and result.get("ok"):
-                return result
-        except Exception:  # noqa: BLE001
-            pass
+        for attempt in range(self.IDENTITY_CAPTURE_ATTEMPTS):
+            payload = getattr(self, "_restore_profile", None)
+            if isinstance(payload, dict) and payload.get("ok"):
+                return dict(payload)
+            url = getattr(self, "_restore_url", None)
+            if url:
+                try:
+                    result = await self.page.evaluate(
+                        """async (u) => {
+                            try {
+                                const response = await fetch(u, { credentials: 'include' });
+                                const body = await response.json().catch(() => ({}));
+                                const profile = (body && body.result && body.result.profile) || {};
+                                return {
+                                    ok: Boolean(response.ok && profile.nickname && profile.heybox_id),
+                                    user_id: profile.heybox_id ? String(profile.heybox_id) : '',
+                                    display_name: profile.nickname ? String(profile.nickname) : '',
+                                };
+                            } catch (_) {
+                                return { ok: false, user_id: '', display_name: '' };
+                            }
+                        }""",
+                        url,
+                    )
+                    if isinstance(result, dict) and result.get("ok"):
+                        return result
+                except Exception:  # noqa: BLE001
+                    pass
+            if attempt + 1 < self.IDENTITY_CAPTURE_ATTEMPTS:
+                await asyncio.sleep(self.IDENTITY_CAPTURE_INTERVAL_SECONDS)
         return {"ok": False, "user_id": "", "display_name": ""}
 
     async def _wait_first_visible(self, selector: str, timeout_ms: int = 5000):
@@ -279,9 +285,16 @@ class XiaoheihePlatform(BasePlatform):
         try:
             self._raise_if_page_closed("小黑盒登录态检测")
             await self.page.goto("https://www.xiaoheihe.cn/", wait_until="domcontentloaded", timeout=15000)
-            # 多等一会儿，确保 SPA 完成 hydration、cookie 已注入页面上下文
-            await asyncio.sleep(4)
-            return await self._is_logged_in_dom()
+            # SPA hydration 和登录 Cookie 可在不同时间落地。保持原有 4 秒
+            # 总等待预算，但改为多次只读观测，避免某一次 context.cookies()
+            # 暂时失败就把已验证账号降级为 LOGIN_REQUIRED。
+            await asyncio.sleep(2)
+            for attempt in range(3):
+                if await self._is_logged_in_dom():
+                    return True
+                if attempt < 2:
+                    await asyncio.sleep(1)
+            return False
         except BrowserLifecycleError:
             raise
         except Exception as exc:

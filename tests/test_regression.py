@@ -1384,6 +1384,36 @@ class RegressionTests(DatabaseTestCase):
         self.assertTrue(result["ok"])
         self.assertEqual(result["display_name"], "玩家102503316")
 
+    def test_xiaoheihe_fetch_identity_retries_transient_restore_failure(self):
+        platform = XiaoheihePlatform()
+        platform._restore_url = (
+            "https://api.xiaoheihe.cn/account/restore_login?hkey=X&nonce=Y"
+        )
+        platform.page = type(
+            "Page",
+            (),
+            {
+                "evaluate": AsyncMock(
+                    side_effect=[
+                        {"ok": False, "user_id": "", "display_name": ""},
+                        {
+                            "ok": True,
+                            "user_id": "102503316",
+                            "display_name": "玩家102503316",
+                        },
+                    ]
+                )
+            },
+        )()
+
+        with patch("platforms.xiaoheihe.asyncio.sleep", new=AsyncMock()) as sleep:
+            result = asyncio.run(platform.fetch_identity_payload())
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["user_id"], "102503316")
+        self.assertEqual(platform.page.evaluate.await_count, 2)
+        self.assertEqual(sleep.await_count, 1)
+
     def test_xiaoheihe_fetch_identity_fails_closed_without_capture(self):
         platform = XiaoheihePlatform()
         result = asyncio.run(platform.fetch_identity_payload())

@@ -624,17 +624,17 @@ class SmzdmPlatform(BasePlatform):
             ) from exc
 
     async def _create_paragraph_after_image(self) -> None:
-        """通过 ProseMirror transaction 创建图片后的末尾正文段落。
+        """通过页面公开的 TipTap Editor API 创建图片后的正文段落。
 
         图片是 TipTap/ProseMirror 的原子节点。过去依赖方向键和回车猜测
         浏览器光标，连续图片或最后一张图片时会落到错误节点。这里直接从
-        编辑器根节点取得 ``EditorView``，向文档末尾插入 paragraph，并把
-        selection 放入新段落；拿不到真实 model 时 fail closed，绝不回退
-        到键盘碰运气。
+        编辑器根节点取得 ``editor`` 实例，通过 ``commands.insertContentAt``
+        向文档末尾插入 paragraph，并把 selection 放入新段落；拿不到真实
+        TipTap API 时 fail closed，绝不回退到键盘碰运气。
         """
 
         safe_reasons = {
-            "editor-view-unavailable",
+            "editor-api-unavailable",
             "paragraph-node-unavailable",
             "transaction-result-invalid",
             "transaction-evaluation-failed",
@@ -656,30 +656,22 @@ class SmzdmPlatform(BasePlatform):
                         return {ok: true, action: 'existing'};
                     }
 
-                    // ProseMirror 把内部 ViewDesc 挂在编辑器 DOM 上。沿 parent
-                    // 回到 DocViewDesc 后才能取得真正的 EditorView；这是模型
-                    // 写入，不是直接篡改 DOM。
-                    let descriptor = root.pmViewDesc || null;
-                    if (!descriptor) {
-                        const node = Array.from(root.querySelectorAll('*'))
-                            .find(candidate => candidate.pmViewDesc);
-                        descriptor = node ? node.pmViewDesc : null;
+                    // 真实页面把 TipTap Editor 实例公开挂在 ProseMirror 根节点
+                    // 的 editor 属性上。不要再依赖 pmViewDesc 等私有实现细节。
+                    const tiptap = root.editor || null;
+                    const commands = tiptap && tiptap.commands;
+                    const state = tiptap && (tiptap.state || tiptap.view?.state);
+                    if (!tiptap || !commands || !state || !state.doc ||
+                        typeof commands.insertContentAt !== 'function' ||
+                        typeof commands.focus !== 'function') {
+                        return {ok: false, reason: 'editor-api-unavailable'};
                     }
-                    let view = root.editorView || null;
-                    while (descriptor) {
-                        if (descriptor.view) view = descriptor.view;
-                        descriptor = descriptor.parent || null;
-                    }
-                    if (!view || !view.state || !view.state.doc ||
-                        !view.state.schema || typeof view.dispatch !== 'function') {
-                        return {ok: false, reason: 'editor-view-unavailable'};
-                    }
-                    const paragraphType = view.state.schema.nodes.paragraph;
-                    if (!paragraphType || !view.state.tr) {
+                    const paragraphType = state.schema?.nodes?.paragraph;
+                    if (!paragraphType) {
                         return {ok: false, reason: 'paragraph-node-unavailable'};
                     }
 
-                    const modelTail = view.state.doc.lastChild;
+                    const modelTail = state.doc.lastChild;
                     let modelTailHasImage = false;
                     if (modelTail && typeof modelTail.descendants === 'function') {
                         modelTail.descendants(node => {
@@ -694,27 +686,20 @@ class SmzdmPlatform(BasePlatform):
                     // 会把 <p><img></p> 误认为可输入段落，必须确认其中无图片。
                     if (modelTail && modelTail.type === paragraphType
                         && !modelTailHasImage) {
-                        if (typeof view.focus === 'function') view.focus();
+                        commands.focus('end');
                         return {ok: true, action: 'existing-model'};
                     }
 
-                    const insertAt = view.state.doc.content.size;
-                    let transaction = view.state.tr.insert(
+                    const insertAt = state.doc.content.size;
+                    const inserted = commands.insertContentAt(
                         insertAt,
-                        paragraphType.create(),
+                        {type: 'paragraph'},
+                        {updateSelection: true},
                     );
-                    const selectionType = view.state.selection &&
-                        view.state.selection.constructor;
-                    if (selectionType && typeof selectionType.near === 'function') {
-                        transaction = transaction.setSelection(
-                            selectionType.near(
-                                transaction.doc.resolve(transaction.doc.content.size),
-                                -1,
-                            ),
-                        );
+                    if (inserted === false) {
+                        return {ok: false, reason: 'transaction-result-invalid'};
                     }
-                    view.dispatch(transaction.scrollIntoView());
-                    if (typeof view.focus === 'function') view.focus();
+                    commands.focus('end');
                     return {ok: true, action: 'inserted'};
                 }"""
                     )

@@ -166,7 +166,7 @@ def test_smzdm_full_multi_image_contract_handles_consecutive_and_final_images() 
     assert result["uploaded_images"] == 7
 
 
-def test_smzdm_creates_real_paragraph_with_prosemirror_transaction() -> None:
+def test_smzdm_creates_real_paragraph_with_public_tiptap_commands() -> None:
     editor = SimpleNamespace(
         evaluate=AsyncMock(
             side_effect=[
@@ -182,11 +182,12 @@ def test_smzdm_creates_real_paragraph_with_prosemirror_transaction() -> None:
     asyncio.run(platform._create_paragraph_after_image())
 
     transaction_script = editor.evaluate.await_args_list[0].args[0]
-    assert "root.pmViewDesc" in transaction_script
-    assert "candidate.pmViewDesc" in transaction_script
+    assert "root.editor" in transaction_script
+    assert "commands.insertContentAt" in transaction_script
+    assert "commands.focus('end')" in transaction_script
     assert "modelTailHasImage" in transaction_script
-    assert "view.state.tr.insert" in transaction_script
-    assert "view.dispatch(transaction.scrollIntoView())" in transaction_script
+    assert "root.pmViewDesc" not in transaction_script
+    assert "view.state.tr.insert" not in transaction_script
     assert "ArrowDown" not in transaction_script
     assert "keyboard" not in transaction_script
     assert "tail.tagName.toLowerCase() === 'p'" in editor.evaluate.await_args_list[1].args[0]
@@ -216,10 +217,10 @@ def test_smzdm_waits_for_async_paragraph_after_image_atom() -> None:
     assert sleep.await_count == 2
 
 
-def test_smzdm_fails_closed_when_prosemirror_view_is_unavailable() -> None:
+def test_smzdm_fails_closed_when_tiptap_editor_api_is_unavailable() -> None:
     editor = SimpleNamespace(
         evaluate=AsyncMock(
-            return_value={"ok": False, "reason": "editor-view-unavailable"}
+            return_value={"ok": False, "reason": "editor-api-unavailable"}
         )
     )
     platform = SmzdmPlatform()
@@ -229,7 +230,7 @@ def test_smzdm_fails_closed_when_prosemirror_view_is_unavailable() -> None:
 
     with pytest.raises(
         ContentValidationError,
-        match="reason=editor-view-unavailable",
+        match="reason=editor-api-unavailable",
     ):
         asyncio.run(platform._create_paragraph_after_image())
 

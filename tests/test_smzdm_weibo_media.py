@@ -191,12 +191,15 @@ class FakeUploadPage:
             return self.dialogs
         raise AssertionError(f"unexpected page selector: {selector}")
 
-    async def evaluate(self, _script: str) -> int:
+    async def evaluate(self, _script: str) -> dict:
         try:
             self.last_image_count = next(self.image_counts)
         except StopIteration:
             pass
-        return self.last_image_count
+        return {
+            "semantic_count": self.last_image_count,
+            "unsupported_count": 0,
+        }
 
 
 PLATFORMS = (
@@ -208,6 +211,7 @@ def run_upload(platform_class, module_name: str, inputs, image_counts):
     platform = platform_class()
     platform.page = FakeUploadPage(inputs, image_counts)
     platform._find_body_image_trigger = AsyncMock(return_value=platform.page.trigger)
+    platform._semantic_editor_image_count = AsyncMock(side_effect=image_counts)
     with patch(f"{module_name}.asyncio.sleep", new=AsyncMock()):
         result = asyncio.run(platform._upload_image("photo.png"))
     return platform, result
@@ -286,7 +290,9 @@ def test_image_count_not_increasing_is_failure(
     )
 
     assert result["success"] is False
-    assert result["error_code"] == f"{prefix}_EDITOR_IMAGE_COUNT_UNCHANGED"
+    assert result["error_code"] == (
+        f"{prefix}_EDITOR_SEMANTIC_IMAGE_COUNT_UNCHANGED"
+    )
     body_image.set_input_files.assert_awaited_once()
 
 

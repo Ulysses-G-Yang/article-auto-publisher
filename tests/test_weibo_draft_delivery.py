@@ -369,7 +369,10 @@ class _UploadPage:
         self.dialogs = _UploadDialogs(self, self.dialog)
 
     async def evaluate(self, _script: str):
-        return self.editor_image_count
+        return {
+            "semantic_count": self.editor_image_count,
+            "unsupported_count": 0,
+        }
 
     def locator(self, selector: str):
         assert selector == ".n-dialog:visible"
@@ -382,6 +385,7 @@ def test_weibo_upload_selects_only_the_new_ready_album_item() -> None:
     platform = WeiboPlatform()
     platform.page = page
     platform._find_body_image_trigger = AsyncMock(return_value=trigger)
+    platform._semantic_editor_image_count = AsyncMock(side_effect=[2, 3, 3])
 
     with patch("platforms.weibo.asyncio.sleep", new=AsyncMock()):
         result = asyncio.run(platform._upload_image("D:/controlled/third.png"))
@@ -395,12 +399,89 @@ def test_weibo_upload_selects_only_the_new_ready_album_item() -> None:
     page.dialog.insert_button.click.assert_awaited_once_with(timeout=5000)
 
 
+def test_weibo_dom_snapshot_ignores_prosemirror_separators() -> None:
+    snapshot = [
+        {
+            "tag": "p",
+            "class_name": "",
+            "text": "第一段",
+            "images": [
+                {"is_separator": True, "is_body_image": False},
+            ],
+        },
+        {
+            "tag": "figure",
+            "class_name": "wb-node-image",
+            "text": "",
+            "images": [
+                {"is_separator": False, "is_body_image": True},
+            ],
+        },
+        {
+            "tag": "p",
+            "class_name": "",
+            "text": "第二段",
+            "images": [
+                {"is_separator": True, "is_body_image": False},
+            ],
+        },
+    ]
+
+    assert WeiboPlatform._normalize_editor_dom_snapshot(snapshot) == [
+        {"kind": "text", "text": "第一段"},
+        {"kind": "image"},
+        {"kind": "text", "text": "第二段"},
+    ]
+
+
+def test_weibo_dom_snapshot_rejects_unknown_non_separator_image() -> None:
+    snapshot = [
+        {
+            "tag": "p",
+            "class_name": "",
+            "text": "正文",
+            "images": [
+                {"is_separator": False, "is_body_image": True},
+            ],
+        }
+    ]
+
+    with pytest.raises(ContentValidationError, match="正文图片结构无法确认"):
+        WeiboPlatform._normalize_editor_dom_snapshot(snapshot)
+
+
+def test_weibo_semantic_image_count_uses_verified_figure_state() -> None:
+    editor = SimpleNamespace(
+        evaluate=AsyncMock(
+            return_value={"semantic_count": 7, "unsupported_count": 0}
+        )
+    )
+    platform = WeiboPlatform()
+    platform._current_body_editor = AsyncMock(return_value=editor)
+
+    assert asyncio.run(platform._semantic_editor_image_count()) == 7
+
+
+def test_weibo_semantic_image_count_rejects_unknown_images() -> None:
+    editor = SimpleNamespace(
+        evaluate=AsyncMock(
+            return_value={"semantic_count": 1, "unsupported_count": 1}
+        )
+    )
+    platform = WeiboPlatform()
+    platform._current_body_editor = AsyncMock(return_value=editor)
+
+    with pytest.raises(ContentValidationError, match="正文图片结构无法确认"):
+        asyncio.run(platform._semantic_editor_image_count())
+
+
 def test_weibo_upload_fails_closed_when_more_than_one_new_item_appears() -> None:
     page = _UploadPage(ambiguous_new_items=True)
     trigger = _UiNode("")
     platform = WeiboPlatform()
     platform.page = page
     platform._find_body_image_trigger = AsyncMock(return_value=trigger)
+    platform._semantic_editor_image_count = AsyncMock(return_value=2)
 
     with patch("platforms.weibo.asyncio.sleep", new=AsyncMock()):
         result = asyncio.run(platform._upload_image("D:/controlled/third.png"))

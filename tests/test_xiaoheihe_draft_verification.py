@@ -19,7 +19,16 @@ class _NoDelay:
 
 
 class _FakePage:
-    def __init__(self, *, url: str, snapshots=None, evaluate_error=None, click_error=None):
+    def __init__(
+        self,
+        *,
+        url: str,
+        snapshots=None,
+        evaluate_error=None,
+        click_error=None,
+        save_button_count: int = 1,
+        save_button_text: str = "保存草稿",
+    ):
         self.url = url
         self.snapshots = list(snapshots or [])
         self.evaluate_error = evaluate_error
@@ -27,12 +36,16 @@ class _FakePage:
         self.closed = False
         self.click_count = 0
         self.evaluate_scripts: list[str] = []
+        self.goto_count = 0
+        self.save_button_count = save_button_count
+        self.save_button_text = save_button_text
 
     def is_closed(self) -> bool:
         return self.closed
 
     async def goto(self, url: str, **_kwargs):
         self.url = url
+        self.goto_count += 1
 
     async def evaluate(self, script: str, *_args):
         self.evaluate_scripts.append(script)
@@ -47,8 +60,42 @@ class _FakePage:
         if self.click_error is not None:
             raise self.click_error
 
+    def locator(self, _selector: str):
+        return _FakeButtonList(self)
+
     async def close(self):
         self.closed = True
+
+
+class _FakeButton:
+    def __init__(self, page: _FakePage):
+        self.page = page
+
+    async def is_visible(self):
+        return True
+
+    async def is_enabled(self):
+        return True
+
+    async def inner_text(self):
+        return self.page.save_button_text
+
+    async def get_attribute(self, name: str):
+        return "editor-publish__save-draft" if name == "class" else None
+
+    async def click(self, *_args, **_kwargs):
+        await self.page.click()
+
+
+class _FakeButtonList:
+    def __init__(self, page: _FakePage):
+        self.page = page
+
+    async def count(self):
+        return self.page.save_button_count
+
+    def nth(self, _index: int):
+        return _FakeButton(self.page)
 
 
 class _FakeContext:
@@ -106,6 +153,35 @@ async def test_save_draft_requires_new_exact_matching_card_and_closes_baseline_p
     assert main.click_count == 1
     assert baseline.closed is True
     assert platform.context.new_page_count == 1
+
+
+@pytest.mark.asyncio
+async def test_save_draft_reloads_slow_draft_list_without_repeating_save():
+    expected = "慢加载草稿"
+    baseline = _baseline_page([_candidate("old", "旧草稿")])
+    main = _main_page(
+        {"candidates": [], "reliable": True},
+        {"candidates": [], "reliable": True},
+        {"candidates": [_candidate("new", expected)], "reliable": True},
+    )
+    platform = _platform(main, baseline)
+
+    assert await platform.save_draft(expected) == XiaoheihePlatform.DRAFTS_URL
+    assert main.click_count == 1
+    assert main.goto_count == 3
+
+
+@pytest.mark.asyncio
+async def test_save_draft_fails_before_side_effect_when_button_is_ambiguous():
+    baseline = _baseline_page([_candidate("old", "旧草稿")])
+    main = _FakePage(
+        url="https://www.xiaoheihe.cn/creator/editor/fixture",
+        save_button_count=2,
+    )
+    platform = _platform(main, baseline)
+
+    assert await platform.save_draft("按钮候选不唯一") == ""
+    assert main.click_count == 0
 
 
 @pytest.mark.asyncio

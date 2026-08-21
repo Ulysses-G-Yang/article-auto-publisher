@@ -624,18 +624,76 @@ class SmzdmPlatform(BasePlatform):
             ) from exc
 
     async def _create_paragraph_after_image(self) -> None:
-        """越过 TipTap 图片原子块，创建可继续写入的末尾正文段落。"""
+        """通过 ProseMirror transaction 创建图片后的末尾正文段落。
+
+        图片是 TipTap/ProseMirror 的原子节点。过去依赖方向键和回车猜测
+        浏览器光标，连续图片或最后一张图片时会落到错误节点。这里直接从
+        编辑器根节点取得 ``EditorView``，向文档末尾插入 paragraph，并把
+        selection 放入新段落；拿不到真实 model 时 fail closed，绝不回退
+        到键盘碰运气。
+        """
 
         editor = await self._current_body_editor()
         try:
-            await editor.press("Control+End")
-            await self.page.keyboard.press("ArrowDown")
-            await self.page.keyboard.press("ArrowRight")
-            await self.page.keyboard.press("Enter")
-            # TipTap 在图片节点上传完成后会异步提交 ProseMirror transaction。
-            # 真实页面观察到：按键已经成功，但空 ``p`` 会在稍后才成为末尾
-            # 子节点。不能在按键后立即单次判断，否则会把已成功的插图误报
-            # 为失败。每轮重新取得编辑器，兼容 TipTap 替换根节点。
+            mutation = await editor.evaluate(
+                """root => {
+                    const domTailIsParagraph = () => {
+                        const tail = root.lastElementChild;
+                        return !!tail && tail.tagName.toLowerCase() === 'p'
+                            && tail.querySelectorAll('img').length === 0;
+                    };
+                    if (domTailIsParagraph()) {
+                        return {ok: true, action: 'existing'};
+                    }
+
+                    // ProseMirror 把内部 ViewDesc 挂在编辑器 DOM 上。沿 parent
+                    // 回到 DocViewDesc 后才能取得真正的 EditorView；这是模型
+                    // 写入，不是直接篡改 DOM。
+                    let descriptor = root.pmViewDesc || null;
+                    while (descriptor && descriptor.parent) {
+                        descriptor = descriptor.parent;
+                    }
+                    const view = (descriptor && descriptor.view) || root.editorView;
+                    if (!view || !view.state || !view.state.doc ||
+                        !view.state.schema || typeof view.dispatch !== 'function') {
+                        return {ok: false, reason: 'editor-view-unavailable'};
+                    }
+                    const paragraphType = view.state.schema.nodes.paragraph;
+                    if (!paragraphType || !view.state.tr) {
+                        return {ok: false, reason: 'paragraph-node-unavailable'};
+                    }
+
+                    const modelTail = view.state.doc.lastChild;
+                    if (modelTail && modelTail.type === paragraphType) {
+                        if (typeof view.focus === 'function') view.focus();
+                        return {ok: true, action: 'existing-model'};
+                    }
+
+                    const insertAt = view.state.doc.content.size;
+                    let transaction = view.state.tr.insert(
+                        insertAt,
+                        paragraphType.create(),
+                    );
+                    const selectionType = view.state.selection &&
+                        view.state.selection.constructor;
+                    if (selectionType && typeof selectionType.near === 'function') {
+                        transaction = transaction.setSelection(
+                            selectionType.near(
+                                transaction.doc.resolve(transaction.doc.content.size),
+                                -1,
+                            ),
+                        );
+                    }
+                    view.dispatch(transaction.scrollIntoView());
+                    if (typeof view.focus === 'function') view.focus();
+                    return {ok: true, action: 'inserted'};
+                }"""
+            )
+            if not isinstance(mutation, dict) or mutation.get("ok") is not True:
+                raise RuntimeError("ProseMirror EditorView 或 paragraph 节点不可用")
+
+            # dispatch 通常同步更新 DOM，但图片上传组件可能随后替换根节点。
+            # 有界轮询且每次重新取得 editor，避免把成功 transaction 误报失败。
             for attempt in range(self.POST_IMAGE_PARAGRAPH_POLL_ATTEMPTS):
                 editor = await self._current_body_editor()
                 tail_ready = bool(

@@ -42,9 +42,14 @@ class XiaoheihePlatform(BasePlatform):
     TITLE_FIELD = ".editor-title__container [contenteditable='true'], .editor-title__container .ProseMirror"
     BODY_FIELD = ".article__edit-content--inner [contenteditable='true'], .article__edit-content--inner .ProseMirror"
     SAVE_DRAFT_BTN = "button.editor-publish__save-draft"           # 保存草稿
+    SAVE_DRAFT_CANDIDATES = (
+        "button.editor-publish__save-draft,"
+        "button.editor-publish__btn:has-text('保存草稿'),"
+        "button:has-text('保存草稿')"
+    )
     DRAFT_BOX_BTN = "button.editor-publish__btn.sub-btn.margin-left"  # 草稿箱
     DRAFTS_URL = "https://www.xiaoheihe.cn/creator/draft"
-    DRAFT_VERIFY_ATTEMPTS = 3
+    DRAFT_VERIFY_DELAYS = (1.0, 2.0, 3.0, 5.0, 8.0)
     DRAFT_CONTENT_POLL_DELAYS = (1.0, 2.0, 3.0)
     IDENTITY_CAPTURE_ATTEMPTS = 6
     IDENTITY_CAPTURE_INTERVAL_SECONDS = 0.5
@@ -1718,8 +1723,9 @@ class XiaoheihePlatform(BasePlatform):
         try:
             # close leftover modal mask if any (e.g. community/topic picker left open)
             await self._dismiss_overlays()
+            save_button = await self._resolve_save_draft_button()
             clicked = True
-            await self.page.click(self.SAVE_DRAFT_BTN, timeout=8000)
+            await save_button.click(timeout=8000)
         except asyncio.CancelledError as exc:
             if clicked:
                 raise DraftResultUnknownError(
@@ -1755,6 +1761,38 @@ class XiaoheihePlatform(BasePlatform):
             raise DraftResultUnknownError(
                 "DRAFT_RESULT_UNKNOWN: 小黑盒保存后内容无法证明"
             ) from exc
+
+    async def _resolve_save_draft_button(self):
+        """只返回唯一、可见、可用的保存草稿按钮。
+
+        小黑盒曾调整按钮 class，单一 CSS 选择器会在正文已经写完后才失败。
+        候选仍严格限定为 button，并以真实文字或已验证 class 二次过滤；
+        候选不唯一时停止，避免误点旁边的草稿箱或公开发布按钮。
+        """
+
+        self._raise_if_page_closed("定位小黑盒保存草稿按钮")
+        try:
+            controls = self.page.locator(self.SAVE_DRAFT_CANDIDATES)
+            visible = []
+            for index in range(await controls.count()):
+                control = controls.nth(index)
+                if not await control.is_visible() or not await control.is_enabled():
+                    continue
+                text = " ".join((await control.inner_text()).split())
+                class_name = str(await control.get_attribute("class") or "")
+                if text == "保存草稿" or "editor-publish__save-draft" in class_name:
+                    visible.append(control)
+            if len(visible) != 1:
+                raise SelectorError("小黑盒保存草稿按钮不可用或候选不唯一")
+            return visible[0]
+        except SelectorError:
+            raise
+        except Exception as exc:
+            if self._exception_means_browser_closed(exc):
+                raise BrowserLifecycleError(
+                    "BROWSER_CONTEXT_CLOSED: 定位小黑盒保存草稿按钮时页面已关闭"
+                ) from exc
+            raise SelectorError("小黑盒保存草稿按钮定位失败") from exc
 
     @staticmethod
     def _is_drafts_route(url: str | None) -> bool:
@@ -1866,7 +1904,10 @@ class XiaoheihePlatform(BasePlatform):
                     };
 
                     const titleSelector = [
+                        ".creator-draft__title",
+                        ".creator-draft__content-title",
                         ".creator-draft__content",
+                        "[data-draft-title]",
                         "[data-title]",
                         "[class*='title']",
                         "[class*='name']",
@@ -2196,7 +2237,27 @@ class XiaoheihePlatform(BasePlatform):
             logger.error("小黑盒草稿箱路由验证失败")
             return ""
 
-        for attempt in range(self.DRAFT_VERIFY_ATTEMPTS):
+        for attempt, delay in enumerate(self.DRAFT_VERIFY_DELAYS):
+            if attempt:
+                try:
+                    # SPA 草稿列表可能保留首次空快照。重新导航只读页面，
+                    # 强制取得新的列表响应；不会重复保存，也不会产生副作用。
+                    await self.page.goto(
+                        self.DRAFTS_URL,
+                        wait_until="domcontentloaded",
+                        timeout=30000,
+                    )
+                except Exception as exc:
+                    if self._exception_means_browser_closed(exc):
+                        raise BrowserLifecycleError(
+                            "BROWSER_CONTEXT_CLOSED: 刷新小黑盒草稿箱时页面已关闭"
+                        ) from exc
+                    logger.warning(
+                        "小黑盒草稿箱第{}次只读刷新失败：error_type={}",
+                        attempt + 1,
+                        type(exc).__name__,
+                    )
+            await self.simulator.random_delay(delay, delay + 0.5)
             current, reliable = await self._snapshot_draft_state(self.page)
             if reliable and self._has_new_matching_draft(
                 baseline,
@@ -2205,8 +2266,6 @@ class XiaoheihePlatform(BasePlatform):
             ):
                 await self._verify_persisted_draft_content(expected_title)
                 return drafts_url
-            if attempt + 1 < self.DRAFT_VERIFY_ATTEMPTS:
-                await self.simulator.random_delay(2, 4)
         logger.warning("小黑盒草稿箱未确认保存后新增的匹配草稿卡片")
         return ""
 

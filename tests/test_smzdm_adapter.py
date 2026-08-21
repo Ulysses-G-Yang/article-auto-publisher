@@ -121,55 +121,130 @@ def test_smzdm_fill_content_processes_blocks_in_source_order() -> None:
     assert result["uploaded_images"] == 1
 
 
-def test_smzdm_creates_real_paragraph_after_image_atom() -> None:
-    editor = SimpleNamespace(press=AsyncMock(), evaluate=AsyncMock(return_value=True))
-    keyboard = SimpleNamespace(press=AsyncMock())
+def test_smzdm_full_multi_image_contract_handles_consecutive_and_final_images() -> None:
+    editor = SimpleNamespace(click=AsyncMock())
+    keyboard = SimpleNamespace(press=AsyncMock(), insert_text=AsyncMock())
     platform = SmzdmPlatform()
     platform.page = SimpleNamespace(keyboard=keyboard)
+    platform.simulator.random_delay = AsyncMock()
+    platform._current_body_editor = AsyncMock(return_value=editor)
+    platform._place_body_caret_at_end = AsyncMock()
+    platform._upload_image = AsyncMock(return_value={"success": True})
+    platform._create_paragraph_after_image = AsyncMock()
+    platform._validate_dom_prefix = AsyncMock()
+    platform._validate_dom_exact = AsyncMock()
+    blocks = [
+        {"type": "text", "text": "开头"},
+        {"type": "image", "position": 1},
+        {"type": "image", "position": 2},
+        {"type": "text", "text": "连续图片后的正文"},
+        {"type": "image", "position": 3},
+        {"type": "image", "position": 4},
+        {"type": "image", "position": 5},
+        {"type": "text", "text": "第二组图片后的正文"},
+        {"type": "image", "position": 6},
+        {"type": "image", "position": 7},
+    ]
+    images = [
+        {"position_index": index, "local_path": f"image-{index}.png"}
+        for index in range(1, 8)
+    ]
+
+    result = asyncio.run(platform.fill_content(blocks, images))
+
+    assert platform._upload_image.await_args_list == [
+        call(f"image-{index}.png") for index in range(1, 8)
+    ]
+    assert platform._create_paragraph_after_image.await_count == 7
+    assert keyboard.insert_text.await_args_list == [
+        call("开头"),
+        call("连续图片后的正文"),
+        call("第二组图片后的正文"),
+    ]
+    platform._validate_dom_exact.assert_awaited_once_with(blocks, phase="正文最终")
+    assert result["media_status"] == "completed"
+    assert result["uploaded_images"] == 7
+
+
+def test_smzdm_creates_real_paragraph_with_prosemirror_transaction() -> None:
+    editor = SimpleNamespace(
+        evaluate=AsyncMock(
+            side_effect=[
+                {"ok": True, "action": "inserted"},
+                True,
+            ]
+        )
+    )
+    platform = SmzdmPlatform()
+    platform.page = SimpleNamespace()
     platform._current_body_editor = AsyncMock(return_value=editor)
 
     asyncio.run(platform._create_paragraph_after_image())
 
-    editor.press.assert_awaited_once_with("Control+End")
-    assert keyboard.press.await_args_list == [
-        call("ArrowDown"),
-        call("ArrowRight"),
-        call("Enter"),
-    ]
-    assert "tail.tagName.toLowerCase() === 'p'" in editor.evaluate.await_args.args[0]
+    transaction_script = editor.evaluate.await_args_list[0].args[0]
+    assert "root.pmViewDesc" in transaction_script
+    assert "view.state.tr.insert" in transaction_script
+    assert "view.dispatch(transaction.scrollIntoView())" in transaction_script
+    assert "ArrowDown" not in transaction_script
+    assert "keyboard" not in transaction_script
+    assert "tail.tagName.toLowerCase() === 'p'" in editor.evaluate.await_args_list[1].args[0]
 
 
 def test_smzdm_waits_for_async_paragraph_after_image_atom() -> None:
     editor = SimpleNamespace(
-        press=AsyncMock(),
-        evaluate=AsyncMock(side_effect=[False, False, True]),
+        evaluate=AsyncMock(
+            side_effect=[
+                {"ok": True, "action": "inserted"},
+                False,
+                False,
+                True,
+            ]
+        ),
     )
-    keyboard = SimpleNamespace(press=AsyncMock())
     platform = SmzdmPlatform()
-    platform.page = SimpleNamespace(keyboard=keyboard)
+    platform.page = SimpleNamespace()
     platform._current_body_editor = AsyncMock(return_value=editor)
 
     with patch("platforms.smzdm.asyncio.sleep", new=AsyncMock()) as sleep:
         asyncio.run(platform._create_paragraph_after_image())
 
-    assert editor.evaluate.await_count == 3
+    assert editor.evaluate.await_count == 4
     assert sleep.await_count == 2
-    assert keyboard.press.await_args_list == [
-        call("ArrowDown"),
-        call("ArrowRight"),
-        call("Enter"),
-    ]
+
+
+def test_smzdm_fails_closed_when_prosemirror_view_is_unavailable() -> None:
+    editor = SimpleNamespace(
+        evaluate=AsyncMock(
+            return_value={"ok": False, "reason": "editor-view-unavailable"}
+        )
+    )
+    platform = SmzdmPlatform()
+    platform.page = SimpleNamespace()
+    platform._current_body_editor = AsyncMock(return_value=editor)
+
+    with pytest.raises(
+        ContentValidationError,
+        match="SMZDM_POST_IMAGE_PARAGRAPH_FAILED",
+    ):
+        asyncio.run(platform._create_paragraph_after_image())
+
+    assert editor.evaluate.await_count == 1
 
 
 def test_smzdm_fails_closed_when_post_image_paragraph_never_appears() -> None:
     editor = SimpleNamespace(
-        press=AsyncMock(),
-        evaluate=AsyncMock(return_value=False),
+        evaluate=AsyncMock(
+            side_effect=[
+                {"ok": True, "action": "inserted"},
+                False,
+                False,
+                False,
+            ]
+        ),
     )
-    keyboard = SimpleNamespace(press=AsyncMock())
     platform = SmzdmPlatform()
     platform.POST_IMAGE_PARAGRAPH_POLL_ATTEMPTS = 3
-    platform.page = SimpleNamespace(keyboard=keyboard)
+    platform.page = SimpleNamespace()
     platform._current_body_editor = AsyncMock(return_value=editor)
 
     with patch("platforms.smzdm.asyncio.sleep", new=AsyncMock()):
@@ -179,7 +254,7 @@ def test_smzdm_fails_closed_when_post_image_paragraph_never_appears() -> None:
         ):
             asyncio.run(platform._create_paragraph_after_image())
 
-    assert editor.evaluate.await_count == 3
+    assert editor.evaluate.await_count == 4
 
 
 class PersistedTitle:

@@ -19,8 +19,8 @@
 
 脚本只从该 SHA 的 Git archive 按白名单复制运行代码，并生成：
 
-- `ArticleOps-v0.4.2-<commit-sha>.zip`：全新安装包。
-- `ArticleOps-upgrade-v0.4.2-<commit-sha>.zip`：已有业务电脑升级包。
+- `ArticleOps-v0.4.3-<commit-sha>.zip`：全新安装包。
+- `ArticleOps-upgrade-v0.4.3-<commit-sha>.zip`：已有业务电脑升级包。
 - 两个压缩包各自同名的 `.sha256` 文件。
 
 交付前在目标机核对 SHA256，并记录压缩包内 `RELEASE_MANIFEST.txt` 的
@@ -28,7 +28,7 @@
 
 ## 已有业务电脑原地升级
 
-不要用完整包覆盖旧目录。解压 `ArticleOps-upgrade-v0.4.2-<commit-sha>.zip` 到
+不要用完整包覆盖旧目录。解压 `ArticleOps-upgrade-v0.4.3-<commit-sha>.zip` 到
 临时目录，然后执行：
 
 ```powershell
@@ -50,7 +50,9 @@ $targetRoot = Read-Host "请输入现有 ArticleOps 运行目录"
 
 1. 安装 Python 3.12、Conda、Google Chrome Stable；不要复用开发机 Profile。
 2. 解压 RC 包到一个新的目录。
-3. 复制 `scripts\production_env.example.ps1` 到 `data\production_env.ps1`，设置长度不少于 32 的随机 `APP_SECRET_KEY`，再按实际内网地址填写 `MCP_BIND_HOST` 和 `MCP_ALLOWED_HOSTS`。
+3. 复制 `scripts\production_env.example.ps1` 到 `data\production_env.ps1`，设置长度
+   不少于 32 的随机 `APP_SECRET_KEY`，再按实际内网地址填写 `MCP_BIND_HOST` 和
+   `MCP_ALLOWED_HOSTS`。初始化脚本会单独生成 MCP 内部令牌，绝不复用应用密钥。
 4. 在包根目录运行：
 
 ```powershell
@@ -71,6 +73,24 @@ $targetRoot = Read-Host "请输入现有 ArticleOps 运行目录"
 RC 压缩包是运行时白名单包，不包含 `requirements-dev.txt` 或 `tests/`。因此
 `setup_windows.ps1` 在包内安装 `requirements.txt`，仍会执行 `compileall`，并在日志中
 明确跳过不存在的 `pytest`；源码 checkout 则继续安装开发依赖并执行完整回归。
+
+## CS_Admin MCP 启用步骤
+
+发布包内的 `MCP_API_REFERENCE.md` 和 `mcp_server\registration.json` 是交付给
+CS_Admin 管理员的接口文档与一键导入配置。默认配置保持 fail-closed：
+
+1. 先在 ArticleOps 账号页完成真实平台登录，并确认账号为 `ACTIVE/VALID`。
+2. 把获准由 CS_Admin 使用的 `account_id` 写入
+   `ARTICLEOPS_MCP_ALLOWED_ACCOUNT_IDS`，多个账号用逗号分隔，禁止使用 `*`。
+3. 将 `ARTICLEOPS_MCP_DRAFT_DELIVERY_ENABLED` 改为 `true`，重启 Flask 与 MCP。
+4. 在 CS_Admin 导入 `mcp_server\registration.json`，点击“同步工具”并配置角色授权。
+5. 先调用 `list_platform_accounts` 核对公开昵称，再用
+   `start_article_draft_delivery` 提交受控 DOCX 临时地址与草稿目标。
+
+当前 MCP 只授予白名单账号 `draft.create`，不授予 `publish.request` 或
+`publish.execute`。如果提交超时，任务返回 `SUBMISSION_RESULT_UNKNOWN`，必须人工
+核对平台，不得自动重复提交。业务域名、可信代理和文件服务 Host 白名单的配置及
+CS_Admin 导入 JSON 见 `MCP_API_REFERENCE.md`。
 
 ## RC 生产入口冒烟
 

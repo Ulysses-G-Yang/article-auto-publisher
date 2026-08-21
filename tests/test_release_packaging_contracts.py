@@ -42,6 +42,7 @@ def test_windows_setup_keeps_all_mutating_paths_closed_by_default() -> None:
         "PUBLISH_AFTER_DRAFT",
         "LEGACY_UPLOAD_QUEUE_ENABLED",
         "ACCOUNT_SESSIONS_ALLOW_PUBLIC_PUBLISH",
+        "ARTICLEOPS_MCP_DRAFT_DELIVERY_ENABLED",
         "MCP_LEGACY_MUTATIONS_ENABLED",
     ):
         expected = f"`$env:{variable} = $(ConvertTo-PowerShellLiteral 'false')"
@@ -61,6 +62,8 @@ def test_release_whitelist_excludes_development_and_machine_state_files() -> Non
     assert "Get-FileHash -LiteralPath $archiveOutput -Algorithm SHA256" in script
     assert '"ArticleOps-upgrade-v$Version-$resolvedSha"' in script
     assert '"scripts\\apply_upgrade_windows.ps1"' in script
+    assert '"MCP_API_REFERENCE.md"' in script
+    assert '"docs\\releases\\v0.4.3-weibo-mcp.md"' in script
 
 
 def test_windows_upgrade_preserves_runtime_state_and_rolls_back_code() -> None:
@@ -88,10 +91,11 @@ def test_windows_start_script_exposes_bundled_src_modules_to_mcp() -> None:
 
 def test_release_docs_describe_runtime_only_test_behavior() -> None:
     docs = read("docs/deployment/PRODUCTION_WINDOWS.md")
-    release = read("docs/releases/v0.4.2-hotfix.md")
+    release = read("docs/releases/v0.4.3-weibo-mcp.md")
 
     assert "仍会执行 `compileall`" in docs
     assert "跳过不存在的 `pytest`" in docs
     assert "排除 `.git`、`data`、数据库、Cookie" in release
-    assert "ArticleOps-upgrade-v0.4.2" in docs
+    assert "ArticleOps-upgrade-v0.4.3" in docs
     assert "data\\upgrade_backups" in docs
+    assert "start_article_draft_delivery" in docs

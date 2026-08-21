@@ -19,7 +19,7 @@ param(
     [string]$OutputDirectory = ".\build\release",
 
     [ValidatePattern('^[0-9]+\.[0-9]+\.[0-9]+(?:-[A-Za-z0-9.-]+)?$')]
-    [string]$Version = "0.4.2"
+    [string]$Version = "0.4.3"
 )
 
 $ErrorActionPreference = "Stop"
@@ -117,7 +117,8 @@ try {
         "run_flask_production.py",
         "requirements.txt",
         "pyproject.toml",
-        "THIRD_PARTY_NOTICES.md"
+        "THIRD_PARTY_NOTICES.md",
+        "MCP_API_REFERENCE.md"
     )
     foreach ($relativePath in $rootFiles) {
         Copy-TrackedFile -RelativePath $relativePath -DestinationRelativePath $relativePath
@@ -143,6 +144,7 @@ try {
         "docs\releases\v0.4.0-draft-delivery.md",
         "docs\releases\v0.4.1-rc1.md",
         "docs\releases\v0.4.2-hotfix.md",
+        "docs\releases\v0.4.3-weibo-mcp.md",
         "docs\deployment\PRODUCTION_WINDOWS.md"
     )
     foreach ($relativePath in $releaseDocuments) {

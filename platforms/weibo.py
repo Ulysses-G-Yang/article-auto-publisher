@@ -408,6 +408,7 @@ class WeiboPlatform(BasePlatform):
             raise DraftBaselineError(
                 "DRAFT_BASELINE_FAILED: 微博缺少唯一标题草稿基线"
             )
+        create_started = False
         try:
             await self.page.goto(
                 "https://card.weibo.com/article/v5/editor#/draft",
@@ -424,11 +425,49 @@ class WeiboPlatform(BasePlatform):
                 }""",
                 timeout=15000,
             )
-            write_btn = self.page.get_by_text("写文章", exact=True).first
-            await write_btn.click(timeout=10000)
-            # 等待切换到已创建的草稿视图 #/draft/{id}
+            before_draft_id = str(
+                await self.page.evaluate(
+                    r"""() => {
+                        const match = location.hash.match(/^#\/draft\/(\d+)$/);
+                        return match ? match[1] : '';
+                    }"""
+                )
+                or ""
+            )
+            write_buttons = self.page.get_by_role(
+                "button",
+                name="写文章",
+                exact=True,
+            )
+            if await write_buttons.count() != 1 or not await write_buttons.is_visible():
+                raise DraftBaselineError(
+                    "DRAFT_BASELINE_FAILED: 微博写文章按钮不唯一或不可见"
+                )
+
+            async with self.page.expect_response(
+                lambda response: (
+                    str(response.request.method or "").upper() == "POST"
+                    and urlsplit(str(response.url or "")).path
+                    == "/article/v5/aj/editor/draft/create"
+                ),
+                timeout=20000,
+            ) as response_info:
+                create_started = True
+                await write_buttons.click(timeout=10000)
+            create_response = await response_info.value
+            if not 200 <= int(create_response.status) < 300:
+                raise DraftResultUnknownError(
+                    "DRAFT_RESULT_UNKNOWN: 微博新草稿创建请求未返回成功状态，禁止重试"
+                )
+
+            # 草稿页会默认打开最近一篇旧稿；只有创建接口成功且 hash 切换到
+            # 一个不同的正整数 ID，才能证明当前编辑器属于本次新草稿。
             await self.page.wait_for_function(
-                """() => /#\\/draft\\/\\d+/.test(location.hash)""",
+                r"""(beforeId) => {
+                    const match = location.hash.match(/^#\/draft\/(\d+)$/);
+                    return Boolean(match && match[1] !== '0' && match[1] !== beforeId);
+                }""",
+                arg=before_draft_id,
                 timeout=20000,
             )
             await self.page.wait_for_selector(
@@ -453,9 +492,13 @@ class WeiboPlatform(BasePlatform):
                 )
                 or ""
             )
-            if not draft_id.isdigit():
-                raise DraftBaselineError(
-                    "DRAFT_BASELINE_FAILED: 微博没有创建可绑定的草稿 ID"
+            if (
+                not draft_id.isdigit()
+                or int(draft_id) <= 0
+                or draft_id == before_draft_id
+            ):
+                raise DraftResultUnknownError(
+                    "DRAFT_RESULT_UNKNOWN: 微博创建响应已返回但无法绑定新的草稿 ID"
                 )
             editor_state = await self.page.evaluate(
                 """(selector) => {
@@ -481,14 +524,22 @@ class WeiboPlatform(BasePlatform):
                     "DRAFT_BASELINE_FAILED: 微博新草稿编辑器不是空白状态"
                 )
             self._active_draft_id = draft_id
-        except DraftBaselineError:
+        except (DraftBaselineError, DraftResultUnknownError):
             raise
         except BrowserLifecycleError:
             raise
         except Exception as exc:
             if self._exception_means_browser_closed(exc):
+                if create_started:
+                    raise DraftResultUnknownError(
+                        "DRAFT_RESULT_UNKNOWN: 微博创建草稿后页面关闭，禁止重试"
+                    ) from exc
                 raise BrowserLifecycleError(
                     "BROWSER_CONTEXT_CLOSED: 微博打开编辑器时页面已关闭"
+                ) from exc
+            if create_started:
+                raise DraftResultUnknownError(
+                    "DRAFT_RESULT_UNKNOWN: 微博创建草稿后无法证明新编辑器状态，禁止重试"
                 ) from exc
             raise SelectorError("微博头条文章编辑器未找到标题输入框") from exc
 

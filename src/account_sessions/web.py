@@ -12,7 +12,11 @@ from flask import Blueprint, jsonify, redirect, request
 from pydantic import ValidationError
 
 from account_sessions.account_service import AccountSessionService
-from account_sessions.contracts import DeliveryRequest, SessionPolicyRequest
+from account_sessions.contracts import (
+    ClearLoginStateRequest,
+    DeliveryRequest,
+    SessionPolicyRequest,
+)
 from account_sessions.database import AccountDatabase
 from account_sessions.delivery_service import DeliveryService
 from account_sessions.errors import AccountSessionError, ConfirmationRequiredError
@@ -210,11 +214,15 @@ def create_account_session_blueprint(
     @blueprint.get("/api/platforms/<platform>/accounts")
     def list_accounts(platform: str):
         usable = request.args.get("usable", "false").lower() == "true"
+        include_archived = (
+            request.args.get("include_archived", "false").lower() == "true"
+        )
         accounts = state.run(
             state.accounts.list_accounts(
                 platform,
                 LOCAL_WEB_CONTEXT,
                 usable_only=usable,
+                include_archived=include_archived,
             )
         )
         return jsonify({"platform": platform, "accounts": accounts})
@@ -225,11 +233,15 @@ def create_account_session_blueprint(
 
         access = mcp_resolver.resolve(request.headers)
         usable = request.args.get("usable", "false").lower() == "true"
+        include_archived = (
+            request.args.get("include_archived", "false").lower() == "true"
+        )
         accounts = state.run(
             state.accounts.list_accounts(
                 platform,
                 access,
                 usable_only=usable,
+                include_archived=include_archived,
             )
         )
         return jsonify({"platform": platform, "accounts": accounts})
@@ -300,6 +312,29 @@ def create_account_session_blueprint(
     def logout_account(account_id: str):
         account = state.run(
             state.accounts.logout_account(account_id, LOCAL_WEB_CONTEXT),
+            timeout=60,
+        )
+        return jsonify(account)
+
+    @blueprint.post("/api/account-sessions/<account_id>/archive")
+    def archive_account(account_id: str):
+        account = state.run(
+            state.accounts.archive_account(account_id, LOCAL_WEB_CONTEXT)
+        )
+        return jsonify(account)
+
+    @blueprint.post("/api/account-sessions/<account_id>/restore")
+    def restore_account(account_id: str):
+        account = state.run(
+            state.accounts.restore_account(account_id, LOCAL_WEB_CONTEXT)
+        )
+        return jsonify(account)
+
+    @blueprint.post("/api/account-sessions/<account_id>/clear-login-state")
+    def clear_login_state(account_id: str):
+        ClearLoginStateRequest.model_validate(request.get_json(silent=True) or {})
+        account = state.run(
+            state.accounts.clear_login_state(account_id, LOCAL_WEB_CONTEXT),
             timeout=60,
         )
         return jsonify(account)

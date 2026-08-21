@@ -38,3 +38,11 @@ class SessionPolicyRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     persist_login: bool
+
+
+class ClearLoginStateRequest(BaseModel):
+    """高风险 Profile 清理必须携带固定确认值。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    confirmation: Literal["CLEAR_LOGIN_STATE"]

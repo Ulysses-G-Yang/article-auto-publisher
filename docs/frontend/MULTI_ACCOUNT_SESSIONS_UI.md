@@ -2,16 +2,18 @@
 
 ## 兼容边界
 
-`/accounts` 原有 Alpine 登录区、旧接口、重新登录确认框和轮询逻辑保持不变。新增区域是相邻的原生 JavaScript 组件，仅修改前端模板和静态资源，没有修改路由、API、模型、数据库或平台实现。
+`/accounts` 使用账号域公开 API，不读取 Profile 路径、Cookie、Token 或原始平台用户 ID。投递选择器只读取 `ACTIVE` 账号；账号管理页可以显式请求并切换查看 `ARCHIVED` 账号。
 
 ## 使用流程
 
 1. 初始不加载多账号数据，用户先选择小黑盒或中关村在线。
-2. 前端调用 `GET /api/platforms/{platform}/accounts?usable=false`，展示该平台全部公开账号。
+2. 前端调用 `GET /api/platforms/{platform}/accounts?usable=false&include_archived=true`；默认仍隐藏归档账号，用户开启“显示已归档账号”后才展示。
 3. 卡片只使用 `account_id`、`display_name`、`masked_platform_user_id`、`status`、`session_status`、`persist_login`、`last_verified_at`。
 4. `UNVERIFIED`、`LOGIN_REQUIRED`、`ERROR`、`EXPIRED` 可以启动“仅验证现有登录态”；`VALID` 可以退出单个账号。
 5. “添加该平台账号”调用平台级 login API，由后端创建隔离 Profile 并打开交互登录。
-6. 账户级退出使用 `POST /api/account-sessions/{account_id}/logout`；活动日志使用 `GET /api/account-sessions/{account_id}/activity`，在同页 CoreUI 抽屉中加载并包含加载、失败和空状态。
+6. `POST /api/account-sessions/{account_id}/archive` 归档账号，`POST .../restore` 恢复；两者都保留身份绑定、投递历史和活动日志。
+7. “退出并清除登录态”只对归档后的托管 Profile 开放，并携带固定确认值调用 `POST /api/account-sessions/{account_id}/clear-login-state`。它清空 Cookie/Profile，但保留账号和审计历史。
+8. `DELETE /api/account-sessions/{account_id}` 仍是永久删除，后端只允许从未产生投递历史的账号执行。
 
 ## 有限目标轮询
 

@@ -25,7 +25,7 @@ def test_multi_account_area_waits_for_platform_before_loading() -> None:
     script = read("web/static/js/account-sessions.js")
 
     assert 'id="multi-account-sessions"' in template
-    assert "/api/platforms/{platform}/accounts?usable=false" in template
+    assert "/api/platforms/{platform}/accounts?usable=false&amp;include_archived=true" in template
     assert "input.name = 'session-platform'" in script
     assert "if (!state.platform) return" in script
     assert "loadAccounts('zol')" not in script
@@ -102,14 +102,31 @@ def test_account_removal_confirms_before_delete_and_uses_delete_endpoint() -> No
     script = read("web/static/js/account-sessions.js")
 
     assert 'data-delete-account-url-template="/api/account-sessions/{account_id}"' in template
-    assert "删除账号" in script
+    assert "永久删除" in script
     assert "function removeAccount(account)" in script
     assert "method: 'DELETE'" in script
     assert "window.confirm" in script
     assert "拥有投递历史的账号会被拒绝删除" in script
-    assert "隔离浏览器 Profile" in script
     assert "此操作不可撤销" in script
     assert "loadAccounts()" in script
+
+
+def test_account_archive_restore_and_clear_login_state_are_separate() -> None:
+    template = read("web/templates/accounts.html")
+    script = read("web/static/js/account-sessions.js")
+
+    assert 'id="show-archived-accounts"' in template
+    assert "/api/account-sessions/{account_id}/archive" in template
+    assert "/api/account-sessions/{account_id}/restore" in template
+    assert "/api/account-sessions/{account_id}/clear-login-state" in template
+    assert "state.showArchived || account.status !== 'ARCHIVED'" in script
+    assert "function archiveAccount(account)" in script
+    assert "function restoreAccount(account)" in script
+    assert "function clearLoginState(account)" in script
+    assert "归档后会从默认列表和投递选择器隐藏" in script
+    assert "JSON.stringify({ confirmation: 'CLEAR_LOGIN_STATE' })" in script
+    assert "浏览器登录数据和隔离 Profile" in script
+    assert "账号身份、投递记录和活动日志仍会保留" in script
 
 
 def test_session_policy_and_activity_have_independent_states() -> None:

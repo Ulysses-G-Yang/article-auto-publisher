@@ -7,6 +7,7 @@ import asyncio
 import sqlite3
 import sys
 import uuid
+from contextlib import nullcontext
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -1439,3 +1440,178 @@ def test_remove_account_unknown_account_returns_not_found(tmp_path: Path) -> Non
     with pytest.raises(AccountNotFoundError):
         run(service.remove_account("missing-account-id", LOCAL_WEB_CONTEXT))
     run(database.dispose())
+
+
+def test_account_archive_clear_restore_preserves_delivery_history(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database = AccountDatabase(sqlite_database_url(tmp_path))
+    profile_root = tmp_path / "runtime" / "profiles"
+    service = AccountSessionService(
+        database,
+        seed_legacy_profiles=False,
+        allowed_profile_roots=(profile_root,),
+    )
+    run(service.initialize())
+    profile = make_profile(tmp_path, "xiaoheihe", "lifecycle")
+    cookie_sentinel = profile / "Default" / "Cookies"
+    cookie_sentinel.parent.mkdir(parents=True)
+    cookie_sentinel.write_text("test-only-cookie-placeholder", encoding="utf-8")
+    account = run(insert_account(database, profile))
+
+    async def attach_completed_operation() -> str:
+        operation_id = str(uuid.uuid4())
+        async with database.session() as session:
+            session.add(
+                DeliveryOperation(
+                    operation_id=operation_id,
+                    account_id=account.account_id,
+                    platform="xiaoheihe",
+                    mode="DRAFT",
+                    source="WEB",
+                    actor_id="local-web-user",
+                    title=SAMPLE_ARTICLE_TITLE,
+                    body=SAMPLE_ARTICLE_BODY,
+                    content_version="lifecycle-v1",
+                    account_display_name_snapshot=account.display_name,
+                    status="DRAFT_SAVED",
+                )
+            )
+        return operation_id
+
+    operation_id = run(attach_completed_operation())
+    archived = run(service.archive_account(account.account_id, LOCAL_WEB_CONTEXT))
+    assert archived["status"] == "ARCHIVED"
+    assert archived["heartbeat_enabled"] is False
+    assert run(service.list_accounts("xiaoheihe", LOCAL_WEB_CONTEXT)) == []
+    archived_list = run(
+        service.list_accounts(
+            "xiaoheihe",
+            LOCAL_WEB_CONTEXT,
+            include_archived=True,
+        )
+    )
+    assert [item["account_id"] for item in archived_list] == [account.account_id]
+
+    with pytest.raises(AccountSessionError) as archived_error:
+        run(service.mark_verifying(account.account_id, LOCAL_WEB_CONTEXT))
+    assert archived_error.value.error_code == "ACCOUNT_ARCHIVED"
+
+    monkeypatch.setattr(service, "_lease", lambda *_args, **_kwargs: nullcontext())
+    cleared = run(service.clear_login_state(account.account_id, LOCAL_WEB_CONTEXT))
+    assert cleared["status"] == "ARCHIVED"
+    assert cleared["session_status"] == "LOGIN_REQUIRED"
+    assert cleared["persist_login"] is False
+    assert profile.is_dir()
+    assert list(profile.iterdir()) == []
+
+    async def retained_state() -> tuple[DeliveryOperation | None, list[str]]:
+        async with database.session() as session:
+            operation = await session.get(DeliveryOperation, operation_id)
+            actions = list(
+                (
+                    await session.scalars(
+                        select(AccountActivity.action).where(
+                            AccountActivity.account_id == account.account_id
+                        )
+                    )
+                ).all()
+            )
+            return operation, actions
+
+    retained_operation, actions = run(retained_state())
+    assert retained_operation is not None
+    assert retained_operation.status == "DRAFT_SAVED"
+    assert "ACCOUNT_ARCHIVED" in actions
+    assert "LOGIN_STATE_CLEARED" in actions
+
+    restored = run(service.restore_account(account.account_id, LOCAL_WEB_CONTEXT))
+    assert restored["status"] == "ACTIVE"
+    assert restored["session_status"] == "LOGIN_REQUIRED"
+    assert restored["heartbeat_enabled"] is True
+
+    with pytest.raises(AccountSessionError) as delete_error:
+        run(service.remove_account(account.account_id, LOCAL_WEB_CONTEXT))
+    assert delete_error.value.error_code == "ACCOUNT_HAS_DELIVERY_HISTORY"
+    run(database.dispose())
+
+
+def test_archive_refuses_account_with_active_delivery(tmp_path: Path) -> None:
+    database = AccountDatabase(sqlite_database_url(tmp_path))
+    service = AccountSessionService(database, seed_legacy_profiles=False)
+    run(service.initialize())
+    profile = make_profile(tmp_path, "xiaoheihe", "active-delivery")
+    account = run(insert_account(database, profile))
+
+    async def attach_queued_operation() -> None:
+        async with database.session() as session:
+            session.add(
+                DeliveryOperation(
+                    operation_id=str(uuid.uuid4()),
+                    account_id=account.account_id,
+                    platform="xiaoheihe",
+                    mode="DRAFT",
+                    source="WEB",
+                    actor_id="local-web-user",
+                    title=SAMPLE_ARTICLE_TITLE,
+                    body=SAMPLE_ARTICLE_BODY,
+                    content_version="queued-v1",
+                    account_display_name_snapshot=account.display_name,
+                    status="QUEUED",
+                )
+            )
+
+    run(attach_queued_operation())
+    with pytest.raises(AccountSessionError) as exc_info:
+        run(service.archive_account(account.account_id, LOCAL_WEB_CONTEXT))
+    assert exc_info.value.error_code == "ACCOUNT_HAS_ACTIVE_DELIVERY"
+    run(database.dispose())
+
+
+def test_account_lifecycle_http_contract_hides_archived_by_default(
+    tmp_path: Path,
+) -> None:
+    from flask import Flask
+
+    database_url = sqlite_database_url(tmp_path)
+    database = AccountDatabase(database_url)
+    run(database.initialize())
+    profile = make_profile(tmp_path, "xiaoheihe", "lifecycle-http")
+    account = run(insert_account(database, profile, display_name="归档接口账号"))
+    run(database.dispose())
+
+    app = Flask("account-lifecycle-http-test")
+    app.secret_key = "test"
+    app.register_blueprint(
+        create_account_session_blueprint(
+            database_url=database_url,
+            seed_legacy_profiles=False,
+            auto_execute=False,
+            public_publish_enabled=False,
+            allowed_profile_roots=(tmp_path / "runtime" / "profiles",),
+        )
+    )
+    client = app.test_client()
+
+    archived = client.post(f"/api/account-sessions/{account.account_id}/archive")
+    assert archived.status_code == 200
+    assert archived.get_json()["status"] == "ARCHIVED"
+    assert client.get("/api/platforms/xiaoheihe/accounts").get_json()["accounts"] == []
+    archived_rows = client.get(
+        "/api/platforms/xiaoheihe/accounts?include_archived=true"
+    ).get_json()["accounts"]
+    assert [row["account_id"] for row in archived_rows] == [account.account_id]
+
+    missing_confirmation = client.post(
+        f"/api/account-sessions/{account.account_id}/clear-login-state",
+        json={},
+    )
+    assert missing_confirmation.status_code == 422
+    assert missing_confirmation.get_json()["error"] == "REQUEST_VALIDATION_FAILED"
+    assert profile.exists()
+
+    restored = client.post(f"/api/account-sessions/{account.account_id}/restore")
+    assert restored.status_code == 200
+    assert restored.get_json()["status"] == "ACTIVE"
+    app.extensions["account_sessions"].close()

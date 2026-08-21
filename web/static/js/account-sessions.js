@@ -17,16 +17,18 @@
         requestSequence: 0,
         requestController: null,
         targetedPolls: new Map(),
+        showArchived: false,
     };
     const byId = id => document.getElementById(id);
     const sessionLabels = {
         VALID: '有效', UNVERIFIED: '未验证', LOGIN_REQUIRED: '需要登录', ERROR: '异常',
         EXPIRED: '已过期', VERIFYING: '验证中', BUSY: '使用中',
+        ACTIVE: '使用中', ARCHIVED: '已归档',
     };
     const statusClasses = {
         VALID: 'text-bg-success', VERIFYING: 'text-bg-info', BUSY: 'text-bg-warning',
         ERROR: 'text-bg-danger', LOGIN_REQUIRED: 'text-bg-danger', EXPIRED: 'text-bg-secondary',
-        UNVERIFIED: 'text-bg-secondary', ACTIVE: 'text-bg-primary', DISABLED: 'text-bg-secondary',
+        UNVERIFIED: 'text-bg-secondary', ACTIVE: 'text-bg-primary', ARCHIVED: 'text-bg-secondary', DISABLED: 'text-bg-secondary',
     };
 
     function endpoint(template, key, value) {
@@ -74,6 +76,8 @@
     function accountCard(account) {
         const card = document.createElement('article');
         card.className = 'session-account-card';
+        const archived = account.status === 'ARCHIVED';
+        card.classList.toggle('is-archived', archived);
         card.dataset.accountId = account.account_id;
         const top = document.createElement('div'); top.className = 'session-account-top';
         const identity = document.createElement('div'); identity.className = 'session-account-identity';
@@ -91,22 +95,31 @@
         const policyInput = document.createElement('input');
         policyInput.className = 'form-check-input'; policyInput.type = 'checkbox'; policyInput.role = 'switch';
         policyInput.id = `session-persist-${account.account_id}`; policyInput.checked = Boolean(account.persist_login);
+        policyInput.disabled = archived;
         policyInput.setAttribute('aria-label', `${account.display_name || '账号'}保持登录态`);
         policyInput.addEventListener('change', () => updatePolicy(account, policyInput));
         policy.append(policyInput); meta.append(verified, policy);
 
         const actions = document.createElement('div'); actions.className = 'session-account-actions';
-        if (['UNVERIFIED', 'ERROR', 'EXPIRED'].includes(account.session_status)) {
-            actions.append(button('验证现有登录态', 'btn btn-outline-primary btn-sm', () => verifyAccount(account)));
-        }
-        if (account.session_status === 'LOGIN_REQUIRED') {
-            actions.append(button('重新登录', 'btn btn-primary btn-sm', () => loginAccount(account)));
-        }
-        if (account.session_status === 'VALID') {
-            actions.append(button('退出该账号', 'btn btn-outline-danger btn-sm', () => logoutAccount(account)));
+        if (!archived) {
+            if (['UNVERIFIED', 'ERROR', 'EXPIRED'].includes(account.session_status)) {
+                actions.append(button('验证现有登录态', 'btn btn-outline-primary btn-sm', () => verifyAccount(account)));
+            }
+            if (account.session_status === 'LOGIN_REQUIRED') {
+                actions.append(button('重新登录', 'btn btn-primary btn-sm', () => loginAccount(account)));
+            }
+            if (account.session_status === 'VALID') {
+                actions.append(button('退出该账号', 'btn btn-outline-danger btn-sm', () => logoutAccount(account)));
+            }
         }
         actions.append(button('活动日志', 'btn btn-outline-secondary btn-sm', () => openActivity(account)));
-        actions.append(button('删除账号', 'btn btn-outline-danger btn-sm', () => removeAccount(account)));
+        if (archived) {
+            actions.append(button('恢复账号', 'btn btn-outline-primary btn-sm', () => restoreAccount(account)));
+            actions.append(button('退出并清除登录态', 'btn btn-outline-danger btn-sm', () => clearLoginState(account)));
+            actions.append(button('永久删除', 'btn btn-outline-danger btn-sm', () => removeAccount(account)));
+        } else {
+            actions.append(button('归档账号', 'btn btn-outline-secondary btn-sm', () => archiveAccount(account)));
+        }
         card.append(top, meta, actions);
         return card;
     }
@@ -195,9 +208,12 @@
 
     function renderAccounts() {
         const list = byId('session-account-list');
-        list.replaceChildren(...state.accounts.map(accountCard));
-        list.classList.toggle('d-none', state.accounts.length === 0);
-        byId('session-accounts-empty').classList.toggle('d-none', state.accounts.length > 0);
+        const archivedCount = state.accounts.filter(account => account.status === 'ARCHIVED').length;
+        const visibleAccounts = state.accounts.filter(account => state.showArchived || account.status !== 'ARCHIVED');
+        list.replaceChildren(...visibleAccounts.map(accountCard));
+        list.classList.toggle('d-none', visibleAccounts.length === 0);
+        byId('session-accounts-empty').classList.toggle('d-none', visibleAccounts.length > 0);
+        byId('archived-account-count').textContent = archivedCount ? `已归档 ${archivedCount} 个` : '';
     }
 
     async function loadAccounts(options = {}) {
@@ -315,9 +331,46 @@
         } catch (error) { setMessage('session-accounts-error', error.message || '账号退出失败。'); }
     }
 
+    async function archiveAccount(account) {
+        if (!window.confirm(`确定归档 ${accountLabel(account)} 吗？\n\n归档后会从默认列表和投递选择器隐藏，但账号身份、投递记录和活动日志都会保留。`)) return;
+        setMessage('session-accounts-error', '');
+        try {
+            const url = endpoint(root.dataset.archiveAccountUrlTemplate, 'account_id', account.account_id);
+            await jsonResponse(await fetch(url, { method: 'POST', headers: { Accept: 'application/json' } }));
+            setMessage('session-login-status', `已归档账号「${accountLabel(account)}」，历史记录仍保留。`);
+            await loadAccounts();
+        } catch (error) { setMessage('session-accounts-error', error.message || '账号归档失败。'); }
+    }
+
+    async function restoreAccount(account) {
+        setMessage('session-accounts-error', '');
+        try {
+            const url = endpoint(root.dataset.restoreAccountUrlTemplate, 'account_id', account.account_id);
+            await jsonResponse(await fetch(url, { method: 'POST', headers: { Accept: 'application/json' } }));
+            setMessage('session-login-status', `已恢复账号「${accountLabel(account)}」。`);
+            await loadAccounts();
+        } catch (error) { setMessage('session-accounts-error', error.message || '账号恢复失败。'); }
+    }
+
+    async function clearLoginState(account) {
+        const label = accountLabel(account);
+        if (!window.confirm(`确定退出并清除账号「${label}」的登录态吗？\n\n这会清空该账号的浏览器登录数据和隔离 Profile，但账号身份、投递记录和活动日志仍会保留。之后需要重新登录。`)) return;
+        setMessage('session-accounts-error', '');
+        try {
+            const url = endpoint(root.dataset.clearLoginStateUrlTemplate, 'account_id', account.account_id);
+            await jsonResponse(await fetch(url, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+                body: JSON.stringify({ confirmation: 'CLEAR_LOGIN_STATE' }),
+            }));
+            setMessage('session-login-status', `已清除账号「${label}」的登录态；历史记录未删除。`);
+            await loadAccounts();
+        } catch (error) { setMessage('session-accounts-error', error.message || '登录态清理失败。'); }
+    }
+
     async function removeAccount(account) {
         const label = accountLabel(account);
-        if (!window.confirm(`确定永久删除账号「${label}」吗？\n\n将删除该账号的隔离浏览器 Profile 及其活动记录；拥有投递历史的账号会被拒绝删除。此操作不可撤销。`)) return;
+        if (!window.confirm(`确定永久删除账号「${label}」吗？\n\n只有从未产生投递记录的账号才能删除；拥有投递历史的账号会被拒绝删除。此操作不可撤销。`)) return;
         setMessage('session-accounts-error', '');
         try {
             const url = endpoint(root.dataset.deleteAccountUrlTemplate, 'account_id', account.account_id);
@@ -359,4 +412,8 @@
     loadPlatforms();
     byId('refresh-account-sessions').addEventListener('click', () => loadAccounts());
     byId('add-platform-account').addEventListener('click', addPlatformAccount);
+    byId('show-archived-accounts').addEventListener('change', event => {
+        state.showArchived = event.target.checked === true;
+        renderAccounts();
+    });
 })();

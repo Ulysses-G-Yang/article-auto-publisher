@@ -12,7 +12,7 @@
     </div>
 </div>
 
-<section id="multi-account-sessions" class="container multi-account-sessions mt-4" style="max-width: 1100px;" data-platforms-url="/api/platforms" data-accounts-url-template="/api/platforms/{platform}/accounts?usable=false" data-verify-url-template="/api/accounts/{account_id}/verify" data-account-login-url-template="/api/account-sessions/{account_id}/login" data-login-url-template="/api/platforms/{platform}/accounts/login" data-policy-url-template="/api/accounts/{account_id}/session-policy" data-logout-url-template="/api/account-sessions/{account_id}/logout" data-delete-account-url-template="/api/account-sessions/{account_id}" data-activity-url-template="/api/account-sessions/{account_id}/activity" aria-labelledby="multi-account-heading">
+<section id="multi-account-sessions" class="container multi-account-sessions mt-4" style="max-width: 1100px;" data-platforms-url="/api/platforms" data-accounts-url-template="/api/platforms/{platform}/accounts?usable=false&amp;include_archived=true" data-verify-url-template="/api/accounts/{account_id}/verify" data-account-login-url-template="/api/account-sessions/{account_id}/login" data-login-url-template="/api/platforms/{platform}/accounts/login" data-policy-url-template="/api/accounts/{account_id}/session-policy" data-logout-url-template="/api/account-sessions/{account_id}/logout" data-archive-account-url-template="/api/account-sessions/{account_id}/archive" data-restore-account-url-template="/api/account-sessions/{account_id}/restore" data-clear-login-state-url-template="/api/account-sessions/{account_id}/clear-login-state" data-delete-account-url-template="/api/account-sessions/{account_id}" data-activity-url-template="/api/account-sessions/{account_id}/activity" aria-labelledby="multi-account-heading">
     <div class="card">
         <div class="card-header multi-account-header">
             <div><span class="section-eyebrow">ISOLATED ACCOUNT SESSIONS</span><h2 id="multi-account-heading">多账号会话</h2><p>每个账号使用独立浏览器 Profile，公开信息仅展示真实昵称和脱敏 ID。</p></div>
@@ -28,6 +28,13 @@
             <div id="session-accounts-placeholder" class="session-placeholder"><i class="cil-arrow-top" aria-hidden="true"></i><span>选择平台后加载该平台账号</span></div>
             <div id="session-accounts-loading" class="session-placeholder d-none" role="status"><span class="spinner-border spinner-border-sm" aria-hidden="true"></span><span>正在读取账号…</span></div>
             <div id="session-accounts-error" class="alert alert-danger d-none" role="alert"></div>
+            <div class="session-lifecycle-toolbar">
+                <div class="form-check form-switch m-0">
+                    <input id="show-archived-accounts" class="form-check-input" type="checkbox" role="switch">
+                    <label class="form-check-label" for="show-archived-accounts">显示已归档账号</label>
+                </div>
+                <span id="archived-account-count" class="text-body-secondary small" aria-live="polite"></span>
+            </div>
             <div id="session-accounts-empty" class="empty-state d-none"><i class="cil-user-unfollow" aria-hidden="true"></i><strong>该平台还没有账号</strong><span>添加账号会创建新的隔离浏览器 Profile。</span></div>
             <div id="session-account-list" class="session-account-list d-none" aria-live="polite"></div>
             <div id="session-login-status" class="alert alert-info d-none mt-3 mb-0" role="status"></div>
@@ -50,4 +57,4 @@
 </section>
 {% endblock %}
 
-{% block extra_scripts %}<script src="{{ url_for('static', filename='js/account-sessions.js', v='20260814-dynamic-platforms') }}"></script>{% endblock %}
+{% block extra_scripts %}<script src="{{ url_for('static', filename='js/account-sessions.js', v='20260821-account-lifecycle') }}"></script>{% endblock %}

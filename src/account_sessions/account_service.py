@@ -99,13 +99,20 @@ class AccountSessionService:
         access: AccessContext,
         *,
         usable_only: bool = False,
+        include_archived: bool = False,
     ) -> list[dict]:
         _require_platform(platform)
         async with self.database.session() as session:
             statement = select(PlatformAccount).where(
-                PlatformAccount.platform == platform,
-                PlatformAccount.status == "ACTIVE",
-            ).order_by(PlatformAccount.display_name, PlatformAccount.account_id)
+                PlatformAccount.platform == platform
+            )
+            if usable_only or not include_archived:
+                statement = statement.where(PlatformAccount.status == "ACTIVE")
+            statement = statement.order_by(
+                PlatformAccount.status,
+                PlatformAccount.display_name,
+                PlatformAccount.account_id,
+            )
             accounts = list((await session.scalars(statement)).all())
         visible = []
         for account in accounts:
@@ -191,6 +198,7 @@ class AccountSessionService:
             account = await session.get(PlatformAccount, account_id)
             if account is None:
                 raise AccountNotFoundError("平台账号不存在")
+            _require_active_account(account)
             account.persist_login = persist_login
             await session.flush()
             payload = public_account(account)
@@ -238,6 +246,7 @@ class AccountSessionService:
             account = await session.get(PlatformAccount, account_id)
             if account is None:
                 raise AccountNotFoundError("平台账号不存在")
+            _require_active_account(account)
             account.session_status = "VERIFYING"
             await session.flush()
             return public_account(account)
@@ -251,6 +260,7 @@ class AccountSessionService:
     ) -> dict:
         access.require("session.verify", account_id)
         account = await self.get_account(account_id)
+        _require_active_account(account)
         lease = self._lease(account, purpose="LOGIN" if allow_interactive_login else "VERIFY")
         platform = self.platform_factory(account)
         try:
@@ -463,6 +473,7 @@ class AccountSessionService:
 
         access.require("session.manage", account_id)
         account = await self.get_account(account_id)
+        _require_active_account(account)
         platform = self.platform_factory(account)
         try:
             with self._lease(account, purpose="LOGOUT"):
@@ -488,6 +499,164 @@ class AccountSessionService:
                     message="已退出该账号的持久登录态",
                 )
             )
+            return public_account(stored)
+
+    async def archive_account(
+        self,
+        account_id: str,
+        access: AccessContext,
+    ) -> dict:
+        """隐藏账号并禁止后续投递，保留 Profile 与全部审计历史。"""
+
+        access.require("session.manage", account_id)
+        async with self.database.session() as session:
+            account = await session.get(PlatformAccount, account_id)
+            if account is None:
+                raise AccountNotFoundError("平台账号不存在")
+            if account.status == "ARCHIVED":
+                return public_account(account)
+            if account.status != "ACTIVE":
+                raise AccountSessionError(
+                    "账号状态不允许归档",
+                    error_code="ACCOUNT_STATUS_INVALID",
+                )
+            if await _active_delivery_count(session, account_id):
+                raise AccountSessionError(
+                    "账号仍有执行中的投递，暂时不能归档",
+                    error_code="ACCOUNT_HAS_ACTIVE_DELIVERY",
+                )
+            account.status = "ARCHIVED"
+            account.heartbeat_enabled = False
+            account.next_heartbeat_at = None
+            account.heartbeat_claim_owner = None
+            account.heartbeat_claimed_at = None
+            account.heartbeat_claim_expires_at = None
+            session.add(
+                activity_for(
+                    account,
+                    access,
+                    action="ACCOUNT_ARCHIVED",
+                    message="账号已归档；投递与心跳已停用，历史记录继续保留",
+                )
+            )
+            await session.flush()
+            return public_account(account)
+
+    async def restore_account(
+        self,
+        account_id: str,
+        access: AccessContext,
+    ) -> dict:
+        """恢复归档账号；原身份绑定和历史记录保持不变。"""
+
+        access.require("session.manage", account_id)
+        async with self.database.session() as session:
+            account = await session.get(PlatformAccount, account_id)
+            if account is None:
+                raise AccountNotFoundError("平台账号不存在")
+            if account.status == "ACTIVE":
+                return public_account(account)
+            if account.status != "ARCHIVED":
+                raise AccountSessionError(
+                    "账号状态不允许恢复",
+                    error_code="ACCOUNT_STATUS_INVALID",
+                )
+            account.status = "ACTIVE"
+            account.heartbeat_enabled = True
+            account.next_heartbeat_at = None
+            account.heartbeat_claim_owner = None
+            account.heartbeat_claimed_at = None
+            account.heartbeat_claim_expires_at = None
+            session.add(
+                activity_for(
+                    account,
+                    access,
+                    action="ACCOUNT_RESTORED",
+                    message="归档账号已恢复；登录态状态保持原值",
+                )
+            )
+            await session.flush()
+            return public_account(account)
+
+    async def clear_login_state(
+        self,
+        account_id: str,
+        access: AccessContext,
+    ) -> dict:
+        """清空托管 Profile/Cookie，但保留账号行、身份绑定和投递历史。
+
+        为避免活跃账号误清，会要求先归档；legacy Profile 可能仍被旧入口
+        共享，因此拒绝在这里删除。受控 Profile 清空后立即重建空目录，确保
+        未来恢复账号并重新登录时仍满足严格 Profile 路径契约。
+        """
+
+        access.require("session.manage", account_id)
+        async with self.database.session() as session:
+            account = await session.get(PlatformAccount, account_id)
+            if account is None:
+                raise AccountNotFoundError("平台账号不存在")
+            if account.status != "ARCHIVED":
+                raise AccountSessionError(
+                    "请先归档账号，再退出并清除登录态",
+                    error_code="ACCOUNT_ARCHIVE_REQUIRED",
+                )
+            if account.is_legacy_profile:
+                raise AccountSessionError(
+                    "旧入口共享 Profile 不允许在账号域清除",
+                    error_code="LEGACY_PROFILE_CLEAR_UNSUPPORTED",
+                )
+            if await _active_delivery_count(session, account_id):
+                raise AccountSessionError(
+                    "账号仍有执行中的投递，暂时不能清除登录态",
+                    error_code="ACCOUNT_HAS_ACTIVE_DELIVERY",
+                )
+            profile = Path(account.profile_path)
+            if not self._profile_within_roots(profile, account.platform):
+                raise AccountSessionError(
+                    "账号 Profile 不在允许的运行目录中",
+                    error_code="ACCOUNT_PROFILE_PATH_INVALID",
+                )
+
+        try:
+            with self._lease(account, purpose="CLEAR_LOGIN_STATE"):
+                shutil.rmtree(profile)
+                profile.mkdir(parents=True, exist_ok=False)
+        except AccountSessionError:
+            raise
+        except Exception as exc:
+            # 删除成功但建目录失败时尽量恢复空目录，避免账号永远不可登录。
+            try:
+                profile.mkdir(parents=True, exist_ok=True)
+            except OSError:
+                pass
+            raise AccountSessionError(
+                "账号登录态清理失败",
+                error_code="ACCOUNT_LOGIN_STATE_CLEAR_FAILED",
+            ) from exc
+
+        async with self.database.session() as session:
+            stored = await session.get(PlatformAccount, account_id)
+            if stored is None:
+                raise AccountNotFoundError("平台账号不存在")
+            stored.session_status = "LOGIN_REQUIRED"
+            stored.persist_login = False
+            stored.last_verified_at = None
+            stored.heartbeat_enabled = False
+            stored.next_heartbeat_at = None
+            stored.heartbeat_failures = 0
+            stored.last_heartbeat_error_code = None
+            stored.heartbeat_claim_owner = None
+            stored.heartbeat_claimed_at = None
+            stored.heartbeat_claim_expires_at = None
+            session.add(
+                activity_for(
+                    stored,
+                    access,
+                    action="LOGIN_STATE_CLEARED",
+                    message="账号登录态和隔离 Profile 已清空；身份绑定与投递历史保留",
+                )
+            )
+            await session.flush()
             return public_account(stored)
 
     async def remove_account(
@@ -741,6 +910,26 @@ async def _check_login(platform, *, read_only: bool) -> bool:
 def _require_platform(platform: str) -> None:
     if platform not in SUPPORTED_PLATFORMS:
         raise AccountPlatformMismatchError("不支持的平台")
+
+
+def _require_active_account(account: PlatformAccount) -> None:
+    if account.status != "ACTIVE":
+        raise AccountSessionError(
+            "账号已归档，请先恢复后再操作",
+            error_code="ACCOUNT_ARCHIVED",
+        )
+
+
+async def _active_delivery_count(session, account_id: str) -> int:
+    value = await session.scalar(
+        select(func.count())
+        .select_from(DeliveryOperation)
+        .where(
+            DeliveryOperation.account_id == account_id,
+            DeliveryOperation.status.in_({"QUEUED", "RUNNING"}),
+        )
+    )
+    return int(value or 0)
 
 
 def _looks_like_chrome_profile(path: Path) -> bool:

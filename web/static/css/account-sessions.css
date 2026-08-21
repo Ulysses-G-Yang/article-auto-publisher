@@ -1,4 +1,6 @@
 .multi-account-sessions { padding: 0; }
+.session-lifecycle-toolbar { display: flex; align-items: center; justify-content: flex-end; gap: .75rem; margin: .25rem 0 .75rem; }
+.session-account-card.is-archived { border-style: dashed; background: var(--cui-tertiary-bg, #f8f9fa); }
 .multi-account-header { display: flex; align-items: center; justify-content: space-between; gap: 1rem; }
 .multi-account-header h2 { margin: .15rem 0 0; font-size: 1.05rem; font-weight: 700; }
 .multi-account-header p { margin: .35rem 0 0; color: var(--app-muted); font-size: .75rem; }

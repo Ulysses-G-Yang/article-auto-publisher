@@ -203,6 +203,35 @@ def test_parser_v2_preserves_rich_order_marks_anchor_and_caption(tmp_path: Path)
     assert table_block["rows"][0]["cells"][1]["blocks"][0]["children"][0]["kind"] == "image"
 
 
+def test_visible_h1_overrides_stale_core_title_and_is_omitted_from_delivery(
+    tmp_path: Path,
+) -> None:
+    document = Document()
+    document.core_properties.title = "PS5卧室外接显示器，别只盯HDMI 2.1"
+    visible_title = "PS5卧室外接显示器，别只盯着HDMI 2.1（高速接口标准）"
+    document.add_heading(visible_title, level=1)
+    document.add_paragraph("这是用于确定正文结构并验证标题不会重复进入正文的引导段。")
+    document.add_heading("27英寸更适合卧室桌面", level=2)
+    document.add_paragraph("这是二级标题之后的正文内容。")
+    source = tmp_path / "stale-core-title.docx"
+    document.save(source)
+
+    parsed = DocxParser(
+        images_dir=str(tmp_path / "parser-images")
+    ).parse_document_v2(str(source))
+    rich_document = parsed.document_v2
+
+    assert rich_document["title"] == visible_title
+    assert rich_document["title_block_id"] == rich_document["blocks"][0]["block_id"]
+
+    delivery_document, _loss_report = normalize_for_delivery(rich_document)
+    delivery_blocks = project_to_delivery_blocks(delivery_document)
+    assert visible_title not in {
+        block.get("text") for block in delivery_blocks if block.get("text")
+    }
+    assert delivery_heading_levels(delivery_document) == frozenset({2})
+
+
 def test_parser_v2_marks_floating_image(tmp_path: Path) -> None:
     source = tmp_path / "floating.docx"
     source.write_bytes(_make_floating_image_doc(tmp_path))

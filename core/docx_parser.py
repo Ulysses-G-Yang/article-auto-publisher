@@ -282,9 +282,22 @@ class DocxParser:
         # 其它 Caption 段落保留为普通段落，避免误吞正文。
         rich_blocks = self._attach_safe_captions(rich_blocks)
 
-        core_title = self._normalize_title(doc.core_properties.title)
-        title = core_title or self._title_from_rich_blocks(rich_blocks, filename)
-        title_block_id = self._find_title_block_id(rich_blocks, title)
+        # 无样式稿件的可见主标题才是投递标题的权威来源。Word 的
+        # core_properties.title 经常保留旧标题、缩写标题或编辑前版本；若先
+        # 使用该元数据，再靠文本完全相等寻找正文块，可见 H1 只要多一个括号
+        # 说明就会失去 title_block_id，并被错误地作为正文 H1 送进能力门。
+        #
+        # 因此先按已经完成的视觉/显式标题识别结果，在开头三个非空文本块中
+        # 寻找唯一 H1，并直接固化它的 block_id。只有没有可靠可见 H1 时，
+        # 才回退到 Word 元数据和原有精确匹配逻辑。
+        visible_title = self._leading_title_block(rich_blocks)
+        if visible_title is not None:
+            title = self._normalize_title(self._rich_block_text(visible_title))
+            title_block_id = visible_title.get("block_id")
+        else:
+            core_title = self._normalize_title(doc.core_properties.title)
+            title = core_title or self._title_from_rich_blocks(rich_blocks, filename)
+            title_block_id = self._find_title_block_id(rich_blocks, title)
         document_v2: dict[str, Any] = {
             "schema_version": 2,
             "title": title,
@@ -958,6 +971,28 @@ class DocxParser:
             if text.strip():
                 return self._normalize_title(text)
         return Path(filename).stem
+
+    def _leading_title_block(
+        self,
+        blocks: list[dict[str, Any]],
+    ) -> dict[str, Any] | None:
+        """返回开头三个非空文本块中的唯一 H1；证据冲突时拒绝猜测。"""
+
+        leading_text_blocks: list[dict[str, Any]] = []
+        for block in blocks:
+            if block.get("kind") not in {"paragraph", "heading"}:
+                continue
+            if not self._rich_block_text(block).strip():
+                continue
+            leading_text_blocks.append(block)
+            if len(leading_text_blocks) == 3:
+                break
+        candidates = [
+            block
+            for block in leading_text_blocks
+            if block.get("kind") == "heading" and block.get("level") == 1
+        ]
+        return candidates[0] if len(candidates) == 1 else None
 
     def _find_title_block_id(self, blocks: list[dict[str, Any]], title: str) -> str | None:
         normalized_title = self._normalize_title(title)

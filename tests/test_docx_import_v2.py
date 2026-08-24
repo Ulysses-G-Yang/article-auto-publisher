@@ -20,6 +20,7 @@ from content_studio.assets import AssetStore
 from content_studio.content_document import (
     delivery_features,
     delivery_heading_levels,
+    normalize_for_delivery,
     project_to_delivery_blocks,
 )
 from content_studio.errors import ContentAssetError
@@ -245,23 +246,23 @@ def test_parser_v2_promotes_only_strong_visual_heading_evidence(
     title = blocks_by_text["视觉主标题"]
     assert title["kind"] == "heading"
     assert title["level"] == 1
-    assert "marks" not in title["children"][0]
+    assert title["children"][0]["marks"] == ["bold"]
 
     heading = blocks_by_text["视觉二级标题"]
     assert heading["kind"] == "heading"
     assert heading["level"] == 2
     assert "style_name" not in heading
-    assert "marks" not in heading["children"][0]
+    assert heading["children"][0]["marks"] == ["bold"]
 
     callout = blocks_by_text["同字号粗体提示不能冒充标题"]
     assert callout["kind"] == "heading"
     assert callout["level"] == 2
-    assert "marks" not in callout["children"][0]
+    assert callout["children"][0]["marks"] == ["bold"]
 
     mixed = blocks_by_text["局部粗体仍然是正文"]
     assert mixed["kind"] == "heading"
     assert mixed["level"] == 2
-    assert "marks" not in mixed["children"][0]
+    assert mixed["children"][0]["marks"] == ["bold"]
     assert "marks" not in mixed["children"][1]
 
 
@@ -364,13 +365,16 @@ def test_visual_heading_normalization_unblocks_verified_zol_contract(
         adapter.parse_v2(data, "visual-heading.docx")
     )
     declaration = DEFAULT_PLATFORM_FORMAT_CAPABILITIES.get("zol")
+    delivery_document, report = normalize_for_delivery(document)
 
     assert len(assets) == 2
-    assert delivery_features(document) == frozenset({"heading", "image_order"})
-    assert delivery_heading_levels(document) == frozenset({2})
-    assert delivery_features(document) - declaration.supported == set()
-    assert delivery_heading_levels(document) - declaration.heading_levels == set()
-    projected = project_to_delivery_blocks(document)
+    assert "marks" in delivery_features(document)
+    assert report["removed_marks"]
+    assert delivery_features(delivery_document) == frozenset({"heading", "image_order"})
+    assert delivery_heading_levels(delivery_document) == frozenset({2})
+    assert delivery_features(delivery_document) - declaration.supported == set()
+    assert delivery_heading_levels(delivery_document) - declaration.heading_levels == set()
+    projected = project_to_delivery_blocks(delivery_document)
     assert [block["type"] for block in projected] == [
         "text",
         "image",

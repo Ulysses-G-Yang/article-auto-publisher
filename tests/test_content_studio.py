@@ -22,7 +22,14 @@ from account_sessions.models import DeliveryOperation, PlatformAccount
 from account_sessions.permissions import LOCAL_WEB_CONTEXT
 from account_sessions.web import AccountSessionRuntimeState
 from content_studio.assets import AssetStore
-from content_studio.content_document import delivery_features
+from content_studio.content_document import (
+    DELIVERY_POLICY_VERSION,
+    canonical_document_json,
+    delivery_features,
+    document_hash,
+    normalize_for_delivery,
+    project_to_v1,
+)
 from content_studio.contracts import (
     CoverInput,
     CreateDraftRequest,
@@ -53,6 +60,7 @@ from content_studio.service import (
     ContentStudioService,
     _content_hash,
     _plan_status,
+    _validated_stored_version,
 )
 from content_studio.web import create_content_studio_blueprint
 
@@ -369,6 +377,29 @@ def test_exact_word_features_keep_xiaoheihe_heading_plan_blocked() -> None:
     declaration = DEFAULT_PLATFORM_FORMAT_CAPABILITIES.get("xiaoheihe")
     assert delivery_features(document) - declaration.supported == set()
     assert {2} - declaration.heading_levels == set()
+
+
+def test_marks_are_removed_before_all_six_platform_capability_checks() -> None:
+    document = delivery_v2_document("带样式 Word")
+    document["blocks"].append(
+        {
+            "kind": "paragraph",
+            "block_id": "marked-body",
+            "children": [
+                {"kind": "text", "text": "正文粗体", "marks": ["bold", "italic"]}
+            ],
+        }
+    )
+
+    delivery_document, report = normalize_for_delivery(document)
+
+    assert delivery_features(document) == frozenset({"marks"})
+    assert delivery_features(delivery_document) == frozenset()
+    assert report["removed_marks"]
+    for platform in DELIVERY_PLATFORMS:
+        declaration = DEFAULT_PLATFORM_FORMAT_CAPABILITIES.get(platform)
+        assert "marks" not in declaration.supported
+        assert delivery_features(delivery_document) - declaration.supported == set()
 
 
 def test_autosave_revision_conflict_returns_server_draft(tmp_path: Path) -> None:
@@ -799,6 +830,77 @@ def test_v1_content_hash_remains_backward_compatible() -> None:
     )
 
 
+def test_v2_content_hash_keeps_legacy_formula_and_versions_delivery_policy() -> None:
+    title = "冻结策略"
+    document = delivery_v2_document(title)
+    projection = project_to_v1(document).blocks
+    legacy_payload = json.dumps(
+        {
+            "content_schema_version": 2,
+            "document_json": canonical_document_json(document),
+            "document_hash": document_hash(document),
+            "cover": {"strategy": "NONE", "asset_id": None},
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    legacy_hash = hashlib.sha256(legacy_payload.encode("utf-8")).hexdigest()
+    assert (
+        _content_hash(
+            title,
+            projection,
+            content_schema_version=2,
+            document=document,
+        )
+        == legacy_hash
+    )
+
+    delivery_document, _report = normalize_for_delivery(document)
+    policy_hash = _content_hash(
+        title,
+        projection,
+        content_schema_version=2,
+        document=document,
+        delivery_document=delivery_document,
+        delivery_policy_version=DELIVERY_POLICY_VERSION,
+    )
+    assert policy_hash != legacy_hash
+
+
+def test_v2_version_accepts_legacy_null_snapshot_but_rejects_partial_snapshot() -> None:
+    document = delivery_v2_document("旧版本")
+    projection = project_to_v1(document).blocks
+    version = ContentVersion(
+        version_id="legacy-v2",
+        draft_id="legacy-draft",
+        source_revision=1,
+        content_hash="legacy-hash",
+        title="旧版本",
+        blocks_json=projection,
+        content_schema_version=2,
+        document_json=document,
+    )
+    schema_version, canonical, stored_projection = _validated_stored_version(version)
+    assert schema_version == 2
+    assert canonical == document
+    assert stored_projection == projection
+
+    version.delivery_document_json = document
+    with pytest.raises(DraftValidationError, match="投递归一化快照不完整"):
+        _validated_stored_version(version)
+
+    delivery_document, report = normalize_for_delivery(document)
+    version.delivery_document_json = delivery_document
+    version.delivery_policy_version = "unknown_policy"
+    version.delivery_loss_report_json = {
+        **report,
+        "policy_version": "unknown_policy",
+    }
+    with pytest.raises(DraftValidationError, match="不受支持的投递策略"):
+        _validated_stored_version(version)
+
+
 def test_v2_plan_freezes_document_and_hash_is_semantic_and_idempotent(tmp_path: Path) -> None:
     account_db = AccountDatabase(sqlite_url(tmp_path / "accounts.db"))
     accounts = AccountSessionService(account_db, seed_legacy_profiles=False)
@@ -827,7 +929,19 @@ def test_v2_plan_freezes_document_and_hash_is_semantic_and_idempotent(tmp_path: 
         cover_asset = await service.add_asset(
             draft["draft_id"], image_bytes("JPEG"), "封面.jpg"
         )
-        document = rich_v2_document("富文档", body_asset["asset_id"])
+        document = delivery_v2_document(
+            "富文档", asset_ids=[body_asset["asset_id"]]
+        )
+        document["blocks"].insert(
+            1,
+            {
+                "kind": "paragraph",
+                "block_id": "marked-body",
+                "children": [
+                    {"kind": "text", "text": "正文保留粗体", "marks": ["bold"]}
+                ],
+            },
+        )
         current = await service.patch_draft(
             draft["draft_id"],
             PatchDraftRequest(
@@ -861,6 +975,16 @@ def test_v2_plan_freezes_document_and_hash_is_semantic_and_idempotent(tmp_path: 
         assert repeated_plan["content_version"] == base_plan["content_version"]
         assert base_plan["content_schema_version"] == 2
         assert base_plan["document"] == current["document"]
+        assert base_plan["status"] == "READY"
+        assert base_plan["targets"][0]["status"] == "READY"
+        assert base_plan["delivery_policy_version"] == DELIVERY_POLICY_VERSION
+        assert base_plan["delivery_loss_report"] == {
+            "policy_version": DELIVERY_POLICY_VERSION,
+            "removed_marks": [
+                {"block_id": "title-block", "child_index": 0, "marks": ["bold"]},
+                {"block_id": "marked-body", "child_index": 0, "marks": ["bold"]},
+            ],
+        }
         assert "storage_path" not in json.dumps(base_plan, ensure_ascii=False)
 
         base_context, _ = await service.get_plan_execution_context(
@@ -868,12 +992,15 @@ def test_v2_plan_freezes_document_and_hash_is_semantic_and_idempotent(tmp_path: 
         )
         assert base_context["content_schema_version"] == 2
         assert base_context["document"] == current["document"]
+        assert "marks" in delivery_features(base_context["document"])
+        assert "marks" not in delivery_features(base_context["delivery_document"])
+        assert base_context["delivery_policy_version"] == DELIVERY_POLICY_VERSION
         base_resolved = await service.resolve_delivery_payload(
             await _version_id_for_hash(service, base_plan["content_version"])
         )
 
         variants = [
-            rich_v2_document("富文档", body_asset["asset_id"], marks=["bold"]),
+            rich_v2_document("富文档", body_asset["asset_id"], marks=["italic"]),
             rich_v2_document("富文档", body_asset["asset_id"], style_name="Quote"),
             rich_v2_document(
                 "富文档",
@@ -950,8 +1077,12 @@ def test_v2_plan_freezes_document_and_hash_is_semantic_and_idempotent(tmp_path: 
             )
             assert base_version.content_schema_version == 2
             assert base_version.document_json == document
+            assert "marks" in delivery_features(base_version.document_json)
+            assert "marks" not in delivery_features(base_version.delivery_document_json)
+            assert base_version.delivery_policy_version == DELIVERY_POLICY_VERSION
             assert base_version.blocks_json == base_context["blocks"]
             frozen_document = base_version.document_json
+            frozen_delivery_document = base_version.delivery_document_json
             frozen_projection = base_version.blocks_json
 
         # 活动草稿已经多次更新，旧 ContentVersion 和其解析结果仍保持不变。
@@ -960,6 +1091,7 @@ def test_v2_plan_freezes_document_and_hash_is_semantic_and_idempotent(tmp_path: 
         async with service.database.session() as session:
             base_version = await session.get(ContentVersion, base_version.version_id)
             assert base_version.document_json == frozen_document
+            assert base_version.delivery_document_json == frozen_delivery_document
             assert base_version.blocks_json == frozen_projection
         await service.database.dispose()
         await account_db.dispose()

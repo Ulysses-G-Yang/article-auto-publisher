@@ -13,11 +13,14 @@ from sqlalchemy.orm import selectinload
 
 from content_studio.assets import AssetStore, StoredAsset
 from content_studio.content_document import (
+    DELIVERY_POLICY_VERSION,
     ContentDocumentValidationError,
     canonical_document_json,
     delivery_features,
     delivery_heading_levels,
+    document_features,
     document_hash,
+    normalize_for_delivery,
     project_to_delivery_blocks,
     project_to_v1,
     validate_document,
@@ -460,26 +463,14 @@ class ContentStudioService:
                 if account.status != "ACTIVE" or account.session_status != "VALID":
                     raise DraftValidationError(f"账号 {target.account_display_name} 已失效")
 
-            required_format_features = (
-                delivery_features(canonical_document)
-                if schema_version == 2 and canonical_document is not None
-                else frozenset()
-            )
-            required_heading_levels = (
-                delivery_heading_levels(canonical_document)
-                if schema_version == 2 and canonical_document is not None
-                else frozenset()
-            )
-            format_results = {
-                target.target_id: _format_target_result(
-                    target.platform,
-                    required_format_features,
-                    self.platform_format_capabilities,
-                    schema_version=schema_version,
-                    required_heading_levels=required_heading_levels,
+            delivery_document = None
+            delivery_loss_report = None
+            delivery_policy_version = None
+            if schema_version == 2 and canonical_document is not None:
+                delivery_document, delivery_loss_report = normalize_for_delivery(
+                    canonical_document
                 )
-                for target in targets
-            }
+                delivery_policy_version = DELIVERY_POLICY_VERSION
 
             content_hash = _content_hash(
                 draft.title,
@@ -488,6 +479,8 @@ class ContentStudioService:
                 cover_asset_id,
                 content_schema_version=schema_version,
                 document=canonical_document,
+                delivery_document=delivery_document,
+                delivery_policy_version=delivery_policy_version,
             )
             await session.execute(
                 sqlite_insert(ContentVersion)
@@ -500,6 +493,9 @@ class ContentStudioService:
                     blocks_json=projection,
                     content_schema_version=schema_version,
                     document_json=canonical_document,
+                    delivery_document_json=delivery_document,
+                    delivery_policy_version=delivery_policy_version,
+                    delivery_loss_report_json=delivery_loss_report,
                     cover_strategy=cover_strategy,
                     cover_asset_id=cover_asset_id,
                     created_at=_utc_now(),
@@ -514,7 +510,33 @@ class ContentStudioService:
             )
             if version is None:
                 raise RuntimeError("内容版本冻结失败")
-            _validated_stored_version(version)
+            stored_schema_version, stored_document, _stored_projection = (
+                _validated_stored_version(version)
+            )
+            frozen_delivery_document = _validated_delivery_document(
+                version,
+                stored_document,
+            )
+            required_format_features = (
+                delivery_features(frozen_delivery_document)
+                if stored_schema_version == 2 and frozen_delivery_document is not None
+                else frozenset()
+            )
+            required_heading_levels = (
+                delivery_heading_levels(frozen_delivery_document)
+                if stored_schema_version == 2 and frozen_delivery_document is not None
+                else frozenset()
+            )
+            format_results = {
+                target.target_id: _format_target_result(
+                    target.platform,
+                    required_format_features,
+                    self.platform_format_capabilities,
+                    schema_version=stored_schema_version,
+                    required_heading_levels=required_heading_levels,
+                )
+                for target in targets
+            }
 
             plan = DeliveryPlan(
                 plan_id=str(uuid.uuid4()),
@@ -571,6 +593,10 @@ class ContentStudioService:
             if version is None:
                 raise DraftValidationError("投递计划引用的内容版本不存在")
             schema_version, canonical_document, projection = _validated_stored_version(version)
+            delivery_document = _validated_delivery_document(
+                version,
+                canonical_document,
+            )
             targets = list(
                 (
                     await session.scalars(
@@ -593,6 +619,9 @@ class ContentStudioService:
                 "blocks": projection,
                 "content_schema_version": schema_version,
                 "document": canonical_document,
+                "delivery_document": delivery_document,
+                "delivery_policy_version": version.delivery_policy_version,
+                "delivery_loss_report": version.delivery_loss_report_json,
                 "cover": public_cover(version.cover_strategy, version.cover_asset_id),
                 "content_hash": version.content_hash,
                 "version_id": version.version_id,
@@ -799,6 +828,7 @@ class ContentStudioService:
             if version is None:
                 raise DraftValidationError("投递执行单引用的内容版本不存在")
             schema_version, document, projection = _validated_stored_version(version)
+            delivery_document = _validated_delivery_document(version, document)
             draft_id = version.draft_id
             title = version.title
             cover_strategy = version.cover_strategy
@@ -809,9 +839,12 @@ class ContentStudioService:
                 if cover_asset is None or cover_asset.draft_id != draft_id:
                     raise ContentAssetError("冻结版本封面资产不存在或不属于当前草稿")
         if schema_version == 2:
-            if document is None:
+            if delivery_document is None:
                 raise DraftValidationError("v2 内容版本缺少 document，无法解析投递内容")
-            platform_blocks = project_to_delivery_blocks(document, omit_title_block=True)
+            platform_blocks = project_to_delivery_blocks(
+                delivery_document,
+                omit_title_block=True,
+            )
         else:
             platform_blocks = projection
         _body, platform_blocks, images = await self.build_platform_content(
@@ -1232,6 +1265,8 @@ def public_plan(plan, version, targets) -> dict:
         "content_version": version.content_hash,
         "content_schema_version": schema_version,
         "document": canonical_document,
+        "delivery_policy_version": version.delivery_policy_version,
+        "delivery_loss_report": version.delivery_loss_report_json,
         "draft_revision": plan.draft_revision,
         "cover": public_cover(version.cover_strategy, version.cover_asset_id),
         "status": plan.status,
@@ -1356,6 +1391,15 @@ def _validated_stored_version(
     if schema_version == 1:
         if version.document_json is not None:
             raise DraftValidationError("v1 内容版本不应包含 document")
+        if any(
+            value is not None
+            for value in (
+                version.delivery_document_json,
+                version.delivery_policy_version,
+                version.delivery_loss_report_json,
+            )
+        ):
+            raise DraftValidationError("v1 内容版本不应包含投递归一化副本")
         if not isinstance(version.blocks_json, list):
             raise DraftValidationError("v1 内容版本 blocks projection 无效")
         return 1, None, version.blocks_json
@@ -1366,7 +1410,45 @@ def _validated_stored_version(
         raise DraftValidationError("v2 内容版本 document 未保持 canonical 形式")
     if projection != version.blocks_json:
         raise DraftValidationError("v2 内容版本 blocks projection 与 document 不一致")
+    _validated_delivery_document(version, canonical)
     return 2, canonical, projection
+
+
+def _validated_delivery_document(
+    version: ContentVersion,
+    canonical_document: dict | None,
+) -> dict | None:
+    """读取冻结的投递副本；旧版本全空时保持兼容，部分缺失则拒绝执行。"""
+
+    delivery_document = version.delivery_document_json
+    policy_version = version.delivery_policy_version
+    loss_report = version.delivery_loss_report_json
+    values = (delivery_document, policy_version, loss_report)
+    if all(value is None for value in values):
+        return canonical_document
+    if any(value is None for value in values):
+        raise DraftValidationError("内容版本的投递归一化快照不完整")
+    if not isinstance(delivery_document, dict):
+        raise DraftValidationError("内容版本的投递文档无效")
+    if not isinstance(policy_version, str) or not policy_version:
+        raise DraftValidationError("内容版本的投递策略版本无效")
+    if policy_version != DELIVERY_POLICY_VERSION:
+        raise DraftValidationError("内容版本使用了不受支持的投递策略")
+    if not isinstance(loss_report, dict):
+        raise DraftValidationError("内容版本的投递损失报告无效")
+    if loss_report.get("policy_version") != policy_version:
+        raise DraftValidationError("内容版本的投递策略与损失报告不一致")
+    if not isinstance(loss_report.get("removed_marks"), list):
+        raise DraftValidationError("内容版本的 marks 损失报告无效")
+    try:
+        normalized = validate_document(delivery_document)
+    except ContentDocumentValidationError as exc:
+        raise DraftValidationError("内容版本的投递文档无效") from exc
+    if normalized != delivery_document:
+        raise DraftValidationError("内容版本的投递文档未保持 canonical 形式")
+    if "marks" in document_features(normalized):
+        raise DraftValidationError("内容版本的投递文档仍包含 marks")
+    return normalized
 
 
 def _normalize_blocks(blocks: list[ContentBlockInput] | list[dict]) -> list[dict]:
@@ -1444,6 +1526,8 @@ def _content_hash(
     *,
     content_schema_version: int = 1,
     document: dict | None = None,
+    delivery_document: dict | None = None,
+    delivery_policy_version: str | None = None,
 ) -> str:
     if content_schema_version == 1:
         # 保留 v1 既有 hash 输入结构，确保旧草稿重建 plan 时完全兼容。
@@ -1467,6 +1551,15 @@ def _content_hash(
                 "asset_id": cover_asset_id,
             },
         }
+        if delivery_document is not None or delivery_policy_version is not None:
+            if not isinstance(delivery_document, dict) or not isinstance(
+                delivery_policy_version, str
+            ):
+                raise DraftValidationError("v2 投递副本与策略版本必须同时参与 hash")
+            hash_payload["delivery"] = {
+                "policy_version": delivery_policy_version,
+                "document_json": canonical_document_json(delivery_document),
+            }
     else:
         raise DraftValidationError("内容版本 schema 不受支持")
     payload = json.dumps(

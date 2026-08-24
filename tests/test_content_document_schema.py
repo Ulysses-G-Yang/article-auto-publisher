@@ -102,6 +102,9 @@ def test_old_cover_schema_migrates_document_columns_idempotently_and_preserves_v
         assert draft.cover_asset_id == "00000000-0000-4000-8000-000000000001"
         assert version.content_schema_version == 1
         assert version.document_json is None
+        assert version.delivery_document_json is None
+        assert version.delivery_policy_version is None
+        assert version.delivery_loss_report_json is None
         assert version.cover_strategy == "EXPLICIT"
         assert version.cover_asset_id == "00000000-0000-4000-8000-000000000001"
 
@@ -113,6 +116,17 @@ def test_old_cover_schema_migrates_document_columns_idempotently_and_preserves_v
                 }
                 assert columns["content_schema_version"]["default"] == "1"
                 assert columns["document_json"]["type"] == "JSON"
+            version_columns = {
+                row[1]: row[2]
+                for row in connection.execute("PRAGMA table_info(content_versions)")
+            }
+            assert version_columns["delivery_document_json"] == "JSON"
+            assert version_columns["delivery_policy_version"] == "VARCHAR(32)"
+            assert version_columns["delivery_loss_report_json"] == "JSON"
+            draft_columns = {
+                row[1] for row in connection.execute("PRAGMA table_info(content_drafts)")
+            }
+            assert "delivery_document_json" not in draft_columns
     finally:
         run(database.dispose())
 
@@ -149,6 +163,12 @@ def test_new_schema_defaults_and_document_json_round_trip_without_automatic_writ
                 blocks_json=[],
                 content_schema_version=2,
                 document_json=document,
+                delivery_document_json=document,
+                delivery_policy_version="stable_v1",
+                delivery_loss_report_json={
+                    "policy_version": "stable_v1",
+                    "removed_marks": [],
+                },
             )
             session.add(version)
             await session.flush()
@@ -163,6 +183,12 @@ def test_new_schema_defaults_and_document_json_round_trip_without_automatic_writ
         assert draft.document_json == document
         assert version.content_schema_version == 2
         assert version.document_json == document
+        assert version.delivery_document_json == document
+        assert version.delivery_policy_version == "stable_v1"
+        assert version.delivery_loss_report_json == {
+            "policy_version": "stable_v1",
+            "removed_marks": [],
+        }
     finally:
         run(database.dispose())
 

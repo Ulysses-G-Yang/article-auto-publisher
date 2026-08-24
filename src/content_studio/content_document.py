@@ -41,6 +41,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 SCHEMA_VERSION = 2
 LEGACY_PROJECTED = "LEGACY_PROJECTED"
 NATIVE = "NATIVE"
+DELIVERY_POLICY_VERSION = "stable_v1"
 
 # 这些上限是文档层的防护，不替代 API 层和数据库层的资源限制。
 MAX_BLOCKS = 2_000
@@ -1056,6 +1057,36 @@ def delivery_heading_levels(document: Mapping[str, Any]) -> frozenset[int]:
     return frozenset(levels)
 
 
+def normalize_for_delivery(
+    document: Mapping[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """生成去除行内 marks 的稳定投递副本，原始文档绝不被修改。"""
+
+    normalized = validate_document(document)
+    removed_marks: list[dict[str, Any]] = []
+    for block in _walk_blocks(normalized["blocks"]):
+        if block.get("kind") not in {"paragraph", "heading"}:
+            continue
+        block_id = block.get("block_id")
+        for child_index, child in enumerate(block.get("children", [])):
+            if child.get("kind") != "text":
+                continue
+            marks = child.pop("marks", None)
+            if marks:
+                removed_marks.append(
+                    {
+                        "block_id": block_id,
+                        "child_index": child_index,
+                        "marks": list(marks),
+                    }
+                )
+    delivery_document = validate_document(normalized)
+    return delivery_document, {
+        "policy_version": DELIVERY_POLICY_VERSION,
+        "removed_marks": removed_marks,
+    }
+
+
 def project_to_delivery_blocks(
     document: Mapping[str, Any], *, omit_title_block: bool = True
 ) -> list[dict[str, Any]]:
@@ -1196,6 +1227,7 @@ __all__ = [
     "ContentDocument",
     "ContentDocumentError",
     "ContentDocumentValidationError",
+    "DELIVERY_POLICY_VERSION",
     "DocumentAnchor",
     "DocumentLink",
     "FEATURE_KEYS",
@@ -1228,6 +1260,7 @@ __all__ = [
     "delivery_features",
     "document_hash",
     "hash_document",
+    "normalize_for_delivery",
     "project_to_v1",
     "project_to_delivery_blocks",
     "required_capabilities",

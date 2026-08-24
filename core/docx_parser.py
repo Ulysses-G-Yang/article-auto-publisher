@@ -365,21 +365,10 @@ class DocxParser:
                         )
                     )
         if explicit_level is None and inferred_heading_level is not None:
-            # 整段粗体是视觉标题的结构信号，而不是平台必须支持的正文强调。
-            # 只移除已由保守识别器证明为结构用途的 bold；其它行内 mark 从不
-            # 在这里降级或吞掉。原始 Normal 只是识别前的 Word 来源样式；
-            # 晋级为 canonical heading 后必须移除，不能制造“Normal + H2”的
-            # 自相矛盾结构。
+            # 原始 Normal 只是识别前的 Word 来源样式；晋级为 canonical heading
+            # 后必须移除，不能制造“Normal + H2”的自相矛盾结构。视觉 marks
+            # 仍完整保留在原始文档，平台投递副本再统一归一化。
             block.pop("style_name", None)
-            for child in block["children"]:
-                marks = child.get("marks")
-                if not isinstance(marks, list) or "bold" not in marks:
-                    continue
-                remaining = [mark for mark in marks if mark != "bold"]
-                if remaining:
-                    child["marks"] = remaining
-                else:
-                    child.pop("marks", None)
         return block
 
     def _rich_run_children(

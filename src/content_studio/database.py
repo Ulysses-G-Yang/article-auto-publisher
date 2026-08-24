@@ -52,6 +52,7 @@ class ContentDatabase:
             await connection.run_sync(Base.metadata.create_all)
             await connection.run_sync(self._upgrade_cover_schema)
             await connection.run_sync(self._upgrade_document_schema)
+            await connection.run_sync(self._upgrade_delivery_document_schema)
             await connection.run_sync(self._upgrade_plan_target_schema)
 
     @staticmethod
@@ -115,6 +116,29 @@ class ContentDatabase:
         if "execution_claim_expires_at" not in columns:
             connection.exec_driver_sql(
                 "ALTER TABLE delivery_plan_targets ADD COLUMN execution_claim_expires_at DATETIME"
+            )
+
+    @staticmethod
+    def _upgrade_delivery_document_schema(connection) -> None:
+        """幂等补充冻结版本的投递归一化副本。"""
+
+        columns = {
+            row[1]
+            for row in connection.exec_driver_sql(
+                "PRAGMA table_info(content_versions)"
+            ).fetchall()
+        }
+        if "delivery_document_json" not in columns:
+            connection.exec_driver_sql(
+                "ALTER TABLE content_versions ADD COLUMN delivery_document_json JSON"
+            )
+        if "delivery_policy_version" not in columns:
+            connection.exec_driver_sql(
+                "ALTER TABLE content_versions ADD COLUMN delivery_policy_version VARCHAR(32)"
+            )
+        if "delivery_loss_report_json" not in columns:
+            connection.exec_driver_sql(
+                "ALTER TABLE content_versions ADD COLUMN delivery_loss_report_json JSON"
             )
 
     @asynccontextmanager

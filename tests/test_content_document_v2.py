@@ -7,6 +7,7 @@ import json
 import pytest
 
 from content_studio.content_document import (
+    DELIVERY_POLICY_VERSION,
     ContentDocumentValidationError,
     PlatformCapabilities,
     canonical_document_json,
@@ -15,6 +16,7 @@ from content_studio.content_document import (
     delivery_heading_levels,
     document_features,
     document_hash,
+    normalize_for_delivery,
     project_to_delivery_blocks,
     project_to_v1,
     required_features,
@@ -324,6 +326,90 @@ def test_delivery_features_exclude_title_block_from_platform_requirements() -> N
     assert delivery_features(document) == frozenset({"heading", "image_order"})
     # 完整文档能力的历史 API 仍包含标题本身的 marks。
     assert "marks" in required_features(document)
+
+
+def test_delivery_normalization_removes_marks_without_mutating_source() -> None:
+    document = {
+        "schema_version": 2,
+        "title": "标题",
+        "title_block_id": "title-block",
+        "source_fidelity": "NATIVE",
+        "blocks": [
+            {
+                "kind": "heading",
+                "block_id": "title-block",
+                "level": 1,
+                "children": [{"kind": "text", "text": "标题", "marks": ["bold"]}],
+            },
+            {
+                "kind": "heading",
+                "block_id": "body-heading",
+                "level": 2,
+                "children": [
+                    {"kind": "text", "text": "二级标题", "marks": ["bold"]}
+                ],
+            },
+            {
+                "kind": "paragraph",
+                "block_id": "body",
+                "children": [
+                    {"kind": "text", "text": "正文", "marks": ["italic", "underline"]},
+                    {
+                        "kind": "image",
+                        "asset_id": "00000000-0000-4000-8000-000000000001",
+                    },
+                    {"kind": "text", "text": "图片后"},
+                ],
+            },
+        ],
+    }
+    original = json.loads(json.dumps(document, ensure_ascii=False))
+
+    delivery_document, report = normalize_for_delivery(document)
+
+    assert document == original
+    assert "marks" in delivery_features(document)
+    assert "marks" not in delivery_features(delivery_document)
+    assert report == {
+        "policy_version": DELIVERY_POLICY_VERSION,
+        "removed_marks": [
+            {"block_id": "title-block", "child_index": 0, "marks": ["bold"]},
+            {"block_id": "body-heading", "child_index": 0, "marks": ["bold"]},
+            {
+                "block_id": "body",
+                "child_index": 0,
+                "marks": ["italic", "underline"],
+            },
+        ],
+    }
+    assert project_to_delivery_blocks(delivery_document) == [
+        {"type": "heading", "text": "二级标题", "position": 0, "level": 2},
+        {"type": "text", "text": "正文", "position": 1},
+        {
+            "type": "image",
+            "asset_id": "00000000-0000-4000-8000-000000000001",
+            "position": 2,
+        },
+        {"type": "text", "text": "图片后", "position": 3},
+    ]
+
+
+def test_delivery_normalization_keeps_every_non_mark_format_gate() -> None:
+    document = mixed_document()
+    source_features = delivery_features(document)
+
+    delivery_document, _report = normalize_for_delivery(document)
+
+    assert "marks" in source_features
+    assert delivery_features(delivery_document) == source_features - {"marks"}
+    assert {
+        "caption",
+        "floating_anchor",
+        "link",
+        "list",
+        "mixed_inline",
+        "table",
+    } <= delivery_features(delivery_document)
 
 
 def test_delivery_projection_preserves_heading_levels_and_inline_image_order() -> None:

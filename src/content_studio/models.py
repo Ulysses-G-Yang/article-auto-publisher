@@ -130,6 +130,9 @@ class ContentVersion(Base):
         Integer, default=1, server_default="1", nullable=False
     )
     document_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    delivery_document_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    delivery_policy_version: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    delivery_loss_report_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     cover_strategy: Mapped[str] = mapped_column(
         String(32), default="NONE", server_default="NONE", nullable=False
     )

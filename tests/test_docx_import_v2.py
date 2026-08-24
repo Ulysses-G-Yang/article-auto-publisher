@@ -13,7 +13,7 @@ from docx import Document
 from docx.opc.constants import RELATIONSHIP_TYPE as RT
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
-from docx.shared import Inches, Pt
+from docx.shared import Inches, Pt, RGBColor
 from PIL import Image
 
 from content_studio.assets import AssetStore
@@ -243,8 +243,9 @@ def test_parser_v2_promotes_only_strong_visual_heading_evidence(
     }
 
     title = blocks_by_text["视觉主标题"]
-    assert title["kind"] == "paragraph"
-    assert title["children"][0]["marks"] == ["bold"]
+    assert title["kind"] == "heading"
+    assert title["level"] == 1
+    assert "marks" not in title["children"][0]
 
     heading = blocks_by_text["视觉二级标题"]
     assert heading["kind"] == "heading"
@@ -253,13 +254,96 @@ def test_parser_v2_promotes_only_strong_visual_heading_evidence(
     assert "marks" not in heading["children"][0]
 
     callout = blocks_by_text["同字号粗体提示不能冒充标题"]
-    assert callout["kind"] == "paragraph"
-    assert callout["children"][0]["marks"] == ["bold"]
+    assert callout["kind"] == "heading"
+    assert callout["level"] == 2
+    assert "marks" not in callout["children"][0]
 
     mixed = blocks_by_text["局部粗体仍然是正文"]
-    assert mixed["kind"] == "paragraph"
-    assert mixed["children"][0]["marks"] == ["bold"]
+    assert mixed["kind"] == "heading"
+    assert mixed["level"] == 2
+    assert "marks" not in mixed["children"][0]
     assert "marks" not in mixed["children"][1]
+
+
+@pytest.mark.parametrize(
+    ("bold_text", "plain_text", "expected_kind"),
+    [
+        ("粗体七字符甲乙", "普通三", "heading"),
+        ("粗体六字符甲", "普通四字", "paragraph"),
+    ],
+)
+def test_visual_heading_uses_character_weighted_seventy_percent_threshold(
+    tmp_path: Path,
+    bold_text: str,
+    plain_text: str,
+    expected_kind: str,
+) -> None:
+    document = Document()
+    title = document.add_paragraph()
+    title_run = title.add_run("视觉主标题")
+    title_run.bold = True
+    title_run.font.size = Pt(20)
+    body = document.add_paragraph("这是一段用于确定正文基准字号的普通正文内容。")
+    body.runs[0].font.size = Pt(11)
+    candidate = document.add_paragraph()
+    bold_run = candidate.add_run(bold_text)
+    bold_run.bold = True
+    bold_run.font.size = Pt(11)
+    plain_run = candidate.add_run(plain_text)
+    plain_run.font.size = Pt(11)
+    output = tmp_path / "bold-ratio.docx"
+    document.save(output)
+
+    parsed = DocxParser(images_dir=str(tmp_path / "parser-images")).parse_document_v2(
+        str(output)
+    )
+    candidate_block = next(
+        block
+        for block in parsed.document_v2["blocks"]
+        if "".join(
+            child.get("text", "")
+            for child in block.get("children", [])
+            if child.get("kind") == "text"
+        )
+        == bold_text + plain_text
+    )
+
+    assert candidate_block["kind"] == expected_kind
+    if expected_kind == "heading":
+        assert candidate_block["level"] == 2
+
+
+def test_visual_color_is_auxiliary_and_does_not_promote_plain_body(
+    tmp_path: Path,
+) -> None:
+    document = Document()
+    title = document.add_paragraph()
+    title_run = title.add_run("视觉主标题")
+    title_run.bold = True
+    title_run.font.size = Pt(20)
+    body = document.add_paragraph("这是一段用于确定正文基准字号的普通正文内容。")
+    body.runs[0].font.size = Pt(11)
+    colored = document.add_paragraph("只有颜色变化的普通提示")
+    colored.runs[0].font.size = Pt(11)
+    colored.runs[0].font.color.rgb = RGBColor(0x22, 0x66, 0xAA)
+    output = tmp_path / "colored-body.docx"
+    document.save(output)
+
+    parsed = DocxParser(images_dir=str(tmp_path / "parser-images")).parse_document_v2(
+        str(output)
+    )
+    colored_block = next(
+        block
+        for block in parsed.document_v2["blocks"]
+        if "".join(
+            child.get("text", "")
+            for child in block.get("children", [])
+            if child.get("kind") == "text"
+        )
+        == "只有颜色变化的普通提示"
+    )
+
+    assert colored_block["kind"] == "paragraph"
 
 
 def test_visual_heading_normalization_unblocks_verified_zol_contract(

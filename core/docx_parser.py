@@ -3,9 +3,9 @@
 import json
 import os
 import re
+from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
-from statistics import median
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -208,19 +208,31 @@ class DocxParser:
         rich_blocks: list[dict[str, Any]] = []
         current_list_key: tuple[bool, int] | None = None
         body_font_size = self._body_font_size_points(doc)
-        first_text_paragraph = next(
-            (paragraph._p for paragraph in doc.paragraphs if paragraph.text.strip()),
-            None,
+        body_font_color = self._body_font_color(doc)
+        nonempty_paragraphs = [
+            paragraph for paragraph in doc.paragraphs if paragraph.text.strip()
+        ]
+        visual_title_paragraph = self._visual_title_paragraph(
+            nonempty_paragraphs,
+            body_font_size,
+            body_font_color,
+            doc,
         )
 
         for child in doc.element.body:
             if child.tag == qn("w:p"):
                 paragraph = Paragraph(child, doc)
+                explicit_heading_level = self._heading_level(
+                    paragraph.style.name if paragraph.style else None
+                )
                 inferred_heading_level = None
-                if child is not first_text_paragraph:
+                if explicit_heading_level is None and child is visual_title_paragraph:
+                    inferred_heading_level = 1
+                elif explicit_heading_level is None:
                     inferred_heading_level = self._visual_heading_level(
                         paragraph,
                         body_font_size,
+                        doc,
                     )
                 block = self._rich_paragraph(
                     paragraph,
@@ -554,71 +566,188 @@ class DocxParser:
         猜测正文格式。
         """
 
-        sizes: list[float] = []
+        sizes: Counter[float] = Counter()
         paragraphs = [paragraph for paragraph in doc.paragraphs if paragraph.text.strip()]
         for paragraph in paragraphs[1:]:
             if cls._heading_level(
                 paragraph.style.name if paragraph.style else None
             ) is not None:
                 continue
-            text_runs = [run for run in paragraph.runs if run.text.strip()]
+            text_runs = [
+                run for run in cls._paragraph_runs(paragraph) if run.text.strip()
+            ]
             if not text_runs or all(cls._effective_bold(run, paragraph) for run in text_runs):
                 continue
             for run in text_runs:
                 if cls._effective_bold(run, paragraph):
                     continue
-                size = cls._effective_font_size_points(run, paragraph)
+                size = cls._effective_font_size_points(run, paragraph, doc)
                 if size is not None:
-                    sizes.append(size)
-        return float(median(sizes)) if sizes else None
+                    weight = cls._visible_character_count(run.text)
+                    if weight:
+                        sizes[round(size, 2)] += weight
+        if not sizes:
+            return None
+        max_weight = max(sizes.values())
+        # 同权时选更小字号，避免偶发的大字号提示语抬高正文基准。
+        return float(min(size for size, weight in sizes.items() if weight == max_weight))
+
+    @classmethod
+    def _body_font_color(cls, doc) -> str | None:
+        colors: Counter[str] = Counter()
+        paragraphs = [paragraph for paragraph in doc.paragraphs if paragraph.text.strip()]
+        for paragraph in paragraphs[1:]:
+            if cls._heading_level(
+                paragraph.style.name if paragraph.style else None
+            ) is not None:
+                continue
+            for run in cls._paragraph_runs(paragraph):
+                weight = cls._visible_character_count(run.text)
+                if not weight or cls._effective_bold(run, paragraph):
+                    continue
+                color = cls._effective_font_color(run, paragraph)
+                if color is not None:
+                    colors[color] += weight
+        if not colors:
+            return None
+        max_weight = max(colors.values())
+        return sorted(color for color, weight in colors.items() if weight == max_weight)[0]
+
+    @classmethod
+    def _visual_title_paragraph(
+        cls,
+        paragraphs: list[Paragraph],
+        body_font_size: float | None,
+        body_font_color: str | None,
+        doc,
+    ):
+        """按“前三非空 + 字号差/粗体”选择唯一视觉主标题。"""
+
+        if not paragraphs or body_font_size is None:
+            return None
+        candidates: list[tuple[tuple[float, ...], Paragraph]] = []
+        for rank, paragraph in enumerate(paragraphs[:3]):
+            style_name = paragraph.style.name if paragraph.style else None
+            if cls._heading_level(style_name) is not None:
+                continue
+            text = paragraph.text.strip()
+            if not text or len(text) > 40 or "\n" in text or "\r" in text:
+                continue
+            if any(node.tag == A_BLIP for node in paragraph._p.iter()):
+                continue
+            font_size = cls._paragraph_font_size_points(paragraph, doc)
+            bold_ratio = cls._paragraph_bold_ratio(paragraph)
+            size_signal = font_size is not None and font_size >= body_font_size + 4.0
+            bold_signal = bold_ratio >= 0.70
+            # “位于前三”是第一条证据；还必须至少命中字号或粗体证据。
+            if not (size_signal or bold_signal):
+                continue
+            color = cls._paragraph_font_color(paragraph)
+            color_signal = color is not None and color != body_font_color
+            score = (
+                float(1 + int(size_signal) + int(bold_signal)),
+                float(int(color_signal)),
+                float((font_size or body_font_size) - body_font_size),
+                bold_ratio,
+                float(-rank),
+            )
+            candidates.append((score, paragraph))
+        if not candidates:
+            return None
+        return max(candidates, key=lambda item: item[0])[1]._p
 
     @classmethod
     def _visual_heading_level(
         cls,
         paragraph: Paragraph,
         body_font_size: float | None,
+        doc=None,
     ) -> int | None:
-        """把有充分排版证据的普通样式小标题归一化为语义 H2。
-
-        识别条件有意保守：整段文字必须全部粗体、字号显著高于本文正文基准，
-        且不得包含图片、链接、换行或其它行内强调。普通粗体提示语和局部加粗
-        仍保留为 ``marks``，继续由格式能力门审查。
-        """
+        """按字号或 70% 粗体规则把普通样式短段落识别为语义 H2。"""
 
         if body_font_size is None:
             return None
         text = paragraph.text.strip()
-        if not text or len(text) > 120 or "\n" in text or "\r" in text:
+        if not text or len(text) > 30 or "\n" in text or "\r" in text:
+            return None
+        if re.search(r"[。！？!?；;]", text[:-1]):
             return None
         if any(node.tag == A_BLIP for node in paragraph._p.iter()):
             return None
         if paragraph._p.find(qn("w:hyperlink")) is not None:
             return None
-
-        text_runs = [run for run in paragraph.runs if run.text.strip()]
-        if not text_runs or not all(
-            cls._effective_bold(run, paragraph) for run in text_runs
-        ):
-            return None
-        if any(
-            bool(run.italic) or bool(run.underline) or bool(run.font.strike)
-            for run in text_runs
-        ):
+        style_name = " ".join(
+            str(paragraph.style.name if paragraph.style else "").split()
+        ).casefold()
+        if style_name == "caption":
             return None
 
-        sizes = [
-            size
-            for run in text_runs
-            if (size := cls._effective_font_size_points(run, paragraph)) is not None
-        ]
-        if len(sizes) != len(text_runs):
+        text_runs = [run for run in cls._paragraph_runs(paragraph) if run.text.strip()]
+        if not text_runs:
             return None
-        heading_size = float(median(sizes))
-        if heading_size < body_font_size + 1.0:
-            return None
-        if heading_size < body_font_size * 1.12:
+        heading_size = cls._paragraph_font_size_points(paragraph, doc)
+        bold_ratio = cls._paragraph_bold_ratio(paragraph)
+        size_signal = heading_size is not None and heading_size > body_font_size + 0.01
+        if not size_signal and bold_ratio < 0.70:
             return None
         return 2
+
+    @classmethod
+    def _paragraph_bold_ratio(cls, paragraph: Paragraph) -> float:
+        total = 0
+        bold = 0
+        for run in cls._paragraph_runs(paragraph):
+            weight = cls._visible_character_count(run.text)
+            if not weight:
+                continue
+            total += weight
+            if cls._effective_bold(run, paragraph):
+                bold += weight
+        return bold / total if total else 0.0
+
+    @classmethod
+    def _paragraph_font_size_points(
+        cls,
+        paragraph: Paragraph,
+        doc=None,
+    ) -> float | None:
+        sizes: Counter[float] = Counter()
+        for run in cls._paragraph_runs(paragraph):
+            weight = cls._visible_character_count(run.text)
+            if not weight:
+                continue
+            size = cls._effective_font_size_points(run, paragraph, doc)
+            if size is not None:
+                sizes[round(size, 2)] += weight
+        if not sizes:
+            return None
+        max_weight = max(sizes.values())
+        return float(max(size for size, weight in sizes.items() if weight == max_weight))
+
+    @classmethod
+    def _paragraph_font_color(cls, paragraph: Paragraph) -> str | None:
+        colors: Counter[str] = Counter()
+        for run in cls._paragraph_runs(paragraph):
+            weight = cls._visible_character_count(run.text)
+            if not weight:
+                continue
+            color = cls._effective_font_color(run, paragraph)
+            if color is not None:
+                colors[color] += weight
+        if not colors:
+            return None
+        max_weight = max(colors.values())
+        return sorted(color for color, weight in colors.items() if weight == max_weight)[0]
+
+    @staticmethod
+    def _visible_character_count(value: str) -> int:
+        return sum(1 for char in str(value or "") if not char.isspace())
+
+    @staticmethod
+    def _paragraph_runs(paragraph: Paragraph) -> list[Run]:
+        """返回段落 XML 中的全部 run，包括 hyperlink 内部 run。"""
+
+        return [Run(element, paragraph) for element in paragraph._p.iter(qn("w:r"))]
 
     @staticmethod
     def _effective_bold(run: Run, paragraph: Paragraph) -> bool:
@@ -639,6 +768,7 @@ class DocxParser:
     def _effective_font_size_points(
         run: Run,
         paragraph: Paragraph,
+        doc=None,
     ) -> float | None:
         candidates = [run.font.size]
         run_style = getattr(run, "style", None)
@@ -647,9 +777,40 @@ class DocxParser:
         candidates.append(
             paragraph_style.font.size if paragraph_style is not None else None
         )
+        if doc is not None:
+            try:
+                candidates.append(doc.styles["Normal"].font.size)
+            except (KeyError, TypeError):
+                pass
         for size in candidates:
             if size is not None:
                 return float(size.pt)
+        return None
+
+    @staticmethod
+    def _effective_font_color(run: Run, paragraph: Paragraph) -> str | None:
+        for font in (
+            run.font,
+            getattr(getattr(run, "style", None), "font", None),
+            getattr(getattr(paragraph, "style", None), "font", None),
+        ):
+            if font is None:
+                continue
+            color = getattr(font, "color", None)
+            if color is None:
+                continue
+            try:
+                rgb = color.rgb
+            except (AttributeError, TypeError, ValueError):
+                rgb = None
+            if rgb is not None:
+                return f"rgb:{rgb}"
+            try:
+                theme = color.theme_color
+            except (AttributeError, TypeError, ValueError):
+                theme = None
+            if theme is not None:
+                return f"theme:{theme}"
         return None
 
     @staticmethod

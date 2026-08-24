@@ -28,6 +28,7 @@ from content_studio.content_document import (
     delivery_features,
     document_hash,
     normalize_for_delivery,
+    project_to_delivery_blocks,
     project_to_v1,
 )
 from content_studio.contracts import (
@@ -81,9 +82,12 @@ def test_plan_status_never_leaves_result_unknown_executing(statuses, expected):
     assert _plan_status(statuses) == expected
 
 
-def image_bytes(image_format: str = "PNG") -> bytes:
+def image_bytes(
+    image_format: str = "PNG",
+    color: tuple[int, int, int] = (20, 90, 160),
+) -> bytes:
     buffer = io.BytesIO()
-    Image.new("RGB", (32, 16), color=(20, 90, 160)).save(buffer, format=image_format)
+    Image.new("RGB", (32, 16), color=color).save(buffer, format=image_format)
     return buffer.getvalue()
 
 
@@ -100,6 +104,55 @@ def docx_bytes() -> bytes:
     buffer = io.BytesIO()
     document.save(buffer)
     return buffer.getvalue()
+
+
+def seven_image_edge_docx_bytes() -> tuple[bytes, list[str]]:
+    """生成覆盖首尾图、连续图、段中图和同图重复的七图 Word。"""
+
+    from docx import Document
+    from docx.shared import Inches
+
+    source_images = [
+        image_bytes(color=color)
+        for color in (
+            (210, 45, 45),
+            (45, 160, 70),
+            (45, 90, 210),
+            (210, 150, 45),
+            (145, 70, 190),
+        )
+    ]
+    ordered_images = [
+        source_images[0],
+        source_images[1],
+        source_images[2],
+        source_images[0],
+        source_images[3],
+        source_images[4],
+        source_images[0],
+    ]
+
+    document = Document()
+    document.add_heading("七图边界", level=1)
+    document.add_paragraph().add_run().add_picture(
+        io.BytesIO(ordered_images[0]), width=Inches(0.5)
+    )
+    consecutive = document.add_paragraph()
+    for payload in ordered_images[1:3]:
+        consecutive.add_run().add_picture(io.BytesIO(payload), width=Inches(0.5))
+    mixed = document.add_paragraph()
+    mixed.add_run("图前")
+    mixed.add_run().add_picture(io.BytesIO(ordered_images[3]), width=Inches(0.5))
+    mixed.add_run("图后")
+    document.add_paragraph("中段")
+    trailing = document.add_paragraph()
+    for payload in ordered_images[4:]:
+        trailing.add_run().add_picture(io.BytesIO(payload), width=Inches(0.5))
+
+    buffer = io.BytesIO()
+    document.save(buffer)
+    expected_hashes = [hashlib.sha256(payload).hexdigest() for payload in ordered_images]
+    return buffer.getvalue(), expected_hashes
 
 
 def make_legacy_database(tmp_path: Path) -> tuple[Path, Path]:
@@ -510,6 +563,76 @@ def test_docx_import_uses_unified_blocks_and_controlled_assets(tmp_path: Path) -
 
     imported, loaded = run(scenario())
     assert loaded["blocks"] == imported["blocks"]
+
+
+def test_docx_seven_image_edge_order_reaches_platform_blocks(tmp_path: Path) -> None:
+    payload, expected_hashes = seven_image_edge_docx_bytes()
+    service = make_service(tmp_path)
+
+    async def scenario():
+        await service.initialize()
+        imported = await service.import_docx(payload, "seven-image-edges.docx")
+        delivery_document, report = normalize_for_delivery(imported["document"])
+        projected = project_to_delivery_blocks(
+            delivery_document,
+            omit_title_block=True,
+        )
+        body, platform_blocks, images = await service.build_platform_content(
+            imported["draft_id"],
+            projected,
+        )
+        await service.database.dispose()
+        return imported, report, projected, body, platform_blocks, images
+
+    imported, report, projected, body, platform_blocks, images = run(scenario())
+    expected_shape = [
+        ("image", None),
+        ("image", None),
+        ("image", None),
+        ("text", "图前"),
+        ("image", None),
+        ("text", "图后"),
+        ("text", "中段"),
+        ("image", None),
+        ("image", None),
+        ("image", None),
+    ]
+    expected_image_positions = [0, 1, 2, 4, 7, 8, 9]
+
+    assert imported["title"] == "七图边界"
+    assert imported["cover"] == {
+        "strategy": "NONE",
+        "asset_id": None,
+        "asset_url": None,
+    }
+    assert report["removed_marks"] == []
+    assert [(block["type"], block.get("text")) for block in projected] == expected_shape
+    assert [block["position"] for block in projected] == list(range(10))
+    assert [
+        block["position"] for block in projected if block["type"] == "image"
+    ] == expected_image_positions
+    assert len(
+        {
+            block["asset_id"]
+            for block in projected
+            if block["type"] == "image"
+        }
+    ) == 7
+    assert body == "图前\n\n图后\n\n中段"
+    assert [
+        (block["type"], block.get("text")) for block in platform_blocks
+    ] == expected_shape
+    assert [image["position_index"] for image in images] == expected_image_positions
+    actual_hashes = [
+        hashlib.sha256(Path(image["local_path"]).read_bytes()).hexdigest()
+        for image in images
+    ]
+    assert actual_hashes == expected_hashes
+    assert actual_hashes[0] == actual_hashes[3] == actual_hashes[6]
+    assert len(set(actual_hashes)) == 5
+    public_json = json.dumps(imported, ensure_ascii=False)
+    assert "local_path" not in public_json
+    assert "storage_path" not in public_json
 
 
 def test_v2_patch_is_canonical_and_old_client_cannot_downgrade(

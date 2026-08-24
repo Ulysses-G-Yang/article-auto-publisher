@@ -1,5 +1,7 @@
 ﻿#Requires -Version 5.1
 
+# 改动：移除自动生成data/production_env.ps1逻辑；MCP环境变量由外部shell传入，脚本不再生成磁盘配置文件
+
 <##
 .SYNOPSIS
     启动当前项目的生产 Flask（Waitress）和 MCP 服务。
@@ -16,14 +18,34 @@ param(
 $ErrorActionPreference = "Stop"
 $ProjectRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 Set-Location -LiteralPath $ProjectRoot
-$envFile = Join-Path $ProjectRoot "data\production_env.ps1"
-if (-not (Test-Path -LiteralPath $envFile)) {
-    throw "找不到生产配置 $envFile。请先运行 .\scripts\setup_windows.ps1。"
-}
-. $envFile
 
 if ($env:APP_ENV -ne "production") {
     throw "APP_ENV 不是 production，拒绝启动生产入口。"
+}
+
+# 生产启动脚本只校验并继承当前 PowerShell 进程的环境变量，绝不生成或
+# 覆写磁盘配置。两个 Python 子进程会自动继承这些进程级环境变量。
+$requiredMcpEnvironmentVariables = @(
+    "MCP_BIND_HOST",
+    "MCP_PORT",
+    "FLASK_BASE_URL",
+    "ARTICLEOPS_MCP_DRAFT_DELIVERY_ENABLED",
+    "ARTICLEOPS_MCP_INTERNAL_TOKEN",
+    "ARTICLEOPS_MCP_ALLOWED_ACCOUNT_IDS",
+    "MCP_ALLOWED_HOSTS"
+)
+$missingMcpEnvironmentVariables = @(
+    $requiredMcpEnvironmentVariables | Where-Object {
+        [string]::IsNullOrWhiteSpace(
+            [Environment]::GetEnvironmentVariable(
+                $_,
+                [System.EnvironmentVariableTarget]::Process
+            )
+        )
+    }
+)
+if ($missingMcpEnvironmentVariables.Count -gt 0) {
+    throw "当前 PowerShell 会话缺少必需的 MCP 环境变量：$($missingMcpEnvironmentVariables -join ', ')"
 }
 
 # MCP 入口以模块方式启动；发布包不安装本地源码为 site-package，显式加入
@@ -37,13 +59,13 @@ $env:PYTHONPATH = if ($env:PYTHONPATH) {
 
 $condaCommand = Get-Command conda -ErrorAction SilentlyContinue
 if (-not $condaCommand) {
-    throw "找不到 conda。请先运行 setup_windows.ps1。"
+    throw "找不到 conda。请先安装 Conda 并创建 article-publisher-py312 环境。"
 }
 $condaExecutable = if ($condaCommand.Source -and (Test-Path $condaCommand.Source)) { $condaCommand.Source } else { $condaCommand.Name }
 $condaBase = ((& $condaExecutable info --base) | Select-Object -Last 1).ToString().Trim()
 $pythonPath = Join-Path $condaBase "envs\article-publisher-py312\python.exe"
 if (-not (Test-Path -LiteralPath $pythonPath)) {
-    throw "找不到 article-publisher-py312 Python。请先运行 setup_windows.ps1。"
+    throw "找不到 article-publisher-py312 Python。请先创建该 Conda 环境。"
 }
 $projectRootMarker = $ProjectRoot.ToLowerInvariant()
 

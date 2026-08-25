@@ -3266,3 +3266,55 @@ class ZOLPlatform(BasePlatform):
                     await draft_page.close()
                 except Exception:
                     logger.warning("ZOL 草稿核验页关闭失败，业务结果保持原状态")
+
+    async def verify_draft_readonly(self, title: str) -> dict:
+        """只读核验：打开 ZOL 草稿箱按标题匹配唯一草稿卡片。
+
+        复用 _navigate_draft_verification_page + _matching_draft_cards
+        （均为只读：打开草稿页、读取卡片，不点击、不输入、不保存）。
+        """
+        expected_title = normalize_for_comparison(title)
+        if not expected_title:
+            return {"error_code": "PROBE_TITLE_MISSING", "error_message": "缺少可核验标题"}
+        if self.context is None:
+            return {"error_code": "PROBE_RESULT_UNKNOWN", "error_message": "浏览器上下文不可用"}
+        draft_page = None
+        try:
+            draft_page = await self.context.new_page()
+            await self._navigate_draft_verification_page(draft_page)
+            matches = await self._matching_draft_cards(draft_page, expected_title)
+            count = len(matches)
+            if count == 1:
+                return {
+                    "title_matched": True,
+                    "match_count": 1,
+                    "draft_url": self.platform_cfg.get(
+                        "draft_url", "https://post.zol.com.cn/v2/manage/works/draft"
+                    ),
+                    "structure": {"source": "draft_list"},
+                }
+            if count > 1:
+                return {
+                    "error_code": "PROBE_TITLE_AMBIGUOUS",
+                    "error_message": f"草稿箱存在 {count} 个同名草稿",
+                }
+            return {
+                "error_code": "PROBE_NOT_FOUND",
+                "error_message": "草稿箱未找到该标题草稿",
+            }
+        except Exception as exc:
+            if self._exception_means_browser_closed(exc):
+                return {
+                    "error_code": "PROBE_RESULT_UNKNOWN",
+                    "error_message": "核验期间浏览器已关闭",
+                }
+            return {
+                "error_code": "PROBE_RESULT_UNKNOWN",
+                "error_message": "草稿箱核验失败",
+            }
+        finally:
+            if draft_page is not None:
+                try:
+                    await draft_page.close()
+                except Exception:
+                    logger.warning("ZOL 只读核验页关闭失败，业务结果保持原状态")

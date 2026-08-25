@@ -1813,6 +1813,53 @@ class BaijiahaoPlatform(BasePlatform):
             row_index=int(created_match.get("index", -1)),
         )
 
+    async def verify_draft_readonly(self, title: str) -> dict:
+        """只读核验：在百家号草稿作品页按标题搜索并匹配唯一草稿行。
+
+        只读操作：打开作品页 → 切到草稿 tab → 搜索框填标题（防抖查询）→
+        读匹配行数；不点击“修改”、不打开编辑页、不保存。
+        """
+        expected_title = self._normalize_title(title)
+        if not expected_title:
+            return {"error_code": "PROBE_TITLE_MISSING", "error_message": "缺少可核验标题"}
+        try:
+            await self._open_works_page()
+            await self._search_works(expected_title)
+            matches = await self._matching_work_rows(expected_title)
+            count = len(matches)
+            if count == 1:
+                preview_href = str(matches[0].get("preview_href") or "")
+                draft_url = (
+                    self._edit_url_from_preview_href(preview_href)
+                    if preview_href
+                    else None
+                )
+                return {
+                    "title_matched": True,
+                    "match_count": 1,
+                    "draft_url": draft_url,
+                    "structure": {"source": "works_list"},
+                }
+            if count > 1:
+                return {
+                    "error_code": "PROBE_TITLE_AMBIGUOUS",
+                    "error_message": f"草稿箱存在 {count} 个同名草稿",
+                }
+            return {
+                "error_code": "PROBE_NOT_FOUND",
+                "error_message": "草稿箱未找到该标题草稿",
+            }
+        except Exception as exc:
+            if self._exception_means_browser_closed(exc):
+                return {
+                    "error_code": "PROBE_RESULT_UNKNOWN",
+                    "error_message": "核验期间浏览器已关闭",
+                }
+            return {
+                "error_code": "PROBE_RESULT_UNKNOWN",
+                "error_message": "草稿箱核验失败",
+            }
+
     async def _open_exact_draft_via_modify(
         self,
         title: str,

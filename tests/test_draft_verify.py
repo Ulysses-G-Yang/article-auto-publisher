@@ -186,3 +186,140 @@ class TestBasePlatformHook:
         platform = _Concrete()
         result = await platform.verify_draft_readonly("任何标题")
         assert result == {"unsupported": True}
+
+
+# ---------------------------------------------------------------------------
+# 三个平台的只读核验实现
+# ---------------------------------------------------------------------------
+
+
+class TestPlatformReadonlyVerify:
+    @pytest.mark.asyncio
+    async def test_zol_found_and_not_found(self) -> None:
+        from platforms.zol import ZOLPlatform
+
+        # found: 1 张匹配卡片
+        platform = ZOLPlatform()
+        page = AsyncMock()
+        platform.context = MagicMock()
+        platform.context.new_page = AsyncMock(return_value=page)
+        platform._navigate_draft_verification_page = AsyncMock()
+        platform._matching_draft_cards = AsyncMock(return_value=["card1"])
+        result = await platform.verify_draft_readonly("测试标题")
+        assert result["title_matched"] is True
+        assert result["match_count"] == 1
+        page.close.assert_awaited()
+
+        # not found
+        platform2 = ZOLPlatform()
+        platform2.context = MagicMock()
+        platform2.context.new_page = AsyncMock(return_value=AsyncMock())
+        platform2._navigate_draft_verification_page = AsyncMock()
+        platform2._matching_draft_cards = AsyncMock(return_value=[])
+        result2 = await platform2.verify_draft_readonly("不存在的标题")
+        assert result2["error_code"] == PROBE_NOT_FOUND
+
+        # ambiguous
+        platform3 = ZOLPlatform()
+        platform3.context = MagicMock()
+        platform3.context.new_page = AsyncMock(return_value=AsyncMock())
+        platform3._navigate_draft_verification_page = AsyncMock()
+        platform3._matching_draft_cards = AsyncMock(return_value=["a", "b"])
+        result3 = await platform3.verify_draft_readonly("同名标题")
+        assert result3["error_code"] == PROBE_TITLE_AMBIGUOUS
+
+    @pytest.mark.asyncio
+    async def test_smzdm_title_matching(self) -> None:
+        from platforms.smzdm import SmzdmPlatform
+
+        platform = SmzdmPlatform()
+        platform.page = AsyncMock()
+        platform.simulator = MagicMock()
+        platform.simulator.random_delay = AsyncMock()
+        platform._validated_draft_entity = MagicMock(
+            side_effect=lambda url: (
+                "draft-1",
+                "https://post.smzdm.com/edit/draft-1",
+            )
+        )
+
+        # found: 一个 li 标题匹配
+        async def evaluate(script, *args):
+            return [
+                {"href": "https://post.smzdm.com/edit/draft-1", "text": "测试标题 继续编辑"},
+            ]
+
+        platform.page.evaluate = AsyncMock(side_effect=evaluate)
+        result = await platform.verify_draft_readonly("测试标题")
+        assert result["title_matched"] is True
+        assert result["match_count"] == 1
+
+        # not found: 标题不匹配
+        async def evaluate_not_found(script, *args):
+            return [
+                {"href": "https://post.smzdm.com/edit/draft-1", "text": "别的标题 继续编辑"},
+            ]
+
+        platform.page.evaluate = AsyncMock(side_effect=evaluate_not_found)
+        result2 = await platform.verify_draft_readonly("测试标题")
+        assert result2["error_code"] == PROBE_NOT_FOUND
+
+    @pytest.mark.asyncio
+    async def test_smzdm_ambiguous(self) -> None:
+        from platforms.smzdm import SmzdmPlatform
+
+        platform = SmzdmPlatform()
+        platform.page = AsyncMock()
+        platform.simulator = MagicMock()
+        platform.simulator.random_delay = AsyncMock()
+        platform._validated_draft_entity = MagicMock(
+            side_effect=lambda url: (
+                url.split("/")[-1],
+                url,
+            )
+        )
+
+        async def evaluate(script, *args):
+            return [
+                {"href": "https://post.smzdm.com/edit/1", "text": "同名 继续编辑"},
+                {"href": "https://post.smzdm.com/edit/2", "text": "同名 继续编辑"},
+            ]
+
+        platform.page.evaluate = AsyncMock(side_effect=evaluate)
+        result = await platform.verify_draft_readonly("同名")
+        assert result["error_code"] == PROBE_TITLE_AMBIGUOUS
+
+    @pytest.mark.asyncio
+    async def test_baijiahao_found_and_missing(self) -> None:
+        from platforms.baijiahao import BaijiahaoPlatform
+
+        # found: 1 个匹配行
+        platform = BaijiahaoPlatform()
+        platform.page = AsyncMock()
+        platform.simulator = MagicMock()
+        platform.simulator.random_delay = AsyncMock()
+        platform._open_works_page = AsyncMock()
+        platform._search_works = AsyncMock()
+        platform._matching_work_rows = AsyncMock(
+            return_value=[{"preview_href": "https://baijiahao.baidu.com/builder/preview/abc"}]
+        )
+        platform._edit_url_from_preview_href = MagicMock(
+            return_value="https://baijiahao.baidu.com/builder/rc/edit?article_id=abc"
+        )
+        platform._normalize_title = MagicMock(side_effect=lambda t: t)
+        result = await platform.verify_draft_readonly("测试文章")
+        assert result["title_matched"] is True
+        assert result["draft_url"].endswith("article_id=abc")
+        platform._search_works.assert_awaited_once_with("测试文章")
+
+        # not found
+        platform2 = BaijiahaoPlatform()
+        platform2.page = AsyncMock()
+        platform2.simulator = MagicMock()
+        platform2.simulator.random_delay = AsyncMock()
+        platform2._open_works_page = AsyncMock()
+        platform2._search_works = AsyncMock()
+        platform2._matching_work_rows = AsyncMock(return_value=[])
+        platform2._normalize_title = MagicMock(side_effect=lambda t: t)
+        result2 = await platform2.verify_draft_readonly("不存在的文章")
+        assert result2["error_code"] == PROBE_NOT_FOUND

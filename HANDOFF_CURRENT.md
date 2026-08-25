@@ -19,7 +19,7 @@
 | 当前工作树 | `D:\Backup\Documents\article-auto-publisher-worktrees\weibo-v043-integration` |
 | 当前集成分支 | `integrate/weibo-draft-v0.4.3` |
 | Git 远端 | `git@github.com:Ulysses-G-Yang/article-auto-publisher.git` |
-| 当前基线 SHA | `d55ea1f40adf41cc58870e8c43f9d6fc292b178c` |
+| 本文之前的功能代码基线 SHA | `d55ea1f40adf41cc58870e8c43f9d6fc292b178c` |
 | Python | `C:\Users\Administrator\miniconda3\envs\article-publisher-py312\python.exe` |
 
 开始任何新模块前都必须执行 `git fetch origin`，并确认起点为远端
@@ -91,13 +91,23 @@ git rev-parse HEAD
 git status --short
 ```
 
-起点必须输出：
+实际开发起点必须等于 `git fetch` 后的远端集成分支 HEAD。`d55ea1f...`
+只是本文之前的功能代码基线，不是要求新工作树停留的提交。创建工作树后执行：
 
-```text
-d55ea1f40adf41cc58870e8c43f9d6fc292b178c
+```powershell
+$localHead = git rev-parse HEAD
+$remoteHead = git rev-parse origin/integrate/weibo-draft-v0.4.3
+if ($localHead -ne $remoteHead) {
+  throw "工作树 HEAD 与远端集成分支不一致：$localHead != $remoteHead"
+}
+
+git merge-base --is-ancestor d55ea1f40adf41cc58870e8c43f9d6fc292b178c HEAD
+if ($LASTEXITCODE -ne 0) {
+  throw '当前 HEAD 不包含本文之前的功能代码基线'
+}
 ```
 
-如果远端集成分支已经前进，以 `git fetch` 后的新远端 40 位 SHA 为准，并在任务报告中明确说明；不得擅自回退到本文 SHA。
+在任务报告中记录 `$remoteHead` 的完整 40 位 SHA；不得擅自回退到功能代码基线。
 
 ## 7. 新模块任务包协议
 
@@ -202,11 +212,14 @@ git ls-remote origin "refs/heads/$(git branch --show-current)"
 可信起点：
 - repo：D:\Backup\Documents\article-auto-publisher
 - base：origin/integrate/weibo-draft-v0.4.3
-- 当前记录 SHA：d55ea1f40adf41cc58870e8c43f9d6fc292b178c
+- 本文之前的功能代码基线 SHA：d55ea1f40adf41cc58870e8c43f9d6fc292b178c（不是实际开发起点）
 - Python：C:\Users\Administrator\miniconda3\envs\article-publisher-py312\python.exe
 - remote：git@github.com:Ulysses-G-Yang/article-auto-publisher.git
 
 先 fetch 远端，并从 origin/integrate/weibo-draft-v0.4.3 创建独立 feature 分支和独立 worktree。
+实际工作树 HEAD 必须等于 fetch 后的远端分支 HEAD，并且
+git merge-base --is-ancestor d55ea1f40adf41cc58870e8c43f9d6fc292b178c HEAD 必须成功。
+报告实际远端 HEAD 的完整 40 位 SHA，不要把功能代码基线当作当前 HEAD。
 阅读根目录 HANDOFF_CURRENT.md 和 AGENTS.md；HANDOFF_CURRENT.md 决定当前分支和协作流程，
 AGENTS.md 的安全边界与 Git 纪律继续有效。
 

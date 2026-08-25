@@ -1,8 +1,10 @@
 """Content Studio Flask Blueprint。"""
 
+import asyncio
 import atexit
 import json
 import logging
+import random
 from collections.abc import Coroutine
 from pathlib import Path
 from threading import Lock
@@ -33,11 +35,7 @@ from content_studio.contracts import (
     ReplaceTargetsRequest,
 )
 from content_studio.database import ContentDatabase
-from content_studio.errors import (
-    ContentStudioError,
-    DraftBatchConfirmationRequiredError,
-    DraftRevisionConflictError,
-)
+from content_studio.errors import ContentStudioError, DraftRevisionConflictError
 from content_studio.importers import DocxImportAdapter, LegacyDatabaseSource
 from content_studio.platform_format_capabilities import PlatformFormatCapabilities
 from content_studio.service import (
@@ -59,6 +57,7 @@ class ContentStudioRuntimeState:
         legacy_source=None,
         runtime: AccountRuntime | None = None,
         platform_format_capabilities: PlatformFormatCapabilities | None = None,
+        operation_delay_range: tuple[float, float] = (8.0, 20.0),
     ) -> None:
         self.account_state = account_state
         self.database = ContentDatabase(database_url)
@@ -76,7 +75,9 @@ class ContentStudioRuntimeState:
         self._owns_runtime = False
         self._initialized = False
         self._lock = Lock()
-
+        self._operation_delay_range = operation_delay_range
+        self._operation_lock: asyncio.Lock | None = None
+        self._has_executed_operation = False
 
     def run(self, coroutine: Coroutine[Any, Any, Any], *, timeout: float = 60) -> Any:
         runtime = self._ensure_runtime()
@@ -104,18 +105,24 @@ class ContentStudioRuntimeState:
                 self._runtime.run(self.service.initialize())
                 self._initialized = True
                 if self.account_state.auto_execute:
-                    for item in self._runtime.run(
+                    recoverable = self._runtime.run(
                         self.service.list_recoverable_plan_operations(
                             self.account_state.delivery,
                             LOCAL_WEB_CONTEXT,
                         )
-                    ):
+                    )
+                    if recoverable:
                         self.account_state.submit(
-                            self._execute_operation_and_sync(
-                                item["plan_id"],
-                                item["target_id"],
-                                item["operation_id"],
-                                LOCAL_WEB_CONTEXT,
+                            self._execute_operations_serially(
+                                [
+                                    (
+                                        item["plan_id"],
+                                        item["target_id"],
+                                        item["operation_id"],
+                                        LOCAL_WEB_CONTEXT,
+                                    )
+                                    for item in recoverable
+                                ]
                             )
                         )
             return self._runtime
@@ -126,6 +133,8 @@ class ContentStudioRuntimeState:
             owns_runtime = self._owns_runtime
             self._runtime = None
             self._initialized = False
+            self._operation_lock = None
+            self._has_executed_operation = False
         if runtime is not None:
             if owns_runtime:
                 runtime.close(self.database.dispose())
@@ -149,16 +158,7 @@ class ContentStudioRuntimeState:
             raise ContentStudioError("投递计划包含未知目标", error_code="PLAN_TARGET_UNKNOWN")
 
         selected = [target for target in targets if target["target_id"] in requested_ids]
-        executable_targets = [
-            target
-            for target in selected
-            if target["status"] != "FORMAT_REVIEW_REQUIRED"
-        ]
-        draft_targets = [target for target in executable_targets if target["mode"] == "DRAFT"]
-        if draft_targets and not payload.draft_batch_confirmed:
-            raise DraftBatchConfirmationRequiredError(
-                f"请确认将同一内容保存到 {len(draft_targets)} 个平台草稿"
-            )
+        queued_operations: list[tuple[str, str, str, Any]] = []
 
         for target in selected:
             if target["status"] == "FORMAT_REVIEW_REQUIRED":
@@ -247,14 +247,19 @@ class ContentStudioRuntimeState:
             target["status"] = operation_status
             target["operation_id"] = operation["operation_id"]
             if self.account_state.auto_execute and operation_status == "QUEUED":
-                self.account_state.submit(
-                    self._execute_operation_and_sync(
+                queued_operations.append(
+                    (
                         plan_id,
                         target["target_id"],
                         operation["operation_id"],
                         access,
                     )
                 )
+
+        if queued_operations:
+            self.account_state.submit(
+                self._execute_operations_serially(queued_operations)
+            )
 
         plan = await self.reconcile_plan_operations(plan_id, access)
         response_targets = {target["target_id"]: target for target in plan["targets"]}
@@ -326,6 +331,35 @@ class ContentStudioRuntimeState:
                 error_message=operation.get("error_message"),
             )
         return await self.service.get_delivery_plan(plan_id, access)
+
+    async def _execute_operations_serially(
+        self,
+        operations: list[tuple[str, str, str, Any]],
+    ) -> None:
+        operation_lock = getattr(self, "_operation_lock", None)
+        if operation_lock is None:
+            operation_lock = asyncio.Lock()
+            self._operation_lock = operation_lock
+
+        async with operation_lock:
+            for plan_id, target_id, operation_id, access in operations:
+                if getattr(self, "_has_executed_operation", False):
+                    delay = random.uniform(*self._operation_delay_range)
+                    await asyncio.sleep(delay)
+                try:
+                    await self._execute_operation_and_sync(
+                        plan_id,
+                        target_id,
+                        operation_id,
+                        access,
+                    )
+                except Exception:
+                    LOGGER.exception(
+                        "投递计划串行执行失败，继续处理下一目标",
+                        extra={"plan_id": plan_id, "target_id": target_id},
+                    )
+                finally:
+                    self._has_executed_operation = True
 
     async def _execute_operation_and_sync(
         self,

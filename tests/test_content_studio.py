@@ -35,6 +35,7 @@ from content_studio.content_document import (
 from content_studio.contracts import (
     CoverInput,
     CreateDraftRequest,
+    ExecuteDeliveryPlanRequest,
     PatchDraftRequest,
     ReplaceTargetsRequest,
 )
@@ -42,7 +43,6 @@ from content_studio.database import ContentDatabase, sqlite_url
 from content_studio.errors import (
     ContentAssetError,
     DeliveryPlanStaleError,
-    DraftBatchConfirmationRequiredError,
     DraftContentSchemaConflictError,
     DraftRevisionConflictError,
     DraftTargetConflictError,
@@ -1415,12 +1415,10 @@ def test_v2_format_gate_is_per_target_and_execute_skips_review_targets(
     state = ContentStudioRuntimeState.__new__(ContentStudioRuntimeState)
     state.account_state = fake_state
     state.service = service
-    with pytest.raises(DraftBatchConfirmationRequiredError, match="1 个平台草稿"):
-        run(state.execute_plan(plan["plan_id"], ExecuteDeliveryPlanRequest(), LOCAL_WEB_CONTEXT))
     result = run(
         state.execute_plan(
             plan["plan_id"],
-            ExecuteDeliveryPlanRequest(draft_batch_confirmed=True),
+            ExecuteDeliveryPlanRequest(),
             LOCAL_WEB_CONTEXT,
         )
     )
@@ -2082,6 +2080,10 @@ class FakeAccountState:
         self.accounts = accounts
         self.delivery = delivery
         self.auto_execute = False
+        self.submitted = []
+
+    def submit(self, coroutine) -> None:
+        self.submitted.append(coroutine)
 
 
 class CapturingDelivery:
@@ -2124,7 +2126,141 @@ class PartiallyFailingDelivery(CapturingDelivery):
         return {"operation_id": str(uuid.uuid4()), "status": "QUEUED"}
 
 
-def test_plan_requires_batch_draft_and_per_publish_confirmation(tmp_path: Path) -> None:
+def test_execute_plan_submits_queued_targets_as_one_batch() -> None:
+    from content_studio.web import ContentStudioRuntimeState
+
+    targets = [
+        {
+            "target_id": f"target-{index}",
+            "status": "READY",
+            "operation_id": None,
+            "mode": "DRAFT",
+            "platform": platform,
+            "account_id": str(uuid.uuid4()),
+            "persist_login": True,
+        }
+        for index, platform in enumerate(("xiaoheihe", "zol"))
+    ]
+    service = SimpleNamespace(
+        get_plan_execution_context=AsyncMock(
+            return_value=(
+                {
+                    "title": "串行批次",
+                    "content_hash": "a" * 64,
+                    "version_id": "version-1",
+                },
+                targets,
+            )
+        ),
+        claim_plan_target=AsyncMock(side_effect=["claim-1", "claim-2"]),
+        set_plan_target_result=AsyncMock(),
+    )
+    delivery = SimpleNamespace(
+        request_delivery=AsyncMock(
+            side_effect=[
+                {"operation_id": "operation-1", "status": "QUEUED"},
+                {"operation_id": "operation-2", "status": "QUEUED"},
+            ]
+        )
+    )
+    account_state = FakeAccountState(None, delivery)
+    account_state.auto_execute = True
+    state = ContentStudioRuntimeState.__new__(ContentStudioRuntimeState)
+    state.account_state = account_state
+    state.service = service
+    state._operation_delay_range = (0.0, 0.0)
+    state._operation_lock = None
+    state._has_executed_operation = False
+    state.reconcile_plan_operations = AsyncMock(
+        return_value={"plan_id": "plan-1", "status": "EXECUTING", "targets": targets}
+    )
+    state._execute_operation_and_sync = AsyncMock()
+
+    run(
+        state.execute_plan(
+            "plan-1",
+            ExecuteDeliveryPlanRequest(),
+            LOCAL_WEB_CONTEXT,
+        )
+    )
+
+    assert len(account_state.submitted) == 1
+    run(account_state.submitted[0])
+    assert [call.args[2] for call in state._execute_operation_and_sync.await_args_list] == [
+        "operation-1",
+        "operation-2",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("delay_range", "selected_delay"),
+    [((8.0, 20.0), 13.5), ((0.0, 0.0), 0.0)],
+)
+def test_operation_batches_are_globally_serial_and_continue_after_failure(
+    monkeypatch,
+    delay_range: tuple[float, float],
+    selected_delay: float,
+) -> None:
+    from content_studio.web import ContentStudioRuntimeState
+
+    state = ContentStudioRuntimeState.__new__(ContentStudioRuntimeState)
+    state._operation_delay_range = delay_range
+    state._operation_lock = None
+    state._has_executed_operation = False
+    real_sleep = asyncio.sleep
+    active = 0
+    max_active = 0
+    execution_order: list[str] = []
+    sleep_calls: list[float] = []
+
+    async def execute(_plan_id, target_id, _operation_id, _access) -> None:
+        nonlocal active, max_active
+        active += 1
+        max_active = max(max_active, active)
+        execution_order.append(target_id)
+        try:
+            await real_sleep(0)
+            if target_id == "target-fail":
+                raise RuntimeError("expected test failure")
+        finally:
+            active -= 1
+
+    async def sleep(delay: float) -> None:
+        sleep_calls.append(delay)
+        await real_sleep(0)
+
+    def uniform(minimum: float, maximum: float) -> float:
+        assert (minimum, maximum) == delay_range
+        return selected_delay
+
+    state._execute_operation_and_sync = execute
+    monkeypatch.setattr("content_studio.web.asyncio.sleep", sleep)
+    monkeypatch.setattr("content_studio.web.random.uniform", uniform)
+
+    async def scenario() -> None:
+        await asyncio.gather(
+            state._execute_operations_serially(
+                [
+                    ("plan-1", "target-1", "operation-1", LOCAL_WEB_CONTEXT),
+                    ("plan-1", "target-fail", "operation-2", LOCAL_WEB_CONTEXT),
+                    ("plan-1", "target-2", "operation-3", LOCAL_WEB_CONTEXT),
+                ]
+            ),
+            state._execute_operations_serially(
+                [("plan-2", "target-3", "operation-4", LOCAL_WEB_CONTEXT)]
+            ),
+        )
+
+    run(scenario())
+
+    assert max_active == 1
+    assert execution_order == ["target-1", "target-fail", "target-2", "target-3"]
+    assert sleep_calls == [selected_delay, selected_delay, selected_delay]
+
+
+def test_plan_allows_draft_without_batch_and_requires_publish_confirmation(
+    tmp_path: Path,
+) -> None:
     from content_studio.web import ContentStudioRuntimeState
 
     account_db = AccountDatabase(sqlite_url(tmp_path / "plan-accounts.db"))
@@ -2182,23 +2318,10 @@ def test_plan_requires_batch_draft_and_per_publish_confirmation(tmp_path: Path) 
     state.account_state = fake_state
     state.service = service
 
-    with pytest.raises(DraftBatchConfirmationRequiredError):
-        run(
-            state.execute_plan(
-                plan["plan_id"],
-                __import__(
-                    "content_studio.contracts", fromlist=["ExecuteDeliveryPlanRequest"]
-                ).ExecuteDeliveryPlanRequest(),
-                LOCAL_WEB_CONTEXT,
-            )
-        )
-
-    from content_studio.contracts import ExecuteDeliveryPlanRequest
-
     first = run(
         state.execute_plan(
             plan["plan_id"],
-            ExecuteDeliveryPlanRequest(draft_batch_confirmed=True),
+            ExecuteDeliveryPlanRequest(),
             LOCAL_WEB_CONTEXT,
         )
     )
@@ -2508,6 +2631,112 @@ def test_plan_target_request_is_idempotent_and_running_becomes_unknown(
     assert updated["status"] == "FATAL"
     run(service.database.dispose())
     run(account_db.dispose())
+
+
+def test_recoverable_operations_follow_plan_and_target_order(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    account_db = AccountDatabase(sqlite_url(tmp_path / "recovery-order-accounts.db"))
+    accounts = AccountSessionService(account_db, seed_legacy_profiles=False)
+    delivery = CapturingDelivery()
+    service = make_service(tmp_path, account_service=accounts)
+
+    async def scenario():
+        await accounts.initialize()
+        target_inputs = []
+        for index in range(2):
+            account = PlatformAccount(
+                account_id=str(uuid.uuid4()),
+                platform="xiaoheihe",
+                platform_user_id=f"recovery-order-{index}",
+                display_name=f"恢复顺序账号{index}",
+                profile_path=str(tmp_path / f"recovery-order-profile-{index}"),
+                status="ACTIVE",
+                session_status="VALID",
+                persist_login=True,
+            )
+            async with account_db.session() as session:
+                session.add(account)
+            target_inputs.append(
+                {
+                    "platform": "xiaoheihe",
+                    "account_id": account.account_id,
+                    "mode": "DRAFT",
+                }
+            )
+
+        await service.initialize()
+        draft = await service.create_draft(
+            CreateDraftRequest(
+                title="恢复顺序",
+                blocks=[{"type": "text", "text": "正文", "position": 0}],
+            )
+        )
+        targeted = await service.replace_targets(
+            draft["draft_id"],
+            ReplaceTargetsRequest(
+                revision=draft["revision"],
+                targets=target_inputs,
+            ),
+            LOCAL_WEB_CONTEXT,
+        )
+
+        fixed_ids = iter(
+            [
+                uuid.UUID("00000000-0000-0000-0000-000000000010"),
+                uuid.UUID("ffffffff-ffff-ffff-ffff-fffffffffff0"),
+                uuid.UUID("00000000-0000-0000-0000-000000000020"),
+                uuid.UUID("00000000-0000-0000-0000-000000000021"),
+                uuid.UUID("00000000-0000-0000-0000-000000000030"),
+                uuid.UUID("00000000-0000-0000-0000-000000000040"),
+                uuid.UUID("00000000-0000-0000-0000-000000000050"),
+                uuid.UUID("00000000-0000-0000-0000-000000000051"),
+            ]
+        )
+        with monkeypatch.context() as patch:
+            patch.setattr(
+                "content_studio.service.uuid.uuid4",
+                lambda: next(fixed_ids),
+            )
+            plan_created_first = await service.create_delivery_plan(
+                draft["draft_id"], targeted["revision"], LOCAL_WEB_CONTEXT
+            )
+            plan_created_second = await service.create_delivery_plan(
+                draft["draft_id"], targeted["revision"], LOCAL_WEB_CONTEXT
+            )
+
+        plans = [plan_created_first, plan_created_second]
+        for plan in plans:
+            for target in plan["targets"]:
+                operation_id = str(uuid.uuid4())
+                await service.set_plan_target_result(
+                    plan["plan_id"],
+                    target["target_id"],
+                    status="QUEUED",
+                    operation_id=operation_id,
+                )
+                target["operation_id"] = operation_id
+
+        recoverable = await service.list_recoverable_plan_operations(
+            delivery,
+            LOCAL_WEB_CONTEXT,
+        )
+        expected = [
+            {
+                "plan_id": plan["plan_id"],
+                "target_id": target["target_id"],
+                "operation_id": target["operation_id"],
+            }
+            for plan in sorted(plans, key=lambda item: item["plan_id"])
+            for target in plan["targets"]
+        ]
+        await service.database.dispose()
+        await account_db.dispose()
+        return recoverable, expected
+
+    recoverable, expected = run(scenario())
+    assert recoverable == expected
 
 
 def test_plan_status_waits_for_every_target_to_reach_terminal_state() -> None:

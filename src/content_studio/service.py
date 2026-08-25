@@ -684,6 +684,9 @@ class ContentStudioService:
                         select(DeliveryPlanTarget).where(
                             DeliveryPlanTarget.operation_id.is_not(None),
                             DeliveryPlanTarget.status.in_({"QUEUED", "RUNNING"}),
+                        ).order_by(
+                            DeliveryPlanTarget.plan_id,
+                            DeliveryPlanTarget.position,
                         )
                     )
                 ).all()

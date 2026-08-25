@@ -61,6 +61,8 @@ from content_studio.platform_format_capabilities import (
     PlatformFormatCapabilities,
 )
 
+LEGACY_DELIVERY_POLICY_VERSIONS = frozenset({"stable_v1"})
+
 SEED_KEY = "articleops:system-seed:smart-toilet:v1"
 SEED_TITLE = "凌晨三点，公司的智能马桶开始给我做绩效面谈"
 SEED_BODY = """凌晨三点十三分，我被公司的智能马桶叫醒了。
@@ -1432,7 +1434,9 @@ def _validated_delivery_document(
         raise DraftValidationError("内容版本的投递文档无效")
     if not isinstance(policy_version, str) or not policy_version:
         raise DraftValidationError("内容版本的投递策略版本无效")
-    if policy_version != DELIVERY_POLICY_VERSION:
+    if policy_version not in LEGACY_DELIVERY_POLICY_VERSIONS | {
+        DELIVERY_POLICY_VERSION
+    }:
         raise DraftValidationError("内容版本使用了不受支持的投递策略")
     if not isinstance(loss_report, dict):
         raise DraftValidationError("内容版本的投递损失报告无效")
@@ -1440,6 +1444,15 @@ def _validated_delivery_document(
         raise DraftValidationError("内容版本的投递策略与损失报告不一致")
     if not isinstance(loss_report.get("removed_marks"), list):
         raise DraftValidationError("内容版本的 marks 损失报告无效")
+    if policy_version == DELIVERY_POLICY_VERSION:
+        for field in (
+            "removed_links",
+            "normalized_headings",
+            "normalized_paragraph_styles",
+            "split_mixed_inline",
+        ):
+            if not isinstance(loss_report.get(field), list):
+                raise DraftValidationError("内容版本的投递损失报告无效")
     try:
         normalized = validate_document(delivery_document)
     except ContentDocumentValidationError as exc:
@@ -1448,6 +1461,11 @@ def _validated_delivery_document(
         raise DraftValidationError("内容版本的投递文档未保持 canonical 形式")
     if "marks" in document_features(normalized):
         raise DraftValidationError("内容版本的投递文档仍包含 marks")
+    if policy_version == DELIVERY_POLICY_VERSION and {
+        "link",
+        "mixed_inline",
+    } & delivery_features(normalized):
+        raise DraftValidationError("内容版本的投递文档仍包含未归一化展示结构")
     return normalized
 
 

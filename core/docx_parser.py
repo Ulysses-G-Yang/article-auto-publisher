@@ -189,6 +189,11 @@ class DocxParser:
 
         filename = os.path.basename(filepath)
         doc = Document(filepath)
+        if any(
+            node.tag in {M_OMATH, M_OMATH_PARA}
+            for node in doc.element.body.iter()
+        ):
+            raise ValueError("DOCX 公式无法安全映射到平台正文")
         article_images_dir = Path(self.images_dir) / Path(filename).stem
         article_images_dir.mkdir(parents=True, exist_ok=True)
 
@@ -302,10 +307,6 @@ class DocxParser:
             title = core_title or self._title_from_rich_blocks(rich_blocks, filename)
             title_block_id = self._find_title_block_id(rich_blocks, title)
 
-        # Word 模板和人工排版经常把正文小节也错误套成 Heading 1。标题块已经
-        # 通过 ``title_block_id`` 唯一绑定后，其余 H1 不再有歧义：它们属于
-        # 正文层级，统一按 H2 保存，避免把模板样式错误传播到平台能力门。
-        self._normalize_body_heading_one(rich_blocks, title_block_id)
         document_v2: dict[str, Any] = {
             "schema_version": 2,
             "title": title,
@@ -1036,39 +1037,6 @@ class DocxParser:
         if candidates and leading_text_blocks[0] is candidates[0]:
             return candidates[0]
         return candidates[0] if len(candidates) == 1 else None
-
-    @classmethod
-    def _normalize_body_heading_one(
-        cls,
-        blocks: list[dict[str, Any]],
-        title_block_id: str | None,
-    ) -> None:
-        """保证 canonical 文档只有已绑定标题可以保留 H1。"""
-
-        for block in blocks:
-            kind = block.get("kind")
-            if (
-                kind == "heading"
-                and block.get("level") == 1
-                and block.get("block_id") != title_block_id
-            ):
-                block["level"] = 2
-                style_name = " ".join(str(block.get("style_name") or "").split())
-                if style_name.casefold() in {"heading 1", "title"}:
-                    block["style_name"] = "Heading 2"
-            elif kind == "list":
-                for item in block.get("items", []):
-                    cls._normalize_body_heading_one(
-                        item.get("blocks", []),
-                        title_block_id,
-                    )
-            elif kind == "table":
-                for row in block.get("rows", []):
-                    for cell in row.get("cells", []):
-                        cls._normalize_body_heading_one(
-                            cell.get("blocks", []),
-                            title_block_id,
-                        )
 
     def _find_title_block_id(self, blocks: list[dict[str, Any]], title: str) -> str | None:
         normalized_title = self._normalize_title(title)

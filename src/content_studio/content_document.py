@@ -41,7 +41,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 SCHEMA_VERSION = 2
 LEGACY_PROJECTED = "LEGACY_PROJECTED"
 NATIVE = "NATIVE"
-DELIVERY_POLICY_VERSION = "stable_v1"
+DELIVERY_POLICY_VERSION = "stable_v2"
 
 # 这些上限是文档层的防护，不替代 API 层和数据库层的资源限制。
 MAX_BLOCKS = 2_000
@@ -1149,6 +1149,11 @@ def normalize_for_delivery(
                 }
             )
             source["style_name"] = "Normal"
+        # 标题块由 ``title_block_id`` 作为一个整体映射到平台标题栏。即使
+        # Word 标题段意外包含图片，也不能拆块后只省略其中一段，否则图片或
+        # 尾部文字会泄漏到正文。展示属性仍可删除，但结构必须保持原子。
+        if source_block_id == title_block_id:
+            return [source]
         has_text = any(child.get("kind") == "text" for child in children)
         has_image = any(child.get("kind") == "image" for child in children)
         if not (has_text and has_image):
@@ -1169,11 +1174,6 @@ def normalize_for_delivery(
             segments.append(("text", text_children))
 
         original_id_index = 0
-        if source_block_id == title_block_id:
-            original_id_index = next(
-                (index for index, (kind, _children) in enumerate(segments) if kind == "text"),
-                0,
-            )
         result: list[dict[str, Any]] = []
         result_ids: list[str] = []
         for index, (segment_kind, segment_children) in enumerate(segments):

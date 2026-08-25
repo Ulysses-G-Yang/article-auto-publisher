@@ -233,7 +233,7 @@ def test_visible_h1_overrides_stale_core_title_and_is_omitted_from_delivery(
     assert delivery_heading_levels(delivery_document) == frozenset({2})
 
 
-def test_parser_inherits_base_style_and_keeps_only_the_bound_title_as_h1(
+def test_parser_inherits_base_style_and_preserves_source_heading_one_semantics(
     tmp_path: Path,
 ) -> None:
     document = Document()
@@ -281,15 +281,19 @@ def test_parser_inherits_base_style_and_keeps_only_the_bound_title_as_h1(
     assert parsed.document_v2["title_block_id"] == blocks_by_text["唯一主标题"][
         "block_id"
     ]
-    assert [
+    source_h1_blocks = [
         block
         for block in blocks
         if block.get("kind") == "heading" and block.get("level") == 1
-    ] == [blocks_by_text["唯一主标题"]]
+    ]
+    assert source_h1_blocks == [
+        blocks_by_text["唯一主标题"],
+        *(blocks_by_text[f"错误一级标题{index}"] for index in range(1, 6)),
+    ]
     for index in range(1, 6):
         section = blocks_by_text[f"错误一级标题{index}"]
-        assert section["level"] == 2
-        assert section["style_name"] == "Heading 2"
+        assert section["level"] == 1
+        assert section["style_name"] == "Heading 1"
     assert blocks_by_text["继承样式后的视觉二级标题"]["level"] == 2
     assert [child["kind"] for child in blocks_by_text["图片前图片后"]["children"]] == [
         "text",
@@ -314,6 +318,26 @@ def test_parser_v2_rejects_formula_instead_of_silently_dropping_it(
     paragraph = document.add_paragraph("公式前")
     paragraph._p.append(OxmlElement("m:oMath"))
     source = tmp_path / "formula.docx"
+    document.save(source)
+
+    with pytest.raises(ValueError, match="公式无法安全映射"):
+        DocxParser(
+            images_dir=str(tmp_path / "parser-images")
+        ).parse_document_v2(str(source))
+
+
+@pytest.mark.parametrize("container", ["body", "table-cell"])
+def test_parser_v2_rejects_direct_math_paragraphs(
+    tmp_path: Path,
+    container: str,
+) -> None:
+    document = Document()
+    formula = OxmlElement("m:oMathPara")
+    if container == "body":
+        document.element.body.append(formula)
+    else:
+        document.add_table(rows=1, cols=1).cell(0, 0)._tc.append(formula)
+    source = tmp_path / f"formula-{container}.docx"
     document.save(source)
 
     with pytest.raises(ValueError, match="公式无法安全映射"):

@@ -507,6 +507,60 @@ def test_delivery_normalization_flattens_body_headings_and_preserves_inline_orde
     ] == ["图前", repeated_asset, "图中", repeated_asset, "图后"]
 
 
+def test_delivery_normalization_keeps_mixed_title_block_atomic_and_omits_it() -> None:
+    title_asset = "00000000-0000-4000-8000-000000000001"
+    document = {
+        "schema_version": 2,
+        "title": "图文标题",
+        "title_block_id": "title",
+        "source_fidelity": "NATIVE",
+        "blocks": [
+            {
+                "kind": "heading",
+                "block_id": "title",
+                "level": 1,
+                "style_name": "Heading 1",
+                "children": [
+                    {"kind": "text", "text": "标题前", "marks": ["bold"]},
+                    {"kind": "image", "asset_id": title_asset},
+                    {
+                        "kind": "text",
+                        "text": "标题后",
+                        "link": {"href": "https://example.test/title"},
+                    },
+                ],
+            },
+            {
+                "kind": "heading",
+                "block_id": "body-h1",
+                "level": 1,
+                "style_name": "Heading 1",
+                "children": [{"kind": "text", "text": "正文小节"}],
+            },
+        ],
+    }
+
+    delivery_document, report = normalize_for_delivery(document)
+
+    title_block = delivery_document["blocks"][0]
+    assert title_block["block_id"] == "title"
+    assert [child["kind"] for child in title_block["children"]] == [
+        "text",
+        "image",
+        "text",
+    ]
+    assert report["split_mixed_inline"] == []
+    assert report["removed_marks"] == [
+        {"block_id": "title", "child_index": 0, "marks": ["bold"]}
+    ]
+    assert report["removed_links"] == [{"block_id": "title", "child_index": 2}]
+    assert delivery_features(delivery_document) == frozenset({"heading"})
+    assert delivery_heading_levels(delivery_document) == frozenset({2})
+    assert project_to_delivery_blocks(delivery_document) == [
+        {"type": "heading", "text": "正文小节", "position": 0, "level": 2}
+    ]
+
+
 def test_delivery_projection_preserves_heading_levels_and_inline_image_order() -> None:
     document = {
         "schema_version": 2,

@@ -1115,6 +1115,16 @@ def test_v2_version_accepts_legacy_null_snapshot_but_rejects_partial_snapshot() 
 
     delivery_document, report = normalize_for_delivery(document)
     version.delivery_document_json = delivery_document
+    version.delivery_policy_version = "stable_v1"
+    version.delivery_loss_report_json = {
+        "policy_version": "stable_v1",
+        "removed_marks": report["removed_marks"],
+    }
+    schema_version, canonical, stored_projection = _validated_stored_version(version)
+    assert schema_version == 2
+    assert canonical == document
+    assert stored_projection == projection
+
     version.delivery_policy_version = "unknown_policy"
     version.delivery_loss_report_json = {
         **report,

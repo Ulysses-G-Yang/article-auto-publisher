@@ -134,6 +134,15 @@ class AccountSessionRuntimeState:
                 self._initialized = True
             return self._runtime
 
+    def start(self) -> None:
+        """应用启动钩子：幂等初始化账号域运行时并启动心跳调度器。
+
+        即使 `ACCOUNT_SESSION_HEARTBEAT_ENABLED=false`，也会执行一次纯数据库
+        recovery（清理过期 claim、恢复明确超时的 VERIFYING），但不会创建扫描
+        task 或打开浏览器。生产入口应在 Flask 服务对外接收请求前调用一次。
+        """
+        self._ensure_runtime()
+
     def close(self) -> None:
         with self._lock:
             runtime = self._runtime

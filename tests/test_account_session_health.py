@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import sys
+import threading
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -1069,3 +1070,106 @@ def test_account_service_cancelled_error_is_not_recorded_as_verification_failure
 
     database = run(scenario())
     run(database.dispose())
+
+
+def test_runtime_state_start_is_idempotent_and_initializes_once() -> None:
+    """应用启动钩子 start() 幂等；多次调用只初始化一次。"""
+
+    from threading import Lock
+
+    from account_sessions.web import AccountSessionRuntimeState
+
+    events: list[str] = []
+
+    class FakeRuntime:
+        def run(self, coroutine, *, timeout=30):
+            del timeout
+            return asyncio.run(coroutine)
+
+    class FakeAccounts:
+        async def initialize(self):
+            events.append("accounts.initialize")
+
+    class FakeDelivery:
+        async def reconcile_interrupted_operations(self):
+            events.append("delivery.interrupted")
+
+        async def reconcile_pending_article_mappings(self):
+            events.append("delivery.article_mapping")
+
+    class FakeHeartbeatScheduler:
+        async def start(self):
+            events.append("heartbeat.start")
+
+    state = AccountSessionRuntimeState.__new__(AccountSessionRuntimeState)
+    state._runtime = FakeRuntime()
+    state._initialized = False
+    state._lock = Lock()
+    state.accounts = FakeAccounts()
+    state.delivery = FakeDelivery()
+    state.heartbeat_scheduler = FakeHeartbeatScheduler()
+
+    state.start()
+    state.start()
+    state.start()
+
+    assert events == [
+        "accounts.initialize",
+        "delivery.interrupted",
+        "delivery.article_mapping",
+        "heartbeat.start",
+    ]
+
+
+def test_runtime_state_start_is_thread_safe() -> None:
+    """并发调用 start() 不会重复初始化（锁保护）。"""
+
+    from threading import Lock
+
+    from account_sessions.web import AccountSessionRuntimeState
+
+    events: list[str] = []
+
+    class FakeRuntime:
+        def run(self, coroutine, *, timeout=30):
+            del timeout
+            return asyncio.run(coroutine)
+
+    class FakeAccounts:
+        async def initialize(self):
+            events.append("accounts.initialize")
+
+    class FakeDelivery:
+        async def reconcile_interrupted_operations(self):
+            events.append("delivery.interrupted")
+
+        async def reconcile_pending_article_mappings(self):
+            events.append("delivery.article_mapping")
+
+    class FakeHeartbeatScheduler:
+        async def start(self):
+            events.append("heartbeat.start")
+
+    state = AccountSessionRuntimeState.__new__(AccountSessionRuntimeState)
+    state._runtime = FakeRuntime()
+    state._initialized = False
+    state._lock = Lock()
+    state.accounts = FakeAccounts()
+    state.delivery = FakeDelivery()
+    state.heartbeat_scheduler = FakeHeartbeatScheduler()
+
+    threads = [
+        threading.Thread(target=state.start)
+        for _ in range(4)
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert events == [
+        "accounts.initialize",
+        "delivery.interrupted",
+        "delivery.article_mapping",
+        "heartbeat.start",
+    ]

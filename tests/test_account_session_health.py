@@ -693,6 +693,212 @@ def test_scheduler_start_twice_waits_before_scan_and_stop_wakes_immediately() ->
     run(scenario())
 
 
+def test_scheduler_stop_cancels_inflight_scan_and_releases_claim(tmp_path: Path) -> None:
+    """stop() 等待取消清理完成，不留 busy 或数据库 claim。"""
+
+    async def scenario() -> None:
+        database = AccountDatabase(database_url(tmp_path))
+        await database.initialize()
+        now = datetime.now(timezone.utc)
+        account = await add_account(
+            database,
+            next_heartbeat_at=now - timedelta(seconds=1),
+        )
+        verify_entered = asyncio.Event()
+        cleanup_entered = asyncio.Event()
+        allow_cleanup = asyncio.Event()
+        verify_finalized = asyncio.Event()
+        keep_verifying = asyncio.Event()
+
+        async def verify(*_args, **_kwargs):
+            verify_entered.set()
+            try:
+                await keep_verifying.wait()
+            finally:
+                cleanup_entered.set()
+                try:
+                    await allow_cleanup.wait()
+                finally:
+                    verify_finalized.set()
+
+        policy = HeartbeatPolicy(
+            scan_interval=0.01,
+            claim_ttl=timedelta(seconds=30),
+            jitter_ratio=0,
+        )
+        service = HeartbeatService(
+            database,
+            verify,
+            policy=policy,
+            owner_id="stop-cancellation-test",
+        )
+        scheduler = HeartbeatScheduler(service, enabled=True, policy=policy)
+        try:
+            assert await scheduler.start() is True
+            await asyncio.wait_for(verify_entered.wait(), timeout=1)
+            claimed = await _get_account(database, account.account_id)
+            assert claimed.heartbeat_claim_owner == "stop-cancellation-test"
+
+            stop_call = asyncio.create_task(scheduler.stop())
+            await asyncio.wait_for(cleanup_entered.wait(), timeout=1)
+            stop_call.cancel()
+            await asyncio.sleep(0)
+            assert stop_call.done() is False
+            allow_cleanup.set()
+            with pytest.raises(asyncio.CancelledError):
+                await stop_call
+
+            assert verify_finalized.is_set()
+            assert service.busy_account_ids == set()
+            assert scheduler.running is False
+            assert scheduler._task is None
+            assert scheduler._stop_event is None
+            assert await scheduler.stop() is False
+
+            stored = await _get_account(database, account.account_id)
+            assert stored.heartbeat_claim_owner is None
+            assert stored.heartbeat_claimed_at is None
+            assert stored.heartbeat_claim_expires_at is None
+        finally:
+            allow_cleanup.set()
+            await scheduler.stop()
+            await database.dispose()
+
+    run(scenario())
+
+
+def test_stop_cancelled_during_recovery_still_stops_started_scheduler() -> None:
+    """stop 在 recovery 窗口被取消时，先停掉新 task 再传播取消。"""
+
+    async def scenario() -> None:
+        class RecoveringService:
+            def __init__(self, policy: HeartbeatPolicy) -> None:
+                self.policy = policy
+                self.recover_entered = asyncio.Event()
+                self.allow_recover = asyncio.Event()
+
+            async def recover_stale_state(self) -> None:
+                self.recover_entered.set()
+                await self.allow_recover.wait()
+
+            async def scan_once(self) -> dict:
+                return {"processed": 0}
+
+        policy = HeartbeatPolicy(scan_interval=60, jitter_ratio=0)
+        service = RecoveringService(policy)
+        scheduler = HeartbeatScheduler(service, enabled=True, policy=policy)
+        start_call = asyncio.create_task(scheduler.start())
+        await asyncio.wait_for(service.recover_entered.wait(), timeout=1)
+
+        stop_call = asyncio.create_task(scheduler.stop())
+        await asyncio.sleep(0)
+        stop_call.cancel()
+        await asyncio.sleep(0)
+        assert stop_call.done() is False
+
+        service.allow_recover.set()
+        assert await start_call is True
+        with pytest.raises(asyncio.CancelledError):
+            await stop_call
+        assert scheduler.running is False
+        assert scheduler._task is None
+        assert scheduler._stop_event is None
+        assert scheduler._starting_task is None
+        assert scheduler._stopping_task is None
+
+    run(scenario())
+
+
+def test_scheduler_concurrent_stop_and_start_restarts_after_cleanup() -> None:
+    """并发 start 等旧 stop 清理完成，然后创建新 task。"""
+
+    async def scenario() -> None:
+        class RestartService:
+            def __init__(self, policy: HeartbeatPolicy) -> None:
+                self.policy = policy
+                self.calls = 0
+                self.first_scan_entered = asyncio.Event()
+                self.first_cleanup_entered = asyncio.Event()
+                self.allow_first_cleanup = asyncio.Event()
+
+            async def scan_once(self) -> dict:
+                self.calls += 1
+                if self.calls == 1:
+                    self.first_scan_entered.set()
+                    try:
+                        await asyncio.Event().wait()
+                    finally:
+                        self.first_cleanup_entered.set()
+                        await self.allow_first_cleanup.wait()
+                return {"processed": 0}
+
+        policy = HeartbeatPolicy(scan_interval=0.01, jitter_ratio=0)
+        service = RestartService(policy)
+        scheduler = HeartbeatScheduler(service, enabled=True, policy=policy)
+        assert await scheduler.start() is True
+        await asyncio.wait_for(service.first_scan_entered.wait(), timeout=1)
+        first_task = scheduler._task
+
+        stop_call = asyncio.create_task(scheduler.stop())
+        await asyncio.wait_for(service.first_cleanup_entered.wait(), timeout=1)
+        start_call = asyncio.create_task(scheduler.start())
+        await asyncio.sleep(0)
+        assert start_call.done() is False
+
+        service.allow_first_cleanup.set()
+        assert await stop_call is True
+        assert await start_call is True
+        assert scheduler.running is True
+        assert scheduler._task is not first_task
+        assert await scheduler.stop() is True
+
+    run(scenario())
+
+
+def test_scheduler_self_stop_keeps_handles_until_run_exits() -> None:
+    """从 scheduler task 内 stop 时，句柄保留到 _run 真正退出。"""
+
+    async def scenario() -> None:
+        class SelfStoppingService:
+            def __init__(self, policy: HeartbeatPolicy) -> None:
+                self.policy = policy
+                self.scheduler: HeartbeatScheduler | None = None
+                self.self_stop_observed = asyncio.Event()
+                self.allow_scan_return = asyncio.Event()
+
+            async def scan_once(self) -> dict:
+                assert self.scheduler is not None
+                target_task = asyncio.current_task()
+                assert self.scheduler._task is target_task
+                assert await self.scheduler.stop() is True
+                assert self.scheduler._task is target_task
+                assert self.scheduler._stopping_task is not None
+                self.self_stop_observed.set()
+                await self.allow_scan_return.wait()
+                return {"processed": 0}
+
+        policy = HeartbeatPolicy(scan_interval=0.01, jitter_ratio=0)
+        service = SelfStoppingService(policy)
+        scheduler = HeartbeatScheduler(service, enabled=True, policy=policy)
+        service.scheduler = scheduler
+        assert await scheduler.start() is True
+        await asyncio.wait_for(service.self_stop_observed.wait(), timeout=1)
+        target_task = scheduler._task
+        stopping_task = scheduler._stopping_task
+        assert target_task is not None
+        assert stopping_task is not None
+        assert target_task.done() is False
+
+        service.allow_scan_return.set()
+        await asyncio.wait_for(asyncio.shield(stopping_task), timeout=1)
+        assert scheduler._task is None
+        assert scheduler._stop_event is None
+        assert scheduler._stopping_task is None
+        assert await scheduler.stop() is False
+
+    run(scenario())
+
+
 def test_scheduler_scan_is_non_reentrant() -> None:
     async def scenario() -> None:
         from account_sessions.session_health import HeartbeatScheduler
@@ -1124,11 +1330,31 @@ def test_runtime_state_start_is_idempotent_and_initializes_once() -> None:
 def test_runtime_state_start_is_thread_safe() -> None:
     """并发调用 start() 不会重复初始化（锁保护）。"""
 
-    from threading import Lock
-
     from account_sessions.web import AccountSessionRuntimeState
 
     events: list[str] = []
+    errors: list[BaseException] = []
+    error_lock = threading.Lock()
+    all_lock_attempts = threading.Event()
+
+    class TrackingLock:
+        def __init__(self, expected_attempts: int) -> None:
+            self._lock = threading.Lock()
+            self._counter_lock = threading.Lock()
+            self.expected_attempts = expected_attempts
+            self.attempts = 0
+
+        def __enter__(self):
+            with self._counter_lock:
+                self.attempts += 1
+                if self.attempts == self.expected_attempts:
+                    all_lock_attempts.set()
+            self._lock.acquire()
+            return self
+
+        def __exit__(self, exc_type, exc_value, traceback) -> None:
+            del exc_type, exc_value, traceback
+            self._lock.release()
 
     class FakeRuntime:
         def run(self, coroutine, *, timeout=30):
@@ -1138,6 +1364,8 @@ def test_runtime_state_start_is_thread_safe() -> None:
     class FakeAccounts:
         async def initialize(self):
             events.append("accounts.initialize")
+            all_attempted = await asyncio.to_thread(all_lock_attempts.wait, 2)
+            assert all_attempted is True
 
     class FakeDelivery:
         async def reconcile_interrupted_operations(self):
@@ -1153,23 +1381,137 @@ def test_runtime_state_start_is_thread_safe() -> None:
     state = AccountSessionRuntimeState.__new__(AccountSessionRuntimeState)
     state._runtime = FakeRuntime()
     state._initialized = False
-    state._lock = Lock()
+    state._lock = TrackingLock(expected_attempts=4)
     state.accounts = FakeAccounts()
     state.delivery = FakeDelivery()
     state.heartbeat_scheduler = FakeHeartbeatScheduler()
 
-    threads = [
-        threading.Thread(target=state.start)
-        for _ in range(4)
-    ]
+    def call_start() -> None:
+        try:
+            state.start()
+        except BaseException as exc:
+            with error_lock:
+                errors.append(exc)
+
+    threads = [threading.Thread(target=call_start) for _ in range(4)]
     for thread in threads:
         thread.start()
     for thread in threads:
-        thread.join()
+        thread.join(timeout=5)
 
+    assert not any(thread.is_alive() for thread in threads)
+    assert errors == []
+    assert state._lock.attempts == 4
     assert events == [
         "accounts.initialize",
         "delivery.interrupted",
         "delivery.article_mapping",
         "heartbeat.start",
     ]
+
+
+def test_runtime_state_close_blocks_start_until_old_runtime_is_disposed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """close 持有同步锁穿过 stop/dispose，不允许并发 start 抢跑。"""
+
+    import account_sessions.web as web_module
+    from account_sessions.web import AccountSessionRuntimeState
+
+    events: list[str] = []
+    errors: list[BaseException] = []
+    errors_lock = threading.Lock()
+    dispose_entered = threading.Event()
+    allow_dispose = threading.Event()
+    start_attempted = threading.Event()
+    start_finished = threading.Event()
+    new_runtime_created = threading.Event()
+
+    class FakeDatabase:
+        async def dispose(self) -> None:
+            events.append("database.dispose")
+
+    class FakeAccounts:
+        async def initialize(self) -> None:
+            events.append("accounts.initialize")
+
+    class FakeDelivery:
+        async def reconcile_interrupted_operations(self) -> None:
+            events.append("delivery.interrupted")
+
+        async def reconcile_pending_article_mappings(self) -> None:
+            events.append("delivery.article_mapping")
+
+    class FakeScheduler:
+        async def start(self) -> None:
+            events.append("heartbeat.start")
+
+        async def stop(self) -> None:
+            events.append("heartbeat.stop")
+
+    class OldRuntime:
+        def run(self, coroutine, *, timeout=30):
+            del timeout
+            return asyncio.run(coroutine)
+
+        def close(self, dispose) -> None:
+            events.append("old.close.enter")
+            dispose_entered.set()
+            if not allow_dispose.wait(timeout=2):
+                dispose.close()
+                raise AssertionError("test did not release dispose")
+            asyncio.run(dispose)
+            events.append("old.close.done")
+
+    class NewRuntime:
+        def __init__(self) -> None:
+            events.append("new.runtime.created")
+            new_runtime_created.set()
+
+        def run(self, coroutine, *, timeout=30):
+            del timeout
+            return asyncio.run(coroutine)
+
+    monkeypatch.setattr(web_module, "AccountRuntime", NewRuntime)
+    state = AccountSessionRuntimeState.__new__(AccountSessionRuntimeState)
+    state.database = FakeDatabase()
+    state.accounts = FakeAccounts()
+    state.delivery = FakeDelivery()
+    state.heartbeat_scheduler = FakeScheduler()
+    state._runtime = OldRuntime()
+    state._owns_runtime = True
+    state._initialized = True
+    state._lock = threading.Lock()
+
+    def capture(callable_) -> None:
+        try:
+            callable_()
+        except BaseException as exc:
+            with errors_lock:
+                errors.append(exc)
+
+    close_thread = threading.Thread(target=lambda: capture(state.close))
+
+    def start_state() -> None:
+        start_attempted.set()
+        state.start()
+        start_finished.set()
+
+    start_thread = threading.Thread(target=lambda: capture(start_state))
+    close_thread.start()
+    assert dispose_entered.wait(timeout=1)
+    start_thread.start()
+    assert start_attempted.wait(timeout=1)
+    try:
+        assert new_runtime_created.wait(timeout=0.1) is False
+        assert start_finished.is_set() is False
+    finally:
+        allow_dispose.set()
+
+    close_thread.join(timeout=3)
+    start_thread.join(timeout=3)
+    assert close_thread.is_alive() is False
+    assert start_thread.is_alive() is False
+    assert errors == []
+    assert start_finished.is_set() is True
+    assert events.index("old.close.done") < events.index("new.runtime.created")

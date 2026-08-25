@@ -28,13 +28,15 @@ def main() -> None:
     application = create_app()
     # 生产启动钩子：在对外接收请求前初始化账号会话域并启动心跳调度器。
     # 即使心跳开关关闭，也会执行一次纯数据库 recovery（不打开浏览器）。
-    account_state = application.extensions.get("account_sessions")
-    if account_state is not None:
-        try:
-            account_state.start()
-        except Exception:
-            logger.exception("账号会话域启动初始化失败")
-            raise
+    try:
+        account_state = application.extensions["account_sessions"]
+    except KeyError as exc:
+        raise RuntimeError("生产 Flask 应用缺少 account_sessions 扩展") from exc
+    try:
+        account_state.start()
+    except Exception:
+        logger.exception("账号会话域启动初始化失败")
+        raise
     start_queue_worker()
     logger.info(
         "生产 Flask 服务启动: host={}, port={}, publish_after_draft={}",

@@ -274,7 +274,7 @@ git diff --check                                                 # 通过
 
 | 现有机制 | 位置 | 状态 |
 |---|---|---|
-| 会话心跳 Service/Policy/Scheduler | `src/account_sessions/session_health.py` | 完整，1071 行测试 |
+| 会话心跳 Service/Policy/Scheduler | `src/account_sessions/session_health.py` | 完整，有专门测试覆盖 |
 | 心跳接线（verify 注入只读验证） | `src/account_sessions/web.py` | 完整 |
 | Profile 跨进程租约 + Singleton 检查 | `src/account_sessions/leases.py` | 完整，有测试 |
 | 反检测脚本注入 | `platforms/base.py initialize()` | 完整，有测试 |
@@ -282,25 +282,39 @@ git diff --check                                                 # 通过
 
 **本次修复的缺口**：`AccountSessionRuntimeState._ensure_runtime()` 此前是惰性
 初始化——只在第一个 HTTP 请求时才执行数据库 recovery 和启动心跳 scheduler，
-与 `docs/backend/ACCOUNT_SESSION_HEARTBEAT.md` 承诺的“进程启动时先执行一次
+与 `docs/backend/ACCOUNT_SESSION_HEARTBEAT.md` 承诺的“生产入口启动时先执行一次
 纯数据库 recovery”不符。
 
 修复：
 1. `src/account_sessions/web.py` 新增公开方法 `AccountSessionRuntimeState.start()`：
    幂等初始化运行时 + 启动心跳 scheduler（即使开关关闭也执行一次纯数据库
    recovery，不打开浏览器）。
-2. `run_flask_production.py` 生产入口在对外接收请求前调用 `account_state.start()`。
-3. 新增 2 个测试：`test_runtime_state_start_is_idempotent_and_initializes_once`、
-   `test_runtime_state_start_is_thread_safe`（验证多线程并发只初始化一次）。
+2. `run_flask_production.py` 生产入口强制要求 `account_sessions` 扩展存在，
+   并在对外接收请求前调用 `account_state.start()`；初始化失败时
+   队列 worker 和 Waitress 均不启动。
+3. `HeartbeatScheduler` 使用同一 event loop 内原子赋值的
+   `_starting_task/_stopping_task` 状态串行化 `start/stop`，不保留跨 loop 锁；
+   `stop()` 主动取消并等待在途扫描的 `finally` 完成后才清理句柄。
+   即使 `stop()` 调用方被取消，也会先释放 claim 再重新传播取消；
+   并发 `start()` 等旧清理完成后启动新 task。
+4. `AccountSessionRuntimeState.close()` 持有现有同步锁完成 scheduler
+   stop 与 runtime dispose，防止并发 `start()` 在旧 runtime 关闭中途抢跑。
+5. 测试覆盖 `start()` 幂等、真实多线程重叠、调用方取消后
+   `HeartbeatService` 仍释放真实数据库 claim、stop/start 并发重启、
+   close/start 跨线程串行化，以及生产启动顺序与两类失败阻断。
 
-验证（fresh）：`tests/test_account_session_health.py`、`test_delivery_article_mapping.py`、
-`test_regression.py` 定向 153 passed；Ruff 通过。
+验证（本轮 fresh）：整份 `tests/test_account_session_health.py`、整份
+`tests/test_run_flask_production.py`、账号运行时启动顺序和 Flask 组合层
+定向测试共 37 passed；本轮 Python 文件 Ruff 与 `git diff --check` 通过。
 
 **生产启用剩余步骤（必须人工完成，验收门见 ACCOUNT_SESSION_HEARTBEAT.md）**：
 1. 目标机器确认 Profile 无其他发布/登录流程，风控窗口允许；
 2. 显式设置 `ACCOUNT_SESSION_HEARTBEAT_ENABLED=true` 并重启生产服务；
 3. 观察首轮 `HEARTBEAT_*` 日志脱敏、`PROFILE_IN_USE` 不降级 `VALID`；
-4. 任何未知状态立即关闭环境变量停止排查。公开发布开关保持关闭。
+4. 任何未知状态立即把环境变量设为 `false`（或移除），停止并
+   重启生产服务；确认健康汇总为 `heartbeat_enabled=false`、scheduler
+   已退出且不再产生新的 `HEARTBEAT_*` 事件后才排查。仅修改环境变量
+   不会停止已运行的 scheduler。公开发布开关保持关闭。
 
 ## 12. 最小验证与 Git 交付
 

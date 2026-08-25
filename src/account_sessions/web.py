@@ -147,15 +147,21 @@ class AccountSessionRuntimeState:
         with self._lock:
             runtime = self._runtime
             owns_runtime = self._owns_runtime
-            self._runtime = None
-            self._initialized = False
-        if runtime is not None and owns_runtime:
+            if runtime is None:
+                return
             try:
-                runtime.run(self.heartbeat_scheduler.stop(), timeout=10)
+                if owns_runtime:
+                    try:
+                        runtime.run(self.heartbeat_scheduler.stop(), timeout=10)
+                    finally:
+                        runtime.close(self.database.dispose())
+                else:
+                    runtime.run(self.heartbeat_scheduler.stop(), timeout=10)
             finally:
-                runtime.close(self.database.dispose())
-        elif runtime is not None:
-            runtime.run(self.heartbeat_scheduler.stop(), timeout=10)
+                # stop + dispose 期间始终持有同一把同步锁；并发
+                # start() 只能在旧 runtime 完全关闭后创建新 runtime。
+                self._runtime = None
+                self._initialized = False
 
 
 def create_account_session_blueprint(

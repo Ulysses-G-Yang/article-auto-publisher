@@ -892,6 +892,8 @@ class HeartbeatScheduler:
         )
         self._task: asyncio.Task | None = None
         self._stop_event: asyncio.Event | None = None
+        self._starting_task: asyncio.Task | None = None
+        self._stopping_task: asyncio.Task | None = None
         self._scan_lock = asyncio.Lock()
 
     @property
@@ -901,31 +903,140 @@ class HeartbeatScheduler:
     async def start(self) -> bool:
         """启动一次后台 task；重复 start 不创建第二个 task。"""
 
+        while True:
+            stopping_task = self._stopping_task
+            if stopping_task is None:
+                break
+            # stop 清理完成后必须重新判定，不能看到旧 task
+            # 就误报“已启动”。shield 避免 start 取消破坏共享清理。
+            await asyncio.shield(stopping_task)
         if self.running:
             return False
-        recover = getattr(self.service, "recover_stale_state", None)
-        if recover is not None:
-            await recover()
-        if not self.enabled:
+        starting_task = self._starting_task
+        if starting_task is not None:
+            await asyncio.shield(starting_task)
             return False
-        self._stop_event = asyncio.Event()
-        self._task = asyncio.create_task(self._run(), name="account-session-heartbeat")
-        return True
+        # 同一 event loop 中，赋值发生在第一个 await 前；并发
+        # start/stop 都会观察到这个共享生命周期 task。
+        starting_task = asyncio.create_task(
+            self._finish_start(),
+            name="account-session-heartbeat-start",
+        )
+        self._starting_task = starting_task
+        return await starting_task
+
+    async def _finish_start(self) -> bool:
+        try:
+            # 已结束但未经 stop() 回收的旧句柄不得污染新周期。
+            self._task = None
+            self._stop_event = None
+            recover = getattr(self.service, "recover_stale_state", None)
+            if recover is not None:
+                await recover()
+            if not self.enabled:
+                return False
+            self._stop_event = asyncio.Event()
+            self._task = asyncio.create_task(
+                self._run(),
+                name="account-session-heartbeat",
+            )
+            return True
+        finally:
+            if self._starting_task is asyncio.current_task():
+                self._starting_task = None
 
     async def stop(self) -> bool:
-        """设置停止信号并立即唤醒、等待后台 task 完成。"""
+        """取消在途扫描并等待清理；调用方取消不能跳过清理。"""
 
-        task = self._task
-        stop_event = self._stop_event
-        if task is None:
+        caller_cancelled = False
+        starting_task = self._starting_task
+        if starting_task is not None:
+            caller_cancelled = await self._await_lifecycle_task(starting_task)
+        current_task = asyncio.current_task()
+        target_task = self._task
+        stopping_task = self._stopping_task
+        if target_task is None and stopping_task is None:
+            if caller_cancelled:
+                raise asyncio.CancelledError
             return False
-        if stop_event is not None:
-            stop_event.set()
-        if task is not asyncio.current_task():
-            await task
-        self._task = None
-        self._stop_event = None
+        if self._stop_event is not None:
+            self._stop_event.set()
+        if stopping_task is None:
+            if target_task is None:
+                return False
+            cancel_target = target_task is not current_task
+            stopping_task = asyncio.create_task(
+                self._finish_stop(target_task, cancel_target=cancel_target),
+                name="account-session-heartbeat-stop",
+            )
+            self._stopping_task = stopping_task
+            if not cancel_target:
+                # scheduler 从自己的 scan 内请求停止时不能 await/
+                # cancel 自己，也不能在 _run 真正退出前清理句柄。
+                if caller_cancelled:
+                    raise asyncio.CancelledError
+                return True
+
+        caller_cancelled = (
+            await self._await_lifecycle_task(stopping_task) or caller_cancelled
+        )
+        if caller_cancelled:
+            raise asyncio.CancelledError
         return True
+
+    async def _finish_stop(
+        self,
+        target_task: asyncio.Task,
+        *,
+        cancel_target: bool,
+    ) -> None:
+        """独立完成目标 task 取消和句柄回收，不受 stop 调用方影响。"""
+
+        try:
+            if cancel_target and not target_task.done():
+                target_task.cancel()
+            try:
+                await target_task
+            except asyncio.CancelledError:
+                # 这里只消费目标 scheduler task 的预期取消。
+                pass
+        finally:
+            stopping_task = asyncio.current_task()
+            if self._task is target_task:
+                self._task = None
+                self._stop_event = None
+                # stop 已确认没有在途 scan；下一个 runtime 使用新的
+                # loop-local 非重入锁，避免复用旧 event loop 绑定。
+                self._scan_lock = asyncio.Lock()
+            if self._stopping_task is stopping_task:
+                self._stopping_task = None
+
+    @staticmethod
+    async def _await_lifecycle_task(lifecycle_task: asyncio.Task) -> bool:
+        """屏蔽调用方取消直到共享生命周期 task 完成。"""
+
+        caller = asyncio.current_task()
+        cancellation_count = caller.cancelling() if caller is not None else 0
+        caller_cancelled = False
+        while not lifecycle_task.done():
+            try:
+                await asyncio.shield(lifecycle_task)
+            except asyncio.CancelledError:
+                current_count = caller.cancelling() if caller is not None else 0
+                if current_count <= cancellation_count:
+                    # 共享清理自身被取消，不是 stop 调用方的取消。
+                    raise
+                cancellation_count = current_count
+                caller_cancelled = True
+
+        cleanup_error: BaseException | None = None
+        try:
+            lifecycle_task.result()
+        except BaseException as exc:
+            cleanup_error = exc
+        if cleanup_error is not None and not caller_cancelled:
+            raise cleanup_error
+        return caller_cancelled
 
     async def scan_once(self) -> dict[str, Any]:
         """单次扫描入口；并发调用只允许一个进入服务。"""

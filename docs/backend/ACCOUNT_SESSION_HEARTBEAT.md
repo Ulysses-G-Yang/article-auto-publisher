@@ -15,7 +15,12 @@ ACCOUNT_SESSION_HEARTBEAT_ENABLED=false
 只有显式设置为 `true/1/yes/on` 才会启动。启用后仍然是单个 asyncio task、每批
 默认最多一个账号（`max_per_scan=1`），启动先等待一个 `scan_interval`，不会因为
 Flask 进程刚启动就立刻打开浏览器。HTTP 健康汇总始终是只读的；没有手动触发
-心跳的 API。
+心跳的 API。`start/stop` 由同一 event loop 内的共享生命周期 task 状态
+串行化，不保留跨 loop 锁；`stop()` 会主动
+取消并等待在途扫描完成清理，确保 `HeartbeatService` 的 `finally`
+先释放 busy 标记和数据库 claim，再关闭运行时。并发 `start()` 会等待
+旧 stop 完成后创建新 task；即使 stop 调用方被取消，也先完成清理再
+重新传播取消。
 
 ## 策略与状态机
 
@@ -50,13 +55,16 @@ worker 才能更新状态、写活动日志并清理租约。claim 丢失时返�
 当前服务对异步验证提供 TTL 80% 的超时预算，平台适配器或同步注入函数不得运行
 无界阻塞。
 
-进程启动时 scheduler 先执行一次纯数据库 recovery，再根据开关决定是否创建扫描
+使用 `run_flask_production.py` 的生产进程启动时，scheduler 先执行一次
+纯数据库 recovery，再根据开关决定是否创建扫描
 task。recovery 只恢复带有明确且已过期 heartbeat claim 的 `VERIFYING`：有
 `last_verified_at` 恢复为 `VALID`，否则恢复为 `UNVERIFIED`，并把下一次检查设为
 当前时间；没有 claim 来源的遗留 `VERIFYING` 保持不变，仍在有效 claim 内的账号
 也保持不变。其余过期 claim 只清除三列，不杀 Chrome、不删除 Singleton、不触碰
 Profile。即使 `ACCOUNT_SESSION_HEARTBEAT_ENABLED=false`，启动初始化仍执行这次
 数据库清理，但绝不会启动扫描或打开浏览器。
+生产入口强制要求 `account_sessions` 扩展存在；扩展缺失或启动初始化
+失败时，必须在启动队列 worker 和 Waitress 前终止进程，不得带病对外服务。
 
 失败分类优先使用异常类型、稳定 `error_code` 和 `PROFILE_IN_USE:` 等稳定前缀，
 不会依据“包含登录”等模糊文本推断。活动日志只写
@@ -103,4 +111,7 @@ delivery/content bridge。心跳不是 Cookie 池、Cookie SDK、Cookie 续期�
 3. 由人工在目标机器确认 Profile 无其他发布/登录流程、平台风控窗口允许，且
    明确接受启用后只读打开浏览器的影响；公开发布开关仍保持关闭。
 4. 通过全量 pytest、Ruff 和 `git diff --check` 后，使用受控环境变量启用并
-   观察首轮结果；任何未知状态立即关闭环境变量并停止排查。
+   观察首轮结果；任何未知状态都要把环境变量设为 `false`（或移除），
+   停止并重启生产服务，确认 `heartbeat_enabled=false`、scheduler 已退出且
+   不再产生新的 `HEARTBEAT_*` 事件后才排查。仅修改环境变量不会停止
+   已运行的 scheduler。

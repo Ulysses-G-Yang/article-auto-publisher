@@ -316,7 +316,41 @@ git diff --check                                                 # 通过
    已退出且不再产生新的 `HEARTBEAT_*` 事件后才排查。仅修改环境变量
    不会停止已运行的 scheduler。公开发布开关保持关闭。
 
-## 12. 最小验证与 Git 交付
+## 12. 草稿结果可观测性（方案一+方案二，2026-08-25）
+
+解决"草稿明明保存了但界面只显示失败、业务人员要翻终端日志"的问题。
+设计文档：`docs/backend/DRAFT_RESULT_OBSERVABILITY.md`。
+
+### 方案一：证据链结构化（已实现）
+
+- `platforms/base.py` 新增 `DraftVerificationEvidence`：记录保存接口响应、
+  草稿箱标题匹配数、重开核验、草稿链接，生成脱敏 `summary`。
+- 5 平台适配器（微博/知乎/ZOL/SMZDM/百家号）`save_draft()` 埋点写入证据；
+  失败/未知路径通过异常 `evidence` 属性带出。
+- `DeliveryOperation` 新增 `verification_evidence` JSON 列（幂等迁移）；
+  `_mark_failed`/`_mark_completed*` 持久化，`operation_payload` 解码返回。
+- 前端 `planTargetDetail`：`RESULT_UNKNOWN` 且草稿箱有唯一匹配时显示
+  "平台草稿箱已存在标题唯一匹配的草稿"。
+
+### 方案二：只读核验 API + 前端按钮（已实现）
+
+- `BasePlatform.verify_draft_readonly(title)`：默认 `{"unsupported": True}`
+  （fail-closed）；知乎/微博已实现（只导航草稿箱按标题匹配，不点开编辑页）。
+- `POST /api/delivery-operations/{id}/verify-draft`：同步只读核验，复用
+  Profile 租约，返回 `title_matched/match_count/draft_url/structure`，
+  错误码 `PROBE_UNSUPPORTED_PLATFORM`/`PROBE_NOT_FOUND`/`PROBE_TITLE_AMBIGUOUS`/
+  `PROBE_RESULT_UNKNOWN` 等。
+- 前端失败/未知目标行出现"核验平台草稿"按钮，一键只读核验并展示结果。
+- 审计：核验写入 `account_activity`（action=`DRAFT_PROBE*`）。
+
+验证（fresh）：全量 `914 passed, 7 skipped`；Ruff 通过；`git diff --check` 通过。
+新测试：`tests/test_draft_evidence.py`（10）、`tests/test_draft_verify.py`（8）、
+前端契约新增证据/核验断言。
+
+安全边界：判定逻辑零改动（防假成功语义不变）；核验只读（拦截非 GET）；
+租约复用不强抢；脱敏；公开发布开关保持关闭；未实现平台 fail-closed。
+
+## 13. 最小验证与 Git 交付
 
 PowerShell 示例：
 
@@ -354,7 +388,7 @@ git ls-remote origin "refs/heads/$(git branch --show-current)"
 当前基线曾验证为 `857 passed, 7 skipped`，但这只是接力时的历史基线。
 任何新 AI 都必须在自己的工作树 fresh 运行任务包要求的测试，不能直接引用该结果。
 
-## 13. 可直接复制给新 AI 的启动提示
+## 14. 可直接复制给新 AI 的启动提示
 
 ```text
 你负责 ArticleOps 的一个独立新模块。请先只读预检，不要续做任何旧 P0 或历史平台待办。

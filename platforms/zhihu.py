@@ -30,6 +30,7 @@ from platforms.base import (
     BasePlatform,
     BrowserLifecycleError,
     DraftResultUnknownError,
+    DraftVerificationEvidence,
     LoginRequiredError,
     PlatformAutomationError,
     SelectorError,
@@ -804,9 +805,14 @@ class ZhihuPlatform(BasePlatform):
         """等待自动保存，取得唯一草稿 ID，并重开核验完整持久化正文。"""
 
         self._require_page_alive("知乎保存草稿")
+        evidence = DraftVerificationEvidence()
+        self._last_draft_evidence = evidence
         expected_title = " ".join(str(title or "").split())
         if not expected_title:
-            raise DraftResultUnknownError("DRAFT_RESULT_UNKNOWN: 知乎自动保存结果缺少可核验标题")
+            raise DraftResultUnknownError(
+                "DRAFT_RESULT_UNKNOWN: 知乎自动保存结果缺少可核验标题",
+                evidence=evidence.finalize(error_code="DRAFT_RESULT_UNKNOWN"),
+            )
 
         # 知乎从标题首次输入起便可能产生自动保存副作用；此处以后任何
         # 不确定状态只能标记 RESULT_UNKNOWN，绝不能返回可自动重试的普通失败。
@@ -844,10 +850,19 @@ class ZhihuPlatform(BasePlatform):
                 draft = await self._find_unique_exact_draft(expected_title)
             if draft is None:
                 raise DraftResultUnknownError(
-                    "DRAFT_RESULT_UNKNOWN: 知乎未找到标题精确匹配的唯一草稿"
+                    "DRAFT_RESULT_UNKNOWN: 知乎未找到标题精确匹配的唯一草稿",
+                    evidence=evidence.finalize(error_code="DRAFT_RESULT_UNKNOWN"),
                 )
+            evidence.mark_draft_list(match_count=1)
             edit_url = self._draft_edit_url(draft.get("id"))
-            await self._verify_persisted_draft(expected_title, edit_url)
+            evidence.set_draft_url(edit_url)
+            try:
+                await self._verify_persisted_draft(expected_title, edit_url)
+                evidence.mark_reopen(title_match=True, dom_blocks_match=True)
+            except Exception:
+                evidence.mark_reopen(title_match=True, dom_blocks_match=False)
+                raise
+            evidence.finalize()
         except Exception as exc:
             if isinstance(exc, DraftResultUnknownError):
                 raise
@@ -855,8 +870,54 @@ class ZhihuPlatform(BasePlatform):
                 raise BrowserLifecycleError(
                     "BROWSER_CONTEXT_CLOSED: 知乎验证草稿箱时页面已关闭"
                 ) from exc
-            raise DraftResultUnknownError("DRAFT_RESULT_UNKNOWN: 知乎持久化草稿核验失败") from exc
+            raise DraftResultUnknownError(
+                "DRAFT_RESULT_UNKNOWN: 知乎持久化草稿核验失败",
+                evidence=evidence.finalize(error_code="DRAFT_RESULT_UNKNOWN"),
+            ) from exc
         return edit_url
+
+    async def verify_draft_readonly(self, title: str) -> dict:
+        """只读核验：在草稿箱按标题查找唯一草稿，返回结构摘要。
+
+        只导航草稿箱列表；不点击草稿、不重开编辑页、不输入、不保存。
+        """
+        expected_title = " ".join(str(title or "").split())
+        if not expected_title:
+            return {"error_code": "PROBE_TITLE_MISSING", "error_message": "缺少可核验标题"}
+        drafts_url = self.platform_cfg.get("drafts_url") or DRAFTS_URL
+        try:
+            await self.page.goto(
+                drafts_url,
+                wait_until="domcontentloaded",
+                timeout=30000,
+            )
+            await self.simulator.random_delay(2, 4)
+            draft = await self._find_unique_exact_draft(expected_title)
+            if draft is None:
+                await self.simulator.random_delay(2, 4)
+                draft = await self._find_unique_exact_draft(expected_title)
+            if draft is None:
+                return {
+                    "error_code": "PROBE_NOT_FOUND",
+                    "error_message": "草稿箱未找到该标题草稿",
+                }
+            edit_url = self._draft_edit_url(draft.get("id"))
+            return {
+                "title_matched": True,
+                "match_count": 1,
+                "draft_url": edit_url,
+                "structure": {"source": "draft_list"},
+            }
+        except Exception as exc:
+            if self._exception_means_browser_closed(exc):
+                return {
+                    "error_code": "PROBE_RESULT_UNKNOWN",
+                    "error_message": "核验期间浏览器已关闭",
+                }
+            return {
+                "error_code": "PROBE_RESULT_UNKNOWN",
+                "error_message": "草稿箱核验失败",
+            }
 
     async def _find_unique_exact_draft(self, expected_title: str) -> dict | None:
         """只接受列表 API 中标题精确且唯一的草稿实体。"""

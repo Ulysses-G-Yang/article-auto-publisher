@@ -19,6 +19,7 @@ from platforms.base import (
     BrowserLifecycleError,
     DraftBaselineError,
     DraftResultUnknownError,
+    DraftVerificationEvidence,
     LoginRequiredError,
     PlatformAccessError,
     SelectorError,
@@ -3136,6 +3137,8 @@ class ZOLPlatform(BasePlatform):
     async def save_draft(self, title: str = "") -> str:
         """优先证明编辑器自动保存；仅在无副作用证据时点击一次保存。"""
         self._require_page_alive("ZOL 保存草稿")
+        evidence = DraftVerificationEvidence()
+        self._last_draft_evidence = evidence
         current_url = self.page.url or ""
         if not self._is_blog_editor_url(current_url):
             raise PlatformAccessError(
@@ -3233,6 +3236,10 @@ class ZOLPlatform(BasePlatform):
                 "ZOL 草稿实体验证成功: draft_id_fingerprint={}",
                 draft_fingerprint,
             )
+            evidence.mark_draft_list(match_count=1)
+            evidence.mark_reopen(title_match=True, dom_blocks_match=True)
+            evidence.set_draft_url(draft_url)
+            evidence.finalize()
             return draft_url
         except asyncio.CancelledError as exc:
             if clicked:
@@ -3249,7 +3256,8 @@ class ZOLPlatform(BasePlatform):
             if not clicked:
                 raise
             raise DraftResultUnknownError(
-                "DRAFT_RESULT_UNKNOWN: 保存动作已触发但结果无法证明"
+                "DRAFT_RESULT_UNKNOWN: 保存动作已触发但结果无法证明",
+                evidence=evidence.finalize(error_code="DRAFT_RESULT_UNKNOWN"),
             ) from exc
         finally:
             self._stop_autosave_observer()

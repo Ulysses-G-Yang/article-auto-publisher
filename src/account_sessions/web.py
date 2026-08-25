@@ -19,6 +19,7 @@ from account_sessions.contracts import (
 )
 from account_sessions.database import AccountDatabase
 from account_sessions.delivery_service import DeliveryService
+from account_sessions.draft_verify import DraftVerifyService
 from account_sessions.errors import AccountSessionError, ConfirmationRequiredError
 from account_sessions.mcp_access import (
     MCPInternalAccessResolver,
@@ -91,6 +92,11 @@ class AccountSessionRuntimeState:
             platform_factory=platform_factory,
             public_publish_enabled=public_publish_enabled,
             delivery_event_sink=delivery_event_sink,
+        )
+        self.draft_verify = DraftVerifyService(
+            self.accounts,
+            self.delivery,
+            platform_factory=platform_factory,
         )
         self.auto_execute = auto_execute
         self._runtime = runtime
@@ -411,6 +417,18 @@ def create_account_session_blueprint(
     def get_delivery_operation(operation_id: str):
         operation = state.run(state.delivery.get_operation(operation_id, LOCAL_WEB_CONTEXT))
         return jsonify(operation)
+
+    @blueprint.post("/api/delivery-operations/<operation_id>/verify-draft")
+    def verify_draft(operation_id: str):
+        """只读核验草稿：按执行单标题在平台草稿箱查找唯一草稿并返回结构摘要。
+
+        同步等待（最长约 90 秒）；只读、无副作用、不自动重试。
+        """
+        result = state.run(
+            state.draft_verify.verify_draft(operation_id, LOCAL_WEB_CONTEXT),
+            timeout=120,
+        )
+        return jsonify(result)
 
     @blueprint.errorhandler(ConfirmationRequiredError)
     def confirmation_required(exc: ConfirmationRequiredError):

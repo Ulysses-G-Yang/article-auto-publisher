@@ -2040,6 +2040,14 @@
         if (target.error_code === 'DRAFT_BASELINE_UNAVAILABLE') {
             return target.error_message || '保存前无法建立可靠草稿基线；平台写入已停止。';
         }
+        // 草稿保存证据链：即使整体失败/未知，也展示平台侧可核验证据
+        if (target.verification_evidence) {
+            const ev = target.verification_evidence;
+            if (ev.draft_list_title_unique === true) {
+                return '平台草稿箱已存在标题唯一匹配的草稿。' + (ev.summary ? `（${ev.summary}）` : '');
+            }
+            if (ev.summary) return ev.summary;
+        }
         if (target.status === 'RESULT_UNKNOWN') {
             return '结果未知，请先到平台人工核对；系统不会自动重试。';
         }
@@ -2081,9 +2089,65 @@
                     actions.appendChild(link);
                 }
             }
+            // 只读核验草稿按钮：终态且非草稿保存成功时，允许业务人员一键核验
+            if (
+                target.operation_id
+                && ['FAILED', 'RESULT_UNKNOWN', 'DRAFT_SAVED_WITH_WARNINGS'].includes(target.status)
+            ) {
+                const verify = document.createElement('button');
+                verify.className = 'btn btn-sm btn-outline-secondary';
+                verify.textContent = '核验平台草稿';
+                verify.setAttribute('type', 'button');
+                verify.addEventListener('click', () => verifyDraft(target));
+                actions.appendChild(verify);
+            }
             row.append(copy, actions); return row;
         }));
         updateStudioProgress();
+    }
+
+    async function verifyDraft(target) {
+        const opId = target.operation_id;
+        if (!opId) return;
+        const btn = [...document.querySelectorAll('button')].find(el => el.textContent === '核验平台草稿' && el.closest('.plan-target'));
+        if (btn) {
+            btn.disabled = true;
+            btn.textContent = '核验中…';
+        }
+        try {
+            const response = await fetch(`/api/delivery-operations/${encodeURIComponent(opId)}/verify-draft`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: '{}',
+            });
+            const payload = await response.json().catch(() => ({}));
+            const messageEl = byId('plan-review-error') || byId('publish-confirm-error');
+            const setMsg = (text, kind = 'danger') => {
+                if (messageEl) { messageEl.textContent = text; messageEl.className = `alert alert-${kind} mt-2`; }
+            };
+            if (!response.ok) {
+                const code = payload.error || 'PROBE_FAILED';
+                const hint = code === 'PROBE_UNSUPPORTED_PLATFORM'
+                    ? '该平台尚未实现只读核验，请打开平台草稿箱人工核对。'
+                    : (payload.message || `核验失败（${code}）`);
+                setMsg(hint, 'warning');
+                return;
+            }
+            if (payload.title_matched) {
+                setMsg(`只读核验：平台草稿箱存在标题唯一匹配的草稿${payload.draft_url ? '。可在平台直接核对' : ''}。`, 'success');
+            } else if (payload.error_code === 'PROBE_NOT_FOUND') {
+                setMsg('只读核验：平台草稿箱未找到该标题草稿。', 'danger');
+            } else if (payload.error_code === 'PROBE_TITLE_AMBIGUOUS') {
+                setMsg(payload.error_message || '草稿箱存在多个同名草稿，需人工区分。', 'warning');
+            } else {
+                setMsg(payload.error_message || '只读核验完成，请查看平台草稿箱。', 'info');
+            }
+        } catch (err) {
+            const messageEl = byId('plan-review-error') || byId('publish-confirm-error');
+            if (messageEl) { messageEl.textContent = '只读核验请求失败，请稍后重试。'; messageEl.className = 'alert alert-danger mt-2'; }
+        } finally {
+            if (btn) { btn.disabled = false; btn.textContent = '核验平台草稿'; }
+        }
     }
 
     async function executePlan(

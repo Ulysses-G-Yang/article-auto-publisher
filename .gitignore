@@ -25,3 +25,6 @@ inspect_xhh.py
 inspect_drafts.py
 test_e2e_xhh.py
 cleanup_xhh.py
+
+# ---- Test scratch artifacts ----
+.pytest-heartbeat-audit/

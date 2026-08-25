@@ -121,6 +121,9 @@ class DeliveryOperation(Base):
     platform_url: Mapped[str | None] = mapped_column(String(2048), nullable=True)
     error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    verification_evidence: Mapped[str | None] = mapped_column(
+        Text, nullable=True, default=None
+    )
     article_mapping_status: Mapped[str] = mapped_column(
         String(16),
         default="NOT_PENDING",

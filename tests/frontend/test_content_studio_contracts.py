@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -324,7 +325,11 @@ def test_multi_target_and_confirmation_contracts_are_separate() -> None:
     assert 'id="publish-confirm-modal"' in template
     assert "逐条确认公开发布" in template
     assert "submitDelivery" not in script
-    assert "/api/delivery-operations" not in template + script
+    # 前端不直接提交执行单；只读核验（verify-draft）是唯一允许的
+    # delivery-operations 前缀调用，且必须是 POST + /verify-draft 后缀。
+    assert "/api/delivery-operations" not in template
+    assert re.search(r"fetch\(`/api/delivery-operations/\$\{", script) is not None
+    assert "/verify-draft" in script
     assert "addTarget" not in script
 
 
@@ -350,6 +355,27 @@ def test_delivery_statuses_are_explicit_and_never_auto_retry_publish() -> None:
     assert "['DRAFT_SAVED', 'DRAFT_SAVED_WITH_WARNINGS'].includes(target.status)" in script
     assert "retry-target" not in script
     assert "不提供公开发布自动重试按钮" in docs
+
+
+def test_draft_evidence_and_readonly_verify_contracts() -> None:
+    """草稿保存证据展示 + 只读核验按钮（方案一+方案二）契约。"""
+    script = read("web/static/js/content-studio.js")
+
+    # 证据链展示：草稿箱有唯一匹配时给出明确文案
+    assert "verification_evidence" in script
+    assert "平台草稿箱已存在标题唯一匹配的草稿" in script
+    assert "ev.summary" in script
+
+    # 只读核验按钮与 API 调用
+    assert "核验平台草稿" in script
+    assert "async function verifyDraft(target)" in script
+    assert "verify-draft" in script
+    assert "['FAILED', 'RESULT_UNKNOWN', 'DRAFT_SAVED_WITH_WARNINGS']" in script
+    assert "PROBE_UNSUPPORTED_PLATFORM" in script
+    assert "PROBE_NOT_FOUND" in script
+    assert "PROBE_TITLE_AMBIGUOUS" in script
+    # 核验必须只读：前端只 POST verify-draft，绝不触发执行接口
+    assert "核验中…" in script
 
 
 def test_primary_action_reports_and_focuses_missing_fields() -> None:

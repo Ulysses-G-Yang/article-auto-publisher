@@ -95,6 +95,17 @@
                 <div class="card-body">
                     <p class="section-intro">10 个平台统一展示；只有标记“可投递”的平台能开启。先打开平台，再勾选账号；系统不会自动选择账号。</p>
                     <div class="target-builder">
+                        <div class="target-bulk-toolbar" aria-label="批量选择投递目标">
+                            <div class="target-bulk-actions">
+                                <button id="toggle-all-platforms" class="btn btn-outline-primary" type="button" disabled>全选所有平台</button>
+                                <button id="toggle-all-accounts" class="btn btn-outline-primary" type="button" disabled aria-describedby="account-selection-hint">全选所有账户</button>
+                            </div>
+                            <div class="target-selection-status" aria-live="polite">
+                                <strong id="target-selection-summary">已选平台 0 个 · 账户 0 个</strong>
+                                <span id="account-load-progress">平台目录加载后可批量选择</span>
+                                <span id="account-selection-hint" class="visually-hidden">请先选择至少一个可投递平台</span>
+                            </div>
+                        </div>
                         <div id="platform-grid-loading" class="platform-grid-loading" role="status"><span class="spinner-border spinner-border-sm" aria-hidden="true"></span><span>正在读取平台目录…</span></div>
                         <div id="target-switcher-list" class="target-switcher-list d-none" role="group" aria-label="投递目标滑块"></div>
                         <div id="target-builder-error" class="alert alert-danger d-none mt-3" role="alert"></div>
@@ -121,7 +132,7 @@
 
         <aside class="studio-side" aria-label="草稿与安全信息">
             <section class="card side-card"><div class="card-body"><span class="section-kicker">CURRENT DRAFT</span><h2 id="side-draft-title">未命名草稿</h2><dl class="draft-facts"><div><dt>来源</dt><dd id="side-draft-source">—</dd></div><div><dt>图文块</dt><dd id="side-block-count">0</dd></div><div><dt>投递目标</dt><dd id="side-target-count">0</dd></div><div><dt>修订</dt><dd id="side-revision">—</dd></div></dl><button class="btn btn-outline-secondary w-100" type="button" data-coreui-toggle="modal" data-coreui-target="#source-library-modal">打开历史草稿</button></div></section>
-            <section class="card side-card safety-card"><div class="card-body"><div class="safety-icon"><i class="cil-shield-alt" aria-hidden="true"></i></div><h2>发布安全门</h2><ul><li>平台草稿目标使用一次批量摘要确认</li><li>公开发布目标逐条二次确认</li><li>内容、账号或模式变化会使令牌失效</li><li>“保持登录态”只是会话持久化策略</li></ul></div></section>
+            <section class="card side-card safety-card"><div class="card-body"><div class="safety-icon"><i class="cil-shield-alt" aria-hidden="true"></i></div><h2>发布安全门</h2><ul><li>平台草稿目标冻结版本后直接执行</li><li>公开发布目标逐条二次确认</li><li>内容、账号或模式变化会使令牌失效</li><li>“保持登录态”只是会话持久化策略</li></ul></div></section>
         </aside>
     </div>
 
@@ -132,11 +143,11 @@
 
     <div class="modal fade" id="conflict-modal" tabindex="-1" data-coreui-backdrop="static" aria-labelledby="conflict-title" aria-hidden="true"><div class="modal-dialog"><div class="modal-content"><div class="modal-header"><h2 id="conflict-title" class="modal-title fs-5">草稿发生修订冲突</h2></div><div class="modal-body"><p>另一个页面已保存了更新版本。为避免静默覆盖，请选择如何处理当前本地内容。</p><dl class="conflict-facts"><div><dt>当前本地修订</dt><dd id="conflict-local-revision">—</dd></div><div><dt>服务端修订</dt><dd id="conflict-server-revision">—</dd></div></dl></div><div class="modal-footer"><button id="conflict-use-server" class="btn btn-outline-secondary" type="button">采用服务端版本</button><button id="conflict-save-copy" class="btn btn-primary" type="button">将本地内容另存为副本</button></div></div></div></div>
 
-    <div class="modal fade" id="plan-review-modal" tabindex="-1" aria-labelledby="plan-review-title" aria-hidden="true"><div class="modal-dialog modal-lg modal-dialog-scrollable"><div class="modal-content"><div class="modal-header"><div><span class="section-kicker">FROZEN VERSION</span><h2 id="plan-review-title" class="modal-title">核对投递计划</h2></div><button class="btn-close" type="button" data-coreui-dismiss="modal" aria-label="关闭"></button></div><div class="modal-body"><div id="plan-review-summary" class="plan-review-summary"></div><div id="plan-format-warning" class="alert alert-warning d-none mt-3 mb-0" role="status"></div><div id="draft-confirmation-row" class="form-check confirmation-check d-none"><input id="draft-batch-confirmed" class="form-check-input" type="checkbox"><label class="form-check-label" for="draft-batch-confirmed">我已核对摘要，确认将这份内容保存到上述平台草稿目标</label></div><div id="plan-review-error" class="alert alert-danger d-none mt-3 mb-0"></div></div><div class="modal-footer"><button class="btn btn-outline-secondary" type="button" data-coreui-dismiss="modal">返回修改</button><button id="execute-plan" class="btn btn-primary" type="button">确认并创建执行单</button></div></div></div></div>
+    <div class="modal fade" id="plan-review-modal" tabindex="-1" aria-labelledby="plan-review-title" aria-hidden="true"><div class="modal-dialog modal-lg modal-dialog-scrollable"><div class="modal-content"><div class="modal-header"><div><span class="section-kicker">FROZEN VERSION</span><h2 id="plan-review-title" class="modal-title">投递计划无法执行</h2></div><button class="btn-close" type="button" data-coreui-dismiss="modal" aria-label="关闭"></button></div><div class="modal-body"><div id="plan-review-summary" class="plan-review-summary"></div><div id="plan-format-warning" class="alert alert-warning d-none mt-3 mb-0" role="status"></div><div id="plan-review-error" class="alert alert-danger d-none mt-3 mb-0"></div></div><div class="modal-footer"><button class="btn btn-outline-secondary" type="button" data-coreui-dismiss="modal">返回修改</button><button id="execute-plan" class="btn btn-primary" type="button" disabled>当前计划不可执行</button></div></div></div></div>
 
     <div class="modal fade" id="publish-confirm-modal" tabindex="-1" aria-labelledby="publish-confirm-title" aria-hidden="true"><div class="modal-dialog"><div class="modal-content border-danger"><div class="modal-header"><div><span class="badge text-bg-danger mb-2">高风险操作</span><h2 id="publish-confirm-title" class="modal-title fs-5">逐条确认公开发布</h2></div><button class="btn-close" type="button" data-coreui-dismiss="modal" aria-label="关闭"></button></div><div class="modal-body"><p>该目标会将内容公开发布到平台，不是保存草稿。</p><div id="publish-target-summary" class="publish-target-summary"></div><p id="publish-token-expiry" class="small text-body-secondary mb-0"></p><div id="publish-confirm-error" class="alert alert-danger d-none mt-3"></div></div><div class="modal-footer"><button class="btn btn-outline-secondary" type="button" data-coreui-dismiss="modal">取消</button><button id="confirm-publish-target" class="btn btn-danger" type="button">我已核对，确认公开发布</button></div></div></div></div>
 </div>
 {% endblock %}
 
-{% block extra_scripts %}<script src="{{ url_for('static', filename='js/content-studio.js', v='20260820-ux-linkage2') }}"></script>{% endblock %}
+{% block extra_scripts %}<script src="{{ url_for('static', filename='js/content-studio.js', v='20260825-bulk-targets') }}"></script>{% endblock %}
 

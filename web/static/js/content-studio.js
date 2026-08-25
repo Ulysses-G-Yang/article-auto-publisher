@@ -53,6 +53,13 @@
         switcherModes: {},
         switcherControllers: {},
         switcherSequences: {},
+        switcherAccountLoadFailed: {},
+        bulkAccountSelecting: false,
+        targetSaveDesired: [],
+        targetSavePending: null,
+        targetSavePromise: null,
+        targetSaving: false,
+        mutationPromise: null,
         draftLibraryLoading: false,
         navigationSequence: 0,
         saveTimer: null,
@@ -403,12 +410,30 @@
         state.saveTimer = setTimeout(() => saveDraftNow(), 1000);
     }
 
-    async function saveDraftNow() {
+    function enqueueDraftMutation(operation) {
+        const previous = state.mutationPromise || Promise.resolve();
+        const pending = previous.catch(() => undefined).then(operation);
+        const tracked = pending.finally(() => {
+            if (state.mutationPromise === tracked) state.mutationPromise = null;
+        });
+        state.mutationPromise = tracked;
+        return tracked;
+    }
+
+    function saveDraftNow() {
         clearTimeout(state.saveTimer);
+        return enqueueDraftMutation(saveDraftNowUnlocked);
+    }
+
+    async function saveDraftNowUnlocked() {
         if (!state.draft || !state.dirty || state.saving || state.conflictServerDraft) return !state.dirty;
+        const requestDraft = state.draft;
+        const requestDraftId = requestDraft.draft_id;
+        const requestIsCurrent = () => state.draft === requestDraft
+            && state.draft?.draft_id === requestDraftId;
         state.saving = true;
         setSaveState('saving', '正在同步');
-        if (!state.draft.draft_id) {
+        if (!requestDraftId) {
             try {
                 return await createPersistedDraft();
             } catch (error) {
@@ -419,13 +444,13 @@
                 state.saving = false;
             }
         }
-        const baseRevision = state.draft.revision;
+        const baseRevision = requestDraft.revision;
         try {
-            const requestTitle = state.draft.title;
-            const requestIsV2 = isV2Draft();
-            const requestDocument = requestIsV2 ? cloneValue(state.draft.document) : null;
-            const requestBlocks = requestIsV2 ? null : publicBlocks();
-            const requestCover = coverRequest(state.draft.cover);
+            const requestTitle = requestDraft.title;
+            const requestIsV2 = isV2Draft(requestDraft);
+            const requestDocument = requestIsV2 ? cloneValue(requestDraft.document) : null;
+            const requestBlocks = requestIsV2 ? null : publicBlocks(requestDraft.blocks);
+            const requestCover = coverRequest(requestDraft.cover);
             const requestBody = requestIsV2
                 ? {
                     revision: baseRevision,
@@ -440,13 +465,18 @@
                     blocks: requestBlocks,
                     cover: requestCover,
                 };
-            const requestSnapshot = contentSnapshot(state.draft);
-            const response = await fetch(endpoint(root.dataset.draftUrlTemplate, 'draft_id', state.draft.draft_id), {
+            const requestSnapshot = contentSnapshot(requestDraft);
+            const response = await fetch(endpoint(
+                root.dataset.draftUrlTemplate,
+                'draft_id',
+                requestDraftId,
+            ), {
                 method: 'PATCH',
                 headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
                 body: JSON.stringify(requestBody),
             });
             const payload = await response.json().catch(() => ({}));
+            if (!requestIsCurrent()) return true;
             if (response.status === 409 && ['DRAFT_REVISION_CONFLICT', 'DRAFT_CONTENT_SCHEMA_CONFLICT'].includes(payload.error)) {
                 state.conflictServerDraft = payload.server_draft;
                 byId('conflict-local-revision').textContent = String(baseRevision);
@@ -459,20 +489,21 @@
                 return false;
             }
             if (!response.ok) throw new Error(payload.message || '草稿同步失败');
-            state.draft.revision = payload.revision;
-            state.draft.updated_at = payload.updated_at;
-            state.draft.source_type = payload.source_type;
-            const changedDuringRequest = contentSnapshot(state.draft) !== requestSnapshot;
+            requestDraft.revision = payload.revision;
+            requestDraft.updated_at = payload.updated_at;
+            requestDraft.source_type = payload.source_type;
+            const changedDuringRequest = contentSnapshot(requestDraft) !== requestSnapshot;
             if (!changedDuringRequest && requestIsV2 && Number(payload.content_schema_version) === 2) {
-                state.draft.content_schema_version = 2;
-                state.draft.document = cloneValue(payload.document);
-                state.draft.cover = normalizedCover(payload.cover);
+                requestDraft.content_schema_version = 2;
+                requestDraft.document = cloneValue(payload.document);
+                requestDraft.cover = normalizedCover(payload.cover);
             } else if (!changedDuringRequest && !requestIsV2) {
-                state.draft.cover = normalizedCover(payload.cover);
+                requestDraft.cover = normalizedCover(payload.cover);
             }
             renderCover();
             state.dirty = changedDuringRequest;
             await localDraftPut(changedDuringRequest);
+            if (!requestIsCurrent()) return true;
             updateDraftMeta();
             setSaveState(changedDuringRequest ? 'local' : 'synced', changedDuringRequest ? '本地已保存' : '已同步');
             if (changedDuringRequest) {
@@ -481,11 +512,25 @@
             }
             return !changedDuringRequest;
         } catch (error) {
+            if (!requestIsCurrent()) return true;
             setSaveState('error', '同步失败');
             setMessage('content-error', `${error.message}；本地恢复副本已保留。`);
             return false;
         } finally {
             state.saving = false;
+        }
+    }
+
+    function restoreSwitcherSelection(targets) {
+        state.switcherToggles = {};
+        state.switcherSelected = {};
+        state.switcherModes = {};
+        for (const target of targets || []) {
+            state.switcherToggles[target.platform] = true;
+            state.switcherModes[target.platform] = target.mode;
+            const selected = state.switcherSelected[target.platform]
+                || (state.switcherSelected[target.platform] = []);
+            if (!selected.includes(target.account_id)) selected.push(target.account_id);
         }
     }
 
@@ -502,15 +547,9 @@
             targets: Array.isArray(source.targets) ? source.targets : [],
         };
         // 回填滑块状态：已有目标 → 平台开关/账号勾选/模式
-        state.switcherToggles = {};
-        state.switcherSelected = {};
-        state.switcherModes = {};
-        for (const target of state.draft.targets) {
-            state.switcherToggles[target.platform] = true;
-            state.switcherModes[target.platform] = target.mode;
-            const selected = state.switcherSelected[target.platform] || (state.switcherSelected[target.platform] = []);
-            if (!selected.includes(target.account_id)) selected.push(target.account_id);
-        }
+        restoreSwitcherSelection(state.draft.targets);
+        state.targetSaveDesired = cloneValue(state.draft.targets);
+        state.targetSavePending = null;
         state.dirty = false;
         state.conflictServerDraft = null;
         state.coverAutoSelectionDismissed = false;
@@ -1227,6 +1266,75 @@
         return platform ? platform.display_name : id;
     }
 
+    function deliverablePlatforms() {
+        return state.platforms.filter(platform => platform.delivery_enabled);
+    }
+
+    function enabledPlatformIds() {
+        return deliverablePlatforms()
+            .filter(platform => state.switcherToggles[platform.id])
+            .map(platform => platform.id);
+    }
+
+    function selectedSwitcherAccountCount(platformIds = enabledPlatformIds()) {
+        return platformIds.reduce(
+            (total, platformId) => total + (state.switcherSelected[platformId] || []).length,
+            0,
+        );
+    }
+
+    function allLoadedAccountsSelected(platformIds) {
+        if (platformIds.some(platformId => state.switcherAccountLoadFailed[platformId])) {
+            return false;
+        }
+        const accountIds = platformIds.flatMap(platformId =>
+            (state.switcherAccounts[platformId] || []).map(account => account.account_id));
+        return accountIds.length > 0 && platformIds.every(platformId => {
+            const selected = state.switcherSelected[platformId] || [];
+            return (state.switcherAccounts[platformId] || [])
+                .every(account => selected.includes(account.account_id));
+        });
+    }
+
+    function updateBulkTargetControls() {
+        const deliverable = deliverablePlatforms();
+        const enabledIds = enabledPlatformIds();
+        const allPlatformsEnabled = deliverable.length > 0
+            && deliverable.every(platform => state.switcherToggles[platform.id]);
+        const platformButton = byId('toggle-all-platforms');
+        const accountButton = byId('toggle-all-accounts');
+        const selectedAccounts = selectedSwitcherAccountCount(enabledIds);
+        const loadedCount = enabledIds.filter(platformId =>
+            Array.isArray(state.switcherAccounts[platformId])
+            && !state.switcherAccountLoadFailed[platformId]).length;
+
+        if (platformButton) {
+            platformButton.disabled = deliverable.length === 0 || state.bulkAccountSelecting;
+            platformButton.textContent = allPlatformsEnabled
+                ? '取消全选所有平台' : '全选所有平台';
+        }
+        if (accountButton) {
+            accountButton.disabled = enabledIds.length === 0 || state.bulkAccountSelecting;
+            accountButton.textContent = allLoadedAccountsSelected(enabledIds)
+                ? '取消全选所有账户' : '全选所有账户';
+            accountButton.title = enabledIds.length === 0
+                ? '请先选择至少一个可投递平台'
+                : state.bulkAccountSelecting ? '正在加载可用账号' : '';
+        }
+        const summary = byId('target-selection-summary');
+        if (summary) {
+            summary.textContent = `已选平台 ${enabledIds.length} 个 · 账户 ${selectedAccounts} 个`;
+        }
+        const progress = byId('account-load-progress');
+        if (progress) {
+            progress.textContent = enabledIds.length === 0
+                ? '请先选择平台，再批量选择 VALID 账户'
+                : state.bulkAccountSelecting
+                    ? `正在加载账号 ${loadedCount}/${enabledIds.length}`
+                    : `账号已加载 ${loadedCount}/${enabledIds.length}`;
+        }
+    }
+
     // ===== iOS 风格目标选择器：竖排滑块 =====
 
     function switcherMode(platformId) {
@@ -1261,6 +1369,7 @@
         const summary = byId('platform-capability-summary');
         if (summary) summary.textContent = `${deliverable} 个可投递 · ${accountOnly} 个仅账号管理 · ${comingSoon} 个即将接入`;
         byId('targets-empty').classList.toggle('d-none', (state.draft?.targets || []).length > 0);
+        updateBulkTargetControls();
     }
 
     function platformCapability(platform) {
@@ -1325,6 +1434,15 @@
         toggle.addEventListener('change', () => togglePlatform(platform.id, toggle.checked));
         switchWrap.appendChild(toggle);
         head.appendChild(switchWrap);
+        if (canDeliver) {
+            head.classList.add('is-clickable');
+            head.addEventListener('click', event => {
+                if (event.target.closest(
+                    'button, input, a, label, .target-mode-switch, .target-platform-switch',
+                )) return;
+                togglePlatform(platform.id, !on);
+            });
+        }
         row.appendChild(head);
 
         // 展开区：账号多选
@@ -1396,28 +1514,60 @@
         });
     }
 
-    async function loadSwitcherAccounts(platformId) {
+    function reconcileLoadedAccountSelection(platformId, accounts, { apply = true } = {}) {
+        const selected = state.switcherSelected[platformId] || [];
+        const validIds = new Set(accounts.map(account => account.account_id));
+        const invalidIds = selected.filter(accountId => !validIds.has(accountId));
+        if (apply) {
+            state.switcherSelected[platformId] = selected
+                .filter(accountId => validIds.has(accountId));
+        }
+        if (invalidIds.length) {
+            setMessage(
+                'target-builder-error',
+                `${platformLabel(platformId)}有 ${invalidIds.length} 个历史目标账号当前不是 VALID，已从本次选择中移除；历史投递记录不受影响。`,
+            );
+        }
+        return invalidIds;
+    }
+
+    async function loadSwitcherAccounts(platformId, { render = true } = {}) {
         const sequence = (state.switcherSequences[platformId] || 0) + 1;
         state.switcherSequences[platformId] = sequence;
         state.switcherControllers[platformId]?.abort();
         const controller = new AbortController();
         state.switcherControllers[platformId] = controller;
+        if (state.switcherAccounts[platformId] === undefined) {
+            state.switcherAccounts[platformId] = null;
+        }
+        updateBulkTargetControls();
         try {
             const url = endpoint(root.dataset.accountsUrlTemplate, 'platform', platformId);
             const payload = await jsonResponse(await fetch(url, { signal: controller.signal, headers: { Accept: 'application/json' } }));
-            if (sequence !== state.switcherSequences[platformId]) return;
+            if (sequence !== state.switcherSequences[platformId]) return null;
             if (payload.platform && payload.platform !== platformId) throw new Error('账号响应与所选平台不匹配');
             state.switcherAccounts[platformId] = (Array.isArray(payload.accounts) ? payload.accounts : []).filter(account => account.session_status === 'VALID');
-            state.switcherSelected[platformId] = state.switcherSelected[platformId] || [];
-            reRenderSwitcherRow(platformId);
+            state.switcherAccountLoadFailed[platformId] = false;
+            const invalidIds = reconcileLoadedAccountSelection(
+                platformId,
+                state.switcherAccounts[platformId],
+                { apply: render },
+            );
+            if (render) reRenderSwitcherRow(platformId);
+            if (render && invalidIds.length) rebuildTargets();
         } catch (error) {
-            if (error.name === 'AbortError' || sequence !== state.switcherSequences[platformId]) return;
+            if (error.name === 'AbortError' || sequence !== state.switcherSequences[platformId]) return null;
             state.switcherAccounts[platformId] = [];
+            state.switcherAccountLoadFailed[platformId] = true;
             setMessage('target-builder-error', `加载${platformLabel(platformId)}账号失败：${error.message || '未知错误'}`);
-            reRenderSwitcherRow(platformId);
+            if (render) reRenderSwitcherRow(platformId);
         } finally {
             if (state.switcherControllers[platformId] === controller) delete state.switcherControllers[platformId];
+            updateBulkTargetControls();
         }
+        return state.switcherAccountLoadFailed[platformId]
+            ? null
+            : (state.switcherAccounts[platformId] || []);
     }
 
     function reRenderSwitcherRow(platformId) {
@@ -1426,6 +1576,84 @@
         const row = list.querySelector(`.target-platform-row[data-platform-id="${platformId}"]`);
         const platform = state.platforms.find(item => item.id === platformId);
         if (row && platform) row.replaceWith(switcherRow(platform));
+        updateBulkTargetControls();
+    }
+
+    function toggleAllPlatforms() {
+        const deliverable = deliverablePlatforms();
+        if (!deliverable.length) return;
+        const turnOff = deliverable.every(platform => state.switcherToggles[platform.id]);
+        const nextToggles = { ...state.switcherToggles };
+        const nextSelected = { ...state.switcherSelected };
+        for (const platform of deliverable) {
+            nextToggles[platform.id] = !turnOff;
+            if (turnOff) {
+                state.switcherControllers[platform.id]?.abort();
+                delete state.switcherControllers[platform.id];
+                if (state.switcherAccounts[platform.id] === null) {
+                    delete state.switcherAccounts[platform.id];
+                }
+                if (state.switcherAccountLoadFailed[platform.id]) {
+                    delete state.switcherAccounts[platform.id];
+                    delete state.switcherAccountLoadFailed[platform.id];
+                }
+                nextSelected[platform.id] = [];
+            }
+        }
+        state.switcherToggles = nextToggles;
+        state.switcherSelected = nextSelected;
+        renderTargetSwitcher();
+        rebuildTargets();
+    }
+
+    async function toggleAllAccounts() {
+        const platformIds = enabledPlatformIds();
+        if (!platformIds.length || state.bulkAccountSelecting) return;
+        const alreadySelected = platformIds.every(platformId =>
+            Array.isArray(state.switcherAccounts[platformId])
+            && !state.switcherAccountLoadFailed[platformId])
+            && allLoadedAccountsSelected(platformIds);
+        if (alreadySelected) {
+            const nextSelected = { ...state.switcherSelected };
+            for (const platformId of platformIds) nextSelected[platformId] = [];
+            state.switcherSelected = nextSelected;
+            renderTargetSwitcher();
+            rebuildTargets();
+            return;
+        }
+
+        state.bulkAccountSelecting = true;
+        updateBulkTargetControls();
+        let allAccountsLoaded = true;
+        try {
+            const loaded = await Promise.all(platformIds.map(async platformId => {
+                if (Array.isArray(state.switcherAccounts[platformId])
+                    && !state.switcherAccountLoadFailed[platformId]) {
+                    return [platformId, state.switcherAccounts[platformId]];
+                }
+                const accounts = await loadSwitcherAccounts(platformId, { render: false });
+                return [platformId, accounts];
+            }));
+            allAccountsLoaded = loaded.every(([, accounts]) => Array.isArray(accounts));
+            if (allAccountsLoaded) {
+                const nextSelected = { ...state.switcherSelected };
+                for (const [platformId, accounts] of loaded) {
+                    nextSelected[platformId] = accounts.map(account => account.account_id);
+                }
+                state.switcherSelected = nextSelected;
+            }
+        } finally {
+            state.bulkAccountSelecting = false;
+        }
+        renderTargetSwitcher();
+        if (!allAccountsLoaded) {
+            setMessage(
+                'target-builder-error',
+                '部分平台账号加载失败，本次全选未保存；请检查账号状态后重试。',
+            );
+            return;
+        }
+        rebuildTargets();
     }
 
     function togglePlatform(platformId, checked) {
@@ -1436,6 +1664,10 @@
             state.switcherControllers[platformId]?.abort();
             delete state.switcherControllers[platformId];
             if (state.switcherAccounts[platformId] === null) delete state.switcherAccounts[platformId];
+            if (state.switcherAccountLoadFailed[platformId]) {
+                delete state.switcherAccounts[platformId];
+                delete state.switcherAccountLoadFailed[platformId];
+            }
             state.switcherSelected[platformId] = [];
         }
         reRenderSwitcherRow(platformId);
@@ -1450,6 +1682,7 @@
             const index = selected.indexOf(accountId);
             if (index >= 0) selected.splice(index, 1);
         }
+        updateBulkTargetControls();
         rebuildTargets();
     }
 
@@ -1467,40 +1700,177 @@
             if (!platform.delivery_enabled || !state.switcherToggles[platform.id]) continue;
             const mode = switcherMode(platform.id);
             const accounts = state.switcherAccounts[platform.id] || [];
+            const accountsLoading = !Array.isArray(state.switcherAccounts[platform.id])
+                || state.switcherAccountLoadFailed[platform.id];
+            const existingTargets = (state.draft.targets || [])
+                .filter(target => target.platform === platform.id);
             for (const accountId of state.switcherSelected[platform.id] || []) {
                 const account = accounts.find(item => item.account_id === accountId);
+                const existingTarget = existingTargets
+                    .find(target => target.account_id === accountId);
+                if (!account && accountsLoading && existingTarget) {
+                    targets.push({
+                        ...existingTarget,
+                        mode,
+                    });
+                    continue;
+                }
                 if (!account) continue;
-                targets.push({ platform: platform.id, account_id: accountId, mode, persist_login: Boolean(account.persist_login) });
+                targets.push({
+                    target_id: existingTarget?.target_id,
+                    platform: platform.id,
+                    account_id: accountId,
+                    mode,
+                    persist_login: Boolean(account.persist_login),
+                });
             }
         }
-        const current = state.draft.targets || [];
-        const same = current.length === targets.length && current.every((target, index) =>
+        const desired = state.targetSaveDesired || state.draft.targets || [];
+        const same = desired.length === targets.length && desired.every((target, index) =>
             target.platform === targets[index].platform
             && target.account_id === targets[index].account_id
             && target.mode === targets[index].mode);
         if (!same) saveTargets(targets);
     }
 
-    async function saveTargets(targets) {
-        if (!(await saveDraftNow()) || state.conflictServerDraft) return false;
-        if (!(await createPersistedDraft()) || state.conflictServerDraft) return false;
-        try {
-            const response = await fetch(endpoint(root.dataset.targetsUrlTemplate, 'draft_id', state.draft.draft_id), {
-                method: 'PUT', headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
-                body: JSON.stringify({ revision: state.draft.revision, targets: targets.map(target => ({ target_id: target.target_id || undefined, platform: target.platform, account_id: target.account_id, mode: target.mode, persist_login: target.persist_login })) }),
+    function saveTargets(targets) {
+        state.targetSaveDesired = cloneValue(targets);
+        state.targetSavePending = cloneValue(targets);
+        if (!state.targetSavePromise) {
+            state.targetSavePromise = drainTargetSaveQueue().finally(() => {
+                state.targetSavePromise = null;
             });
-            const payload = await response.json().catch(() => ({}));
-            if (response.status === 409 && payload.error === 'DRAFT_REVISION_CONFLICT') {
-                state.conflictServerDraft = payload.server_draft; byId('conflict-local-revision').textContent = String(state.draft.revision); byId('conflict-server-revision').textContent = String(payload.server_draft?.revision ?? '—'); coreModal('conflict-modal').show(); return false;
+        }
+        return state.targetSavePromise;
+    }
+
+    async function drainTargetSaveQueue() {
+        let saved = true;
+        while (state.targetSavePending !== null) {
+            const targets = state.targetSavePending;
+            state.targetSavePending = null;
+            saved = await persistTargets(targets);
+            if (!saved) {
+                state.targetSavePending = null;
+                const serverTargets = state.conflictServerDraft?.targets
+                    || state.draft?.targets
+                    || [];
+                state.targetSaveDesired = cloneValue(serverTargets);
+                restoreSwitcherSelection(serverTargets);
+                renderTargetSwitcher();
+                setMessage(
+                    'target-builder-error',
+                    '投递目标未保存，已恢复到最后一次服务端状态；请处理提示后重试。',
+                );
+                break;
             }
-            if (!response.ok) throw new Error(payload.message || '投递目标保存失败');
-            state.draft.targets = payload.targets || [];
-            state.draft.revision = payload.revision;
-            state.draft.updated_at = payload.updated_at;
-            invalidatePlan(); renderTargets(); updateDraftMeta(); await localDraftPut(false); setSaveState('synced', '已同步');
-            byId('targets-empty').classList.toggle('d-none', state.draft.targets.length > 0);
-            return true;
-        } catch (error) { setMessage('target-builder-error', error.message || '投递目标保存失败'); return false; }
+        }
+        return saved;
+    }
+
+    async function flushTargetSaveQueue() {
+        if (state.targetSavePending !== null && !state.targetSavePromise) {
+            saveTargets(state.targetSavePending);
+        }
+        return state.targetSavePromise ? state.targetSavePromise : true;
+    }
+
+    async function persistTargets(targets) {
+        const initialDraftId = state.draft?.draft_id;
+        if (!(await saveDraftNow()) || state.conflictServerDraft) return false;
+        if (initialDraftId && state.draft?.draft_id !== initialDraftId) return true;
+        if (!state.draft?.draft_id) {
+            const expectedDraft = state.draft;
+            const created = await enqueueDraftMutation(() => {
+                if (state.draft !== expectedDraft) return false;
+                return createPersistedDraft();
+            });
+            if (!created || state.conflictServerDraft) return false;
+        }
+        const requestDraftId = state.draft.draft_id;
+        const requestedTargets = cloneValue(targets);
+        return enqueueDraftMutation(async () => {
+            if (state.draft?.draft_id !== requestDraftId) return true;
+            const requestRevision = state.draft.revision;
+            state.targetSaving = true;
+            try {
+                const response = await fetch(endpoint(
+                    root.dataset.targetsUrlTemplate,
+                    'draft_id',
+                    requestDraftId,
+                ), {
+                    method: 'PUT',
+                    headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+                    body: JSON.stringify({
+                        revision: requestRevision,
+                        targets: requestedTargets.map(target => ({
+                            target_id: target.target_id || undefined,
+                            platform: target.platform,
+                            account_id: target.account_id,
+                            mode: target.mode,
+                            persist_login: target.persist_login,
+                        })),
+                    }),
+                });
+                const payload = await response.json().catch(() => ({}));
+                if (state.draft?.draft_id !== requestDraftId) return true;
+                if (response.status === 409 && payload.error === 'DRAFT_REVISION_CONFLICT') {
+                    state.conflictServerDraft = payload.server_draft;
+                    byId('conflict-local-revision').textContent = String(requestRevision);
+                    byId('conflict-server-revision').textContent = String(
+                        payload.server_draft?.revision ?? '—',
+                    );
+                    coreModal('conflict-modal').show();
+                    return false;
+                }
+                if (!response.ok) throw new Error(payload.message || '投递目标保存失败');
+                state.draft.targets = payload.targets || [];
+                state.draft.revision = payload.revision;
+                state.draft.updated_at = payload.updated_at;
+                invalidatePlan();
+                renderTargets();
+                updateDraftMeta();
+                await localDraftPut(state.dirty);
+                setSaveState(
+                    state.dirty ? 'local' : 'synced',
+                    state.dirty ? '本地已保存' : '已同步',
+                );
+                byId('targets-empty').classList.toggle(
+                    'd-none',
+                    state.draft.targets.length > 0,
+                );
+                return true;
+            } catch (error) {
+                if (state.draft?.draft_id !== requestDraftId) return true;
+                setMessage('target-builder-error', error.message || '投递目标保存失败');
+                return false;
+            } finally {
+                state.targetSaving = false;
+                if (state.draft?.draft_id === requestDraftId
+                    && state.dirty
+                    && !state.conflictServerDraft) {
+                    clearTimeout(state.saveTimer);
+                    state.saveTimer = setTimeout(() => saveDraftNow(), 50);
+                }
+            }
+        });
+    }
+
+    function updateCreatePlanButton() {
+        const button = byId('create-plan');
+        if (!button || state.planBusy) return;
+        const targets = state.draft?.targets || [];
+        const drafts = targets.filter(target => target.mode === 'DRAFT').length;
+        const publishes = targets.filter(target => target.mode === 'PUBLISH').length;
+        if (publishes > 0 && drafts > 0) {
+            button.textContent = `保存到 ${drafts} 个草稿箱，并确认 ${publishes} 个公开发布目标`;
+        } else if (publishes > 0) {
+            button.textContent = `继续确认 ${publishes} 个公开发布目标`;
+        } else if (drafts > 0) {
+            button.textContent = `保存到 ${drafts} 个草稿箱`;
+        } else {
+            button.textContent = '选择投递目标后继续';
+        }
     }
 
     function renderTargets() {
@@ -1523,6 +1893,7 @@
         }));
         byId('targets-empty').classList.toggle('d-none', state.draft.targets.length > 0);
         byId('target-count').textContent = `${state.draft.targets.length} 个目标`;
+        updateCreatePlanButton();
         updateDraftMeta();
     }
 
@@ -1564,6 +1935,7 @@
     }
 
     async function createPlan() {
+        if (!(await flushTargetSaveQueue()) || state.conflictServerDraft) return;
         const issues = validateStudio();
         if (issues.length) { showValidation(issues); return; }
         byId('validation-summary').classList.add('d-none'); setMessage('execution-error', '');
@@ -1573,15 +1945,31 @@
         createButton.setAttribute('aria-busy', 'true');
         createButton.disabled = true;
         createButton.textContent = '正在生成投递计划…';
+        let executeImmediately = false;
         try {
             const response = await fetch(endpoint(root.dataset.planUrlTemplate, 'draft_id', state.draft.draft_id), { method: 'POST', headers: { 'Content-Type': 'application/json', Accept: 'application/json' }, body: JSON.stringify({ revision: state.draft.revision }) });
-            state.plan = await jsonResponse(response); renderPlan(); renderPlanReview(); coreModal('plan-review-modal').show();
+            state.plan = await jsonResponse(response);
+            renderPlan();
+            if (state.plan.targets.some(isFormatBlockedTarget)) {
+                renderPlanReview();
+                coreModal('plan-review-modal').show();
+            } else {
+                executeImmediately = true;
+            }
         } catch (error) { setMessage('execution-error', error.message || '投递计划生成失败'); }
         finally {
             state.planBusy = false;
             createButton.removeAttribute('aria-busy');
             createButton.disabled = false;
-            createButton.textContent = '检查并继续';
+            updateCreatePlanButton();
+        }
+        if (executeImmediately) {
+            const executable = executablePlanTargets();
+            await executePlan({
+                target_ids: executable.map(target => target.target_id),
+                draft_batch_confirmed: true,
+                confirmations: {},
+            }, { messageTarget: 'execution-error' });
         }
     }
 
@@ -1598,16 +1986,15 @@
         }));
         const blockedTargets = state.plan.targets.filter(isFormatBlockedTarget);
         const executableTargets = executablePlanTargets();
-        const hasDraft = executableTargets.some(target => target.mode === 'DRAFT');
-        byId('draft-confirmation-row').classList.toggle('d-none', !hasDraft);
-        byId('draft-batch-confirmed').checked = false;
         const executeButton = byId('execute-plan');
-        executeButton.disabled = executableTargets.length === 0;
-        executeButton.setAttribute('aria-disabled', String(executableTargets.length === 0));
+        executeButton.disabled = blockedTargets.length > 0 || executableTargets.length === 0;
+        executeButton.setAttribute('aria-disabled', String(executeButton.disabled));
+        executeButton.textContent = blockedTargets.length > 0
+            ? '当前计划不可执行' : '创建执行单';
         setMessage('plan-format-warning', blockedTargets.length
             ? blockedTargets.length === state.plan.targets.length
                 ? '当前计划的全部目标均待格式复核，已阻止执行；请先调整内容或完成对应平台格式能力验收。'
-                : `${blockedTargets.length} 个目标待格式复核，将不会创建执行单；其余可执行目标仍可继续。`
+                : `${blockedTargets.length} 个目标待格式复核；为避免部分误投，本计划不会创建任何执行单。`
             : '');
         setMessage('plan-review-error', '');
     }
@@ -1699,35 +2086,48 @@
         updateStudioProgress();
     }
 
-    async function executePlan(payload, { fromReview = false } = {}) {
+    async function executePlan(
+        payload,
+        { fromReview = false, messageTarget = null, manageFollowup = true } = {},
+    ) {
         if (!state.plan || state.planBusy) return;
+        const messageId = messageTarget
+            || (fromReview ? 'plan-review-error' : 'publish-confirm-error');
+        if (state.plan.targets.some(isFormatBlockedTarget)) {
+            setMessage(messageId, '当前计划存在待格式复核目标，系统不会调用执行接口。');
+            return false;
+        }
         const executable = executablePlanTargets();
         if (!executable.length) {
-            setMessage(fromReview ? 'plan-review-error' : 'publish-confirm-error', '当前没有可执行目标：所有目标均待格式复核，系统不会调用执行接口。');
+            setMessage(messageId, '当前没有可执行目标：所有目标均待格式复核，系统不会调用执行接口。');
             return false;
         }
         const executableIds = new Set(executable.map(target => target.target_id));
         const requestedIds = Array.isArray(payload.target_ids) ? payload.target_ids : [...executableIds];
         const safeTargetIds = requestedIds.filter(targetId => executableIds.has(targetId));
         if (!safeTargetIds.length) {
-            setMessage(fromReview ? 'plan-review-error' : 'publish-confirm-error', '所选目标当前不可执行，系统不会调用执行接口。');
+            setMessage(messageId, '所选目标当前不可执行，系统不会调用执行接口。');
             return false;
         }
         const safePayload = { ...payload, target_ids: safeTargetIds };
-        state.planBusy = true; setMessage(fromReview ? 'plan-review-error' : 'publish-confirm-error', '');
+        state.planBusy = true; setMessage(messageId, '');
         try {
             const response = await fetch(endpoint(root.dataset.planExecuteUrlTemplate, 'plan_id', state.plan.plan_id), { method: 'POST', headers: { 'Content-Type': 'application/json', Accept: 'application/json' }, body: JSON.stringify(safePayload) });
             const result = await response.json().catch(() => ({}));
             if (!response.ok && response.status !== 428) throw new Error(result.message || '投递计划执行失败');
             state.plan = result; state.pollCount = 0; renderPlan();
             if (fromReview) coreModal('plan-review-modal').hide();
-            const confirmations = result.targets.filter(target => target.confirmation_required && target.confirmation_token);
-            if (confirmations.length) {
-                state.pendingPublishTargets = confirmations.slice(); showNextPublishConfirmation();
-            } else if (hasInFlightTarget(result)) {
-                schedulePlanPoll();
+            if (manageFollowup) {
+                const confirmations = result.targets.filter(target =>
+                    target.confirmation_required && target.confirmation_token);
+                if (confirmations.length) {
+                    state.pendingPublishTargets = confirmations.slice();
+                    showNextPublishConfirmation();
+                } else if (hasInFlightTarget(result)) {
+                    schedulePlanPoll();
+                }
             }
-        } catch (error) { setMessage(fromReview ? 'plan-review-error' : 'publish-confirm-error', error.message || '投递计划执行失败'); return false; }
+        } catch (error) { setMessage(messageId, error.message || '投递计划执行失败'); return false; }
         finally { state.planBusy = false; }
         return true;
     }
@@ -1746,9 +2146,20 @@
     async function confirmPublishTarget() {
         const target = state.activePublishTarget;
         if (!target) return;
-        await executePlan({ target_ids: [target.target_id], draft_batch_confirmed: true, confirmations: { [target.target_id]: target.confirmation_token } });
+        const accepted = await executePlan({
+            target_ids: [target.target_id],
+            draft_batch_confirmed: true,
+            confirmations: { [target.target_id]: target.confirmation_token },
+        }, { manageFollowup: false });
+        if (!accepted) return;
         coreModal('publish-confirm-modal').hide();
-        if (state.pendingPublishTargets.length) setTimeout(showNextPublishConfirmation, 250);
+        state.pendingPublishTargets = state.plan.targets.filter(targetItem =>
+            targetItem.confirmation_required && targetItem.confirmation_token);
+        if (state.pendingPublishTargets.length) {
+            setTimeout(showNextPublishConfirmation, 250);
+        } else if (hasInFlightTarget(state.plan)) {
+            schedulePlanPoll();
+        }
     }
 
     function schedulePlanPoll() {
@@ -1984,6 +2395,8 @@
             if (images.length) { uploadAssets(images); return; }
             setMessage('content-error', '支持拖入 Word 文档(.docx) 或图片文件。');
         });
+        byId('toggle-all-platforms').addEventListener('click', toggleAllPlatforms);
+        byId('toggle-all-accounts').addEventListener('click', toggleAllAccounts);
         byId('create-plan').addEventListener('click', createPlan);
         byId('save-draft-now').addEventListener('click', () => saveDraftNow());
         byId('execute-plan').addEventListener('click', () => {
@@ -1992,15 +2405,9 @@
                 setMessage('plan-review-error', '当前没有可执行目标：所有目标均待格式复核。');
                 return;
             }
-            const hasDraft = executable.some(target => target.mode === 'DRAFT');
-            if (hasDraft && !byId('draft-batch-confirmed').checked) {
-                setMessage('plan-review-error', '请先勾选平台草稿批量摘要确认。');
-                byId('draft-batch-confirmed').focus();
-                return;
-            }
             executePlan({
                 target_ids: executable.map(target => target.target_id),
-                draft_batch_confirmed: !hasDraft || byId('draft-batch-confirmed').checked,
+                draft_batch_confirmed: true,
                 confirmations: {},
             }, { fromReview: true });
         });

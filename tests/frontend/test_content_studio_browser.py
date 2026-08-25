@@ -4,6 +4,7 @@
 它不登录、不创建 DeliveryPlan，也不触发平台操作。
 """
 
+import asyncio
 import json
 import os
 from pathlib import Path
@@ -167,15 +168,24 @@ async def test_account_target_selection_persists_without_creating_plan() -> None
         )
         page = await browser.new_page(viewport={"width": 390, "height": 844})
         execute_requests: list[str] = []
+        target_put_requests: list[str] = []
         page.on(
             "request",
             lambda request: execute_requests.append(request.url)
             if "/delivery-plans" in request.url
             else None,
         )
+        page.on(
+            "request",
+            lambda request: target_put_requests.append(request.url)
+            if request.method == "PUT"
+            and urlparse(request.url).path.endswith(f"/{draft_id}/targets")
+            else None,
+        )
         try:
             await page.goto(f"{BASE_URL}/upload?draft_id={draft_id}", wait_until="networkidle")
             await page.locator("#studio-workspace:not(.d-none)").wait_for()
+            assert await page.locator("#toggle-all-accounts").is_disabled()
             xhh_row = page.locator('.target-platform-row[data-platform-id="xiaoheihe"]')
             xhh_switch = xhh_row.locator('input[role="switch"]')
             assert not await xhh_switch.is_checked()
@@ -188,26 +198,374 @@ async def test_account_target_selection_persists_without_creating_plan() -> None
                 [await account_checks.nth(index).is_checked() for index in range(account_count)]
             )
 
-            selected = valid_accounts[0]
-            await xhh_row.locator(
-                f'input[aria-label="选择账号 {selected["display_name"]}"]'
-            ).check()
+            assert not await page.locator("#toggle-all-accounts").is_disabled()
+            await page.locator("#toggle-all-accounts").click()
             await page.locator("#targets-list .target-row").wait_for()
-            assert await page.locator("#target-count").text_content() == "1 个目标"
+            await page.wait_for_function(
+                "count => document.querySelector('#target-count')?.textContent "
+                "=== `${count} 个目标`",
+                account_count,
+            )
+            assert len(target_put_requests) == 1
+            assert await page.locator("#toggle-all-accounts").text_content() == "取消全选所有账户"
+            account_card_box = await xhh_row.locator(".target-account-check").first.bounding_box()
+            platform_head_box = await xhh_row.locator(".target-platform-head").bounding_box()
+            assert account_card_box and account_card_box["height"] >= 44
+            assert platform_head_box and platform_head_box["height"] >= 44
+
+            await page.locator("#toggle-all-accounts").click()
+            await page.wait_for_function(
+                "() => document.querySelector('#target-count')?.textContent === '0 个目标'"
+            )
+            assert len(target_put_requests) == 2
+
+            await page.locator("#toggle-all-accounts").click()
+            await page.wait_for_function(
+                "count => document.querySelector('#target-count')?.textContent "
+                "=== `${count} 个目标`",
+                account_count,
+            )
+            assert len(target_put_requests) == 3
 
             await page.reload(wait_until="networkidle")
             await page.locator("#studio-workspace:not(.d-none)").wait_for()
-            assert await page.locator("#target-count").text_content() == "1 个目标"
-            assert selected["display_name"] in await page.locator(
-                "#targets-list"
-            ).text_content()
+            assert await page.locator("#target-count").text_content() == f"{account_count} 个目标"
+            target_text = await page.locator("#targets-list").text_content()
+            assert all(account["display_name"] in target_text for account in valid_accounts)
             assert execute_requests == []
 
             persisted = await api.get(f"/api/content-drafts/{draft_id}")
             assert persisted.ok
             targets = (await persisted.json())["targets"]
-            assert len(targets) == 1
-            assert targets[0]["account_id"] == selected["account_id"]
+            assert len(targets) == account_count
+            assert {target["account_id"] for target in targets} == {
+                account["account_id"] for account in valid_accounts
+            }
+        finally:
+            await page.close()
+            await browser.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(not BASE_URL, reason="需要显式隔离 QA URL")
+async def test_delayed_patch_cannot_overwrite_draft_opened_by_browser_back() -> None:
+    executable = Path(BROWSER_PATH) if BROWSER_PATH else None
+    if executable and not executable.is_file():
+        pytest.fail(f"Chromium 不存在: {executable}")
+
+    patch_started = asyncio.Event()
+    release_patch = asyncio.Event()
+
+    def draft_payload(draft_id: str, title: str, revision: int) -> dict:
+        return {
+            "draft_id": draft_id,
+            "source_type": "BLANK",
+            "source_ref": None,
+            "title": title,
+            "content_schema_version": 1,
+            "document": None,
+            "blocks": [{
+                "block_id": f"{draft_id}-text",
+                "type": "text",
+                "text": f"{title}正文",
+                "position": 0,
+            }],
+            "cover": {"strategy": "NONE", "asset_id": None},
+            "status": "ACTIVE",
+            "revision": revision,
+            "targets": [],
+            "created_at": "2026-08-25T00:00:00Z",
+            "updated_at": "2026-08-25T00:00:00Z",
+        }
+
+    draft_a = draft_payload("qa-patch-a", "草稿 A", 3)
+    draft_b = draft_payload("qa-patch-b", "草稿 B", 7)
+
+    async with async_playwright() as playwright:
+        browser = await playwright.chromium.launch(
+            headless=True,
+            executable_path=str(executable) if executable else None,
+        )
+        page = await browser.new_page(viewport={"width": 1024, "height": 768})
+
+        async def platforms_route(route) -> None:
+            await route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps({"platforms": []}),
+            )
+
+        async def list_route(route) -> None:
+            await route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps({"drafts": [draft_a, draft_b]}, ensure_ascii=False),
+            )
+
+        async def draft_a_route(route, request) -> None:
+            if request.method == "PATCH":
+                patch_started.set()
+                await release_patch.wait()
+                response = {
+                    **draft_a,
+                    "title": "草稿 A 已保存",
+                    "source_type": "DOCX",
+                    "revision": 99,
+                }
+                await route.fulfill(
+                    status=200,
+                    content_type="application/json",
+                    body=json.dumps(response, ensure_ascii=False),
+                )
+                return
+            await route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps(draft_a, ensure_ascii=False),
+            )
+
+        async def draft_b_route(route) -> None:
+            await route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps(draft_b, ensure_ascii=False),
+            )
+
+        await page.route("**/api/platforms", platforms_route)
+        await page.route("**/api/content-drafts?*", list_route)
+        await page.route("**/api/content-drafts/qa-patch-a", draft_a_route)
+        await page.route("**/api/content-drafts/qa-patch-b", draft_b_route)
+        try:
+            await page.goto(
+                f"{BASE_URL}/upload?draft_id={draft_b['draft_id']}",
+                wait_until="networkidle",
+            )
+            await page.locator("#open-source-library").click()
+            item_a = page.locator(".library-item").filter(has_text="草稿 A")
+            await item_a.get_by_role("button", name="继续编辑").click()
+            await page.wait_for_function(
+                "draftId => new URL(location.href).searchParams.get('draft_id') === draftId",
+                arg=draft_a["draft_id"],
+            )
+
+            await page.locator("#draft-title").fill("草稿 A 修改中")
+            await page.locator("#save-draft-now:not(:disabled)").click()
+            await asyncio.wait_for(patch_started.wait(), timeout=5)
+
+            await page.evaluate("history.back()")
+            await page.wait_for_function(
+                "draftId => new URL(location.href).searchParams.get('draft_id') === draftId",
+                arg=draft_b["draft_id"],
+            )
+            await page.wait_for_function(
+                "title => document.querySelector('#draft-title')?.value === title",
+                arg=draft_b["title"],
+            )
+            source_before = await page.locator("#side-draft-source").text_content()
+            release_patch.set()
+            await page.wait_for_timeout(150)
+
+            assert await page.locator("#draft-title").input_value() == draft_b["title"]
+            assert await page.locator("#side-revision").text_content() == "7"
+            assert await page.locator("#side-draft-source").text_content() == source_before
+            assert await page.locator("#save-indicator-text").text_content() == "已同步"
+        finally:
+            release_patch.set()
+            await page.close()
+            await browser.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(not BASE_URL, reason="需要显式隔离 QA URL")
+async def test_three_publish_confirmations_advance_exactly_once() -> None:
+    executable = Path(BROWSER_PATH) if BROWSER_PATH else None
+    if executable and not executable.is_file():
+        pytest.fail(f"Chromium 不存在: {executable}")
+
+    draft_id = "qa-confirm-draft"
+    plan_id = "qa-confirm-plan"
+    account_ids = ["account-a", "account-b", "account-c"]
+    account_names = ["确认账号 A", "确认账号 B", "确认账号 C"]
+    execute_payloads: list[dict] = []
+
+    def target_payload(index: int, status: str, *, confirm: bool = False) -> dict:
+        target = {
+            "target_id": f"target-{index}",
+            "platform": "xiaoheihe",
+            "account_id": account_ids[index],
+            "account_display_name": account_names[index],
+            "mode": "PUBLISH",
+            "status": status,
+            "error_code": None,
+            "error_message": None,
+            "operation_id": None,
+        }
+        if confirm:
+            target.update({
+                "confirmation_required": True,
+                "confirmation_token": f"token-{index}",
+                "expires_at": None,
+            })
+        return target
+
+    async with async_playwright() as playwright:
+        browser = await playwright.chromium.launch(
+            headless=True,
+            executable_path=str(executable) if executable else None,
+        )
+        page = await browser.new_page(viewport={"width": 1024, "height": 768})
+
+        async def draft_route(route) -> None:
+            await route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps({
+                    "draft_id": draft_id,
+                    "source_type": "BLANK",
+                    "source_ref": None,
+                    "title": "三个公开目标逐条确认",
+                    "content_schema_version": 1,
+                    "document": None,
+                    "blocks": [{
+                        "block_id": "qa-confirm-text",
+                        "type": "text",
+                        "text": "只验证确认队列，不调用任何真实平台。",
+                        "position": 0,
+                    }],
+                    "cover": {"strategy": "NONE", "asset_id": None},
+                    "status": "ACTIVE",
+                    "revision": 1,
+                    "targets": [{
+                        "target_id": f"target-{index}",
+                        "platform": "xiaoheihe",
+                        "account_id": account_id,
+                        "account_display_name": account_names[index],
+                        "mode": "PUBLISH",
+                        "persist_login": False,
+                    } for index, account_id in enumerate(account_ids)],
+                    "created_at": None,
+                    "updated_at": None,
+                }, ensure_ascii=False),
+            )
+
+        async def platforms_route(route) -> None:
+            await route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps({"platforms": [{
+                    "id": "xiaoheihe",
+                    "display_name": "小黑盒",
+                    "delivery_enabled": True,
+                    "account_enabled": True,
+                    "sort_order": 1,
+                    "logo_url": "",
+                }]}, ensure_ascii=False),
+            )
+
+        async def accounts_route(route) -> None:
+            await route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps({
+                    "platform": "xiaoheihe",
+                    "accounts": [{
+                        "account_id": account_id,
+                        "display_name": account_names[index],
+                        "masked_platform_user_id": f"***{index}",
+                        "session_status": "VALID",
+                        "persist_login": False,
+                    } for index, account_id in enumerate(account_ids)],
+                }, ensure_ascii=False),
+            )
+
+        async def plan_route(route) -> None:
+            await route.fulfill(
+                status=201,
+                content_type="application/json",
+                body=json.dumps({
+                    "plan_id": plan_id,
+                    "status": "CREATING",
+                    "targets": [
+                        target_payload(index, "CREATING") for index in range(3)
+                    ],
+                }, ensure_ascii=False),
+            )
+
+        async def execute_route(route, request) -> None:
+            execute_payloads.append(json.loads(request.post_data or "{}"))
+            confirmed = max(0, len(execute_payloads) - 1)
+            targets = [
+                target_payload(
+                    index,
+                    "QUEUED" if index < confirmed else "CONFIRMATION_REQUIRED",
+                    confirm=index >= confirmed,
+                )
+                for index in range(3)
+            ]
+            await route.fulfill(
+                status=428 if confirmed < 3 else 200,
+                content_type="application/json",
+                body=json.dumps({
+                    "plan_id": plan_id,
+                    "status": (
+                        "CONFIRMATION_REQUIRED" if confirmed < 3 else "RUNNING"
+                    ),
+                    "targets": targets,
+                }, ensure_ascii=False),
+            )
+
+        await page.route(f"**/api/content-drafts/{draft_id}", draft_route)
+        await page.route("**/api/platforms", platforms_route)
+        await page.route(
+            "**/api/platforms/xiaoheihe/accounts?usable=true",
+            accounts_route,
+        )
+        await page.route(
+            f"**/api/content-drafts/{draft_id}/delivery-plans",
+            plan_route,
+        )
+        await page.route(
+            f"**/api/delivery-plans/{plan_id}/execute",
+            execute_route,
+        )
+        try:
+            await page.goto(
+                f"{BASE_URL}/upload?draft_id={draft_id}",
+                wait_until="networkidle",
+            )
+            await page.locator("#studio-workspace:not(.d-none)").wait_for()
+            await page.locator("#create-plan").click()
+            modal = page.locator("#publish-confirm-modal.show")
+            await modal.wait_for()
+            assert "确认账号 A" in await page.locator(
+                "#publish-target-summary"
+            ).inner_text()
+
+            for expected_name in account_names[1:]:
+                await page.locator("#confirm-publish-target").click()
+                await page.wait_for_function(
+                    "name => document.querySelector('#publish-target-summary')"
+                    "?.textContent.includes(name)",
+                    arg=expected_name,
+                )
+                assert await modal.count() == 1
+
+            await page.locator("#confirm-publish-target").click()
+            await page.locator("#publish-confirm-modal:not(.show)").wait_for()
+
+            confirmation_payloads = execute_payloads[1:]
+            assert [payload["target_ids"] for payload in confirmation_payloads] == [
+                ["target-0"],
+                ["target-1"],
+                ["target-2"],
+            ]
+            assert [
+                list(payload["confirmations"]) for payload in confirmation_payloads
+            ] == [
+                ["target-0"],
+                ["target-1"],
+                ["target-2"],
+            ]
         finally:
             await page.close()
             await browser.close()

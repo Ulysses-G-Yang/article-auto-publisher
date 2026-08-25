@@ -131,6 +131,99 @@ def test_target_switcher_loads_accounts_without_auto_selection() -> None:
     assert "function togglePlatform(platformId, checked)" in script
 
 
+def test_bulk_target_controls_select_only_deliverable_platforms_and_valid_accounts() -> None:
+    template = read("web/templates/upload.html")
+    script = read("web/static/js/content-studio.js")
+    styles = read("web/static/css/content-studio.css")
+
+    assert 'id="toggle-all-platforms"' in template
+    assert 'id="toggle-all-accounts"' in template
+    assert 'id="target-selection-summary"' in template
+    assert 'id="account-load-progress"' in template
+    assert "function deliverablePlatforms()" in script
+    assert "state.platforms.filter(platform => platform.delivery_enabled)" in script
+    assert "account.session_status === 'VALID'" in script
+    assert "function toggleAllPlatforms()" in script
+    assert "function toggleAllAccounts()" in script
+    assert "取消全选所有平台" in script
+    assert "取消全选所有账户" in script
+    assert "请先选择至少一个可投递平台" in script
+    assert "state.switcherSelected = nextSelected;" in script
+    assert ".target-bulk-actions .btn { min-height: 44px; }" in styles
+    assert ".target-platform-head { display: flex; min-width: 0; min-height: 44px;" in styles
+    assert ".target-account-check { display: flex; min-height: 44px;" in styles
+
+
+def test_target_saves_are_serialized_and_latest_selection_is_coalesced() -> None:
+    script = read("web/static/js/content-studio.js")
+
+    assert "targetSavePending: null" in script
+    assert "targetSavePromise: null" in script
+    assert "function saveTargets(targets)" in script
+    assert "async function drainTargetSaveQueue()" in script
+    assert "while (state.targetSavePending !== null)" in script
+    assert "saved = await persistTargets(targets);" in script
+    assert "state.targetSavePending = cloneValue(targets);" in script
+    assert "async function flushTargetSaveQueue()" in script
+    assert "if (!(await flushTargetSaveQueue())" in script
+    assert "targetSaving: false" in script
+    assert "mutationPromise: null" in script
+    assert "function enqueueDraftMutation(operation)" in script
+    assert "return enqueueDraftMutation(saveDraftNowUnlocked);" in script
+    assert "state.targetSaving = true;" in script
+    assert "state.targetSaving = false;" in script
+    assert "const requestDraftId = state.draft.draft_id;" in script
+    assert "if (state.draft?.draft_id !== requestDraftId) return true;" in script
+    assert "restoreSwitcherSelection(serverTargets);" in script
+    assert "已恢复到最后一次服务端状态" in script
+
+
+def test_delayed_content_patch_is_bound_to_its_source_draft() -> None:
+    script = read("web/static/js/content-studio.js")
+
+    assert "const requestDraft = state.draft;" in script
+    assert "const requestDraftId = requestDraft.draft_id;" in script
+    assert "const requestIsCurrent = () => state.draft === requestDraft" in script
+    assert "if (!requestIsCurrent()) return true;" in script
+    assert "requestDraft.revision = payload.revision;" in script
+    assert "requestDraft.source_type = payload.source_type;" in script
+
+
+def test_existing_targets_survive_account_metadata_loading() -> None:
+    script = read("web/static/js/content-studio.js")
+
+    assert "const existingTargets = (state.draft.targets || [])" in script
+    assert "const existingTarget = existingTargets" in script
+    assert "const accountsLoading = !Array.isArray" in script
+    assert "if (!account && accountsLoading && existingTarget)" in script
+    assert "...existingTarget," in script
+    assert "function reconcileLoadedAccountSelection" in script
+    assert "selected.filter(accountId => !validIds.has(accountId))" in script
+    assert "if (render && invalidIds.length) rebuildTargets();" in script
+    assert "当前不是 VALID" in script
+    assert "switcherAccountLoadFailed: {}" in script
+    assert "部分平台账号加载失败，本次全选未保存" in script
+
+
+def test_failed_publish_confirmation_stays_open_for_retry() -> None:
+    script = read("web/static/js/content-studio.js")
+
+    assert "const accepted = await executePlan(" in script
+    assert "if (!accepted) return;" in script
+    assert "manageFollowup = true" in script
+    assert "{ manageFollowup: false }" in script
+    assert "state.pendingPublishTargets = state.plan.targets.filter" in script
+
+
+def test_platform_row_click_does_not_capture_nested_mode_or_switch_space() -> None:
+    script = read("web/static/js/content-studio.js")
+
+    assert (
+        "button, input, a, label, .target-mode-switch, .target-platform-switch"
+        in script
+    )
+
+
 def test_target_switcher_is_dynamic_capability_matrix_without_legacy_radios() -> None:
     template = read("web/templates/upload.html")
     script = read("web/static/js/content-studio.js")
@@ -224,7 +317,10 @@ def test_multi_target_and_confirmation_contracts_are_separate() -> None:
     assert "saveTargets(targets)" in script
     assert "draft_batch_confirmed" in script
     assert "confirmation_token" in script
-    assert 'id="draft-batch-confirmed"' in template
+    assert 'id="draft-batch-confirmed"' not in template
+    assert 'id="draft-confirmation-row"' not in template
+    assert "draft_batch_confirmed: true" in script
+    assert "executeImmediately = true" in script
     assert 'id="publish-confirm-modal"' in template
     assert "逐条确认公开发布" in template
     assert "submitDelivery" not in script
@@ -278,19 +374,22 @@ def test_v2_draft_state_and_patch_never_silently_downgrade() -> None:
     assert "content_schema_version: 2" in script
     assert "document: cloneValue(state.draft.document)" in script
     assert "cover: cloneValue(normalizedCover(state.draft.cover))" in script
-    assert "const requestIsV2 = isV2Draft()" in script
-    assert "const requestBlocks = requestIsV2 ? null : publicBlocks();" in script
+    assert "const requestIsV2 = isV2Draft(requestDraft)" in script
     assert (
-        "const requestDocument = requestIsV2 ? cloneValue(state.draft.document) : null;"
+        "const requestBlocks = requestIsV2 ? null : publicBlocks(requestDraft.blocks);"
+        in script
+    )
+    assert (
+        "const requestDocument = requestIsV2 ? cloneValue(requestDraft.document) : null;"
         in script
     )
     assert "const requestBody = requestIsV2" in script
     assert "document: requestDocument" in script
     assert "cover: requestCover" in script
     assert "asset_id: value.strategy === 'EXPLICIT' ? value.asset_id : null" in script
-    assert "const requestSnapshot = contentSnapshot(state.draft);" in script
+    assert "const requestSnapshot = contentSnapshot(requestDraft);" in script
     assert (
-        "const changedDuringRequest = contentSnapshot(state.draft) !== requestSnapshot;"
+        "const changedDuringRequest = contentSnapshot(requestDraft) !== requestSnapshot;"
         in script
     )
     assert "DRAFT_CONTENT_SCHEMA_CONFLICT" in script
@@ -454,7 +553,7 @@ def test_blank_workspace_uses_minimal_lazy_create_and_never_restores_indexeddb()
 
     assert "function blankDraft()" in script
     assert "async function createPersistedDraft()" in script
-    assert "if (!state.draft.draft_id)" in script
+    assert "if (!requestDraftId)" in script
     assert (
         "if (!state.localDb || !state.draft || !state.draft.draft_id) return Promise.resolve();"
         in script
@@ -508,4 +607,5 @@ def test_format_review_targets_are_warning_only_and_never_execute() -> None:
     assert "target_ids: executable.map(target => target.target_id)" in script
     assert "系统不会调用执行接口" in script
     assert ".plan-review-card.is-format-review" in styles
-    assert "draft-confirmation-row" in script
+    assert "state.plan.targets.some(isFormatBlockedTarget)" in script
+    assert "为避免部分误投，本计划不会创建任何执行单" in script

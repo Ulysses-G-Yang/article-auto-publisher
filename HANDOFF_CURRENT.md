@@ -57,10 +57,13 @@
 
 - 旧 `codex_handoff*.md` 中的分支、优先级和待办。
 - `RESUMABLE_SESSION.md` 中的恢复命令和进行中状态。
-- `AGENTS.md` 中已经过期的目标分支和旧 P0 顺序。
+- `AGENTS.md` 中以下内容已经失效，不得执行：旧 canonical/current branch、旧主线程与执行线程角色、
+  硬编码的 `origin/feat/...` 推送及 SHA 核对目标、旧 P0 顺序，以及旧暂停条件。
 
-`AGENTS.md` 的安全边界和 Git 纪律仍然有效，尤其包括：只暂存本任务文件、
-focused commit、SSH 推送、远端 SHA 核对，以及禁止触碰用户数据和登录凭据。
+`AGENTS.md` 只有以下通用规则继续有效：固定 Python 3.12 路径；禁止触碰
+`data/`、Profile、Cookie、Token、`uv.lock`；真实副作用必须单独授权；只暂存任务文件；
+focused commit；使用 SSH 推送；禁止 force push。实际推送和远端 SHA 核对始终针对当前新分支，
+不得使用 `AGENTS.md` 中硬编码的旧分支。
 若历史文档与本文冲突，以本文的当前分支和协作流程为准；若安全规则冲突，采用更严格的规则。
 
 ## 5. 外部 AI 的默认边界
@@ -80,7 +83,7 @@ focused commit、SSH 推送、远端 SHA 核对，以及禁止触碰用户数据
 
 ```powershell
 Set-Location 'D:\Backup\Documents\article-auto-publisher'
-git fetch origin integrate/weibo-draft-v0.4.3
+git fetch origin
 git worktree add `
   -b "feature/<module-slug>" `
   "D:\Backup\Documents\article-auto-publisher-worktrees\<module-slug>" `
@@ -216,12 +219,14 @@ git ls-remote origin "refs/heads/$(git branch --show-current)"
 - Python：C:\Users\Administrator\miniconda3\envs\article-publisher-py312\python.exe
 - remote：git@github.com:Ulysses-G-Yang/article-auto-publisher.git
 
-先 fetch 远端，并从 origin/integrate/weibo-draft-v0.4.3 创建独立 feature 分支和独立 worktree。
+先执行完整的 git fetch origin，并从 origin/integrate/weibo-draft-v0.4.3 创建独立 feature 分支和独立 worktree。
 实际工作树 HEAD 必须等于 fetch 后的远端分支 HEAD，并且
 git merge-base --is-ancestor d55ea1f40adf41cc58870e8c43f9d6fc292b178c HEAD 必须成功。
 报告实际远端 HEAD 的完整 40 位 SHA，不要把功能代码基线当作当前 HEAD。
-阅读根目录 HANDOFF_CURRENT.md 和 AGENTS.md；HANDOFF_CURRENT.md 决定当前分支和协作流程，
-AGENTS.md 的安全边界与 Git 纪律继续有效。
+阅读根目录 HANDOFF_CURRENT.md 和 AGENTS.md；HANDOFF_CURRENT.md 决定当前分支和协作流程。
+AGENTS.md 中旧分支、旧线程角色、硬编码 origin/feat 推送目标、旧 P0 和暂停条件均已失效；
+只继承其中 Python 路径、数据与凭据安全、真实副作用授权、focused commit、SSH、no force push
+和只暂存任务文件等通用规则，实际推送始终使用当前新分支。
 
 在我提供完整任务包前禁止写代码。收到任务包后，只修改允许目录；冻结 API/路由/模型/数据库/MCP 契约；
 不得触碰百家号或其他未授权模块，不得触碰 data/Profile/Cookie/Token/uv.lock；

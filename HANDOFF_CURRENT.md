@@ -173,11 +173,17 @@ if ($LASTEXITCODE -ne 0) {
 - 禁止 force push、批量暂存和恢复用户无关修改。
 - 文档、日志、测试 fixture 和提交信息不得包含秘密、本机凭据或真实用户内容。
 
-## 11. delivery_tools 外挂模块（feature/shared-sdk-heartbeat-delay）
+## 11. delivery_tools 外挂模块（feature/shared-sdk-heartbeat-delay，参考实现）
 
 三个外挂模块已实现于 `src/delivery_tools/`，设计为不修改现有发布业务逻辑；
 现有 `content_studio/`、`account_sessions/`、`article_mvp/`、`platforms/`、
 `app.py`、`config.py`、`pyproject.toml` 均未改动。
+
+> ⚠️ **定位说明（2026-08-25 复核）**：按用户决策采用“方向二”，本组模块
+> **不接入生产链路**，仅保留为独立工具参考。原因：本项目已有更成熟的现有
+> 机制（persistent Chrome profile 自动 Cookie、`AccountProfileLease` 租约、
+> `HumanSimulator`、`HeartbeatService/Scheduler`），外挂模块与它们架构不兼容
+> 或功能重叠。生产补强走 §11.7 的现有架构内改动。
 
 ### 11.1 文件清单与职责
 
@@ -261,6 +267,40 @@ git diff --check                                                 # 通过
 - headless 模式更易触发风控；可配置 `headless=new` 更接近真实指纹。
 - 未执行任何真实登录、草稿保存、公开发布或删除；生产接线（启动钩子、存储
   回调、发布主流程前置拦截）留待业务侧按任务包接入。
+
+### 11.7 方向二：现有架构内补强（2026-08-25）
+
+用户决策：不接线 delivery_tools，改在现有架构内补强。调研结论：
+
+| 现有机制 | 位置 | 状态 |
+|---|---|---|
+| 会话心跳 Service/Policy/Scheduler | `src/account_sessions/session_health.py` | 完整，1071 行测试 |
+| 心跳接线（verify 注入只读验证） | `src/account_sessions/web.py` | 完整 |
+| Profile 跨进程租约 + Singleton 检查 | `src/account_sessions/leases.py` | 完整，有测试 |
+| 反检测脚本注入 | `platforms/base.py initialize()` | 完整，有测试 |
+| 心跳启用开关 | `ACCOUNT_SESSION_HEARTBEAT_ENABLED` 环境变量 | 默认 false，账号级 `heartbeat_enabled` 默认 true |
+
+**本次修复的缺口**：`AccountSessionRuntimeState._ensure_runtime()` 此前是惰性
+初始化——只在第一个 HTTP 请求时才执行数据库 recovery 和启动心跳 scheduler，
+与 `docs/backend/ACCOUNT_SESSION_HEARTBEAT.md` 承诺的“进程启动时先执行一次
+纯数据库 recovery”不符。
+
+修复：
+1. `src/account_sessions/web.py` 新增公开方法 `AccountSessionRuntimeState.start()`：
+   幂等初始化运行时 + 启动心跳 scheduler（即使开关关闭也执行一次纯数据库
+   recovery，不打开浏览器）。
+2. `run_flask_production.py` 生产入口在对外接收请求前调用 `account_state.start()`。
+3. 新增 2 个测试：`test_runtime_state_start_is_idempotent_and_initializes_once`、
+   `test_runtime_state_start_is_thread_safe`（验证多线程并发只初始化一次）。
+
+验证（fresh）：`tests/test_account_session_health.py`、`test_delivery_article_mapping.py`、
+`test_regression.py` 定向 153 passed；Ruff 通过。
+
+**生产启用剩余步骤（必须人工完成，验收门见 ACCOUNT_SESSION_HEARTBEAT.md）**：
+1. 目标机器确认 Profile 无其他发布/登录流程，风控窗口允许；
+2. 显式设置 `ACCOUNT_SESSION_HEARTBEAT_ENABLED=true` 并重启生产服务；
+3. 观察首轮 `HEARTBEAT_*` 日志脱敏、`PROFILE_IN_USE` 不降级 `VALID`；
+4. 任何未知状态立即关闭环境变量停止排查。公开发布开关保持关闭。
 
 ## 12. 最小验证与 Git 交付
 

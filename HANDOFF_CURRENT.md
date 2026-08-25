@@ -2,6 +2,10 @@
 
 日期：2026-08-25
 
+> 本版本由 `feature/shared-sdk-heartbeat-delay` 分支更新：新增
+> `delivery_tools` 外挂工具模块（共享 Playwright SDK、Cookie 心跳、
+> 随机真人延时），详见 §13。
+
 ## 1. 本文目的
 
 本文是当前唯一有效的协作接力入口。协作方式如下：
@@ -169,7 +173,96 @@ if ($LASTEXITCODE -ne 0) {
 - 禁止 force push、批量暂存和恢复用户无关修改。
 - 文档、日志、测试 fixture 和提交信息不得包含秘密、本机凭据或真实用户内容。
 
-## 11. 最小验证与 Git 交付
+## 11. delivery_tools 外挂模块（feature/shared-sdk-heartbeat-delay）
+
+三个外挂模块已实现于 `src/delivery_tools/`，设计为不修改现有发布业务逻辑；
+现有 `content_studio/`、`account_sessions/`、`article_mvp/`、`platforms/`、
+`app.py`、`config.py`、`pyproject.toml` 均未改动。
+
+### 11.1 文件清单与职责
+
+| 文件 | 职责 |
+|------|------|
+| `src/delivery_tools/__init__.py` | 包说明；三个子模块互不依赖，心跳依赖 sdk |
+| `src/delivery_tools/pw_shared_sdk.py` | 共享 Playwright SDK：全局单例 browser + 按账号隔离的 BrowserContext 池 |
+| `src/delivery_tools/session_heartbeat.py` | 后台 Cookie 心跳：每账号临时 page 探测登录态，状态 `alive/expire/dead` |
+| `src/delivery_tools/human_delay_util.py` | 随机真人延时：动作/页面等待/任务间隙三类装饰器 + 字符级模拟输入 |
+| `tests/test_delivery_tools.py` | 27 个单元测试，全部 mock，不启动真实浏览器、不触网、不读凭据 |
+
+### 11.2 共享 Playwright SDK（pw_shared_sdk.py）
+
+- `SharedPlaywright.get_instance()`：全局单例。
+- `await sdk.init_global_browser(headless=True)`：服务启动执行一次，幂等；
+  只启动 playwright + chromium browser，不创建账号上下文。
+- `await sdk.get_or_create_ctx(site, account_id, cookies=None)`：返回该账号
+  隔离的 BrowserContext；已在池中且连接正常则直接复用；可传入 cookies 恢复登录态。
+- `await sdk.dump_ctx_cookies(ctx, domain_url)`：导出最新 cookie 交给存储层。
+- `await sdk.close_one_ctx(site, account_id)` / `close_all_ctx()` / `shutdown()`：
+  销毁单个/全部上下文；`shutdown` 同时关闭 browser 与 playwright。
+- 未初始化即调用 `get_or_create_ctx` 会抛出 `RuntimeError`。
+
+接入改动点（极小）：服务启动钩子执行 `init_global_browser()`；发布任务内把
+“新建 context”替换为 `get_or_create_ctx(...)`，其后原有发布逻辑一行不改。
+
+### 11.3 Cookie 心跳（session_heartbeat.py）
+
+- `single_account_heartbeat(site, account_id, check_url, judge_fn=None, ...)`：
+  单账号一轮心跳，返回 `alive/expire/dead`。流程：读取持久化 cookie → 获取
+  隔离 context → 临时 page 访问校验页 → 判断登录态 → 有效则导出最新 cookie
+  回写 → 更新状态存储；任何异常降级 `dead` 且不抛出。
+- `heartbeat_loop(account_meta_list, heartbeat_interval_sec=300, ...)`：后台常驻
+  协程，每轮 `asyncio.gather(..., return_exceptions=True)` 并发全部账号；
+  单账号失败不拖垮整轮；可配 `max_accounts_per_round` 分批并发。
+- `check_account_healthy(site, account_id, load_cookie_fn=None)`：发布任务前置
+  校验；未注入存储回调时返回 True（不拦截），注入后按 cookie 非空判断。
+- 存储回调全部由外部注入（`load_cookie_fn`/`save_cookie_fn`/`update_status_fn`），
+  本模块不接管存储、不自动尝试登录（扫码无法自动化）。
+- 登录判断：优先平台自定义 `judge_fn(page, site)`；缺省启发式检查 URL 与
+  常见登录表单选择器。
+
+FastAPI/Flask 启动挂载示例：
+
+```python
+import asyncio
+from delivery_tools.pw_shared_sdk import SharedPlaywright
+from delivery_tools.session_heartbeat import heartbeat_loop
+
+# 启动钩子
+sdk = SharedPlaywright.get_instance()
+await sdk.init_global_browser()
+all_accounts = [{"site": ..., "account_id": ..., "check_url": ...}, ...]
+asyncio.create_task(heartbeat_loop(all_accounts, heartbeat_interval_sec=300))
+```
+
+### 11.4 随机真人延时（human_delay_util.py）
+
+- `@human_action_delay()`：click/select 等动作前随机休眠（动作区间 0.8～2.5s）。
+- `await human_page_delay()()`：goto 后页面等待（1.5～4.0s）。
+- `await task_gap_sleep()`：两篇任务之间休眠（5～15s）。
+- `await human_type(page, selector, text, char_min, char_max)`：字符粒度随机
+  输入，不整段 paste。
+- `configure_delays({...})`：按平台覆盖区间；`no_delay()`：测试用全零。
+- 区间全部来自 `DelayConfig`，不存在硬编码固定 sleep。
+
+### 11.5 验证结果（fresh 运行）
+
+```powershell
+& $articleOpsPython -m pytest tests/test_delivery_tools.py -q    # 27 passed
+& $articleOpsPython -m pytest -q                                 # 884 passed, 7 skipped
+& $articleOpsPython -m ruff check src/delivery_tools tests/test_delivery_tools.py  # All checks passed
+git diff --check                                                 # 通过
+```
+
+### 11.6 已知风险与未覆盖
+
+- 心跳登录判断启发式仅覆盖常见表单；平台 DOM 改版需维护独立 `judge_fn`。
+- 长时间运行 Browser 内存缓慢上涨：建议后续增加“单 context 执行 N 次后销毁
+  重建”策略，不重启全局 browser。
+- headless 模式更易触发风控；可配置 `headless=new` 更接近真实指纹。
+- 未执行任何真实登录、草稿保存、公开发布或删除；生产接线（启动钩子、存储
+  回调、发布主流程前置拦截）留待业务侧按任务包接入。
+
+## 12. 最小验证与 Git 交付
 
 PowerShell 示例：
 
@@ -207,7 +300,7 @@ git ls-remote origin "refs/heads/$(git branch --show-current)"
 当前基线曾验证为 `857 passed, 7 skipped`，但这只是接力时的历史基线。
 任何新 AI 都必须在自己的工作树 fresh 运行任务包要求的测试，不能直接引用该结果。
 
-## 12. 可直接复制给新 AI 的启动提示
+## 13. 可直接复制给新 AI 的启动提示
 
 ```text
 你负责 ArticleOps 的一个独立新模块。请先只读预检，不要续做任何旧 P0 或历史平台待办。

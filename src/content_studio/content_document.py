@@ -1060,30 +1060,196 @@ def delivery_heading_levels(document: Mapping[str, Any]) -> frozenset[int]:
 def normalize_for_delivery(
     document: Mapping[str, Any],
 ) -> tuple[dict[str, Any], dict[str, Any]]:
-    """生成去除行内 marks 的稳定投递副本，原始文档绝不被修改。"""
+    """生成六平台可稳定表达的基础投递副本。
+
+    原始 canonical 文档绝不被修改。这里只降级不改变可见内容的展示属性：
+    去除 marks/link、把正文标题统一为 H2，并把同段图文按原 child 顺序拆成
+    独立块。列表、表格、说明文字和浮动图片等有结构损失风险的内容继续保留，
+    后续能力门仍会 fail closed。
+    """
 
     normalized = validate_document(document)
+    title_block_id = normalized.get("title_block_id")
     removed_marks: list[dict[str, Any]] = []
-    for block in _walk_blocks(normalized["blocks"]):
-        if block.get("kind") not in {"paragraph", "heading"}:
-            continue
+    removed_links: list[dict[str, Any]] = []
+    normalized_headings: list[dict[str, Any]] = []
+    normalized_paragraph_styles: list[dict[str, Any]] = []
+    split_mixed_inline: list[dict[str, Any]] = []
+    existing_block_ids = {
+        block["block_id"]
+        for block in _walk_blocks(normalized["blocks"])
+        if block.get("block_id") is not None
+    }
+    generated_block_index = 0
+
+    def next_block_id() -> str:
+        nonlocal generated_block_index
+        while True:
+            generated_block_index += 1
+            candidate = f"delivery-block-{generated_block_index:06d}"
+            if candidate not in existing_block_ids:
+                existing_block_ids.add(candidate)
+                return candidate
+
+    def normalize_heading(block: dict[str, Any]) -> None:
+        if block.get("kind") != "heading":
+            return
         block_id = block.get("block_id")
-        for child_index, child in enumerate(block.get("children", [])):
-            if child.get("kind") != "text":
+        if block_id == title_block_id:
+            return
+        previous_level = block.get("level")
+        previous_style = block.get("style_name")
+        block["level"] = 2
+        block["style_name"] = "Heading 2"
+        if previous_level != 2 or previous_style != "Heading 2":
+            normalized_headings.append(
+                {
+                    "block_id": block_id,
+                    "from_level": previous_level,
+                    "to_level": 2,
+                }
+            )
+
+    def normalize_leaf(block: Mapping[str, Any]) -> list[dict[str, Any]]:
+        source = dict(block)
+        source_block_id = source.get("block_id")
+        children: list[dict[str, Any]] = []
+        for child_index, raw_child in enumerate(source.get("children", [])):
+            child = dict(raw_child)
+            if child.get("kind") == "text":
+                marks = child.pop("marks", None)
+                if marks:
+                    removed_marks.append(
+                        {
+                            "block_id": source_block_id,
+                            "child_index": child_index,
+                            "marks": list(marks),
+                        }
+                    )
+                if child.pop("link", None) is not None:
+                    removed_links.append(
+                        {
+                            "block_id": source_block_id,
+                            "child_index": child_index,
+                        }
+                    )
+            children.append(child)
+
+        source["children"] = children
+        normalize_heading(source)
+        if source.get("kind") == "paragraph" and source.get("style_name") not in {
+            None,
+            "Normal",
+        }:
+            normalized_paragraph_styles.append(
+                {
+                    "block_id": source_block_id,
+                    "from_style": source.get("style_name"),
+                    "to_style": "Normal",
+                }
+            )
+            source["style_name"] = "Normal"
+        has_text = any(child.get("kind") == "text" for child in children)
+        has_image = any(child.get("kind") == "image" for child in children)
+        if not (has_text and has_image):
+            return [source]
+
+        segments: list[tuple[str, list[dict[str, Any]]]] = []
+        text_children: list[dict[str, Any]] = []
+        for child in children:
+            if child.get("kind") == "text":
+                text_children.append(child)
                 continue
-            marks = child.pop("marks", None)
-            if marks:
-                removed_marks.append(
+            if text_children:
+                segments.append(("text", text_children))
+                text_children = []
+            # 每个图片位置独立成块；相同 asset_id 的重复出现也不会被合并。
+            segments.append(("image", [child]))
+        if text_children:
+            segments.append(("text", text_children))
+
+        original_id_index = 0
+        if source_block_id == title_block_id:
+            original_id_index = next(
+                (index for index, (kind, _children) in enumerate(segments) if kind == "text"),
+                0,
+            )
+        result: list[dict[str, Any]] = []
+        result_ids: list[str] = []
+        for index, (segment_kind, segment_children) in enumerate(segments):
+            if source_block_id is not None and index == original_id_index:
+                block_id = source_block_id
+            else:
+                block_id = next_block_id()
+            result_ids.append(block_id)
+            if segment_kind == "image":
+                result.append(
                     {
+                        "kind": "paragraph",
                         "block_id": block_id,
-                        "child_index": child_index,
-                        "marks": list(marks),
+                        "children": segment_children,
                     }
                 )
+                continue
+            text_block = {
+                key: value
+                for key, value in source.items()
+                if key not in {"block_id", "children"}
+            }
+            text_block["block_id"] = block_id
+            text_block["children"] = segment_children
+            result.append(text_block)
+
+        split_mixed_inline.append(
+            {
+                "block_id": source_block_id,
+                "result_block_ids": result_ids,
+            }
+        )
+        return result
+
+    def normalize_blocks(blocks: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]:
+        result: list[dict[str, Any]] = []
+        for raw_block in blocks:
+            kind = raw_block.get("kind")
+            if kind in {"paragraph", "heading"}:
+                result.extend(normalize_leaf(raw_block))
+                continue
+            block = dict(raw_block)
+            if kind == "list":
+                block["items"] = [
+                    {
+                        **item,
+                        "blocks": normalize_blocks(item.get("blocks", [])),
+                    }
+                    for item in raw_block.get("items", [])
+                ]
+            elif kind == "table":
+                block["rows"] = [
+                    {
+                        **row,
+                        "cells": [
+                            {
+                                **cell,
+                                "blocks": normalize_blocks(cell.get("blocks", [])),
+                            }
+                            for cell in row.get("cells", [])
+                        ],
+                    }
+                    for row in raw_block.get("rows", [])
+                ]
+            result.append(block)
+        return result
+
+    normalized["blocks"] = normalize_blocks(normalized["blocks"])
     delivery_document = validate_document(normalized)
     return delivery_document, {
         "policy_version": DELIVERY_POLICY_VERSION,
         "removed_marks": removed_marks,
+        "removed_links": removed_links,
+        "normalized_headings": normalized_headings,
+        "normalized_paragraph_styles": normalized_paragraph_styles,
+        "split_mixed_inline": split_mixed_inline,
     }
 
 

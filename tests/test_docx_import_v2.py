@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 from docx import Document
+from docx.enum.style import WD_STYLE_TYPE
 from docx.opc.constants import RELATIONSHIP_TYPE as RT
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
@@ -232,6 +233,71 @@ def test_visible_h1_overrides_stale_core_title_and_is_omitted_from_delivery(
     assert delivery_heading_levels(delivery_document) == frozenset({2})
 
 
+def test_parser_inherits_base_style_and_keeps_only_the_bound_title_as_h1(
+    tmp_path: Path,
+) -> None:
+    document = Document()
+    document.styles["Normal"].font.size = Pt(20)
+    body_base = document.styles.add_style("Article Body Base", WD_STYLE_TYPE.PARAGRAPH)
+    body_base.font.size = Pt(11)
+    body_style = document.styles.add_style("Article Body", WD_STYLE_TYPE.PARAGRAPH)
+    body_style.base_style = body_base
+
+    document.add_heading("唯一主标题", level=1)
+    document.add_paragraph("用于确定正文基准字号的普通正文。", style=body_style)
+    for index in range(1, 6):
+        document.add_heading(f"错误一级标题{index}", level=1)
+        document.add_paragraph(f"第{index}节正文。", style=body_style)
+
+    visual_heading = document.add_paragraph(style=body_style)
+    visual_heading_run = visual_heading.add_run("继承样式后的视觉二级标题")
+    visual_heading_run.font.size = Pt(14)
+
+    mixed = document.add_paragraph(style=body_style)
+    mixed.add_run("图片前")
+    mixed.add_run().add_picture(
+        str(_image_path(tmp_path, "base-style-mixed.png")),
+        width=Inches(0.3),
+    )
+    mixed.add_run("图片后")
+    source = tmp_path / "base-style-heading-one.docx"
+    document.save(source)
+
+    parsed = DocxParser(
+        images_dir=str(tmp_path / "parser-images")
+    ).parse_document_v2(str(source))
+    blocks = parsed.document_v2["blocks"]
+    blocks_by_text = {
+        "".join(
+            child.get("text", "")
+            for child in block.get("children", [])
+            if child.get("kind") == "text"
+        ): block
+        for block in blocks
+        if block.get("kind") in {"paragraph", "heading"}
+    }
+
+    assert parsed.document_v2["title"] == "唯一主标题"
+    assert parsed.document_v2["title_block_id"] == blocks_by_text["唯一主标题"][
+        "block_id"
+    ]
+    assert [
+        block
+        for block in blocks
+        if block.get("kind") == "heading" and block.get("level") == 1
+    ] == [blocks_by_text["唯一主标题"]]
+    for index in range(1, 6):
+        section = blocks_by_text[f"错误一级标题{index}"]
+        assert section["level"] == 2
+        assert section["style_name"] == "Heading 2"
+    assert blocks_by_text["继承样式后的视觉二级标题"]["level"] == 2
+    assert [child["kind"] for child in blocks_by_text["图片前图片后"]["children"]] == [
+        "text",
+        "image",
+        "text",
+    ]
+
+
 def test_parser_v2_marks_floating_image(tmp_path: Path) -> None:
     source = tmp_path / "floating.docx"
     source.write_bytes(_make_floating_image_doc(tmp_path))
@@ -239,6 +305,21 @@ def test_parser_v2_marks_floating_image(tmp_path: Path) -> None:
     image = parsed.document_v2["blocks"][0]["children"][0]
     assert image["kind"] == "image"
     assert image["anchor"] == {"kind": "floating"}
+
+
+def test_parser_v2_rejects_formula_instead_of_silently_dropping_it(
+    tmp_path: Path,
+) -> None:
+    document = Document()
+    paragraph = document.add_paragraph("公式前")
+    paragraph._p.append(OxmlElement("m:oMath"))
+    source = tmp_path / "formula.docx"
+    document.save(source)
+
+    with pytest.raises(ValueError, match="公式无法安全映射"):
+        DocxParser(
+            images_dir=str(tmp_path / "parser-images")
+        ).parse_document_v2(str(source))
 
 
 @pytest.mark.parametrize(

@@ -26,6 +26,7 @@ from content_studio.content_document import (
     DELIVERY_POLICY_VERSION,
     canonical_document_json,
     delivery_features,
+    delivery_heading_levels,
     document_hash,
     normalize_for_delivery,
     project_to_delivery_blocks,
@@ -453,6 +454,105 @@ def test_marks_are_removed_before_all_six_platform_capability_checks() -> None:
         declaration = DEFAULT_PLATFORM_FORMAT_CAPABILITIES.get(platform)
         assert "marks" not in declaration.supported
         assert delivery_features(delivery_document) - declaration.supported == set()
+
+
+def test_six_platform_plan_uses_normalized_h2_and_split_inline_blocks(
+    tmp_path: Path,
+) -> None:
+    account_db = AccountDatabase(sqlite_url(tmp_path / "normalized-accounts.db"))
+    accounts = AccountSessionService(account_db, seed_legacy_profiles=False)
+    service = make_service(tmp_path, account_service=accounts)
+
+    async def scenario():
+        await accounts.initialize()
+        targets = []
+        for platform in DELIVERY_PLATFORMS:
+            account = PlatformAccount(
+                account_id=str(uuid.uuid4()),
+                platform=platform,
+                platform_user_id=f"normalized-{platform}",
+                display_name=f"{platform}归一化账号",
+                profile_path=str(tmp_path / f"profile-{platform}"),
+                status="ACTIVE",
+                session_status="VALID",
+                persist_login=True,
+            )
+            async with account_db.session() as session:
+                session.add(account)
+            targets.append(
+                {
+                    "platform": platform,
+                    "account_id": account.account_id,
+                    "mode": "DRAFT",
+                }
+            )
+
+        await service.initialize()
+        draft = await service.create_draft(CreateDraftRequest(title="跨平台归一化", blocks=[]))
+        asset = await service.add_asset(draft["draft_id"], image_bytes(), "正文.png")
+        document = delivery_v2_document("跨平台归一化")
+        document["blocks"] = [
+            document["blocks"][0],
+            *[
+                {
+                    "kind": "heading",
+                    "block_id": f"wrong-h1-{index}",
+                    "level": 1,
+                    "style_name": "Heading 1",
+                    "children": [{"kind": "text", "text": f"错误一级标题{index}"}],
+                }
+                for index in range(1, 6)
+            ],
+            {
+                "kind": "paragraph",
+                "block_id": "mixed-body",
+                "children": [
+                    {
+                        "kind": "text",
+                        "text": "图片前",
+                        "marks": ["bold"],
+                        "link": {"href": "https://example.test/source"},
+                    },
+                    {"kind": "image", "asset_id": asset["asset_id"]},
+                    {"kind": "text", "text": "图片后"},
+                ],
+            },
+        ]
+        current = await service.patch_draft(
+            draft["draft_id"],
+            PatchDraftRequest(
+                revision=draft["revision"],
+                title="跨平台归一化",
+                content_schema_version=2,
+                document=document,
+            ),
+        )
+        current = await service.replace_targets(
+            draft["draft_id"],
+            ReplaceTargetsRequest(revision=current["revision"], targets=targets),
+            LOCAL_WEB_CONTEXT,
+        )
+        plan = await service.create_delivery_plan(
+            draft["draft_id"], current["revision"], LOCAL_WEB_CONTEXT
+        )
+        context, _plan_targets = await service.get_plan_execution_context(
+            plan["plan_id"], LOCAL_WEB_CONTEXT
+        )
+        return plan, context
+
+    plan, context = run(scenario())
+
+    assert plan["status"] == "READY"
+    assert len(plan["targets"]) == len(DELIVERY_PLATFORMS) == 6
+    assert {target["status"] for target in plan["targets"]} == {"READY"}
+    assert delivery_features(context["delivery_document"]) == frozenset({"heading"})
+    assert delivery_heading_levels(context["delivery_document"]) == frozenset({2})
+    assert context["document"] != context["delivery_document"]
+    assert context["document"]["blocks"][1]["level"] == 1
+    assert context["delivery_loss_report"]["split_mixed_inline"]
+
+    run(service.database.dispose())
+    run(account_db.dispose())
 
 
 def test_autosave_revision_conflict_returns_server_draft(tmp_path: Path) -> None:
@@ -1107,6 +1207,10 @@ def test_v2_plan_freezes_document_and_hash_is_semantic_and_idempotent(tmp_path: 
                 {"block_id": "title-block", "child_index": 0, "marks": ["bold"]},
                 {"block_id": "marked-body", "child_index": 0, "marks": ["bold"]},
             ],
+            "removed_links": [],
+            "normalized_headings": [],
+            "normalized_paragraph_styles": [],
+            "split_mixed_inline": [],
         }
         assert "storage_path" not in json.dumps(base_plan, ensure_ascii=False)
 
@@ -1349,6 +1453,7 @@ def test_v2_delivery_format_gate_handles_basic_heading_and_multi_image(
             body_heading: bool = False,
             body_heading_level: int = 2,
             image_count: int = 0,
+            include_table: bool = False,
         ) -> dict:
             draft = await service.create_draft(CreateDraftRequest(title=title, blocks=[]))
             asset_ids = []
@@ -1363,6 +1468,29 @@ def test_v2_delivery_format_gate_handles_basic_heading_and_multi_image(
                 body_heading_level=body_heading_level,
                 asset_ids=asset_ids,
             )
+            if include_table:
+                document["blocks"].append(
+                    {
+                        "kind": "table",
+                        "block_id": "unsafe-table",
+                        "rows": [
+                            {
+                                "cells": [
+                                    {
+                                        "blocks": [
+                                            {
+                                                "kind": "paragraph",
+                                                "children": [
+                                                    {"kind": "text", "text": "表格内容"}
+                                                ],
+                                            }
+                                        ]
+                                    }
+                                ]
+                            }
+                        ],
+                    }
+                )
             current = await service.patch_draft(
                 draft["draft_id"],
                 PatchDraftRequest(
@@ -1393,12 +1521,13 @@ def test_v2_delivery_format_gate_handles_basic_heading_and_multi_image(
         plain = await create_plan("普通段落")
         single_image = await create_plan("单图正文", image_count=1)
         heading = await create_plan("正文标题", body_heading=True)
-        unsupported_h1 = await create_plan(
-            "未验证一级标题", body_heading=True, body_heading_level=1
+        normalized_h1 = await create_plan(
+            "归一化一级标题", body_heading=True, body_heading_level=1
         )
-        unsupported_heading = await create_plan(
-            "未验证标题", body_heading=True, body_heading_level=4
+        normalized_heading = await create_plan(
+            "归一化标题", body_heading=True, body_heading_level=4
         )
+        unsupported_table = await create_plan("不安全表格", include_table=True)
         image_order_only = await create_plan("多图正文", image_count=2)
 
         assert plain["status"] == "READY"
@@ -1407,16 +1536,15 @@ def test_v2_delivery_format_gate_handles_basic_heading_and_multi_image(
         assert single_image["targets"][0]["status"] == "READY"
         assert heading["status"] == "READY"
         assert heading["targets"][0]["status"] == "READY"
-        assert unsupported_h1["status"] == "FORMAT_REVIEW_REQUIRED"
-        assert unsupported_h1["targets"][0]["error_code"] == (
+        assert normalized_h1["status"] == "READY"
+        assert normalized_h1["targets"][0]["status"] == "READY"
+        assert normalized_heading["status"] == "READY"
+        assert normalized_heading["targets"][0]["status"] == "READY"
+        assert unsupported_table["status"] == "FORMAT_REVIEW_REQUIRED"
+        assert unsupported_table["targets"][0]["error_code"] == (
             "CONTENT_FORMAT_UNSUPPORTED"
         )
-        assert "heading_levels=1" in unsupported_h1["targets"][0]["error_message"]
-        assert unsupported_heading["status"] == "FORMAT_REVIEW_REQUIRED"
-        assert unsupported_heading["targets"][0]["error_code"] == (
-            "CONTENT_FORMAT_UNSUPPORTED"
-        )
-        assert "heading_levels=4" in unsupported_heading["targets"][0]["error_message"]
+        assert "table" in unsupported_table["targets"][0]["error_message"]
         # 小黑盒的真实证据已覆盖 H2/H3 与交错插图和稳定图片数量。
         assert image_order_only["status"] == "READY"
         assert image_order_only["targets"][0]["status"] == "READY"
@@ -1451,15 +1579,36 @@ def test_format_review_target_does_not_reopen_when_capability_changes(
             session.add(account)
         await service.initialize()
         draft = await service.create_draft(CreateDraftRequest(title="后验能力", blocks=[]))
+        unsafe_document = delivery_v2_document("后验能力")
+        unsafe_document["blocks"].append(
+            {
+                "kind": "table",
+                "block_id": "unsafe-table",
+                "rows": [
+                    {
+                        "cells": [
+                            {
+                                "blocks": [
+                                    {
+                                        "kind": "paragraph",
+                                        "children": [
+                                            {"kind": "text", "text": "表格内容"}
+                                        ],
+                                    }
+                                ]
+                            }
+                        ]
+                    }
+                ],
+            }
+        )
         current = await service.patch_draft(
             draft["draft_id"],
             PatchDraftRequest(
                 revision=draft["revision"],
                 title="后验能力",
                 content_schema_version=2,
-                document=delivery_v2_document(
-                    "后验能力", body_heading=True, body_heading_level=4
-                ),
+                document=unsafe_document,
             ),
         )
         current = await service.replace_targets(

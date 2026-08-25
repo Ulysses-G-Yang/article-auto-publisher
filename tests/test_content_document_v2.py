@@ -381,6 +381,21 @@ def test_delivery_normalization_removes_marks_without_mutating_source() -> None:
                 "marks": ["italic", "underline"],
             },
         ],
+        "removed_links": [],
+        "normalized_headings": [
+            {"block_id": "body-heading", "from_level": 2, "to_level": 2}
+        ],
+        "normalized_paragraph_styles": [],
+        "split_mixed_inline": [
+            {
+                "block_id": "body",
+                "result_block_ids": [
+                    "body",
+                    "delivery-block-000001",
+                    "delivery-block-000002",
+                ],
+            }
+        ],
     }
     assert project_to_delivery_blocks(delivery_document) == [
         {"type": "heading", "text": "二级标题", "position": 0, "level": 2},
@@ -394,22 +409,102 @@ def test_delivery_normalization_removes_marks_without_mutating_source() -> None:
     ]
 
 
-def test_delivery_normalization_keeps_every_non_mark_format_gate() -> None:
+def test_delivery_normalization_only_keeps_structurally_unsafe_format_gates() -> None:
     document = mixed_document()
     source_features = delivery_features(document)
 
     delivery_document, _report = normalize_for_delivery(document)
 
     assert "marks" in source_features
-    assert delivery_features(delivery_document) == source_features - {"marks"}
+    assert delivery_features(delivery_document) == source_features - {
+        "link",
+        "marks",
+        "mixed_inline",
+    }
     assert {
         "caption",
         "floating_anchor",
-        "link",
         "list",
-        "mixed_inline",
         "table",
     } <= delivery_features(delivery_document)
+
+
+def test_delivery_normalization_flattens_body_headings_and_preserves_inline_order() -> None:
+    repeated_asset = "00000000-0000-4000-8000-000000000001"
+    document = {
+        "schema_version": 2,
+        "title": "唯一主标题",
+        "title_block_id": "title",
+        "source_fidelity": "NATIVE",
+        "blocks": [
+            {
+                "kind": "heading",
+                "block_id": "title",
+                "level": 1,
+                "style_name": "Heading 1",
+                "children": [{"kind": "text", "text": "唯一主标题"}],
+            },
+            *[
+                {
+                    "kind": "heading",
+                    "block_id": f"section-{index}",
+                    "level": 1,
+                    "style_name": "Heading 1",
+                    "children": [{"kind": "text", "text": f"错误一级标题{index}"}],
+                }
+                for index in range(1, 6)
+            ],
+            {
+                "kind": "paragraph",
+                "block_id": "mixed",
+                "style_name": "Quote",
+                "children": [
+                    {
+                        "kind": "text",
+                        "text": "图前",
+                        "marks": ["bold"],
+                        "link": {"href": "https://example.test/source"},
+                    },
+                    {"kind": "image", "asset_id": repeated_asset},
+                    {"kind": "text", "text": "图中"},
+                    {"kind": "image", "asset_id": repeated_asset},
+                    {"kind": "text", "text": "图后"},
+                ],
+            },
+        ],
+    }
+    original = json.loads(json.dumps(document, ensure_ascii=False))
+
+    delivery_document, report = normalize_for_delivery(document)
+
+    assert document == original
+    assert delivery_heading_levels(delivery_document) == frozenset({2})
+    assert not {"link", "marks", "mixed_inline", "paragraph_style"} & delivery_features(
+        delivery_document
+    )
+    assert [item["block_id"] for item in report["normalized_headings"]] == [
+        f"section-{index}" for index in range(1, 6)
+    ]
+    assert report["normalized_paragraph_styles"] == [
+        {"block_id": "mixed", "from_style": "Quote", "to_style": "Normal"}
+    ]
+    assert report["removed_links"] == [{"block_id": "mixed", "child_index": 0}]
+    projected = project_to_delivery_blocks(delivery_document)
+    assert [block["type"] for block in projected] == [
+        "heading",
+        "heading",
+        "heading",
+        "heading",
+        "heading",
+        "text",
+        "image",
+        "text",
+        "image",
+        "text",
+    ]
+    assert [
+        block.get("text") or block.get("asset_id") for block in projected[-5:]
+    ] == ["图前", repeated_asset, "图中", repeated_asset, "图后"]
 
 
 def test_delivery_projection_preserves_heading_levels_and_inline_image_order() -> None:

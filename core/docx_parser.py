@@ -30,6 +30,9 @@ WP_INLINE = f"{{{WP_NS}}}inline"
 WP_ANCHOR = f"{{{WP_NS}}}anchor"
 WP_DOC_PR = f"{{{WP_NS}}}docPr"
 PIC_CNV_PR = "{http://schemas.openxmlformats.org/drawingml/2006/picture}cNvPr"
+M_NS = "http://schemas.openxmlformats.org/officeDocument/2006/math"
+M_OMATH = f"{{{M_NS}}}oMath"
+M_OMATH_PARA = f"{{{M_NS}}}oMathPara"
 
 
 @dataclass
@@ -298,6 +301,11 @@ class DocxParser:
             core_title = self._normalize_title(doc.core_properties.title)
             title = core_title or self._title_from_rich_blocks(rich_blocks, filename)
             title_block_id = self._find_title_block_id(rich_blocks, title)
+
+        # Word 模板和人工排版经常把正文小节也错误套成 Heading 1。标题块已经
+        # 通过 ``title_block_id`` 唯一绑定后，其余 H1 不再有歧义：它们属于
+        # 正文层级，统一按 H2 保存，避免把模板样式错误传播到平台能力门。
+        self._normalize_body_heading_one(rich_blocks, title_block_id)
         document_v2: dict[str, Any] = {
             "schema_version": 2,
             "title": title,
@@ -336,6 +344,8 @@ class DocxParser:
         hyperlink_target: str | None = None,
         inferred_heading_level: int | None = None,
     ) -> dict[str, Any]:
+        if any(node.tag in {M_OMATH, M_OMATH_PARA} for node in paragraph._p.iter()):
+            raise ValueError("DOCX 公式无法安全映射到平台正文")
         style_name = paragraph.style.name if paragraph.style else None
         explicit_level = self._heading_level(style_name)
         level = explicit_level if explicit_level is not None else inferred_heading_level
@@ -766,8 +776,9 @@ class DocxParser:
                 return bool(value)
         return False
 
-    @staticmethod
+    @classmethod
     def _effective_font_size_points(
+        cls,
         run: Run,
         paragraph: Paragraph,
         doc=None,
@@ -775,19 +786,45 @@ class DocxParser:
         candidates = [run.font.size]
         run_style = getattr(run, "style", None)
         paragraph_style = getattr(paragraph, "style", None)
-        candidates.append(run_style.font.size if run_style is not None else None)
-        candidates.append(
-            paragraph_style.font.size if paragraph_style is not None else None
-        )
+        candidates.extend(cls._style_font_sizes(run_style))
+        candidates.extend(cls._style_font_sizes(paragraph_style))
         if doc is not None:
             try:
-                candidates.append(doc.styles["Normal"].font.size)
+                candidates.extend(cls._style_font_sizes(doc.styles["Normal"]))
             except (KeyError, TypeError):
                 pass
         for size in candidates:
             if size is not None:
                 return float(size.pt)
         return None
+
+    @staticmethod
+    def _style_font_sizes(style) -> list[Any]:
+        """按当前样式到 ``base_style`` 的顺序返回显式字号。
+
+        python-docx 不会把基于样式继承的字号展开到 ``style.font.size``。
+        Word 中常见的“正文派生样式/标题派生样式”因此必须显式沿基类链读取；
+        循环保护用于拒绝损坏或第三方生成器产生的异常样式关系。
+        """
+
+        sizes: list[Any] = []
+        seen: set[object] = set()
+        current = style
+        while current is not None:
+            style_element = getattr(current, "_element", None)
+            style_id = getattr(current, "style_id", None)
+            key: object = (
+                ("style-id", style_id)
+                if style_id is not None
+                else ("element-id", id(style_element or current))
+            )
+            if key in seen:
+                break
+            seen.add(key)
+            font = getattr(current, "font", None)
+            sizes.append(getattr(font, "size", None) if font is not None else None)
+            current = getattr(current, "base_style", None)
+        return sizes
 
     @staticmethod
     def _effective_font_color(run: Run, paragraph: Paragraph) -> str | None:
@@ -976,7 +1013,11 @@ class DocxParser:
         self,
         blocks: list[dict[str, Any]],
     ) -> dict[str, Any] | None:
-        """返回开头三个非空文本块中的唯一 H1；证据冲突时拒绝猜测。"""
+        """返回开头三个非空文本块中可唯一绑定的正文主标题。
+
+        当模板错误地把后续小节也标为 H1 时，第一非空块本身是 H1 仍是稳定
+        的主标题证据；否则继续要求候选唯一，避免猜测位于正文中的 H1。
+        """
 
         leading_text_blocks: list[dict[str, Any]] = []
         for block in blocks:
@@ -992,7 +1033,42 @@ class DocxParser:
             for block in leading_text_blocks
             if block.get("kind") == "heading" and block.get("level") == 1
         ]
+        if candidates and leading_text_blocks[0] is candidates[0]:
+            return candidates[0]
         return candidates[0] if len(candidates) == 1 else None
+
+    @classmethod
+    def _normalize_body_heading_one(
+        cls,
+        blocks: list[dict[str, Any]],
+        title_block_id: str | None,
+    ) -> None:
+        """保证 canonical 文档只有已绑定标题可以保留 H1。"""
+
+        for block in blocks:
+            kind = block.get("kind")
+            if (
+                kind == "heading"
+                and block.get("level") == 1
+                and block.get("block_id") != title_block_id
+            ):
+                block["level"] = 2
+                style_name = " ".join(str(block.get("style_name") or "").split())
+                if style_name.casefold() in {"heading 1", "title"}:
+                    block["style_name"] = "Heading 2"
+            elif kind == "list":
+                for item in block.get("items", []):
+                    cls._normalize_body_heading_one(
+                        item.get("blocks", []),
+                        title_block_id,
+                    )
+            elif kind == "table":
+                for row in block.get("rows", []):
+                    for cell in row.get("cells", []):
+                        cls._normalize_body_heading_one(
+                            cell.get("blocks", []),
+                            title_block_id,
+                        )
 
     def _find_title_block_id(self, blocks: list[dict[str, Any]], title: str) -> str | None:
         normalized_title = self._normalize_title(title)

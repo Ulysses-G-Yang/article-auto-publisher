@@ -26,6 +26,7 @@ from platforms.base import (
     BrowserLifecycleError,
     DraftBaselineError,
     DraftResultUnknownError,
+    DraftVerificationEvidence,
     LoginRequiredError,
     PlatformAutomationError,
     SelectorError,
@@ -1605,14 +1606,18 @@ class BaijiahaoPlatform(BasePlatform):
         """精确点击“存草稿”，再按唯一标题重开并核验冻结图文。"""
 
         self._require_page_alive("百家号保存草稿")
+        evidence = DraftVerificationEvidence()
+        self._last_draft_evidence = evidence
         expected_title = self._normalize_title(title)
         if not expected_title or expected_title != self._preflight_title:
             raise DraftResultUnknownError(
-                "DRAFT_RESULT_UNKNOWN: 百家号缺少与本次一致的唯一标题基线"
+                "DRAFT_RESULT_UNKNOWN: 百家号缺少与本次一致的唯一标题基线",
+                evidence=evidence.finalize(error_code="DRAFT_RESULT_UNKNOWN"),
             )
         if self._expected_persisted_blocks is None:
             raise DraftResultUnknownError(
-                "DRAFT_RESULT_UNKNOWN: 百家号缺少冻结内容核验快照"
+                "DRAFT_RESULT_UNKNOWN: 百家号缺少冻结内容核验快照",
+                evidence=evidence.finalize(error_code="DRAFT_RESULT_UNKNOWN"),
             )
         save_responses: list[dict[str, object]] = []
 
@@ -1693,17 +1698,23 @@ class BaijiahaoPlatform(BasePlatform):
 
         try:
             edit_url = await self._find_unique_exact_draft(expected_title)
+            evidence.mark_draft_list(match_count=1)
+            evidence.set_draft_url(edit_url)
             await self._verify_persisted_draft(expected_title, edit_url)
+            evidence.mark_reopen(title_match=True, dom_blocks_match=True)
+            evidence.finalize()
             return edit_url
         except DraftResultUnknownError:
             raise
         except Exception as exc:
             if self._exception_means_browser_closed(exc):
                 raise DraftResultUnknownError(
-                    "DRAFT_RESULT_UNKNOWN: 百家号核验草稿时浏览器已关闭"
+                    "DRAFT_RESULT_UNKNOWN: 百家号核验草稿时浏览器已关闭",
+                    evidence=evidence.finalize(error_code="DRAFT_RESULT_UNKNOWN"),
                 ) from exc
             raise DraftResultUnknownError(
-                "DRAFT_RESULT_UNKNOWN: 百家号持久化草稿核验失败"
+                "DRAFT_RESULT_UNKNOWN: 百家号持久化草稿核验失败",
+                evidence=evidence.finalize(error_code="DRAFT_RESULT_UNKNOWN"),
             ) from exc
 
     @staticmethod

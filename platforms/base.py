@@ -16,6 +16,98 @@ from platforms.content_validation import safe_media_error
 from platforms.media_progress import safe_media_progress
 
 
+class DraftVerificationEvidence:
+    """草稿保存证据链（可观测性）。
+
+    记录 save_draft() 内部各步骤的验证结果，供执行单响应返回给前端，
+    让业务人员不依赖终端日志即可判断"草稿是否真的存在"。
+
+    字段语义：None = 未执行到该步骤；bool/int = 该步骤验证结果。
+    纯数据结构，不携带原始异常文本、Profile 路径、Cookie、Token 或正文。
+    """
+
+    def __init__(self) -> None:
+        self.save_response_2xx: bool | None = None
+        self.save_http_status: int | None = None
+        self.save_platform_code: str | None = None
+        self.draft_list_title_unique: bool | None = None
+        self.draft_list_match_count: int | None = None
+        self.reopen_title_match: bool | None = None
+        self.reopen_dom_blocks_match: bool | None = None
+        self.draft_url: str | None = None
+        self.unknown: bool = False
+        self.summary: str | None = None
+
+    def mark_save_response(self, *, status: int | None, code: str | None = None) -> None:
+        """记录保存接口响应（多次自动保存以最后一次为准）。"""
+        if status is not None:
+            self.save_http_status = int(status)
+            self.save_response_2xx = 200 <= self.save_http_status < 300
+        if code is not None:
+            self.save_platform_code = str(code)
+
+    def mark_draft_list(self, match_count: int | None) -> None:
+        """记录草稿箱标题精确匹配数。"""
+        if match_count is not None:
+            self.draft_list_match_count = int(match_count)
+            self.draft_list_title_unique = self.draft_list_match_count == 1
+
+    def mark_reopen(self, *, title_match: bool | None, dom_blocks_match: bool | None) -> None:
+        """记录重开草稿后的标题与 DOM 结构核验。"""
+        if title_match is not None:
+            self.reopen_title_match = bool(title_match)
+        if dom_blocks_match is not None:
+            self.reopen_dom_blocks_match = bool(dom_blocks_match)
+
+    def set_draft_url(self, url: str | None) -> None:
+        if url:
+            self.draft_url = str(url)
+
+    def finalize(self, *, error_code: str | None = None) -> "DraftVerificationEvidence":
+        """生成脱敏 summary；在 raise/return 前调用，此时证据已完整。"""
+        self.unknown = bool(error_code and "UNKNOWN" in str(error_code).upper())
+        self.summary = self._build_summary()
+        return self
+
+    def _build_summary(self) -> str:
+        parts: list[str] = []
+        if self.save_response_2xx is False:
+            parts.append("保存接口响应未捕获")
+        elif self.save_response_2xx is True:
+            parts.append("保存接口已返回 2xx")
+        if self.draft_list_title_unique is True:
+            parts.append("草稿箱存在标题唯一匹配的草稿")
+        elif self.draft_list_title_unique is False:
+            parts.append(f"草稿箱标题匹配数为 {self.draft_list_match_count}")
+        if self.reopen_title_match is True:
+            parts.append("重开后标题一致")
+        elif self.reopen_title_match is False:
+            parts.append("重开后标题不一致")
+        if self.reopen_dom_blocks_match is False:
+            parts.append("重开后图文结构与冻结版本不一致")
+        if self.draft_url:
+            parts.append("已取得草稿链接")
+        if not parts:
+            parts.append("未记录到可核验证据")
+        return "；".join(parts)
+
+    def to_dict(self) -> dict:
+        if self.summary is None:
+            self.summary = self._build_summary()
+        return {
+            "save_response_2xx": self.save_response_2xx,
+            "save_http_status": self.save_http_status,
+            "save_platform_code": self.save_platform_code,
+            "draft_list_title_unique": self.draft_list_title_unique,
+            "draft_list_match_count": self.draft_list_match_count,
+            "reopen_title_match": self.reopen_title_match,
+            "reopen_dom_blocks_match": self.reopen_dom_blocks_match,
+            "draft_url": self.draft_url,
+            "unknown": self.unknown,
+            "summary": self.summary,
+        }
+
+
 class PlatformAutomationError(RuntimeError):
     """带稳定错误码的平台自动化异常。"""
 
@@ -51,11 +143,19 @@ class DraftBaselineError(PlatformAutomationError):
 
     error_code = "DRAFT_BASELINE_UNAVAILABLE"
 
+    def __init__(self, message: str = "", *, evidence=None):
+        super().__init__(message)
+        self.evidence = evidence
+
 
 class DraftResultUnknownError(PlatformAutomationError):
     """保存动作可能已经发生，但平台未提供可证明的结果。"""
 
     error_code = "DRAFT_RESULT_UNKNOWN"
+
+    def __init__(self, message: str = "", *, evidence=None):
+        super().__init__(message)
+        self.evidence = evidence
 
 
 class BasePlatform(ABC):
@@ -301,6 +401,23 @@ class BasePlatform(ABC):
         """真正发布文章，返回发布后的文章URL；不支持/失败返回空串。
         默认实现不执行任何操作（草稿保存即视为完成），各平台可覆盖。"""
         return ""
+
+    async def verify_draft_readonly(self, title: str) -> dict:
+        """只读核验：按标题在平台草稿箱查找唯一草稿并返回结构摘要。
+
+        只读约束：全程拦截非 GET 请求；不点保存/发布/删除；不清 Cookie；
+        不自动登录；失败返回错误码而非抛出（调用方按错误码处理）。
+
+        默认实现返回 unsupported（fail-closed，不猜测选择器）；各平台
+        显式覆盖后才具备核验能力。
+
+        返回契约：
+        - {"unsupported": True}                      平台未实现只读核验
+        - {"title_matched": bool, "match_count": int, "draft_url": str|None,
+           "structure": {...}}                       核验完成
+        - {"error_code": str, "error_message": str}  核验失败（稳定错误码）
+        """
+        return {"unsupported": True}
 
     async def apply_cover(self, cover: dict | None = None) -> dict:
         """应用冻结封面；平台未实现时明确报告，不得静默忽略用户选择。"""
@@ -590,6 +707,7 @@ class BasePlatform(ABC):
                 "cover_mode": cover_result.get("cover_mode"),
                 "cover_error": cover_result.get("error"),
                 "cover_error_code": cover_result.get("error_code"),
+                "verification_evidence": self._evidence_to_dict(),
             }
 
         except Exception as e:
@@ -599,7 +717,19 @@ class BasePlatform(ABC):
                 "error": str(e),
                 "error_code": getattr(e, "error_code", None),
             }
+            evidence = getattr(e, "evidence", None)
+            if evidence is not None:
+                result["verification_evidence"] = evidence.to_dict()
+            else:
+                result["verification_evidence"] = self._evidence_to_dict()
             progress = safe_media_progress(getattr(e, "media_progress", None))
             if progress is not None:
                 result["media_progress"] = progress
             return result
+
+    def _evidence_to_dict(self) -> dict | None:
+        """返回最近一次 save_draft 收集的证据（无则 None）。"""
+        evidence = getattr(self, "_last_draft_evidence", None)
+        if evidence is None:
+            return None
+        return evidence.to_dict()

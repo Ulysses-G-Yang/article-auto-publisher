@@ -5,10 +5,20 @@ class AccountSessionError(RuntimeError):
     error_code = "ACCOUNT_SESSION_ERROR"
     http_status = 400
 
-    def __init__(self, message: str, *, error_code: str | None = None) -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        error_code: str | None = None,
+        evidence: dict | None = None,
+        http_status: int | None = None,
+    ) -> None:
         super().__init__(message)
         if error_code:
             self.error_code = error_code
+        if http_status is not None:
+            self.http_status = http_status
+        self.evidence = evidence
 
 
 class AccountNotFoundError(AccountSessionError):

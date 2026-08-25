@@ -27,6 +27,7 @@ from platforms.base import (
     BasePlatform,
     BrowserLifecycleError,
     DraftResultUnknownError,
+    DraftVerificationEvidence,
     LoginRequiredError,
     PlatformAutomationError,
     SelectorError,
@@ -1264,10 +1265,13 @@ class SmzdmPlatform(BasePlatform):
         """强制刷新自动保存，按实体 ID 差集定位并重开核验完整图文。"""
 
         self._require_page_alive("smzdm 保存草稿")
+        evidence = DraftVerificationEvidence()
+        self._last_draft_evidence = evidence
         expected_title = " ".join(str(title or "").split())
         if not expected_title:
             raise DraftResultUnknownError(
-                "DRAFT_RESULT_UNKNOWN: smzdm 自动保存结果缺少可核验标题"
+                "DRAFT_RESULT_UNKNOWN: smzdm 自动保存结果缺少可核验标题",
+                evidence=evidence.finalize(error_code="DRAFT_RESULT_UNKNOWN"),
             )
         if self._expected_persisted_blocks is None:
             raise DraftResultUnknownError(
@@ -1330,23 +1334,30 @@ class SmzdmPlatform(BasePlatform):
                 pass
 
         status = captured.get("status")
+        evidence.mark_save_response(status=status, code=captured.get("error_code"))
         if not isinstance(status, int) or not 200 <= status < 300:
             raise DraftResultUnknownError(
-                "DRAFT_RESULT_UNKNOWN: smzdm 本次未捕获到成功自动保存响应"
+                "DRAFT_RESULT_UNKNOWN: smzdm 本次未捕获到成功自动保存响应",
+                evidence=evidence.finalize(error_code="DRAFT_RESULT_UNKNOWN"),
             )
         try:
             edit_url = await self._find_unique_new_draft()
+            evidence.set_draft_url(edit_url)
             await self._verify_persisted_draft(expected_title, edit_url)
+            evidence.mark_reopen(title_match=True, dom_blocks_match=True)
+            evidence.finalize()
             return edit_url
         except DraftResultUnknownError:
             raise
         except Exception as exc:
             if self._exception_means_browser_closed(exc):
                 raise DraftResultUnknownError(
-                    "DRAFT_RESULT_UNKNOWN: smzdm 自动保存后浏览器已关闭"
+                    "DRAFT_RESULT_UNKNOWN: smzdm 自动保存后浏览器已关闭",
+                    evidence=evidence.finalize(error_code="DRAFT_RESULT_UNKNOWN"),
                 ) from exc
             raise DraftResultUnknownError(
-                "DRAFT_RESULT_UNKNOWN: smzdm 持久化草稿核验失败"
+                "DRAFT_RESULT_UNKNOWN: smzdm 持久化草稿核验失败",
+                evidence=evidence.finalize(error_code="DRAFT_RESULT_UNKNOWN"),
             ) from exc
 
     @staticmethod

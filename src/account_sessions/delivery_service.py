@@ -6,6 +6,7 @@
 
 import hashlib
 import hmac
+import json
 import logging
 import os
 import re
@@ -296,6 +297,7 @@ class DeliveryService:
                 raise AccountUnavailableError(
                     result.get("error") or "平台未确认投递成功",
                     error_code=result.get("error_code") or "DELIVERY_FAILED",
+                    evidence=result.get("verification_evidence"),
                 )
             media_incomplete = result.get("media_status") in {"partial", "failed"}
             cover_strategy = str(cover.get("strategy") or "NONE").upper()
@@ -641,6 +643,11 @@ class DeliveryService:
             operation.draft_url = result.get("draft_url")
             operation.platform_url = result.get("post_url") or None
             operation.platform_article_id = platform_article_id
+            evidence = result.get("verification_evidence")
+            if evidence is not None:
+                operation.verification_evidence = json.dumps(
+                    evidence, ensure_ascii=False
+                )
             operation.article_mapping_status = (
                 ARTICLE_MAPPING_PENDING
                 if self.delivery_event_sink is not None
@@ -693,6 +700,11 @@ class DeliveryService:
             operation.draft_url = result.get("draft_url")
             operation.platform_url = result.get("post_url") or None
             operation.platform_article_id = platform_article_id
+            evidence = result.get("verification_evidence")
+            if evidence is not None:
+                operation.verification_evidence = json.dumps(
+                    evidence, ensure_ascii=False
+                )
             operation.article_mapping_status = (
                 ARTICLE_MAPPING_PENDING
                 if self.delivery_event_sink is not None
@@ -922,6 +934,11 @@ class DeliveryService:
             operation.status = "RESULT_UNKNOWN" if result_unknown else "FAILED"
             operation.error_code = error_code
             operation.error_message = safe_error_message(exc)
+            evidence = getattr(exc, "evidence", None)
+            if evidence is not None:
+                operation.verification_evidence = json.dumps(
+                    evidence, ensure_ascii=False
+                )
             operation.completed_at = datetime.now(timezone.utc)
             stored_account = await session.get(PlatformAccount, operation.account_id)
             if (
@@ -998,10 +1015,24 @@ def operation_payload(
         ),
         "error_code": operation.error_code,
         "error_message": operation.error_message,
+        "verification_evidence": _decode_evidence(
+            operation.verification_evidence
+        ),
         "created_at": _iso(operation.created_at),
         "started_at": _iso(operation.started_at),
         "completed_at": _iso(operation.completed_at),
     }
+
+
+def _decode_evidence(raw: str | None) -> dict | None:
+    """把数据库中的证据 JSON 解码为字典；无效或缺失返回 None。"""
+    if not raw:
+        return None
+    try:
+        value = json.loads(raw)
+    except (TypeError, ValueError):
+        return None
+    return value if isinstance(value, dict) else None
 
 
 def _append_buffered_logs(

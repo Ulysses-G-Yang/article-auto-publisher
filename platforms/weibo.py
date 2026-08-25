@@ -25,6 +25,7 @@ from platforms.base import (
     BrowserLifecycleError,
     DraftBaselineError,
     DraftResultUnknownError,
+    DraftVerificationEvidence,
     LoginRequiredError,
     PlatformAutomationError,
     SelectorError,
@@ -1720,6 +1721,8 @@ class WeiboPlatform(BasePlatform):
         """精确保存一次，并重开同一 draft ID 核验冻结图文。"""
 
         self._require_page_alive("微博保存草稿")
+        evidence = DraftVerificationEvidence()
+        self._last_draft_evidence = evidence
         expected_title = str(title or "").strip()
         expected_baseline_count = 1 if self._editing_existing_draft else 0
         if (
@@ -1861,12 +1864,15 @@ class WeiboPlatform(BasePlatform):
             await self.simulator.random_delay(1, 2)
             if captured.get("published") or captured.get("blocked_publish"):
                 raise DraftResultUnknownError(
-                    "DRAFT_RESULT_UNKNOWN: 微博保存期间出现公开发布请求，已拦截且禁止重试"
+                    "DRAFT_RESULT_UNKNOWN: 微博保存期间出现公开发布请求，已拦截且禁止重试",
+                    evidence=evidence,
                 )
             status = captured.get("status")
+            evidence.mark_save_response(status=status, code=captured.get("code"))
             if not isinstance(status, int) or not 200 <= status < 300:
                 raise DraftResultUnknownError(
-                    "DRAFT_RESULT_UNKNOWN: 微博保存动作已触发但未观察到 2xx 保存响应"
+                    "DRAFT_RESULT_UNKNOWN: 微博保存动作已触发但未观察到 2xx 保存响应",
+                    evidence=evidence.finalize(error_code="DRAFT_RESULT_UNKNOWN"),
                 )
 
             await self.page.goto(
@@ -1901,6 +1907,7 @@ class WeiboPlatform(BasePlatform):
                 )
                 if not isinstance(card_result, dict) or not card_result.get("clicked"):
                     continue
+                evidence.mark_draft_list(match_count=card_result.get("count"))
                 for _ in range(10):
                     observed_id = str(
                         await self.page.evaluate(
@@ -1919,7 +1926,8 @@ class WeiboPlatform(BasePlatform):
                     break
             if not opened:
                 raise DraftResultUnknownError(
-                    "DRAFT_RESULT_UNKNOWN: 微博未找到标题精确匹配且绑定本次 ID 的唯一草稿"
+                    "DRAFT_RESULT_UNKNOWN: 微博未找到标题精确匹配且绑定本次 ID 的唯一草稿",
+                    evidence=evidence.finalize(error_code="DRAFT_RESULT_UNKNOWN"),
                 )
 
             await self.page.wait_for_selector(
@@ -1934,27 +1942,42 @@ class WeiboPlatform(BasePlatform):
             ).strip()
             if reopened_title != expected_title:
                 raise DraftResultUnknownError(
-                    "DRAFT_RESULT_UNKNOWN: 微博草稿重开后标题不一致"
+                    "DRAFT_RESULT_UNKNOWN: 微博草稿重开后标题不一致",
+                    evidence=evidence.finalize(error_code="DRAFT_RESULT_UNKNOWN"),
                 )
-            await self._validate_dom_exact(
-                self._expected_persisted_blocks,
-                phase="草稿重开后",
-            )
+            try:
+                await self._validate_dom_exact(
+                    self._expected_persisted_blocks,
+                    phase="草稿重开后",
+                )
+                evidence.mark_reopen(title_match=True, dom_blocks_match=True)
+            except Exception as exc:
+                evidence.mark_reopen(title_match=True, dom_blocks_match=False)
+                raise DraftResultUnknownError(
+                    "DRAFT_RESULT_UNKNOWN: 微博草稿重开后图文结构不一致",
+                    evidence=evidence.finalize(error_code="DRAFT_RESULT_UNKNOWN"),
+                ) from exc
             logger.info(
                 "微博草稿验证成功: draft ID={}，接口 status={} code={}",
                 draft_id,
                 captured.get("status"),
                 captured.get("code"),
             )
+            evidence.set_draft_url(
+                f"https://card.weibo.com/article/v5/editor#/draft/{draft_id}"
+            )
+            evidence.finalize()
             return f"https://card.weibo.com/article/v5/editor#/draft/{draft_id}"
         except DraftBaselineError:
+            evidence.finalize(error_code="DRAFT_BASELINE_UNAVAILABLE")
             raise
         except DraftResultUnknownError:
             raise
         except Exception as exc:
             if save_triggered:
                 raise DraftResultUnknownError(
-                    "DRAFT_RESULT_UNKNOWN: 微博保存动作已触发但持久化结果无法证明"
+                    "DRAFT_RESULT_UNKNOWN: 微博保存动作已触发但持久化结果无法证明",
+                    evidence=evidence.finalize(error_code="DRAFT_RESULT_UNKNOWN"),
                 ) from exc
             if self._exception_means_browser_closed(exc):
                 raise BrowserLifecycleError(
@@ -1972,6 +1995,71 @@ class WeiboPlatform(BasePlatform):
                     await self.page.unroute("**/*", _guard_public_publish)
                 except Exception:  # noqa: BLE001
                     pass
+
+    async def verify_draft_readonly(self, title: str) -> dict:
+        """只读核验：在微博草稿箱按标题查找唯一草稿，返回结构摘要。
+
+        只导航草稿箱列表页并按标题匹配卡片；不点击草稿、不重开编辑页。
+        """
+        expected_title = str(title or "").strip()
+        if not expected_title:
+            return {"error_code": "PROBE_TITLE_MISSING", "error_message": "缺少可核验标题"}
+        try:
+            await self.page.goto(
+                "https://card.weibo.com/article/v5/editor#/draft",
+                wait_until="domcontentloaded",
+                timeout=30000,
+            )
+            match_count = 0
+            for _ in range(4):
+                await self.simulator.random_delay(2, 3)
+                result = await self.page.evaluate(
+                    r"""(title) => {
+                        const visible = (node) => {
+                            const rect = node.getBoundingClientRect();
+                            const style = getComputedStyle(node);
+                            return rect.width > 0 && rect.height > 0
+                                && style.display !== 'none'
+                                && style.visibility !== 'hidden';
+                        };
+                        const matches = Array.from(
+                            document.querySelectorAll('.list-item')
+                        ).filter((card) => visible(card)
+                            && (card.innerText || '').split(/\r?\n/, 1)[0].trim()
+                                === title);
+                        return matches.length;
+                    }""",
+                    expected_title,
+                )
+                if isinstance(result, int) and result > 0:
+                    match_count = result
+                    break
+            if match_count == 1:
+                return {
+                    "title_matched": True,
+                    "match_count": 1,
+                    "draft_url": "https://card.weibo.com/article/v5/editor#/draft",
+                    "structure": {"source": "draft_list"},
+                }
+            if match_count > 1:
+                return {
+                    "error_code": "PROBE_TITLE_AMBIGUOUS",
+                    "error_message": f"草稿箱存在 {match_count} 个同名草稿",
+                }
+            return {
+                "error_code": "PROBE_NOT_FOUND",
+                "error_message": "草稿箱未找到该标题草稿",
+            }
+        except Exception as exc:
+            if self._exception_means_browser_closed(exc):
+                return {
+                    "error_code": "PROBE_RESULT_UNKNOWN",
+                    "error_message": "核验期间浏览器已关闭",
+                }
+            return {
+                "error_code": "PROBE_RESULT_UNKNOWN",
+                "error_message": "草稿箱核验失败",
+            }
 
     @staticmethod
     def _safe_request_path(url: str) -> str:

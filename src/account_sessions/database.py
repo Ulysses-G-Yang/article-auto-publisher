@@ -158,6 +158,10 @@ class AccountDatabase:
                 "ALTER TABLE delivery_operations "
                 "ADD COLUMN article_mapping_last_attempt_at DATETIME"
             )
+        if "verification_evidence" not in columns:
+            connection.exec_driver_sql(
+                "ALTER TABLE delivery_operations ADD COLUMN verification_evidence TEXT"
+            )
         connection.exec_driver_sql(
             "CREATE UNIQUE INDEX IF NOT EXISTS ux_delivery_operations_request_key "
             "ON delivery_operations(request_key) WHERE request_key IS NOT NULL"

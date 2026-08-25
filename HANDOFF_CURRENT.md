@@ -350,6 +350,13 @@ git diff --check                                                 # 通过
 安全边界：判定逻辑零改动（防假成功语义不变）；核验只读（拦截非 GET）；
 租约复用不强抢；脱敏；公开发布开关保持关闭；未实现平台 fail-closed。
 
+**5 平台只读核验全部实现（2026-08-25 补充）**：
+- 知乎/微博：草稿箱列表标题精确匹配（此前已实现）。
+- ZOL：`_navigate_draft_verification_page` + `_matching_draft_cards` 只读匹配卡片。
+- SMZDM：草稿箱 `.draft-list li` 标题文本匹配（不打开编辑页，避免自动保存副作用）。
+- 百家号：作品页草稿 tab + 搜索框填标题（防抖查询）+ 匹配行数（不点"修改"）。
+- 测试：`tests/test_draft_verify.py` 新增 4 个平台场景（找到/未找到/歧义）。
+
 ## 13. 最小验证与 Git 交付
 
 PowerShell 示例：

@@ -643,6 +643,7 @@ class DeliveryService:
             operation.draft_url = result.get("draft_url")
             operation.platform_url = result.get("post_url") or None
             operation.platform_article_id = platform_article_id
+            operation.degraded = result.get("degraded")
             evidence = result.get("verification_evidence")
             if evidence is not None:
                 operation.verification_evidence = json.dumps(
@@ -700,6 +701,7 @@ class DeliveryService:
             operation.draft_url = result.get("draft_url")
             operation.platform_url = result.get("post_url") or None
             operation.platform_article_id = platform_article_id
+            operation.degraded = result.get("degraded")
             evidence = result.get("verification_evidence")
             if evidence is not None:
                 operation.verification_evidence = json.dumps(
@@ -931,7 +933,12 @@ class DeliveryService:
                 return
             error_code = getattr(exc, "error_code", None) or "DELIVERY_FAILED"
             result_unknown = error_code in RESULT_UNKNOWN_ERROR_CODES
-            operation.status = "RESULT_UNKNOWN" if result_unknown else "FAILED"
+            if error_code == "DELIVERY_INCOMPLETE":
+                # 投递未完成：保存动作已触发但平台侧无任何可确认证据。
+                # 这是独立于 FAILED/RESULT_UNKNOWN 的新状态，不伪装成功也不判死失败。
+                operation.status = "DELIVERY_INCOMPLETE"
+            else:
+                operation.status = "RESULT_UNKNOWN" if result_unknown else "FAILED"
             operation.error_code = error_code
             operation.error_message = safe_error_message(exc)
             evidence = getattr(exc, "evidence", None)
@@ -952,8 +959,20 @@ class DeliveryService:
                 activity_for(
                     account,
                     access,
-                    action=("DELIVERY_RESULT_UNKNOWN" if result_unknown else "DELIVERY_FAILED"),
-                    level="WARN" if result_unknown else "ERROR",
+                    action=(
+                        "DELIVERY_INCOMPLETE"
+                        if error_code == "DELIVERY_INCOMPLETE"
+                        else (
+                            "DELIVERY_RESULT_UNKNOWN"
+                            if result_unknown
+                            else "DELIVERY_FAILED"
+                        )
+                    ),
+                    level=(
+                        "WARN"
+                        if error_code == "DELIVERY_INCOMPLETE" or result_unknown
+                        else "ERROR"
+                    ),
                     message=operation.error_message,
                     operation_id=operation_id,
                 )
@@ -1018,6 +1037,7 @@ def operation_payload(
         "verification_evidence": _decode_evidence(
             operation.verification_evidence
         ),
+        "degraded": operation.degraded,
         "created_at": _iso(operation.created_at),
         "started_at": _iso(operation.started_at),
         "completed_at": _iso(operation.completed_at),

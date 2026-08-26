@@ -26,6 +26,7 @@
         DRAFT_SAVED_WITH_WARNINGS: '草稿已保存（有警告）',
         PUBLISHED_WITH_WARNINGS: '已发布（有警告）',
         RESULT_UNKNOWN: '结果未知，需人工核对', FORMAT_REVIEW_REQUIRED: '待格式复核',
+        DELIVERY_INCOMPLETE: '投递未完成',
         AWAITING_CONFIRMATION: '等待公开确认', EXECUTING: '执行中',
     };
     const reLoginErrorCodes = new Set([
@@ -2003,7 +2004,7 @@
         if (isFormatBlockedTarget(target)) return 'text-bg-warning';
         if (['SUCCESS', 'DRAFT_SAVED', 'PUBLISHED'].includes(status)) return 'text-bg-success';
         if (['BLOCKED', 'FAILED', 'FATAL'].includes(status)) return 'text-bg-danger';
-        if (['PARTIAL_FAIL', 'CONFIRMATION_REQUIRED', 'RESULT_UNKNOWN', 'FORMAT_REVIEW_REQUIRED', 'DRAFT_SAVED_WITH_WARNINGS', 'PUBLISHED_WITH_WARNINGS'].includes(status)) return 'text-bg-warning';
+        if (['PARTIAL_FAIL', 'CONFIRMATION_REQUIRED', 'RESULT_UNKNOWN', 'DELIVERY_INCOMPLETE', 'FORMAT_REVIEW_REQUIRED', 'DRAFT_SAVED_WITH_WARNINGS', 'PUBLISHED_WITH_WARNINGS'].includes(status)) return 'text-bg-warning';
         return 'text-bg-info';
     }
 
@@ -2014,6 +2015,9 @@
     function targetStatusLabel(target) {
         if (targetNeedsRelogin(target)) return '需要重新登录';
         if (target?.error_code === 'XHS_CLOUD_DRAFT_UNAVAILABLE') return '网页端无云端草稿';
+        if (target?.degraded && ['DRAFT_SAVED', 'DRAFT_SAVED_WITH_WARNINGS'].includes(target.status)) {
+            return '草稿已保存（草稿箱确认）';
+        }
         return planStatusLabels[target.status] || target.status;
     }
 
@@ -2050,6 +2054,12 @@
         }
         if (target.status === 'RESULT_UNKNOWN') {
             return '结果未知，请先到平台人工核对；系统不会自动重试。';
+        }
+        if (target?.degraded && ['DRAFT_SAVED', 'DRAFT_SAVED_WITH_WARNINGS'].includes(target.status)) {
+            return '平台草稿箱已出现同名草稿，按降级成功判定；建议到平台草稿箱核对图片等完整性。';
+        }
+        if (target.status === 'DELIVERY_INCOMPLETE') {
+            return target.error_message || '投递未完成：平台侧未确认草稿保存结果，请使用只读核验或到平台草稿箱人工核对。';
         }
         if (target.status === 'PARTIAL_FAIL') {
             return target.error_message || '部分内容未完整处理，请核对图片和平台结果。';
@@ -2092,7 +2102,7 @@
             // 只读核验草稿按钮：终态且非草稿保存成功时，允许业务人员一键核验
             if (
                 target.operation_id
-                && ['FAILED', 'RESULT_UNKNOWN', 'DRAFT_SAVED_WITH_WARNINGS'].includes(target.status)
+                && ['FAILED', 'RESULT_UNKNOWN', 'DELIVERY_INCOMPLETE', 'DRAFT_SAVED_WITH_WARNINGS'].includes(target.status)
             ) {
                 const verify = document.createElement('button');
                 verify.className = 'btn btn-sm btn-outline-secondary';

@@ -264,6 +264,7 @@ document.addEventListener('alpine:init', () => {
                 DRAFT_SAVED_WITH_WARNINGS: '草稿已保存（图片未完整）',
                 PUBLISHED: '已发布', PUBLISHED_WITH_WARNINGS: '已发布（图片未完整）',
                 FAILED: '失败', RESULT_UNKNOWN: '结果未知',
+                DELIVERY_INCOMPLETE: '投递未完成',
                 CONFIRMATION_REQUIRED: '待公开确认', BLOCKED: '已拦截',
             };
             return m[s] || s;
@@ -275,6 +276,7 @@ document.addEventListener('alpine:init', () => {
                 DRAFT_SAVED_WITH_WARNINGS: 'bg-warning text-dark',
                 PUBLISHED_WITH_WARNINGS: 'bg-warning text-dark',
                 FAILED: 'bg-danger', RESULT_UNKNOWN: 'bg-warning text-dark',
+                DELIVERY_INCOMPLETE: 'bg-warning text-dark',
                 BLOCKED: 'bg-danger',
             };
             return m[s] || 'bg-light text-dark';

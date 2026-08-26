@@ -357,6 +357,29 @@ git diff --check                                                 # 通过
 - 百家号：作品页草稿 tab + 搜索框填标题（防抖查询）+ 匹配行数（不点"修改"）。
 - 测试：`tests/test_draft_verify.py` 新增 4 个平台场景（找到/未找到/歧义）。
 
+### 保存成功放宽判定：降级成功 / 投递未完成（2026-08-25）
+
+需求：保存结果未知时不再一律判失败——只要草稿箱出现同名草稿就算成功；全部通道都
+不满足时也不显示"失败"，而是显示"投递未完成"。
+
+- `BasePlatform.publish()` 按优先级降级判定：P1 保存响应 → P2 草稿箱标题唯一匹配
+  → P3 重开标题 → P4 重开 DOM；任一满足 ⇒ 降级成功（`success=True`、
+  `degraded="draft_list_confirmed"`，`draft_url` 可为空），全部不满足 ⇒
+  `{success:False, error_code:"DELIVERY_INCOMPLETE", ...}`（独立终态，区别于
+  RESULT_UNKNOWN/FAILED；不在 `RESULT_UNKNOWN_ERROR_CODES`，也不在
+  `SESSION_INVALIDATING_ERROR_CODES`）。
+- `DeliveryOperation` 新增 `degraded` 列；`_mark_completed*` 持久化降级标记，
+  `_mark_failed` 对 `DELIVERY_INCOMPLETE` 写该状态并保留证据链。
+- `DeliveryPlanTarget` 新增 `degraded` + `verification_evidence` 列；
+  `set_plan_target_result` 落库，`public_plan_target` 回读；计划聚合把
+  DELIVERY_INCOMPLETE 归入失败态（全失败 FATAL / 混合 PARTIAL_FAIL），
+  降级成功仍按 DRAFT_SAVED 计 SUCCESS 且标记不丢。
+- 前端：计划/执行状态标签 `DELIVERY_INCOMPLETE='投递未完成'`（warning 样式）；
+  降级成功目标显示"草稿已保存（草稿箱确认）"+ 证据展示 + 可重新验证按钮。
+- 测试：`tests/test_delivery_degraded.py`（10 个，publish 降级链 + DeliveryService
+  落库）；`tests/test_content_studio.py` 聚合与计划目标回读；
+  前端契约断言 `DELIVERY_INCOMPLETE` 标签与"草稿已保存（草稿箱确认）"。
+
 ## 13. 最小验证与 Git 交付
 
 PowerShell 示例：

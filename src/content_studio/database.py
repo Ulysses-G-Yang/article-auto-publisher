@@ -117,6 +117,14 @@ class ContentDatabase:
             connection.exec_driver_sql(
                 "ALTER TABLE delivery_plan_targets ADD COLUMN execution_claim_expires_at DATETIME"
             )
+        if "degraded" not in columns:
+            connection.exec_driver_sql(
+                "ALTER TABLE delivery_plan_targets ADD COLUMN degraded VARCHAR(32)"
+            )
+        if "verification_evidence" not in columns:
+            connection.exec_driver_sql(
+                "ALTER TABLE delivery_plan_targets ADD COLUMN verification_evidence TEXT"
+            )
 
     @staticmethod
     def _upgrade_delivery_document_schema(connection) -> None:

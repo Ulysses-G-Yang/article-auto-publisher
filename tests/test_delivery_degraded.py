@@ -242,6 +242,23 @@ def test_publish_id_mismatch_is_not_title_only_degraded_success() -> None:
     assert result["error_code"] == "DELIVERY_INCOMPLETE"
 
 
+def test_publish_duplicate_cards_without_response_id_is_delivery_incomplete() -> None:
+    evidence = DraftVerificationEvidence()
+    evidence.mark_draft_list(match_count=2)
+    evidence.mark_entity_binding(
+        bound=False,
+        source="save_response_id",
+        id_match=False,
+    )
+    evidence.finalize(error_code="DRAFT_RESULT_UNKNOWN")
+
+    result = _run_publish(_platform_with_save_raising(evidence))
+
+    assert result["success"] is False
+    assert result["error_code"] == "DELIVERY_INCOMPLETE"
+    assert result["verification_evidence"]["draft_entity_bound"] is False
+
+
 def test_publish_content_warning_keeps_actual_media_progress() -> None:
     platform = _platform_with_save_raising(
         DraftVerificationEvidence()

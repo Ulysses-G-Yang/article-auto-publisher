@@ -439,11 +439,15 @@ def test_save_draft_rejects_duplicate_title_cards() -> None:
         card_states=[[], [_SaveCard("新草稿"), _SaveCard("新草稿")]],
     )
 
-    with pytest.raises(DraftResultUnknownError, match="DRAFT_RESULT_UNKNOWN"):
+    with pytest.raises(DraftResultUnknownError, match="DRAFT_RESULT_UNKNOWN") as caught:
         asyncio.run(platform.save_draft("新草稿"))
 
     assert platform.page.control.click_count == 1
     assert draft_page.closed is True
+    assert caught.value.evidence.to_dict()["draft_entity_bound"] is False
+    evidence = platform._last_draft_evidence.to_dict()
+    assert evidence["draft_entity_bound"] is False
+    assert evidence["draft_entity_id_match"] is False
 
 
 def test_save_draft_rejects_missing_card_and_mismatched_card_id() -> None:
@@ -451,15 +455,23 @@ def test_save_draft_rejects_missing_card_and_mismatched_card_id() -> None:
         [],
         [_SaveCard("另一篇", {"data-draft-id": "new-id"})],
         [_SaveCard("新草稿", {"data-draft-id": "other-id"})],
+        [
+            _SaveCard("新草稿", {"data-draft-id": "old-id"}),
+            _SaveCard("新草稿", {"data-draft-id": "other-id"}),
+        ],
     ):
         platform, draft_page = _save_platform(
             responses=[_SaveResponse({"errcode": 0, "data": {"draftId": "new-id"}})],
             card_states=[[], after_cards, after_cards],
         )
-        with pytest.raises(DraftResultUnknownError, match="DRAFT_RESULT_UNKNOWN"):
+        with pytest.raises(DraftResultUnknownError, match="DRAFT_RESULT_UNKNOWN") as caught:
             asyncio.run(platform.save_draft("新草稿"))
         evidence = platform._last_draft_evidence.to_dict()
-        if after_cards and after_cards[0].attributes.get("data-draft-id") == "other-id":
+        if after_cards and (
+            after_cards[0].attributes.get("data-draft-id") == "other-id"
+            or len(after_cards) == 2
+        ):
+            assert caught.value.evidence.to_dict()["draft_entity_bound"] is False
             assert evidence["draft_entity_bound"] is False
             assert evidence["draft_entity_id_match"] is False
         assert platform.page.control.click_count == 1

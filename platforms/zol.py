@@ -3071,6 +3071,12 @@ class ZOLPlatform(BasePlatform):
                             id_match=True,
                         )
                     return
+                if evidence is not None:
+                    evidence.mark_entity_binding(
+                        bound=False,
+                        source="save_response_id",
+                        id_match=False,
+                    )
                 raise DraftResultUnknownError(
                     "DRAFT_RESULT_UNKNOWN: 保存后草稿标题不唯一"
                 )

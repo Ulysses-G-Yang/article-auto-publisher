@@ -725,6 +725,8 @@ class ContentStudioService:
                     operation_id=item["operation_id"],
                     error_code="DELIVERY_OPERATION_UNAVAILABLE",
                     error_message="执行单状态不可读取，请人工核对平台结果",
+                    degraded=None,
+                    verification_evidence=None,
                 )
                 continue
             operation_status = str(operation.get("status") or "")
@@ -741,6 +743,8 @@ class ContentStudioService:
                     operation_id=item["operation_id"],
                     error_code="DELIVERY_RESULT_UNKNOWN",
                     error_message="服务中断时平台操作正在执行，请人工核对平台结果",
+                    degraded=operation.get("degraded"),
+                    verification_evidence=operation.get("verification_evidence"),
                 )
                 continue
             if operation_status in PLAN_OPERATION_SYNC_STATUSES:
@@ -758,6 +762,8 @@ class ContentStudioService:
                         )
                     ),
                     error_message=operation.get("error_message"),
+                    degraded=operation.get("degraded"),
+                    verification_evidence=operation.get("verification_evidence"),
                 )
         return recoverable
 

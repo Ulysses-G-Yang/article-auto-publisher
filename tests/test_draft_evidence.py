@@ -27,6 +27,7 @@ class TestEvidenceModel:
         ev = DraftVerificationEvidence()
         ev.mark_save_response(status=200, code="0")
         ev.mark_draft_list(match_count=1)
+        ev.mark_entity_binding(bound=True, source="save_response_id", id_match=True)
         ev.mark_reopen(title_match=True, dom_blocks_match=True)
         ev.set_draft_url("https://example.com/draft/1")
         ev.finalize()
@@ -36,6 +37,8 @@ class TestEvidenceModel:
         assert payload["save_http_status"] == 200
         assert payload["draft_list_title_unique"] is True
         assert payload["reopen_title_match"] is True
+        assert payload["draft_entity_bound"] is True
+        assert payload["draft_entity_source"] == "save_response_id"
         assert payload["unknown"] is False
         assert "保存接口已返回 2xx" in payload["summary"]
         assert "唯一匹配" in payload["summary"]
@@ -64,6 +67,19 @@ class TestEvidenceModel:
         assert payload["draft_list_title_unique"] is False
         assert payload["draft_list_match_count"] == 3
         assert "匹配数为 3" in payload["summary"]
+
+    def test_entity_binding_false_is_not_title_success(self) -> None:
+        ev = DraftVerificationEvidence()
+        ev.mark_draft_list(match_count=1)
+        ev.mark_entity_binding(
+            bound=False,
+            source="save_response_id",
+            id_match=False,
+        )
+        payload = ev.finalize(error_code="DRAFT_RESULT_UNKNOWN").to_dict()
+        assert payload["draft_list_title_unique"] is True
+        assert payload["draft_entity_bound"] is False
+        assert payload["draft_entity_id_match"] is False
 
     def test_markers_latest_wins_per_step(self) -> None:
         ev = DraftVerificationEvidence()

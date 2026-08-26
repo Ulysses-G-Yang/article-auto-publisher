@@ -1342,12 +1342,36 @@ class SmzdmPlatform(BasePlatform):
             )
         try:
             edit_url = await self._find_unique_new_draft()
+            evidence.mark_draft_list(match_count=1)
+            evidence.mark_entity_binding(
+                bound=True,
+                source="baseline_new_id",
+                id_match=True,
+            )
             evidence.set_draft_url(edit_url)
-            await self._verify_persisted_draft(expected_title, edit_url)
+            try:
+                await self._verify_persisted_draft(expected_title, edit_url)
+            except DraftResultUnknownError as exc:
+                message = str(exc)
+                if "标题不一致" in message:
+                    evidence.mark_reopen(title_match=False, dom_blocks_match=None)
+                elif "图文结构不完整" in message:
+                    evidence.mark_reopen(title_match=True, dom_blocks_match=False)
+                raise
             evidence.mark_reopen(title_match=True, dom_blocks_match=True)
             evidence.finalize()
             return edit_url
-        except DraftResultUnknownError:
+        except DraftResultUnknownError as exc:
+            if getattr(exc, "evidence", None) is None:
+                # ID 差集失败时明确记录“本次实体未绑定”，防止基类仅凭
+                # 标题唯一把旧同名草稿降级为成功。
+                if evidence.draft_entity_bound is None:
+                    evidence.mark_entity_binding(
+                        bound=False,
+                        source="baseline_new_id",
+                        id_match=False,
+                    )
+                exc.evidence = evidence.finalize(error_code="DRAFT_RESULT_UNKNOWN")
             raise
         except Exception as exc:
             if self._exception_means_browser_closed(exc):

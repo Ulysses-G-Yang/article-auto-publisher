@@ -243,6 +243,10 @@ class ContentStudioRuntimeState:
                 target["target_id"],
                 status=operation_status,
                 operation_id=operation["operation_id"],
+                error_code=operation.get("error_code"),
+                error_message=operation.get("error_message"),
+                degraded=operation.get("degraded"),
+                verification_evidence=operation.get("verification_evidence"),
             )
             target["status"] = operation_status
             target["operation_id"] = operation["operation_id"]
@@ -314,6 +318,8 @@ class ContentStudioRuntimeState:
                 and operation.get("error_code") == target.get("error_code")
                 and operation.get("error_message") == target.get("error_message")
                 and operation.get("degraded") == target.get("degraded")
+                and operation.get("verification_evidence")
+                == target.get("verification_evidence")
             ):
                 continue
             await self.service.set_plan_target_result(
@@ -382,6 +388,8 @@ class ContentStudioRuntimeState:
                 target_id,
                 status=operation_status,
                 operation_id=operation_id,
+                error_code=operation.get("error_code"),
+                error_message=operation.get("error_message"),
                 degraded=operation.get("degraded"),
                 verification_evidence=operation.get("verification_evidence"),
             )

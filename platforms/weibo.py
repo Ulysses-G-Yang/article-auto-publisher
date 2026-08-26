@@ -1919,12 +1919,30 @@ class WeiboPlatform(BasePlatform):
                         or ""
                     )
                     if observed_id == draft_id:
+                        evidence.mark_entity_binding(
+                            bound=True,
+                            source=(
+                                "existing_draft_id"
+                                if self._editing_existing_draft
+                                else "save_response_id"
+                            ),
+                            id_match=True,
+                        )
                         opened = True
                         break
                     await asyncio.sleep(0.5)
                 if opened:
                     break
             if not opened:
+                evidence.mark_entity_binding(
+                    bound=False,
+                    source=(
+                        "existing_draft_id"
+                        if self._editing_existing_draft
+                        else "save_response_id"
+                    ),
+                    id_match=False,
+                )
                 raise DraftResultUnknownError(
                     "DRAFT_RESULT_UNKNOWN: 微博未找到标题精确匹配且绑定本次 ID 的唯一草稿",
                     evidence=evidence.finalize(error_code="DRAFT_RESULT_UNKNOWN"),
@@ -1941,6 +1959,7 @@ class WeiboPlatform(BasePlatform):
                 ).first.input_value()
             ).strip()
             if reopened_title != expected_title:
+                evidence.mark_reopen(title_match=False, dom_blocks_match=None)
                 raise DraftResultUnknownError(
                     "DRAFT_RESULT_UNKNOWN: 微博草稿重开后标题不一致",
                     evidence=evidence.finalize(error_code="DRAFT_RESULT_UNKNOWN"),

@@ -414,6 +414,25 @@ def test_save_draft_accepts_unique_title_card_without_card_id() -> None:
     assert asyncio.run(platform.save_draft("新草稿")).endswith("/draft")
 
 
+def test_save_draft_binds_matching_id_among_same_title_cards() -> None:
+    platform, _draft_page = _save_platform(
+        responses=[_SaveResponse({"errcode": 0, "data": {"draftId": "new-id"}})],
+        card_states=[
+            [],
+            [
+                _SaveCard("同名草稿", {"data-draft-id": "old-id"}),
+                _SaveCard("同名草稿", {"data-draft-id": "new-id"}),
+            ],
+        ],
+    )
+
+    assert asyncio.run(platform.save_draft("同名草稿")).endswith("/draft")
+    evidence = platform._last_draft_evidence.to_dict()
+    assert evidence["draft_list_match_count"] == 2
+    assert evidence["draft_entity_bound"] is True
+    assert evidence["draft_entity_id_match"] is True
+
+
 def test_save_draft_rejects_duplicate_title_cards() -> None:
     platform, draft_page = _save_platform(
         responses=[_SaveResponse({"errcode": 0, "data": {"draftId": "new-id"}})],
@@ -439,6 +458,10 @@ def test_save_draft_rejects_missing_card_and_mismatched_card_id() -> None:
         )
         with pytest.raises(DraftResultUnknownError, match="DRAFT_RESULT_UNKNOWN"):
             asyncio.run(platform.save_draft("新草稿"))
+        evidence = platform._last_draft_evidence.to_dict()
+        if after_cards and after_cards[0].attributes.get("data-draft-id") == "other-id":
+            assert evidence["draft_entity_bound"] is False
+            assert evidence["draft_entity_id_match"] is False
         assert platform.page.control.click_count == 1
         assert draft_page.closed is True
 

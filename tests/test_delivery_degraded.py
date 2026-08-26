@@ -145,6 +145,10 @@ class _FakePlatform(BasePlatform):
 
 
 def _run_publish(platform: _FakePlatform) -> dict:
+    return _run_publish_mode(platform, "DRAFT")
+
+
+def _run_publish_mode(platform: _FakePlatform, mode: str | None) -> dict:
     platform.simulator.random_delay = AsyncMock()
     with (
         patch.object(platform, "_safe_simulate_scroll", new=AsyncMock()),
@@ -156,7 +160,7 @@ def _run_publish(platform: _FakePlatform) -> dict:
                 content_blocks=[{"type": "text", "text": "正文"}],
                 images=[],
                 cover={"strategy": "NONE"},
-                delivery_mode="DRAFT",
+                delivery_mode=mode,
                 auto_login=False,
                 task_id=0,
                 db=_FakeDb(),
@@ -180,6 +184,7 @@ def test_publish_degraded_success_when_draft_list_unique() -> None:
     evidence = DraftVerificationEvidence()
     evidence.mark_save_response(status=None)
     evidence.mark_draft_list(match_count=1)
+    evidence.mark_entity_binding(bound=True, source="save_response_id", id_match=True)
     evidence.set_draft_url("https://weibo.com/draft/42")
     evidence.finalize()
 
@@ -196,6 +201,7 @@ def test_publish_degraded_success_allows_empty_draft_url() -> None:
     evidence = DraftVerificationEvidence()
     evidence.mark_save_response(status=None)
     evidence.mark_draft_list(match_count=1)
+    evidence.mark_entity_binding(bound=True, source="save_response_id", id_match=True)
     evidence.finalize()
 
     result = _run_publish(_platform_with_save_raising(evidence))
@@ -218,6 +224,83 @@ def test_publish_delivery_incomplete_when_no_evidence_confirmed() -> None:
     assert result["error_code"] == "DELIVERY_INCOMPLETE"
     assert "投递未完成" in result["error"]
     assert result["verification_evidence"]["draft_list_title_unique"] is False
+
+
+def test_publish_id_mismatch_is_not_title_only_degraded_success() -> None:
+    evidence = DraftVerificationEvidence()
+    evidence.mark_draft_list(match_count=1)
+    evidence.mark_entity_binding(
+        bound=False,
+        source="save_response_id",
+        id_match=False,
+    )
+    evidence.finalize(error_code="DRAFT_RESULT_UNKNOWN")
+
+    result = _run_publish(_platform_with_save_raising(evidence))
+
+    assert result["success"] is False
+    assert result["error_code"] == "DELIVERY_INCOMPLETE"
+
+
+def test_publish_content_warning_keeps_actual_media_progress() -> None:
+    platform = _platform_with_save_raising(
+        DraftVerificationEvidence()
+    )
+    evidence = platform._last_draft_evidence
+    evidence.mark_draft_list(match_count=1)
+    evidence.mark_entity_binding(bound=True, source="save_response_id", id_match=True)
+    evidence.mark_reopen(title_match=True, dom_blocks_match=False)
+    evidence.finalize(error_code="DRAFT_RESULT_UNKNOWN")
+
+    async def partial_content(_content_blocks: list, _images: list) -> dict:
+        return {
+            "text_ok": True,
+            "media_status": "partial",
+            "expected_images": 7,
+            "uploaded_images": 5,
+            "failed_images": [{"filename": "image.png", "error": "未确认"}],
+            "media_error": "正文图片未完整核验",
+        }
+
+    platform.fill_content = partial_content  # type: ignore[method-assign]
+    result = _run_publish(platform)
+
+    assert result["success"] is True
+    assert result["draft_verification_warning"] is True
+    assert result["expected_images"] == 7
+    assert result["uploaded_images"] == 5
+    assert result["media_status"] == "partial"
+
+
+def test_publish_degraded_draft_never_calls_publish_now() -> None:
+    evidence = DraftVerificationEvidence()
+    evidence.mark_draft_list(match_count=1)
+    evidence.mark_entity_binding(bound=True, source="save_response_id", id_match=True)
+    evidence.finalize(error_code="DRAFT_RESULT_UNKNOWN")
+    platform = _platform_with_save_raising(evidence)
+    platform.publish_now = AsyncMock(return_value="https://example.invalid/post")
+
+    result = _run_publish_mode(platform, "PUBLISH")
+
+    assert result["success"] is False
+    assert result["error_code"] == "DELIVERY_INCOMPLETE"
+    platform.publish_now.assert_not_awaited()
+
+
+def test_publish_degraded_blocks_legacy_publish_config_without_mode() -> None:
+    evidence = DraftVerificationEvidence()
+    evidence.mark_draft_list(match_count=1)
+    evidence.mark_entity_binding(bound=True, source="save_response_id", id_match=True)
+    evidence.finalize(error_code="DRAFT_RESULT_UNKNOWN")
+    platform = _platform_with_save_raising(evidence)
+    platform.cfg.setdefault("app", {})["publish_after_draft"] = True
+    platform.publish_now = AsyncMock(return_value="https://example.invalid/post")
+
+    result = _run_publish_mode(platform, None)
+
+    assert result["success"] is False
+    assert result["error_code"] == "DELIVERY_INCOMPLETE"
+    platform.publish_now.assert_not_awaited()
 
 
 def test_publish_delivery_incomplete_when_empty_draft_url_without_exception() -> None:
@@ -396,5 +479,43 @@ class TestDeliveryServiceDegradedPersistence:
             assert payload["degraded"] is None
             operation = await read_operation(database, operation_id)
             assert operation.degraded is None
+        finally:
+            await database.dispose()
+
+    @pytest.mark.asyncio
+    async def test_list_recent_operations_projects_warning_evidence(
+        self, tmp_path: Path
+    ) -> None:
+        database, delivery, account = await make_delivery(tmp_path)
+        try:
+            operation_id = str(uuid.uuid4())
+            await insert_operation(database, account, operation_id)
+            evidence = {
+                "draft_entity_bound": True,
+                "draft_entity_source": "save_response_id",
+                "draft_entity_id_match": True,
+            }
+            result = {
+                "success": True,
+                "draft_url": "",
+                "media_status": "partial",
+                "media_error": "正文图片未完整核验",
+                "degraded": "draft_list_confirmed",
+                "verification_evidence": evidence,
+            }
+            await delivery._mark_completed_with_warnings(
+                operation_id,
+                account,
+                LOCAL_WEB_CONTEXT,
+                result,
+                [],
+            )
+
+            recent = await delivery.list_recent_operations(LOCAL_WEB_CONTEXT)
+            row = next(item for item in recent if item["operation_id"] == operation_id)
+            assert row["status"] == "DRAFT_SAVED_WITH_WARNINGS"
+            assert row["error_code"] == "PLATFORM_MEDIA_INCOMPLETE"
+            assert row["degraded"] == "draft_list_confirmed"
+            assert row["verification_evidence"] == evidence
         finally:
             await database.dispose()

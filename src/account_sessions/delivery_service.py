@@ -300,6 +300,10 @@ class DeliveryService:
                     evidence=result.get("verification_evidence"),
                 )
             media_incomplete = result.get("media_status") in {"partial", "failed"}
+            entity_confirmed = _evidence_confirms_entity(
+                result.get("verification_evidence")
+            )
+            verification_warning = bool(result.get("draft_verification_warning"))
             cover_strategy = str(cover.get("strategy") or "NONE").upper()
             cover_status = result.get("cover_status")
             cover_incomplete = (
@@ -309,13 +313,13 @@ class DeliveryService:
                 result.setdefault("cover_status", "unverified")
                 result.setdefault("cover_error_code", "PLATFORM_COVER_UNVERIFIED")
                 result.setdefault("cover_error", "平台未确认封面设置成功")
-            if media_incomplete and not result.get("draft_url"):
+            if media_incomplete and not result.get("draft_url") and not entity_confirmed:
                 # 草稿都没保存下来，才整体判失败
                 raise AccountUnavailableError(
                     "图片未完整写入平台且草稿未保存",
                     error_code=(result.get("media_error_code") or "PLATFORM_MEDIA_INCOMPLETE"),
                 )
-            if media_incomplete or cover_incomplete:
+            if media_incomplete or cover_incomplete or verification_warning:
                 # 草稿已保存但正文图片或封面未完整：如实标记 WITH_WARNINGS，
                 # 绝不伪装成完整成功，也绝不把已保存的草稿抹成失败。
                 return await self._mark_completed_with_warnings(
@@ -440,6 +444,10 @@ class DeliveryService:
                 ),
                 "error_code": operation.error_code,
                 "error_message": operation.error_message,
+                "verification_evidence": _decode_evidence(
+                    operation.verification_evidence
+                ),
+                "degraded": operation.degraded,
                 "created_at": _iso(operation.created_at),
                 "completed_at": _iso(operation.completed_at),
             }
@@ -720,6 +728,11 @@ class DeliveryService:
                 or "PLATFORM_MEDIA_INCOMPLETE"
             )
             warning_parts: list[str] = []
+            if result.get("draft_verification_warning"):
+                warning_parts.append(
+                    result.get("draft_verification_warning_message")
+                    or "本次草稿实体已保存，但正文或图片完整性待核对"
+                )
             if result.get("media_status") in {"partial", "failed"}:
                 warning_parts.append(
                     result.get("media_error")
@@ -1053,6 +1066,15 @@ def _decode_evidence(raw: str | None) -> dict | None:
     except (TypeError, ValueError):
         return None
     return value if isinstance(value, dict) else None
+
+
+def _evidence_confirms_entity(evidence: object) -> bool:
+    """仅把本次实体绑定证据视为已保存；错误 ID 不能靠标题唯一兜底。"""
+
+    if not isinstance(evidence, dict):
+        return False
+    bound = evidence.get("draft_entity_bound")
+    return bound is True
 
 
 def _append_buffered_logs(

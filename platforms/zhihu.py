@@ -849,11 +849,18 @@ class ZhihuPlatform(BasePlatform):
                 await self.simulator.random_delay(3, 5)
                 draft = await self._find_unique_exact_draft(expected_title)
             if draft is None:
+                evidence.mark_draft_list(match_count=0)
                 raise DraftResultUnknownError(
                     "DRAFT_RESULT_UNKNOWN: 知乎未找到标题精确匹配的唯一草稿",
                     evidence=evidence.finalize(error_code="DRAFT_RESULT_UNKNOWN"),
                 )
             evidence.mark_draft_list(match_count=1)
+            # 知乎当前只有标题列表匹配和列表返回 ID，没有保存前后基线或
+            # 保存响应 ID 绑定；同名旧草稿不能被宣称为本次实体。
+            evidence.mark_entity_binding(
+                bound=False,
+                source="title_match_without_baseline",
+            )
             edit_url = self._draft_edit_url(draft.get("id"))
             evidence.set_draft_url(edit_url)
             try:
@@ -862,6 +869,8 @@ class ZhihuPlatform(BasePlatform):
             except Exception:
                 evidence.mark_reopen(title_match=True, dom_blocks_match=False)
                 raise
+            # 完整重开核验仍沿用原成功路径；实体绑定字段仅用于异常时
+            # 阻止标题唯一降级，不改变正常 save_draft 的兼容返回。
             evidence.finalize()
         except Exception as exc:
             if isinstance(exc, DraftResultUnknownError):

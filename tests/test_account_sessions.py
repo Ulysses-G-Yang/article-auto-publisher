@@ -700,6 +700,70 @@ def test_media_incomplete_with_saved_draft_is_with_warnings_not_failed(
     run(database.dispose())
 
 
+def test_media_incomplete_without_url_but_bound_entity_is_with_warnings(
+    tmp_path: Path,
+) -> None:
+    """已有本次实体证据时，空草稿 URL 也不能被媒体 partial 改写为 FAILED。"""
+
+    class FakePlatform:
+        platform_name = "xiaoheihe"
+        context = None
+
+        async def initialize(self) -> None:
+            return None
+
+        async def check_login(self) -> bool:
+            return True
+
+        async def fetch_identity_payload(self) -> dict:
+            return {"ok": True, "user_id": "10001234", "display_name": "夜航员"}
+
+        async def publish(self, **_kwargs) -> dict:
+            return {
+                "success": True,
+                "draft_url": "",
+                "post_url": "",
+                "media_status": "partial",
+                "media_error": "正文图片未完整核验",
+                "expected_images": 7,
+                "uploaded_images": 5,
+                "failed_images": [{"filename": "image.png", "error": "未确认"}],
+                "verification_evidence": {
+                    "draft_entity_bound": True,
+                    "draft_entity_source": "save_response_id",
+                    "draft_entity_id_match": True,
+                },
+                "degraded": "draft_list_confirmed",
+            }
+
+        async def cleanup(self) -> None:
+            return None
+
+    database = AccountDatabase(sqlite_database_url(tmp_path))
+    fake = FakePlatform()
+    accounts = AccountSessionService(
+        database,
+        seed_legacy_profiles=False,
+        platform_factory=lambda _account: fake,
+        allowed_profile_roots=(tmp_path / "runtime" / "profiles",),
+    )
+    run(accounts.initialize())
+    account = run(insert_account(database, make_profile(tmp_path, "xiaoheihe", "media-no-url")))
+    delivery = DeliveryService(
+        accounts,
+        platform_factory=lambda _account: fake,
+        public_publish_enabled=False,
+    )
+    request = DeliveryRequest.model_validate(delivery_payload(account.account_id))
+    queued = run(delivery.request_delivery(request, LOCAL_WEB_CONTEXT))
+    completed = run(delivery.execute_operation(queued["operation_id"], LOCAL_WEB_CONTEXT))
+
+    assert completed["status"] == "DRAFT_SAVED_WITH_WARNINGS"
+    assert completed["draft_url"] in {None, ""}
+    assert completed["error_code"] == "PLATFORM_MEDIA_INCOMPLETE"
+    run(database.dispose())
+
+
 def test_frozen_cover_payload_reaches_platform_without_public_path_exposure(
     tmp_path: Path,
 ) -> None:

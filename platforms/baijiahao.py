@@ -73,6 +73,8 @@ class BaijiahaoPlatform(BasePlatform):
         self._preflight_title = ""
         self._preflight_matching_draft_count = 0
         self._preflight_draft_ids: frozenset[str] = frozenset()
+        self._last_draft_entity_bound: bool | None = None
+        self._last_draft_entity_source: str | None = None
         self._media_progress_state: dict[str, int] | None = None
 
     async def initialize(self):
@@ -322,6 +324,8 @@ class BaijiahaoPlatform(BasePlatform):
         self._preflight_title = ""
         self._preflight_matching_draft_count = 0
         self._preflight_draft_ids = frozenset()
+        self._last_draft_entity_bound = None
+        self._last_draft_entity_source = None
         expected_title = self._normalize_title(title)
         if not expected_title:
             raise DraftBaselineError("DRAFT_BASELINE_FAILED: 百家号标题不能为空")
@@ -1699,12 +1703,38 @@ class BaijiahaoPlatform(BasePlatform):
         try:
             edit_url = await self._find_unique_exact_draft(expected_title)
             evidence.mark_draft_list(match_count=1)
+            evidence.mark_entity_binding(
+                bound=self._last_draft_entity_bound is True,
+                source=self._last_draft_entity_source
+                or "title_match_without_baseline",
+                id_match=(
+                    True
+                    if self._last_draft_entity_bound is True
+                    else False
+                ),
+            )
             evidence.set_draft_url(edit_url)
-            await self._verify_persisted_draft(expected_title, edit_url)
+            try:
+                await self._verify_persisted_draft(expected_title, edit_url)
+            except DraftResultUnknownError as exc:
+                message = str(exc)
+                if "标题不一致" in message:
+                    evidence.mark_reopen(title_match=False, dom_blocks_match=None)
+                elif "图文结构不完整" in message:
+                    evidence.mark_reopen(title_match=True, dom_blocks_match=False)
+                raise
             evidence.mark_reopen(title_match=True, dom_blocks_match=True)
             evidence.finalize()
             return edit_url
-        except DraftResultUnknownError:
+        except DraftResultUnknownError as exc:
+            if getattr(exc, "evidence", None) is None:
+                if evidence.draft_entity_bound is None:
+                    evidence.mark_entity_binding(
+                        bound=False,
+                        source="baseline_new_id",
+                        id_match=False,
+                    )
+                exc.evidence = evidence.finalize(error_code="DRAFT_RESULT_UNKNOWN")
             raise
         except Exception as exc:
             if self._exception_means_browser_closed(exc):
@@ -1758,6 +1788,8 @@ class BaijiahaoPlatform(BasePlatform):
         return result
 
     async def _find_unique_exact_draft(self, title: str) -> str:
+        self._last_draft_entity_bound = None
+        self._last_draft_entity_source = None
         await self._open_works_page()
         matches: list[dict] = []
         baseline_count = getattr(self, "_preflight_matching_draft_count", 0)
@@ -1785,6 +1817,8 @@ class BaijiahaoPlatform(BasePlatform):
                 ]
                 if len(candidates) == 1:
                     created_match = candidates[0]
+                    self._last_draft_entity_bound = True
+                    self._last_draft_entity_source = "baseline_new_id"
                     break
                 # 新版草稿列表不再给任何一行暴露预览 ID。真实页面按最近
                 # 修改时间倒序；数量严格只增加一条时，第 0 个精确标题行是
@@ -1793,6 +1827,10 @@ class BaijiahaoPlatform(BasePlatform):
                 # 草稿箱搜索框。
                 if matches and int(matches[0].get("index", -1)) == 0:
                     created_match = matches[0]
+                    # 没有稳定预览 ID 时，数量 + 行顺序不能证明这是
+                    # 本次实体；后续即使拿到编辑地址也保持未绑定。
+                    self._last_draft_entity_bound = False
+                    self._last_draft_entity_source = "title_match_without_baseline"
                     break
             if attempt + 1 < 6:
                 await self.page.reload(wait_until="domcontentloaded", timeout=30000)

@@ -354,7 +354,7 @@ def test_delivery_statuses_are_explicit_and_never_auto_retry_publish() -> None:
     assert "platformDraftBoxUrl" in script
     assert "查看平台草稿箱" in script
     assert "['DRAFT_SAVED', 'DRAFT_SAVED_WITH_WARNINGS'].includes(target.status)" in script
-    assert "草稿已保存（草稿箱确认）" in script
+    assert "草稿已保存（完整性待核对）" in script
     assert "retry-target" not in script
     assert "不提供公开发布自动重试按钮" in docs
 

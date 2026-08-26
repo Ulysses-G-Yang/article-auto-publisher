@@ -82,12 +82,13 @@
                             <td x-text="op.account_display_name || '-'"></td>
                             <td><span class="badge text-bg-secondary" x-text="op.mode === 'PUBLISH' ? '公开发布' : '平台草稿'"></span></td>
                             <td>
-                                <span class="badge" :class="deliveryClass(op.status)" x-text="deliveryLabel(op.status)"></span>
+                                <span class="badge" :class="deliveryClass(op.status, op)" x-text="deliveryLabel(op.status, op)"></span>
                                 <small class="d-block text-danger" x-show="op.error_code" x-text="op.error_code"></small>
+                                <small class="d-block text-warning" x-show="deliveryDetail(op)" x-text="deliveryDetail(op)"></small>
                             </td>
                             <td><small class="text-muted" x-text="formatTime(op.created_at)"></small></td>
                             <td>
-                                <a x-show="op.draft_url" :href="op.draft_url" target="_blank" rel="noopener noreferrer" class="btn btn-sm btn-outline-primary">
+                                <a x-show="deliveryDraftHref(op)" :href="deliveryDraftHref(op)" target="_blank" rel="noopener noreferrer" class="btn btn-sm btn-outline-primary">
                                     <i class="cil-external-link"></i> 草稿箱
                                 </a>
                             </td>
@@ -199,12 +200,13 @@
                             <td x-text="op.account_display_name || '-'"></td>
                             <td><span class="badge text-bg-secondary" x-text="op.mode === 'PUBLISH' ? '公开发布' : '平台草稿'"></span></td>
                             <td>
-                                <span class="badge" :class="deliveryClass(op.status)" x-text="deliveryLabel(op.status)"></span>
+                                <span class="badge" :class="deliveryClass(op.status, op)" x-text="deliveryLabel(op.status, op)"></span>
                                 <small class="d-block text-danger" x-show="op.error_code" x-text="op.error_code"></small>
+                                <small class="d-block text-warning" x-show="deliveryDetail(op)" x-text="deliveryDetail(op)"></small>
                             </td>
                             <td><small class="text-muted" x-text="formatTime(op.created_at)"></small></td>
                             <td>
-                                <a x-show="op.draft_url" :href="op.draft_url" target="_blank" rel="noopener noreferrer" class="btn btn-sm btn-outline-primary">
+                                <a x-show="deliveryDraftHref(op)" :href="deliveryDraftHref(op)" target="_blank" rel="noopener noreferrer" class="btn btn-sm btn-outline-primary">
                                     <i class="cil-external-link"></i> 草稿箱
                                 </a>
                             </td>
@@ -258,19 +260,20 @@ document.addEventListener('alpine:init', () => {
             return m[p] || p;
         },
 
-        deliveryLabel(s) {
+        deliveryLabel(s, operation = null) {
             const m = {
                 QUEUED: '已排队', RUNNING: '执行中', DRAFT_SAVED: '草稿已保存',
-                DRAFT_SAVED_WITH_WARNINGS: '草稿已保存（图片未完整）',
+                DRAFT_SAVED_WITH_WARNINGS: '草稿已保存（有警告）',
                 PUBLISHED: '已发布', PUBLISHED_WITH_WARNINGS: '已发布（图片未完整）',
                 FAILED: '失败', RESULT_UNKNOWN: '结果未知',
                 DELIVERY_INCOMPLETE: '投递未完成',
                 CONFIRMATION_REQUIRED: '待公开确认', BLOCKED: '已拦截',
             };
+            if (s === 'DRAFT_SAVED' && operation?.degraded) return '草稿已保存（待核对）';
             return m[s] || s;
         },
 
-        deliveryClass(s) {
+        deliveryClass(s, operation = null) {
             const m = {
                 DRAFT_SAVED: 'bg-success', PUBLISHED: 'bg-success',
                 DRAFT_SAVED_WITH_WARNINGS: 'bg-warning text-dark',
@@ -279,7 +282,60 @@ document.addEventListener('alpine:init', () => {
                 DELIVERY_INCOMPLETE: 'bg-warning text-dark',
                 BLOCKED: 'bg-danger',
             };
+            if (s === 'DRAFT_SAVED' && operation?.degraded) return 'bg-warning text-dark';
             return m[s] || 'bg-light text-dark';
+        },
+
+        deliveryDetail(operation) {
+            if (!operation) return '';
+            const warningStatus = ['DRAFT_SAVED_WITH_WARNINGS', 'PUBLISHED_WITH_WARNINGS'].includes(operation.status);
+            if (warningStatus) {
+                return operation.error_message
+                    || operation.verification_evidence?.summary
+                    || '草稿已保存，完整性待核对。';
+            }
+            if (operation.degraded) {
+                return operation.error_message
+                    || operation.verification_evidence?.summary
+                    || '草稿已保存，完整性待核对。';
+            }
+            if (operation.status === 'DELIVERY_INCOMPLETE') {
+                return operation.error_message
+                    || operation.verification_evidence?.summary
+                    || '投递未完成，请人工核对平台结果。';
+            }
+            return operation.error_message || '';
+        },
+
+        platformDraftBoxUrl(platform) {
+            return {
+                xiaoheihe: 'https://www.xiaoheihe.cn/app/bbs/draft',
+                zhihu: 'https://www.zhihu.com/creator/manage/creation/drafts',
+                weibo: 'https://card.weibo.com/article/v5/editor#/draft',
+                smzdm: 'https://post.smzdm.com/tougao/',
+                baijiahao: 'https://baijiahao.baidu.com/builder/rc/content',
+                zol: 'https://post.zol.com.cn/v2/manage/works/draft',
+            }[platform] || '';
+        },
+
+        safeDraftUrl(value) {
+            if (typeof value !== 'string' || !/^https?:\/\//i.test(value)) return '';
+            try {
+                const parsed = new URL(value, window.location.href);
+                if (parsed.username || parsed.password) return '';
+                const secretKeys = ['access_token', 'api_key', 'apikey', 'auth', 'cookie', 'password', 'secret', 'token'];
+                const hasSecret = [...parsed.searchParams.keys(), ...new URLSearchParams(parsed.hash.slice(1)).keys()]
+                    .some(key => secretKeys.includes(key.toLowerCase()));
+                return hasSecret ? '' : value;
+            } catch (_) {
+                return '';
+            }
+        },
+
+        deliveryDraftHref(operation) {
+            if (!operation || !['DRAFT_SAVED', 'DRAFT_SAVED_WITH_WARNINGS'].includes(operation.status)) return '';
+            // 优先使用后端已确认的安全链接；空 draft_url 时只回退到已盘点入口。
+            return this.safeDraftUrl(operation.draft_url) || this.platformDraftBoxUrl(operation.platform);
         },
 
         statusLabel(s) {

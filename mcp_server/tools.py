@@ -13,7 +13,7 @@ import uuid
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Annotated, Any, Literal
-from urllib.parse import urlsplit
+from urllib.parse import parse_qsl, urlsplit
 
 import httpx
 from loguru import logger
@@ -310,6 +310,133 @@ def _draft_request_fingerprint(
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
+_SAFE_DRAFT_DEGRADED_VALUES = frozenset({"draft_list_confirmed"})
+_SAFE_EVIDENCE_BOOL_FIELDS = frozenset(
+    {
+        "save_response_2xx",
+        "draft_list_title_unique",
+        "reopen_title_match",
+        "reopen_dom_blocks_match",
+        "draft_entity_bound",
+        "draft_entity_id_match",
+        "unknown",
+    }
+)
+_SAFE_EVIDENCE_INT_FIELDS = frozenset(
+    {"save_http_status", "draft_list_match_count"}
+)
+_SAFE_EVIDENCE_TEXT_FIELDS = frozenset(
+    {"save_platform_code", "draft_entity_source", "summary"}
+)
+_SAFE_EVIDENCE_ENTITY_SOURCES = frozenset(
+    {
+        "save_response_id",
+        "existing_draft_id",
+        "baseline_new_id",
+        "title_match_without_baseline",
+        "unknown",
+    }
+)
+_SAFE_EVIDENCE_SECRET_QUERY_KEYS = frozenset(
+    {
+        "access_token",
+        "api_key",
+        "apikey",
+        "auth",
+        "cookie",
+        "password",
+        "secret",
+        "token",
+    }
+)
+
+
+def _safe_evidence_url(value: Any) -> str | None:
+    """Keep evidence links public and reject credentials/query secrets."""
+
+    if not isinstance(value, str) or not value.startswith(("http://", "https://")):
+        return None
+    try:
+        parsed = urlsplit(value)
+        query_keys = {key.lower() for key, _ in parse_qsl(parsed.query, keep_blank_values=True)}
+        fragment_keys = {
+            key.lower() for key, _ in parse_qsl(parsed.fragment, keep_blank_values=True)
+        }
+    except ValueError:
+        return None
+    if (
+        parsed.scheme not in {"http", "https"}
+        or not parsed.netloc
+        or parsed.username
+        or parsed.password
+        or (query_keys | fragment_keys) & _SAFE_EVIDENCE_SECRET_QUERY_KEYS
+    ):
+        return None
+    return value[:1000]
+
+
+def _safe_evidence_summary(value: Any) -> str | None:
+    """Project the backend's short summary without exposing paths or secrets."""
+
+    if value is None:
+        return None
+    summary = _safe_text(value, default="")
+    if not summary:
+        return None
+    # safe_error_message covers the common ``token=`` form. Keep this second
+    # guard for profile/cookie labels and variants embedded in arbitrary text.
+    summary = re.sub(
+        r"(?i)\b(profile|cookie|token|secret|password|api[_ -]?key)\b\s*[:=]\s*"
+        r"(?:\"[^\"\r\n]*\"|'[^'\r\n]*'|[^,;\r\n]*)",
+        r"\1=[redacted]",
+        summary,
+    )
+    return summary[:500]
+
+
+def _safe_verification_evidence(value: Any) -> dict[str, Any] | None:
+    """Allow only stable, scalar evidence fields at the MCP boundary."""
+
+    if not isinstance(value, dict):
+        return None
+    evidence: dict[str, Any] = {}
+    for field in _SAFE_EVIDENCE_BOOL_FIELDS:
+        if field not in value:
+            continue
+        raw = value[field]
+        if raw is None or isinstance(raw, bool):
+            evidence[field] = raw
+    for field in _SAFE_EVIDENCE_INT_FIELDS:
+        if field not in value:
+            continue
+        raw = value[field]
+        if raw is None:
+            evidence[field] = None
+        elif isinstance(raw, int) and not isinstance(raw, bool):
+            if field == "save_http_status" and not 100 <= raw <= 599:
+                continue
+            if field == "draft_list_match_count" and raw < 0:
+                continue
+            evidence[field] = raw
+    for field in _SAFE_EVIDENCE_TEXT_FIELDS:
+        if field not in value:
+            continue
+        raw = value[field]
+        if raw is None:
+            evidence[field] = None
+        elif field == "summary":
+            evidence[field] = _safe_evidence_summary(raw)
+        elif field == "draft_entity_source":
+            source = str(raw)
+            evidence[field] = source if source in _SAFE_EVIDENCE_ENTITY_SOURCES else "unknown"
+        else:
+            text = _safe_text(raw, default="")
+            evidence[field] = text[:128] or None
+    if "draft_url" in value:
+        evidence["draft_url"] = _safe_evidence_url(value.get("draft_url"))
+    return evidence or None
+
+
 def _safe_plan_target(item: dict[str, Any]) -> dict[str, Any]:
     target = {
         "platform": _safe_text(item.get("platform")),
@@ -325,8 +452,20 @@ def _safe_plan_target(item: dict[str, Any]) -> dict[str, Any]:
         "error_message": _safe_text(item.get("error_message"), default="") or None,
     }
     draft_url = item.get("draft_url")
-    if isinstance(draft_url, str) and draft_url.startswith(("http://", "https://")):
-        target["draft_url"] = draft_url[:1000]
+    safe_draft_url = _safe_evidence_url(draft_url)
+    if safe_draft_url:
+        target["draft_url"] = safe_draft_url
+    if "degraded" in item:
+        degraded = item.get("degraded")
+        target["degraded"] = (
+            degraded
+            if isinstance(degraded, str) and degraded in _SAFE_DRAFT_DEGRADED_VALUES
+            else None
+        )
+    if "verification_evidence" in item:
+        target["verification_evidence"] = _safe_verification_evidence(
+            item.get("verification_evidence")
+        )
     return target
 
 
@@ -347,15 +486,56 @@ def _draft_plan_result(plan: dict[str, Any]) -> dict[str, Any]:
 def _mcp_status_for_plan(plan_result: dict[str, Any]) -> tuple[str, str]:
     status = str(plan_result.get("overall_status") or "").upper()
     targets = plan_result.get("targets") or []
+    target_statuses = {
+        str(item.get("status") or "").upper()
+        for item in targets
+        if isinstance(item, dict)
+    }
+    all_incomplete = bool(targets) and target_statuses == {"DELIVERY_INCOMPLETE"}
+    has_incomplete = "DELIVERY_INCOMPLETE" in target_statuses
+    if all_incomplete:
+        return "failed", "草稿投递未完成；平台未确认本次草稿实体，请人工核对后再决定下一步。"
+
+    def needs_review(item: dict[str, Any]) -> bool:
+        item_status = str(item.get("status") or "").upper()
+        if item_status in {
+            "DRAFT_SAVED_WITH_WARNINGS",
+            "PUBLISHED_WITH_WARNINGS",
+        } or item.get("degraded"):
+            return True
+        evidence = item.get("verification_evidence")
+        return isinstance(evidence, dict) and (
+            evidence.get("reopen_title_match") is False
+            or evidence.get("reopen_dom_blocks_match") is False
+        )
+
+    review_required = any(
+        needs_review(item) for item in targets if isinstance(item, dict)
+    )
     if status == "SUCCESS":
+        if has_incomplete:
+            return "failed", "草稿投递包含未完成目标；请查看各平台目标状态并人工核对。"
+        if review_required:
+            return "completed", "草稿已保存，但部分目标需核对平台草稿箱的正文和图片完整性。"
         return "completed", "所有平台草稿均已保存并通过平台侧验证。"
     if status == "PARTIAL_FAIL":
+        if review_required:
+            return (
+                "completed",
+                "草稿投递已结束；已保存目标仍需核对正文和图片，其他目标请查看错误状态。",
+            )
         return "completed", "草稿投递已结束，部分平台成功、部分平台失败或结果未知。"
-    if status in {"FATAL", "FORMAT_REVIEW_REQUIRED"}:
+    if status in {"FATAL", "FORMAT_REVIEW_REQUIRED", "DELIVERY_INCOMPLETE"}:
         return "failed", "草稿投递未成功，请查看各平台目标的错误状态。"
     if any(
         str(item.get("status") or "").upper()
-        in {"FAILED", "BLOCKED", "RESULT_UNKNOWN", "LOGIN_REQUIRED"}
+        in {
+            "FAILED",
+            "BLOCKED",
+            "RESULT_UNKNOWN",
+            "LOGIN_REQUIRED",
+            "DELIVERY_INCOMPLETE",
+        }
         for item in targets
         if isinstance(item, dict)
     ) and all(
@@ -364,7 +544,7 @@ def _mcp_status_for_plan(plan_result: dict[str, Any]) -> tuple[str, str]:
         for item in targets
         if isinstance(item, dict)
     ):
-        return "failed", "所有草稿目标均已进入失败、阻塞或结果未知状态。"
+        return "failed", "所有草稿目标均已进入终态，但部分目标投递未完成或结果未知。"
     if status == "READY":
         return "pending", "投递计划已创建，等待执行单启动。"
     return "running", "平台草稿正在按目标账号执行，请继续轮询。"

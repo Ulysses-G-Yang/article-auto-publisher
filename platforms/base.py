@@ -35,6 +35,11 @@ class DraftVerificationEvidence:
         self.reopen_title_match: bool | None = None
         self.reopen_dom_blocks_match: bool | None = None
         self.draft_url: str | None = None
+        # 标题匹配不是本次副作用的证明。同名草稿允许存在，只有适配器已经
+        # 用保存响应 ID 或保存前后实体差集绑定本次实体时才写 True。
+        self.draft_entity_bound: bool | None = None
+        self.draft_entity_source: str | None = None
+        self.draft_entity_id_match: bool | None = None
         self.unknown: bool = False
         self.summary: str | None = None
 
@@ -63,6 +68,26 @@ class DraftVerificationEvidence:
         if url:
             self.draft_url = str(url)
 
+    def mark_entity_binding(
+        self,
+        *,
+        bound: bool,
+        source: str,
+        id_match: bool | None = None,
+    ) -> None:
+        """记录本次草稿实体绑定结果，只接受受控来源标签。"""
+
+        allowed_sources = {
+            "save_response_id",
+            "existing_draft_id",
+            "baseline_new_id",
+            "title_match_without_baseline",
+        }
+        self.draft_entity_bound = bool(bound)
+        self.draft_entity_source = source if source in allowed_sources else "unknown"
+        if id_match is not None:
+            self.draft_entity_id_match = bool(id_match)
+
     def finalize(self, *, error_code: str | None = None) -> "DraftVerificationEvidence":
         """生成脱敏 summary；在 raise/return 前调用，此时证据已完整。"""
         self.unknown = bool(error_code and "UNKNOWN" in str(error_code).upper())
@@ -85,6 +110,10 @@ class DraftVerificationEvidence:
             parts.append("重开后标题不一致")
         if self.reopen_dom_blocks_match is False:
             parts.append("重开后图文结构与冻结版本不一致")
+        if self.draft_entity_bound is True:
+            parts.append("本次草稿实体已绑定")
+        elif self.draft_entity_bound is False:
+            parts.append("本次草稿实体未能绑定")
         if self.draft_url:
             parts.append("已取得草稿链接")
         if not parts:
@@ -103,6 +132,9 @@ class DraftVerificationEvidence:
             "reopen_title_match": self.reopen_title_match,
             "reopen_dom_blocks_match": self.reopen_dom_blocks_match,
             "draft_url": self.draft_url,
+            "draft_entity_bound": self.draft_entity_bound,
+            "draft_entity_source": self.draft_entity_source,
+            "draft_entity_id_match": self.draft_entity_id_match,
             "unknown": self.unknown,
             "summary": self.summary,
         }
@@ -623,27 +655,53 @@ class BasePlatform(ABC):
 
             # 7. 保存草稿
             db.add_task_log(task_id, "INFO", "保存草稿...")
+            degraded = None
+            draft_verification_warning = False
+            draft_verification_warning_message = None
+            evidence_payload = self._evidence_to_dict()
+            public_publish_blocked = False
             try:
                 draft_url = await self.save_draft(title)
                 degraded = None
+                evidence_payload = self._evidence_to_dict()
             except DraftResultUnknownError as exc:
                 # 降级判定：保存动作已触发但完整证据链未走通时，
-                # 若草稿箱已出现标题唯一匹配的草稿，视为降级成功；
-                # 否则全部证据不足 → 投递未完成（不伪装成功）。
+                # 只有已经绑定本次实体才允许降级成功。旧实现只看标题唯一，
+                # 会把旧同名草稿或错误 ID 误报为本次成功。
                 evidence = getattr(exc, "evidence", None)
                 ev_dict = (
                     evidence.to_dict()
                     if evidence is not None
                     else (self._evidence_to_dict() or {})
                 )
-                if ev_dict.get("draft_list_title_unique") is True:
+                evidence_payload = ev_dict
+                entity_bound = ev_dict.get("draft_entity_bound")
+                if entity_bound is True:
                     draft_url = ev_dict.get("draft_url") or ""
+                    # 保留既有 degraded 枚举，实体绑定细节通过证据字段表达。
                     degraded = "draft_list_confirmed"
+                    draft_verification_warning = (
+                        ev_dict.get("reopen_title_match") is False
+                        or ev_dict.get("reopen_dom_blocks_match") is False
+                    )
+                    draft_verification_warning_message = (
+                        "本次草稿实体已保存，但重开后的正文/图片与冻结版本不一致"
+                        if draft_verification_warning
+                        else None
+                    )
                     db.add_task_log(
                         task_id,
                         "INFO",
-                        "草稿箱已确认标题唯一匹配的草稿（降级成功）",
+                        (
+                            "本次草稿实体已确认，但正文/图片完整性存在警告"
+                            if draft_verification_warning
+                            else "本次草稿实体已确认（完整性待核对）"
+                        ),
                     )
+                    # 弱证据只适用于草稿保存。公开流程必须停在保存结果，
+                    # 不能把降级草稿继续送入 publish_now。
+                    if delivery_mode == "PUBLISH":
+                        public_publish_blocked = True
                 else:
                     db.add_task_log(
                         task_id,
@@ -717,6 +775,37 @@ class BasePlatform(ABC):
                 if delivery_mode is not None
                 else self.cfg.get("app", {}).get("publish_after_draft", False)
             )
+            # 若调用方使用旧的 delivery_mode=None 且配置误开公开发布，
+            # 降级结果同样必须停在草稿；正常无 degraded 的路径不受影响。
+            if public_publish_blocked or (degraded is not None and should_publish):
+                return {
+                    "success": False,
+                    "error_code": "DELIVERY_INCOMPLETE",
+                    "error": "公开发布前草稿完整性未确认，已停止发布",
+                    "draft_url": draft_url,
+                    "post_url": "",
+                    "selection": selection,
+                    "selection_status": selection_status,
+                    "selection_error": selection_error,
+                    "selection_error_code": selection_error_code,
+                    "media_status": content_result.get("media_status", "not_checked"),
+                    "expected_images": content_result.get("expected_images", 0),
+                    "uploaded_images": content_result.get("uploaded_images", 0),
+                    "failed_images": content_result.get("failed_images", []),
+                    "media_error": content_result.get("media_error"),
+                    "media_error_code": content_result.get("media_error_code"),
+                    "cover_strategy": str((cover or {}).get("strategy") or "NONE"),
+                    "cover_status": cover_result.get("cover_status", "failed"),
+                    "cover_mode": cover_result.get("cover_mode"),
+                    "cover_error": cover_result.get("error"),
+                    "cover_error_code": cover_result.get("error_code"),
+                    "verification_evidence": evidence_payload,
+                    "degraded": degraded,
+                    "draft_verification_warning": draft_verification_warning,
+                    "draft_verification_warning_message": draft_verification_warning_message,
+                }
+            if degraded is not None:
+                should_publish = False
             if should_publish:
                 db.add_task_log(task_id, "INFO", "提交发布...")
                 post_url = await self.publish_now(title)
@@ -743,8 +832,10 @@ class BasePlatform(ABC):
                 "cover_mode": cover_result.get("cover_mode"),
                 "cover_error": cover_result.get("error"),
                 "cover_error_code": cover_result.get("error_code"),
-                "verification_evidence": self._evidence_to_dict(),
+                "verification_evidence": evidence_payload,
                 "degraded": degraded,
+                "draft_verification_warning": draft_verification_warning,
+                "draft_verification_warning_message": draft_verification_warning_message,
             }
 
         except Exception as e:

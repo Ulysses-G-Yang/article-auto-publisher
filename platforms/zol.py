@@ -3046,6 +3046,7 @@ class ZOLPlatform(BasePlatform):
         draft_page,
         response_id: str,
         expected_title: str,
+        evidence: DraftVerificationEvidence | None = None,
     ) -> None:
         """轮询独立草稿页，要求唯一标题行并核对卡片 ID。"""
 
@@ -3054,7 +3055,22 @@ class ZOLPlatform(BasePlatform):
                 await asyncio.sleep(delay)
             await self._navigate_draft_verification_page(draft_page)
             matches = await self._matching_draft_cards(draft_page, expected_title)
+            if evidence is not None:
+                evidence.mark_draft_list(match_count=len(matches))
             if len(matches) > 1:
+                matching_ids = [
+                    card
+                    for card in matches
+                    if await self._draft_card_stable_id(card) == response_id
+                ]
+                if len(matching_ids) == 1:
+                    if evidence is not None:
+                        evidence.mark_entity_binding(
+                            bound=True,
+                            source="save_response_id",
+                            id_match=True,
+                        )
+                    return
                 raise DraftResultUnknownError(
                     "DRAFT_RESULT_UNKNOWN: 保存后草稿标题不唯一"
                 )
@@ -3062,8 +3078,27 @@ class ZOLPlatform(BasePlatform):
                 continue
             card_id = await self._draft_card_stable_id(matches[0])
             if card_id is not None and card_id != response_id:
+                if evidence is not None:
+                    evidence.mark_entity_binding(
+                        bound=False,
+                        source="save_response_id",
+                        id_match=False,
+                    )
                 raise DraftResultUnknownError(
                     "DRAFT_RESULT_UNKNOWN: 草稿卡片 ID 与保存响应不一致"
+                )
+            if card_id is None:
+                if evidence is not None:
+                    evidence.mark_entity_binding(
+                        bound=True,
+                        source="save_response_id",
+                        id_match=None,
+                    )
+            elif evidence is not None:
+                evidence.mark_entity_binding(
+                    bound=True,
+                    source="save_response_id",
+                    id_match=True,
                 )
             return
         raise DraftResultUnknownError(
@@ -3189,6 +3224,11 @@ class ZOLPlatform(BasePlatform):
                 clicked = True
                 response_id = await self._collect_draft_save_response(control)
                 if response_id != self._bound_draft_id:
+                    evidence.mark_entity_binding(
+                        bound=False,
+                        source="existing_draft_id",
+                        id_match=False,
+                    )
                     raise DraftResultUnknownError(
                         "DRAFT_RESULT_UNKNOWN: 最终保存响应与绑定草稿不一致"
                     )
@@ -3197,6 +3237,11 @@ class ZOLPlatform(BasePlatform):
                     self._bound_draft_id is not None
                     and autosave_id != self._bound_draft_id
                 ):
+                    evidence.mark_entity_binding(
+                        bound=False,
+                        source="existing_draft_id",
+                        id_match=False,
+                    )
                     raise DraftResultUnknownError(
                         "DRAFT_RESULT_UNKNOWN: 最终保存实体与绑定草稿不一致"
                     )
@@ -3221,13 +3266,26 @@ class ZOLPlatform(BasePlatform):
                 clicked = True
                 response_id = await self._collect_draft_save_response(control)
 
+            # 保存响应/自动保存响应已给出合法实体 ID；列表核对只负责
+            # 发现明确的错误 ID，并在那种情况下将绑定翻转为 False。
+            evidence.mark_entity_binding(
+                bound=True,
+                source="save_response_id",
+                id_match=True,
+            )
             await self.simulator.random_delay(2, 5)
             await self._verify_saved_draft_card(
                 draft_page,
                 response_id,
                 expected_title,
+                evidence,
             )
-            await self._verify_persisted_draft_content(response_id)
+            try:
+                await self._verify_persisted_draft_content(response_id)
+            except DraftResultUnknownError as exc:
+                if "图文结构不完整" in str(exc):
+                    evidence.mark_reopen(title_match=True, dom_blocks_match=False)
+                raise
             draft_url = self.platform_cfg.get(
                 "draft_url", "https://post.zol.com.cn/v2/manage/works/draft"
             )
@@ -3236,7 +3294,6 @@ class ZOLPlatform(BasePlatform):
                 "ZOL 草稿实体验证成功: draft_id_fingerprint={}",
                 draft_fingerprint,
             )
-            evidence.mark_draft_list(match_count=1)
             evidence.mark_reopen(title_match=True, dom_blocks_match=True)
             evidence.set_draft_url(draft_url)
             evidence.finalize()
@@ -3246,7 +3303,9 @@ class ZOLPlatform(BasePlatform):
                 exc.error_code = "DRAFT_RESULT_UNKNOWN"
                 exc.safe_message = "DRAFT_RESULT_UNKNOWN: 保存动作已触发，结果未知"
             raise
-        except DraftResultUnknownError:
+        except DraftResultUnknownError as exc:
+            if getattr(exc, "evidence", None) is None:
+                exc.evidence = evidence.finalize(error_code="DRAFT_RESULT_UNKNOWN")
             raise
         except Exception as exc:
             if self._exception_means_browser_closed(exc) and not clicked:

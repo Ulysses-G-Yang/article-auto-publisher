@@ -2739,6 +2739,98 @@ def test_recoverable_operations_follow_plan_and_target_order(
     assert recoverable == expected
 
 
+def test_recovery_sync_preserves_warning_result_fields(
+    tmp_path: Path,
+) -> None:
+    """启动恢复同步终态时，计划详情不能丢失降级与证据字段。"""
+
+    account_db = AccountDatabase(sqlite_url(tmp_path / "recovery-warning-accounts.db"))
+    accounts = AccountSessionService(account_db, seed_legacy_profiles=False)
+    service = make_service(tmp_path, account_service=accounts)
+    evidence = {
+        "draft_entity_bound": True,
+        "draft_entity_source": "save_response_id",
+        "draft_entity_id_match": True,
+        "draft_list_title_unique": True,
+    }
+
+    async def scenario():
+        await accounts.initialize()
+        account = PlatformAccount(
+            account_id=str(uuid.uuid4()),
+            platform="xiaoheihe",
+            platform_user_id="recovery-warning-1",
+            display_name="恢复警告账号",
+            profile_path=str(tmp_path / "recovery-warning-profile"),
+            status="ACTIVE",
+            session_status="VALID",
+            persist_login=True,
+        )
+        async with account_db.session() as session:
+            session.add(account)
+
+        await service.initialize()
+        draft = await service.create_draft(
+            CreateDraftRequest(
+                title="恢复警告",
+                blocks=[{"type": "text", "text": "正文", "position": 0}],
+            )
+        )
+        targeted = await service.replace_targets(
+            draft["draft_id"],
+            ReplaceTargetsRequest(
+                revision=draft["revision"],
+                targets=[
+                    {
+                        "platform": "xiaoheihe",
+                        "account_id": account.account_id,
+                        "mode": "DRAFT",
+                    }
+                ],
+            ),
+            LOCAL_WEB_CONTEXT,
+        )
+        plan = await service.create_delivery_plan(
+            draft["draft_id"], targeted["revision"], LOCAL_WEB_CONTEXT
+        )
+        target = plan["targets"][0]
+        operation_id = str(uuid.uuid4())
+        await service.set_plan_target_result(
+            plan["plan_id"],
+            target["target_id"],
+            status="QUEUED",
+            operation_id=operation_id,
+        )
+
+        class RecoveryDelivery:
+            async def get_operation(self, operation_id, _access):
+                return {
+                    "operation_id": operation_id,
+                    "status": "DRAFT_SAVED_WITH_WARNINGS",
+                    "error_code": "PLATFORM_MEDIA_INCOMPLETE",
+                    "error_message": "正文图片未完整核验",
+                    "degraded": "draft_list_confirmed",
+                    "verification_evidence": evidence,
+                }
+
+        recoverable = await service.list_recoverable_plan_operations(
+            RecoveryDelivery(), LOCAL_WEB_CONTEXT
+        )
+        updated = await service.get_delivery_plan(plan["plan_id"], LOCAL_WEB_CONTEXT)
+        await service.database.dispose()
+        await account_db.dispose()
+        return recoverable, updated
+
+    recoverable, updated = run(scenario())
+    assert recoverable == []
+    target = updated["targets"][0]
+    assert target["status"] == "DRAFT_SAVED_WITH_WARNINGS"
+    assert target["error_code"] == "PLATFORM_MEDIA_INCOMPLETE"
+    assert target["error_message"] == "正文图片未完整核验"
+    assert target["degraded"] == "draft_list_confirmed"
+    assert target["verification_evidence"] == evidence
+
+
 def test_plan_status_waits_for_every_target_to_reach_terminal_state() -> None:
     from content_studio.service import _plan_status
 

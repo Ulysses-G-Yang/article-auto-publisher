@@ -73,6 +73,7 @@
         activePublishTarget: null,
         pollCount: 0,
         pollTimer: null,
+        verifyingOperations: new Set(),
         draggedBlockId: null,
         localDb: null,
         coverAutoSelectionDismissed: false,
@@ -2002,6 +2003,7 @@
 
     function planBadge(status, target = null) {
         if (isFormatBlockedTarget(target)) return 'text-bg-warning';
+        if (target?.degraded && target.status === 'DRAFT_SAVED') return 'text-bg-warning';
         if (['SUCCESS', 'DRAFT_SAVED', 'PUBLISHED'].includes(status)) return 'text-bg-success';
         if (['BLOCKED', 'FAILED', 'FATAL'].includes(status)) return 'text-bg-danger';
         if (['PARTIAL_FAIL', 'CONFIRMATION_REQUIRED', 'RESULT_UNKNOWN', 'DELIVERY_INCOMPLETE', 'FORMAT_REVIEW_REQUIRED', 'DRAFT_SAVED_WITH_WARNINGS', 'PUBLISHED_WITH_WARNINGS'].includes(status)) return 'text-bg-warning';
@@ -2015,21 +2017,20 @@
     function targetStatusLabel(target) {
         if (targetNeedsRelogin(target)) return '需要重新登录';
         if (target?.error_code === 'XHS_CLOUD_DRAFT_UNAVAILABLE') return '网页端无云端草稿';
-        if (target?.degraded && ['DRAFT_SAVED', 'DRAFT_SAVED_WITH_WARNINGS'].includes(target.status)) {
-            return '草稿已保存（草稿箱确认）';
-        }
+        if (target.status === 'DRAFT_SAVED_WITH_WARNINGS') return '草稿已保存（有警告）';
+        if (target?.degraded && target.status === 'DRAFT_SAVED') return '草稿已保存（完整性待核对）';
         return planStatusLabels[target.status] || target.status;
     }
 
     function platformDraftBoxUrl(platform) {
         // 各平台草稿箱直达地址（2026-08 盘点确认）
         return {
-            xiaoheihe: 'https://www.xiaoheihe.cn/creator/draft',
+            xiaoheihe: 'https://www.xiaoheihe.cn/app/bbs/draft',
             zhihu: 'https://www.zhihu.com/creator/manage/creation/drafts',
             weibo: 'https://card.weibo.com/article/v5/editor#/draft',
             smzdm: 'https://post.smzdm.com/tougao/',
-            baijiahao: 'https://baijiahao.baidu.com/builder/rc/manage',
-            zol: 'https://post.zol.com.cn/v2/home',
+            baijiahao: 'https://baijiahao.baidu.com/builder/rc/content',
+            zol: 'https://post.zol.com.cn/v2/manage/works/draft',
         }[platform] || '';
     }
 
@@ -2044,6 +2045,15 @@
         if (target.error_code === 'DRAFT_BASELINE_UNAVAILABLE') {
             return target.error_message || '保存前无法建立可靠草稿基线；平台写入已停止。';
         }
+        const warningStatus = ['DRAFT_SAVED_WITH_WARNINGS', 'PUBLISHED_WITH_WARNINGS'].includes(target.status);
+        if (warningStatus && target.error_message) return target.error_message;
+        if (target?.degraded && ['DRAFT_SAVED', 'DRAFT_SAVED_WITH_WARNINGS'].includes(target.status)) {
+            return target.error_message
+                || '平台草稿箱已出现本次草稿，保存结果待核对正文和图片完整性。';
+        }
+        if (target.status === 'DELIVERY_INCOMPLETE' && target.error_message) {
+            return target.error_message;
+        }
         // 草稿保存证据链：即使整体失败/未知，也展示平台侧可核验证据
         if (target.verification_evidence) {
             const ev = target.verification_evidence;
@@ -2054,9 +2064,6 @@
         }
         if (target.status === 'RESULT_UNKNOWN') {
             return '结果未知，请先到平台人工核对；系统不会自动重试。';
-        }
-        if (target?.degraded && ['DRAFT_SAVED', 'DRAFT_SAVED_WITH_WARNINGS'].includes(target.status)) {
-            return '平台草稿箱已出现同名草稿，按降级成功判定；建议到平台草稿箱核对图片等完整性。';
         }
         if (target.status === 'DELIVERY_INCOMPLETE') {
             return target.error_message || '投递未完成：平台侧未确认草稿保存结果，请使用只读核验或到平台草稿箱人工核对。';
@@ -2072,6 +2079,24 @@
             : target.mode === 'PUBLISH' ? '公开发布' : '平台草稿');
     }
 
+    function planDisplayStatus(plan) {
+        const targets = Array.isArray(plan?.targets) ? plan.targets : [];
+        if (plan?.status === 'FATAL' && targets.length > 0
+            && targets.every(target => target?.status === 'DELIVERY_INCOMPLETE')) {
+            return 'DELIVERY_INCOMPLETE';
+        }
+        return plan?.status || '';
+    }
+
+    const verifyStatuses = ['FAILED', 'RESULT_UNKNOWN', 'DELIVERY_INCOMPLETE', 'DRAFT_SAVED_WITH_WARNINGS'];
+    const verificationControls = new WeakMap();
+
+    function canVerifyDraft(target) {
+        return Boolean(target?.operation_id)
+            && (verifyStatuses.includes(target.status)
+                || (target.degraded && target.status === 'DRAFT_SAVED'));
+    }
+
     function hasInFlightTarget(plan) {
         return plan.targets.some(target => ['CREATING', 'QUEUED', 'RUNNING'].includes(target.status));
     }
@@ -2080,8 +2105,9 @@
         if (!state.plan) return;
         byId('plan-result').classList.remove('d-none');
         byId('plan-id').textContent = `投递计划 ${state.plan.plan_id.slice(0, 8)}…`;
-        byId('plan-status').className = `badge ${planBadge(state.plan.status)}`;
-        byId('plan-status').textContent = planStatusLabels[state.plan.status] || state.plan.status;
+        const displayStatus = planDisplayStatus(state.plan);
+        byId('plan-status').className = `badge ${planBadge(displayStatus)}`;
+        byId('plan-status').textContent = planStatusLabels[displayStatus] || displayStatus;
         byId('plan-targets').replaceChildren(...state.plan.targets.map(target => {
             const row = document.createElement('article'); row.className = `plan-target${isFormatBlockedTarget(target) ? ' is-format-review' : ''}`;
             const copy = document.createElement('div'); copy.className = 'plan-target-copy'; const strong = document.createElement('strong'); strong.textContent = `${platformLabel(target.platform)} · ${target.account_display_name || '平台账号'}`; const small = document.createElement('small'); small.textContent = planTargetDetail(target); copy.append(strong, small);
@@ -2099,17 +2125,22 @@
                     actions.appendChild(link);
                 }
             }
-            // 只读核验草稿按钮：终态且非草稿保存成功时，允许业务人员一键核验
-            if (
-                target.operation_id
-                && ['FAILED', 'RESULT_UNKNOWN', 'DELIVERY_INCOMPLETE', 'DRAFT_SAVED_WITH_WARNINGS'].includes(target.status)
-            ) {
+            // 只读核验草稿按钮：结果需核对时允许人工触发；不自动验证或重试。
+            if (canVerifyDraft(target)) {
+                const verifyResult = document.createElement('div');
+                verifyResult.className = 'plan-target-verify-result alert alert-info mt-2 d-none';
+                verifyResult.setAttribute('role', 'status');
+                verifyResult.setAttribute('aria-live', 'polite');
+                verifyResult.setAttribute('aria-atomic', 'true');
                 const verify = document.createElement('button');
                 verify.className = 'btn btn-sm btn-outline-secondary';
                 verify.textContent = '核验平台草稿';
                 verify.setAttribute('type', 'button');
+                verify.dataset.draftVerifyButton = 'true';
+                verificationControls.set(target, { button: verify, result: verifyResult });
                 verify.addEventListener('click', () => verifyDraft(target));
                 actions.appendChild(verify);
+                copy.appendChild(verifyResult);
             }
             row.append(copy, actions); return row;
         }));
@@ -2119,10 +2150,20 @@
     async function verifyDraft(target) {
         const opId = target.operation_id;
         if (!opId) return;
-        const btn = [...document.querySelectorAll('button')].find(el => el.textContent === '核验平台草稿' && el.closest('.plan-target'));
+        const controls = verificationControls.get(target) || {};
+        const btn = controls.button || null;
+        const resultEl = controls.result || null;
+        if (state.verifyingOperations.has(opId)) return;
+        state.verifyingOperations.add(opId);
+        const setResult = (text, kind = 'info') => {
+            if (!resultEl) return;
+            resultEl.textContent = text || '';
+            resultEl.className = `plan-target-verify-result alert alert-${kind} mt-2${text ? '' : ' d-none'}`;
+        };
         if (btn) {
             btn.disabled = true;
             btn.textContent = '核验中…';
+            btn.setAttribute('aria-busy', 'true');
         }
         try {
             const response = await fetch(`/api/delivery-operations/${encodeURIComponent(opId)}/verify-draft`, {
@@ -2131,32 +2172,32 @@
                 body: '{}',
             });
             const payload = await response.json().catch(() => ({}));
-            const messageEl = byId('plan-review-error') || byId('publish-confirm-error');
-            const setMsg = (text, kind = 'danger') => {
-                if (messageEl) { messageEl.textContent = text; messageEl.className = `alert alert-${kind} mt-2`; }
-            };
             if (!response.ok) {
                 const code = payload.error || 'PROBE_FAILED';
                 const hint = code === 'PROBE_UNSUPPORTED_PLATFORM'
                     ? '该平台尚未实现只读核验，请打开平台草稿箱人工核对。'
                     : (payload.message || `核验失败（${code}）`);
-                setMsg(hint, 'warning');
+                setResult(hint, 'warning');
                 return;
             }
             if (payload.title_matched) {
-                setMsg(`只读核验：平台草稿箱存在标题唯一匹配的草稿${payload.draft_url ? '。可在平台直接核对' : ''}。`, 'success');
+                setResult(`只读核验：平台草稿箱存在标题唯一匹配的草稿${payload.draft_url ? '。可在平台直接核对' : ''}。`, 'success');
             } else if (payload.error_code === 'PROBE_NOT_FOUND') {
-                setMsg('只读核验：平台草稿箱未找到该标题草稿。', 'danger');
+                setResult('只读核验：平台草稿箱未找到该标题草稿。', 'danger');
             } else if (payload.error_code === 'PROBE_TITLE_AMBIGUOUS') {
-                setMsg(payload.error_message || '草稿箱存在多个同名草稿，需人工区分。', 'warning');
+                setResult(payload.error_message || '草稿箱存在多个同名草稿，需人工区分。', 'warning');
             } else {
-                setMsg(payload.error_message || '只读核验完成，请查看平台草稿箱。', 'info');
+                setResult(payload.error_message || '只读核验完成，请查看平台草稿箱。', 'info');
             }
         } catch (err) {
-            const messageEl = byId('plan-review-error') || byId('publish-confirm-error');
-            if (messageEl) { messageEl.textContent = '只读核验请求失败，请稍后重试。'; messageEl.className = 'alert alert-danger mt-2'; }
+            setResult('只读核验请求失败，请稍后重试；系统不会自动重试平台操作。', 'danger');
         } finally {
-            if (btn) { btn.disabled = false; btn.textContent = '核验平台草稿'; }
+            state.verifyingOperations.delete(opId);
+            if (btn) {
+                btn.disabled = false;
+                btn.textContent = '核验平台草稿';
+                btn.setAttribute('aria-busy', 'false');
+            }
         }
     }
 

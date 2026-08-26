@@ -251,6 +251,35 @@ class AccountSessionService:
             await session.flush()
             return public_account(account)
 
+    async def restore_verifying_after_login_failure(
+        self,
+        account_id: str,
+        access: AccessContext,
+        *,
+        error_code: str,
+    ) -> None:
+        """只恢复仍停留在本次登录 VERIFYING 的账号，避免悬挂状态。"""
+
+        access.require("session.verify", account_id)
+        async with self.database.session() as session:
+            account = await session.get(PlatformAccount, account_id)
+            if account is None or account.status != "ACTIVE":
+                return
+            if account.session_status != "VERIFYING":
+                return
+            account.session_status = "ERROR"
+            account.last_verified_at = None
+            session.add(
+                activity_for(
+                    account,
+                    access,
+                    action="SESSION_VERIFY_FAILED",
+                    level="ERROR",
+                    message=f"登录任务未能完成（{error_code}）",
+                )
+            )
+            await session.flush()
+
     async def verify_account(
         self,
         account_id: str,

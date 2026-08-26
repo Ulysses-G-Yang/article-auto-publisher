@@ -2,6 +2,8 @@
 
 import atexit
 import logging
+import re
+import uuid
 from collections.abc import Coroutine
 from pathlib import Path
 from threading import Lock
@@ -20,7 +22,11 @@ from account_sessions.contracts import (
 from account_sessions.database import AccountDatabase
 from account_sessions.delivery_service import DeliveryService
 from account_sessions.draft_verify import DraftVerifyService
-from account_sessions.errors import AccountSessionError, ConfirmationRequiredError
+from account_sessions.errors import (
+    AccountSessionError,
+    ConfirmationRequiredError,
+    LoginInProgressError,
+)
 from account_sessions.mcp_access import (
     MCPInternalAccessResolver,
     MCPRequestValidationError,
@@ -39,6 +45,71 @@ from account_sessions.session_health import (
 )
 
 LOGGER = logging.getLogger(__name__)
+
+
+class SmzdmLoginGuard:
+    """进程内的 SMZDM 交互登录单槽位与稳定结果投影。"""
+
+    _PLATFORM = "smzdm"
+    _SAFE_ERROR_CODE = re.compile(r"[A-Z][A-Z0-9_]{0,63}\Z")
+
+    def __init__(self) -> None:
+        self._lock = Lock()
+        self._active: dict[str, object] | None = None
+        self._last_errors: dict[str, str] = {}
+
+    def reserve(self, platform: str, account_id: str | None = None) -> str | None:
+        if platform != self._PLATFORM:
+            return None
+        with self._lock:
+            if self._active is not None:
+                raise LoginInProgressError("SMZDM 登录流程正在进行中")
+            token = uuid.uuid4().hex
+            self._active = {"token": token, "account_id": account_id}
+            if account_id:
+                self._last_errors.pop(account_id, None)
+            return token
+
+    def bind(self, token: str | None, account_id: str) -> None:
+        if token is None:
+            return
+        with self._lock:
+            if self._active and self._active.get("token") == token:
+                self._active["account_id"] = account_id
+
+    def release(self, token: str | None, error_code: str | None = None) -> None:
+        if token is None:
+            return
+        with self._lock:
+            active = self._active
+            if active is None or active.get("token") != token:
+                return
+            self._active = None
+            account_id = active.get("account_id")
+            if not isinstance(account_id, str) or not account_id:
+                return
+            if error_code:
+                self._last_errors[account_id] = error_code
+            else:
+                self._last_errors.pop(account_id, None)
+
+    def error_code(self, exc: BaseException | None) -> str | None:
+        if exc is None:
+            return None
+        raw = getattr(exc, "error_code", None)
+        if not isinstance(raw, str):
+            return "ERROR"
+        code = raw.strip().upper()
+        return code if self._SAFE_ERROR_CODE.fullmatch(code) else "ERROR"
+
+    def public_state(self, account_id: str) -> dict[str, object | None]:
+        with self._lock:
+            active_account_id = self._active.get("account_id") if self._active else None
+            return {
+                "login_in_progress": active_account_id == account_id,
+                "platform_login_in_progress": self._active is not None,
+                "login_error_code": self._last_errors.get(account_id),
+            }
 
 
 class AccountSessionRuntimeState:
@@ -63,6 +134,7 @@ class AccountSessionRuntimeState:
         heartbeat_scheduler: HeartbeatScheduler | None = None,
     ) -> None:
         self.database = AccountDatabase(database_url)
+        self.smzdm_login_guard = SmzdmLoginGuard()
         self.accounts = AccountSessionService(
             self.database,
             acquire_legacy_guard=acquire_legacy_guard,
@@ -119,6 +191,86 @@ class AccountSessionRuntimeState:
                 LOGGER.exception("账号会话后台操作失败")
 
         future.add_done_callback(consume_result)
+
+    def submit_login(
+        self,
+        reservation: str | None,
+        coroutine: Coroutine[Any, Any, Any],
+        *,
+        account_id: str | None = None,
+    ) -> None:
+        """提交登录任务；SMZDM 守卫在协程 finally 后才释放。"""
+
+        if reservation is None:
+            try:
+                self.submit(coroutine)
+            except BaseException:
+                coroutine.close()
+                raise
+            return
+
+        async def guarded() -> Any:
+            error_code: str | None = None
+            try:
+                return await coroutine
+            except BaseException as exc:
+                error_code = self.smzdm_login_guard.error_code(exc)
+                if account_id:
+                    try:
+                        await self.accounts.restore_verifying_after_login_failure(
+                            account_id,
+                            LOCAL_WEB_CONTEXT,
+                            error_code=error_code or "LOGIN_TASK_FAILED",
+                        )
+                    except BaseException:
+                        LOGGER.exception("SMZDM 登录任务终态恢复失败")
+                raise
+            finally:
+                self.smzdm_login_guard.release(reservation, error_code)
+
+        wrapper = guarded()
+        try:
+            self.submit(wrapper)
+        except BaseException as exc:
+            wrapper.close()
+            coroutine.close()
+            if account_id:
+                try:
+                    self.run(
+                        self.accounts.restore_verifying_after_login_failure(
+                            account_id,
+                            LOCAL_WEB_CONTEXT,
+                            error_code=self.smzdm_login_guard.error_code(exc)
+                            or "LOGIN_TASK_FAILED",
+                        )
+                    )
+                except BaseException:
+                    LOGGER.exception("SMZDM 登录任务提交失败后的终态恢复失败")
+            self.smzdm_login_guard.release(
+                reservation,
+                self.smzdm_login_guard.error_code(exc),
+            )
+            raise
+
+    def _with_login_state(
+        self,
+        payload: dict,
+        *,
+        platform: str | None = None,
+    ) -> dict:
+        resolved_platform = platform or payload.get("platform")
+        if resolved_platform != "smzdm" or not payload.get("account_id"):
+            return payload
+        enriched = dict(payload)
+        enriched.update(self.smzdm_login_guard.public_state(payload["account_id"]))
+        return enriched
+
+    def reserve_existing_login(self, account_id: str) -> tuple[str, str | None]:
+        account = self.run(self.accounts.get_account(account_id))
+        return account.platform, self.smzdm_login_guard.reserve(
+            account.platform,
+            account_id,
+        )
 
     def _ensure_runtime(self) -> AccountRuntime:
         with self._lock:
@@ -231,6 +383,7 @@ def create_account_session_blueprint(
                 include_archived=include_archived,
             )
         )
+        accounts = [state._with_login_state(account, platform=platform) for account in accounts]
         return jsonify({"platform": platform, "accounts": accounts})
 
     @blueprint.get("/api/internal/mcp/platforms/<platform>/accounts")
@@ -266,41 +419,68 @@ def create_account_session_blueprint(
 
     @blueprint.post("/api/platforms/<platform>/accounts/login")
     def create_account_login(platform: str):
-        account = state.run(state.accounts.create_login_candidate(platform, LOCAL_WEB_CONTEXT))
-        state.submit(
-            state.accounts.verify_account(
-                account["account_id"],
-                LOCAL_WEB_CONTEXT,
-                allow_interactive_login=True,
+        reservation = state.smzdm_login_guard.reserve(platform)
+        try:
+            account = state.run(
+                state.accounts.create_login_candidate(platform, LOCAL_WEB_CONTEXT)
             )
-        )
-        return jsonify(account), 202
+            state.smzdm_login_guard.bind(reservation, account["account_id"])
+            state.submit_login(
+                reservation,
+                state.accounts.verify_account(
+                    account["account_id"],
+                    LOCAL_WEB_CONTEXT,
+                    allow_interactive_login=True,
+                ),
+                account_id=account["account_id"],
+            )
+            reservation = None
+            return jsonify(state._with_login_state(account, platform=platform)), 202
+        finally:
+            if reservation is not None:
+                state.smzdm_login_guard.release(reservation)
 
     @blueprint.post("/api/accounts/<account_id>/verify")
     def verify_account(account_id: str):
-        account = state.run(state.accounts.mark_verifying(account_id, LOCAL_WEB_CONTEXT))
-        state.submit(
-            state.accounts.verify_account(
-                account_id,
-                LOCAL_WEB_CONTEXT,
-                allow_interactive_login=False,
+        platform, reservation = state.reserve_existing_login(account_id)
+        try:
+            account = state.run(state.accounts.mark_verifying(account_id, LOCAL_WEB_CONTEXT))
+            state.submit_login(
+                reservation,
+                state.accounts.verify_account(
+                    account_id,
+                    LOCAL_WEB_CONTEXT,
+                    allow_interactive_login=False,
+                ),
+                account_id=account_id,
             )
-        )
-        return jsonify(account), 202
+            reservation = None
+            return jsonify(state._with_login_state(account, platform=platform)), 202
+        finally:
+            if reservation is not None:
+                state.smzdm_login_guard.release(reservation)
 
     @blueprint.post("/api/account-sessions/<account_id>/login")
     def login_existing_account(account_id: str):
         """复用指定账号的隔离 Profile，启动交互式重新登录。"""
 
-        account = state.run(state.accounts.mark_verifying(account_id, LOCAL_WEB_CONTEXT))
-        state.submit(
-            state.accounts.verify_account(
-                account_id,
-                LOCAL_WEB_CONTEXT,
-                allow_interactive_login=True,
+        platform, reservation = state.reserve_existing_login(account_id)
+        try:
+            account = state.run(state.accounts.mark_verifying(account_id, LOCAL_WEB_CONTEXT))
+            state.submit_login(
+                reservation,
+                state.accounts.verify_account(
+                    account_id,
+                    LOCAL_WEB_CONTEXT,
+                    allow_interactive_login=True,
+                ),
+                account_id=account_id,
             )
-        )
-        return jsonify(account), 202
+            reservation = None
+            return jsonify(state._with_login_state(account, platform=platform)), 202
+        finally:
+            if reservation is not None:
+                state.smzdm_login_guard.release(reservation)
 
     @blueprint.post("/api/accounts/<account_id>/session-policy")
     def update_session_policy(account_id: str):

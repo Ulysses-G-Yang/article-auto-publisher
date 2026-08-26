@@ -43,6 +43,7 @@ from platforms.media_progress import safe_media_progress
 LOGIN_URL = "https://zhiyou.smzdm.com/user/login"
 HOME_URL = "https://zhiyou.smzdm.com/"
 USERNAME_SELECTOR = "input#username.form-input"
+RATE_LIMIT_NOTICE = "您的操作过于频繁，请稍后再试"
 IDENTITY_NAME_KEYS = {"nickname", "user_name", "screen_name", "name", "nick"}
 IDENTITY_UID_KEYS = {"smzdm_id", "uid", "user_id", "id"}
 TITLE_SELECTOR = "textarea.article-title"
@@ -56,6 +57,18 @@ class PlatformNotImplementedError(PlatformAutomationError):
     """平台能力尚未实现。"""
 
     error_code = "PLATFORM_NOT_IMPLEMENTED"
+
+
+class SmzdmRateLimitedError(PlatformAutomationError):
+    """登录页明确提示当前操作被限频。"""
+
+    error_code = "RATE_LIMITED"
+
+
+class SmzdmLoginCheckError(PlatformAutomationError):
+    """SMZDM 本地会话检查发生技术异常。"""
+
+    error_code = "SMZDM_LOGIN_CHECK_ERROR"
 
 
 class SmzdmPlatform(BasePlatform):
@@ -84,52 +97,76 @@ class SmzdmPlatform(BasePlatform):
 
     # ==================== 登录态与身份 ====================
 
-    async def _has_session_cookie_signal(self) -> bool:
-        """sess 会话 cookie 作为登录成功信号；不返回、不记录 cookie 值。"""
+    async def _read_site_cookie_state(self) -> tuple[bool, bool]:
+        """仅读取站点 Cookie 名称，返回(有任意Cookie, 有sess)。"""
 
         if self.context is None:
-            return False
+            raise BrowserLifecycleError(
+                "BROWSER_CONTEXT_CLOSED: smzdm 会话检查时浏览器上下文不存在"
+            )
         try:
             cookies = await self.context.cookies([
                 "https://www.smzdm.com/",
                 "https://zhiyou.smzdm.com/",
             ])
-        except Exception:
-            return False
-        return any(
-            str(item.get("name") or "") in self.SESSION_COOKIE_NAMES
+        except Exception as exc:
+            if self._exception_means_browser_closed(exc):
+                raise BrowserLifecycleError(
+                    "BROWSER_CONTEXT_CLOSED: smzdm 会话检查时浏览器上下文已关闭"
+                ) from exc
+            raise SmzdmLoginCheckError(
+                "SMZDM_LOGIN_CHECK_ERROR: smzdm 会话检查失败"
+            ) from exc
+        if not isinstance(cookies, list):
+            raise SmzdmLoginCheckError(
+                "SMZDM_LOGIN_CHECK_ERROR: smzdm 会话检查返回无效结果"
+            )
+        names = {
+            str(item.get("name") or "")
             for item in cookies
-        )
+            if isinstance(item, dict)
+        }
+        return bool(names), bool(names & self.SESSION_COOKIE_NAMES)
+
+    async def _has_session_cookie_signal(self) -> bool:
+        """sess 会话 cookie 作为登录成功信号；不返回、不记录 cookie 值。"""
+
+        _has_any_cookie, has_session_cookie = await self._read_site_cookie_state()
+        return has_session_cookie
 
     async def check_login(self) -> bool:
-        """只读验证现有 Profile；会话 cookie 出现才认定登录有效。"""
+        """只读验证现有 Profile；会话信号触发同源身份检查后才认定有效。"""
 
         try:
             self.last_login_error = ""
             self._require_page_alive("smzdm 登录态检测")
-            await self.page.goto(
-                HOME_URL,
-                wait_until="domcontentloaded",
-                timeout=15000,
-            )
-            await asyncio.sleep(4)
-            if await self._has_session_cookie_signal():
-                identity = await self.fetch_identity_payload()
-                if identity.get("ok"):
-                    return True
-                self.last_login_error = "SMZDM_IDENTITY_MISSING: 会话存在但身份未确认"
+            # 先做本地只读信号检查；无任何站点 Cookie 的新候选直接交给
+            # 唯一的 login() 导航，避免一次无意义的主页请求。
+            await self._raise_if_rate_limited()
+            has_any_cookie, _ = await self._read_site_cookie_state()
+            if not has_any_cookie:
+                self.last_login_error = "LOGIN_REQUIRED: smzdm 账号需要登录"
                 return False
-            self.last_login_error = "LOGIN_REQUIRED: smzdm 账号需要登录"
+            # 有 sess 或其它历史站点 Cookie 时保留一次首页身份检查，兼容
+            # 旧 Profile 由其它持久 Cookie 恢复会话的情况；身份仍需同源确认。
+            identity = await self.fetch_identity_payload()
+            _has_any_cookie_after_home, has_session_cookie = (
+                await self._read_site_cookie_state()
+            )
+            if has_session_cookie and identity.get("ok"):
+                return True
+            self.last_login_error = "SMZDM_IDENTITY_MISSING: 会话存在但身份未确认"
             return False
-        except BrowserLifecycleError:
+        except (BrowserLifecycleError, SmzdmRateLimitedError, SmzdmLoginCheckError):
             raise
         except Exception as exc:
             if self._exception_means_browser_closed(exc):
                 raise BrowserLifecycleError(
                     "BROWSER_CONTEXT_CLOSED: smzdm 登录态检测时页面已关闭"
                 ) from exc
-            self.last_login_error = "SMZDM_LOGIN_CHECK_ERROR: smzdm 登录态验证失败"
-            return False
+            raise SmzdmLoginCheckError(
+                "SMZDM_LOGIN_CHECK_ERROR: smzdm 登录态验证失败"
+            ) from exc
 
     async def login(self):
         """打开 smzdm 登录页，由用户在可见窗口中输入凭据完成登录。"""
@@ -140,24 +177,83 @@ class SmzdmPlatform(BasePlatform):
             wait_until="domcontentloaded",
             timeout=20000,
         )
-        try:
-            await self.page.wait_for_selector(
-                USERNAME_SELECTOR,
-                state="visible",
-                timeout=20000,
-            )
-        except Exception:
-            pass
+        await self._wait_for_login_form_or_rate_limit()
         await self._show_login_hint()
 
         for _ in range(self.LOGIN_POLL_ATTEMPTS):
             self._require_page_alive("smzdm 等待登录")
+            await self._raise_if_rate_limited()
             if await self._has_session_cookie_signal():
                 self.last_login_error = ""
                 return
             await asyncio.sleep(self.LOGIN_POLL_INTERVAL_SECONDS)
         self.last_login_error = "LOGIN_REQUIRED: smzdm 登录超时，请重新完成登录"
         raise LoginRequiredError(self.last_login_error)
+
+    async def _visible_rate_limit_notice(self) -> bool:
+        """只读可见页面/iframe 元素，不读取表单、Cookie 或网络响应。"""
+
+        self._require_page_alive("smzdm 限频提示检测")
+        page = self.page
+        if page is None:
+            return False
+        contexts = [page]
+        frames = getattr(page, "frames", None)
+        if frames:
+            contexts.extend(frame for frame in frames if frame is not page)
+        for context in contexts:
+            get_by_text = getattr(context, "get_by_text", None)
+            locator_factory = getattr(context, "locator", None)
+            if not callable(get_by_text) and not callable(locator_factory):
+                continue
+            try:
+                matches = (
+                    get_by_text(RATE_LIMIT_NOTICE, exact=False)
+                    if callable(get_by_text)
+                    else locator_factory(f"text={RATE_LIMIT_NOTICE}")
+                )
+                count = min(await matches.count(), 8)
+                for index in range(count):
+                    if await matches.nth(index).is_visible(timeout=500):
+                        return True
+            except Exception as exc:
+                if self._exception_means_browser_closed(exc):
+                    raise BrowserLifecycleError(
+                        "BROWSER_CONTEXT_CLOSED: smzdm 限频提示检测时页面已关闭"
+                    ) from exc
+                continue
+        return False
+
+    async def _raise_if_rate_limited(self) -> None:
+        if await self._visible_rate_limit_notice():
+            self.last_login_error = "RATE_LIMITED"
+            raise SmzdmRateLimitedError("RATE_LIMITED")
+
+    async def _wait_for_login_form_or_rate_limit(self) -> None:
+        """把 20 秒表单等待切成有界小步，期间立即识别限频提示。"""
+
+        wait_for_selector = getattr(self.page, "wait_for_selector", None)
+        if not callable(wait_for_selector):
+            await self._raise_if_rate_limited()
+            return
+        deadline = asyncio.get_running_loop().time() + 20
+        while True:
+            await self._raise_if_rate_limited()
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
+                return
+            try:
+                await wait_for_selector(
+                    USERNAME_SELECTOR,
+                    state="visible",
+                    timeout=min(500, max(1, int(remaining * 1000))),
+                )
+                return
+            except Exception as exc:
+                if self._exception_means_browser_closed(exc):
+                    raise BrowserLifecycleError(
+                        "BROWSER_CONTEXT_CLOSED: smzdm 登录表单等待时页面已关闭"
+                    ) from exc
 
     async def _show_login_hint(self):
         """页面顶部显示登录提示条。"""
@@ -219,23 +315,27 @@ class SmzdmPlatform(BasePlatform):
                     wait_until="domcontentloaded",
                     timeout=30000,
                 )
+                await self._raise_if_rate_limited()
                 for _ in range(8):
                     if self._identity_payload is not None:
                         break
+                    await self._raise_if_rate_limited()
                     await asyncio.sleep(1)
             finally:
                 try:
                     self.page.remove_listener("response", _on_response)
                 except Exception:  # noqa: BLE001
                     pass
-        except BrowserLifecycleError:
+        except (BrowserLifecycleError, SmzdmRateLimitedError):
             raise
         except Exception as exc:
             if self._exception_means_browser_closed(exc):
                 raise BrowserLifecycleError(
                     "BROWSER_CONTEXT_CLOSED: smzdm 身份捕获时页面已关闭"
                 ) from exc
-            logger.warning("smzdm 身份捕获失败: {}", exc)
+            raise SmzdmLoginCheckError(
+                "SMZDM_LOGIN_CHECK_ERROR: smzdm 身份捕获失败"
+            ) from exc
 
         # DOM 兜底：个人中心昵称 + user cookie 中的用户 ID
         if not (
@@ -267,8 +367,14 @@ class SmzdmPlatform(BasePlatform):
                         "user_id": user_id,
                         "display_name": nickname,
                     }
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as exc:  # noqa: BLE001
+                if self._exception_means_browser_closed(exc):
+                    raise BrowserLifecycleError(
+                        "BROWSER_CONTEXT_CLOSED: smzdm 身份兜底时页面已关闭"
+                    ) from exc
+                raise SmzdmLoginCheckError(
+                    "SMZDM_LOGIN_CHECK_ERROR: smzdm 身份兜底失败"
+                ) from exc
 
         if isinstance(self._identity_payload, dict) and self._identity_payload.get("ok"):
             return dict(self._identity_payload)

@@ -53,6 +53,13 @@ class AccountBusyError(AccountSessionError):
     http_status = 409
 
 
+class LoginInProgressError(AccountSessionError):
+    """同一平台已有交互式登录流程正在运行。"""
+
+    error_code = "LOGIN_IN_PROGRESS"
+    http_status = 409
+
+
 class PublicPublishDisabledError(AccountSessionError):
     error_code = "PUBLIC_PUBLISH_DISABLED"
     http_status = 403

@@ -6,9 +6,11 @@
 
     const MAX_TARGETED_POLLS = 12;
     const POLL_INTERVAL_MS = 2500;
+    const SMZDM_PLATFORM = 'smzdm';
     const PUBLIC_ACCOUNT_FIELDS = [
         'account_id', 'display_name', 'masked_platform_user_id', 'status',
         'session_status', 'persist_login', 'last_verified_at',
+        'login_in_progress', 'platform_login_in_progress', 'login_error_code',
     ];
     const state = {
         platforms: [],
@@ -17,6 +19,10 @@
         requestSequence: 0,
         requestController: null,
         targetedPolls: new Map(),
+        pollingAccountId: null,
+        pollingGeneration: 0,
+        loginInFlight: false,
+        loginTargetAccountId: null,
         showArchived: false,
     };
     const byId = id => document.getElementById(id);
@@ -29,6 +35,13 @@
         VALID: 'text-bg-success', VERIFYING: 'text-bg-info', BUSY: 'text-bg-warning',
         ERROR: 'text-bg-danger', LOGIN_REQUIRED: 'text-bg-danger', EXPIRED: 'text-bg-secondary',
         UNVERIFIED: 'text-bg-secondary', ACTIVE: 'text-bg-primary', ARCHIVED: 'text-bg-secondary', DISABLED: 'text-bg-secondary',
+    };
+
+    const loginErrorMessages = {
+        RATE_LIMITED: '平台提示“您的操作过于频繁，请稍后再试”，未自动重试。',
+        LOGIN_REQUIRED: '登录未完成，请在浏览器窗口中完成登录。',
+        BROWSER_CONTEXT_CLOSED: '登录窗口已关闭，未完成登录。',
+        LOGIN_IN_PROGRESS: 'SMZDM 登录已在其他标签页进行中，请勿重复点击。',
     };
 
     function endpoint(template, key, value) {
@@ -47,8 +60,86 @@
 
     async function jsonResponse(response) {
         const payload = await response.json().catch(() => ({}));
-        if (!response.ok) throw new Error(payload.message || '请求失败，请稍后重试。');
+        if (!response.ok) {
+            const error = new Error(payload.message || '请求失败，请稍后重试。');
+            error.code = payload.error || '';
+            throw error;
+        }
         return payload;
+    }
+
+    function smzdmSelected() {
+        return state.platform === SMZDM_PLATFORM;
+    }
+
+    function loginErrorMessage(code) {
+        return loginErrorMessages[code] || (code ? `登录失败（${code}）。` : '登录状态未完成。');
+    }
+
+    function setLoginInFlight(value, accountId = null) {
+        const active = Boolean(value) && smzdmSelected();
+        state.loginInFlight = active;
+        state.loginTargetAccountId = active ? accountId : null;
+        byId('add-platform-account').disabled = active;
+    }
+
+    function isCurrentContext(platform, generation) {
+        return state.platform === platform && state.pollingGeneration === generation;
+    }
+
+    function loginMetadataAvailable(account) {
+        return typeof account?.login_in_progress === 'boolean';
+    }
+
+    function syncSmzdmActivity() {
+        if (!smzdmSelected()) return;
+        const active = state.accounts.find(account => account.login_in_progress === true);
+        if (active) {
+            const targetChanged = state.loginTargetAccountId !== active.account_id;
+            if (!state.loginInFlight || targetChanged) setLoginInFlight(true, active.account_id);
+            if (state.pollingAccountId !== active.account_id) startTargetedPolling(active.account_id);
+            return;
+        }
+        // A current poller owns terminal handling.  Do not race it by clearing
+        // state here; the poller will use the same response and generation.
+        if (state.pollingAccountId !== null) return;
+        if (state.loginInFlight) {
+            const target = state.accounts.find(
+                account => account.account_id === state.loginTargetAccountId,
+            );
+            const metadataAvailable = state.accounts.some(loginMetadataAvailable);
+            // Old services omit the optional fields.  If no target was returned,
+            // release the local button lock; otherwise the bounded poller owns it.
+            if (metadataAvailable || !state.loginTargetAccountId) {
+                setLoginInFlight(false);
+                if (target) reportLoginOutcome(target);
+            }
+        }
+    }
+
+    function loginRequestErrorMessage(error, fallback) {
+        if (smzdmSelected()) return loginErrorMessage(error?.code) || fallback;
+        return error?.message || fallback;
+    }
+
+    function reportLoginOutcome(account) {
+        if (!account) {
+            setMessage('session-accounts-error', '登录账号已不存在，未自动重试。');
+            return;
+        }
+        if (account.login_error_code) {
+            setMessage('session-accounts-error', loginErrorMessage(account.login_error_code));
+            return;
+        }
+        if (account.session_status === 'VALID') {
+            setMessage('session-login-status', '登录态验证成功。');
+            return;
+        }
+        if (['LOGIN_REQUIRED', 'ERROR', 'EXPIRED'].includes(account.session_status)) {
+            setMessage('session-accounts-error', loginErrorMessage(account.session_status));
+            return;
+        }
+        setMessage('session-login-status', '登录状态已更新，请查看账号卡片。');
     }
 
     function accountLabel(account) {
@@ -91,6 +182,12 @@
         const meta = document.createElement('div'); meta.className = 'session-account-meta';
         const verified = document.createElement('span');
         verified.textContent = account.last_verified_at ? `最近验证：${account.last_verified_at}` : '尚未验证登录态';
+        if (account.login_error_code) {
+            const loginError = document.createElement('span');
+            loginError.className = 'text-danger';
+            loginError.textContent = loginErrorMessage(account.login_error_code);
+            verified.append(' ', loginError);
+        }
         const policy = document.createElement('div'); policy.className = 'form-check form-switch m-0';
         const policyInput = document.createElement('input');
         policyInput.className = 'form-check-input'; policyInput.type = 'checkbox'; policyInput.role = 'switch';
@@ -102,8 +199,14 @@
 
         const actions = document.createElement('div'); actions.className = 'session-account-actions';
         if (!archived) {
-            if (['UNVERIFIED', 'ERROR', 'EXPIRED'].includes(account.session_status)) {
+            const loginBusy = smzdmSelected() && (state.loginInFlight || account.login_in_progress);
+            if (loginBusy) {
+                actions.append(button('登录处理中', 'btn btn-outline-secondary btn-sm', () => {}));
+            } else if (['UNVERIFIED', 'ERROR', 'EXPIRED'].includes(account.session_status)) {
                 actions.append(button('验证现有登录态', 'btn btn-outline-primary btn-sm', () => verifyAccount(account)));
+                if (smzdmSelected()) {
+                    actions.append(button('重新登录', 'btn btn-primary btn-sm', () => loginAccount(account)));
+                }
             }
             if (account.session_status === 'LOGIN_REQUIRED') {
                 actions.append(button('重新登录', 'btn btn-primary btn-sm', () => loginAccount(account)));
@@ -232,6 +335,7 @@
             const payload = await jsonResponse(response);
             if (sequence !== state.requestSequence || payload.platform !== state.platform) return;
             state.accounts = (Array.isArray(payload.accounts) ? payload.accounts : []).map(publicAccount);
+            syncSmzdmActivity();
             renderAccounts();
         } catch (error) {
             if (error.name === 'AbortError' || sequence !== state.requestSequence) return;
@@ -246,8 +350,11 @@
         if (!selectedPlatform?.account_enabled) return;
         state.platform = platform;
         state.accounts = [];
+        state.pollingGeneration += 1;
         state.targetedPolls.forEach(timer => clearTimeout(timer));
         state.targetedPolls.clear();
+        state.pollingAccountId = null;
+        setLoginInFlight(false);
         renderAccounts();
         byId('refresh-account-sessions').disabled = false;
         byId('add-platform-account').disabled = false;
@@ -272,36 +379,104 @@
     }
 
     async function verifyAccount(account) {
+        if (smzdmSelected() && (state.loginInFlight || account.login_in_progress)) {
+            setMessage('session-login-status', 'SMZDM 登录已在进行中，请勿重复点击。');
+            return;
+        }
+        const platformAtStart = state.platform;
+        const generationAtStart = state.pollingGeneration;
         setMessage('session-accounts-error', '');
+        if (smzdmSelected()) setLoginInFlight(true, account.account_id);
         try {
             const url = endpoint(root.dataset.verifyUrlTemplate, 'account_id', account.account_id);
             await jsonResponse(await fetch(url, { method: 'POST', headers: { Accept: 'application/json' } }));
+            if (!isCurrentContext(platformAtStart, generationAtStart)) return;
             setMessage('session-login-status', `正在验证 ${accountLabel(account)} 的现有登录态；不会自动打开扫码。`);
             startTargetedPolling(account.account_id);
-        } catch (error) { setMessage('session-accounts-error', error.message || '无法启动登录态验证。'); }
+        } catch (error) {
+            if (!isCurrentContext(platformAtStart, generationAtStart)) return;
+            if (platformAtStart === SMZDM_PLATFORM && error.code === 'LOGIN_IN_PROGRESS') {
+                setMessage('session-login-status', 'SMZDM 登录已在其他标签页进行中，请勿重复点击。');
+                await loadAccounts({ silent: true });
+            } else {
+                if (platformAtStart === SMZDM_PLATFORM) setLoginInFlight(false);
+                setMessage('session-accounts-error', loginRequestErrorMessage(error, '无法启动登录态验证。'));
+            }
+        }
     }
 
     async function loginAccount(account) {
+        if (smzdmSelected() && (state.loginInFlight || account.login_in_progress)) {
+            setMessage('session-login-status', 'SMZDM 登录已在进行中，请勿重复点击。');
+            return;
+        }
+        const platformAtStart = state.platform;
+        const generationAtStart = state.pollingGeneration;
         setMessage('session-accounts-error', '');
+        if (smzdmSelected()) setLoginInFlight(true, account.account_id);
         try {
             const url = endpoint(root.dataset.accountLoginUrlTemplate, 'account_id', account.account_id);
             await jsonResponse(await fetch(url, { method: 'POST', headers: { Accept: 'application/json' } }));
-            setMessage('session-login-status', `正在为 ${accountLabel(account)} 打开扫码登录窗口；将复用该账号的隔离 Profile。`);
+            if (!isCurrentContext(platformAtStart, generationAtStart)) return;
+            setMessage('session-login-status', `正在为 ${accountLabel(account)} 打开人工登录窗口；将复用该账号的隔离 Profile。`);
             startTargetedPolling(account.account_id);
-        } catch (error) { setMessage('session-accounts-error', error.message || '无法启动账号重新登录。'); }
+        } catch (error) {
+            if (!isCurrentContext(platformAtStart, generationAtStart)) return;
+            if (platformAtStart === SMZDM_PLATFORM && error.code === 'LOGIN_IN_PROGRESS') {
+                setMessage('session-login-status', 'SMZDM 登录已在其他标签页进行中，请勿重复点击。');
+                await loadAccounts({ silent: true });
+            } else {
+                if (platformAtStart === SMZDM_PLATFORM) setLoginInFlight(false);
+                setMessage('session-accounts-error', loginRequestErrorMessage(error, '无法启动账号重新登录。'));
+            }
+        }
     }
 
     function startTargetedPolling(accountId) {
+        const platform = state.platform;
+        if (!platform || !accountId) return;
+        if (state.pollingAccountId === accountId) return;
+        const generation = ++state.pollingGeneration;
         state.targetedPolls.forEach(timer => clearTimeout(timer));
         state.targetedPolls.clear();
+        state.pollingAccountId = accountId;
         let attempts = 0;
         const poll = async () => {
+            if (generation !== state.pollingGeneration || state.platform !== platform) return;
+            state.targetedPolls.delete(accountId);
             attempts += 1;
             await loadAccounts({ silent: true });
+            if (generation !== state.pollingGeneration || state.platform !== platform) return;
             const account = state.accounts.find(item => item.account_id === accountId);
-            if (!account || !['VERIFYING', 'BUSY', 'UNVERIFIED'].includes(account.session_status) || attempts >= MAX_TARGETED_POLLS) {
+            const terminal = !account || (platform === SMZDM_PLATFORM
+                ? (loginMetadataAvailable(account)
+                    ? account.login_in_progress === false
+                    : (!['VERIFYING', 'BUSY'].includes(account.session_status)
+                        || attempts >= MAX_TARGETED_POLLS))
+                : !['VERIFYING', 'BUSY', 'UNVERIFIED'].includes(account.session_status));
+            if (terminal) {
                 state.targetedPolls.delete(accountId);
-                setMessage('session-login-status', attempts >= MAX_TARGETED_POLLS ? '验证轮询已停止，请稍后手动刷新。' : '账号状态已更新。');
+                state.pollingAccountId = null;
+                if (platform === SMZDM_PLATFORM) {
+                    setLoginInFlight(false);
+                    reportLoginOutcome(account);
+                } else {
+                    setMessage('session-login-status', '账号状态已更新。');
+                }
+                return;
+            }
+            if (platform !== SMZDM_PLATFORM && attempts >= MAX_TARGETED_POLLS) {
+                state.targetedPolls.delete(accountId);
+                state.pollingAccountId = null;
+                setMessage('session-login-status', '验证轮询已停止，请稍后手动刷新。');
+                return;
+            }
+            if (platform === SMZDM_PLATFORM && !loginMetadataAvailable(account)
+                && attempts >= MAX_TARGETED_POLLS) {
+                state.targetedPolls.delete(accountId);
+                state.pollingAccountId = null;
+                setLoginInFlight(false);
+                setMessage('session-login-status', '登录状态轮询已停止，请稍后手动刷新。');
                 return;
             }
             state.targetedPolls.set(accountId, setTimeout(poll, POLL_INTERVAL_MS));
@@ -311,14 +486,31 @@
 
     async function addPlatformAccount() {
         if (!state.platform) return;
+        if (smzdmSelected() && state.loginInFlight) {
+            setMessage('session-login-status', 'SMZDM 登录已在进行中，请勿重复点击。');
+            return;
+        }
+        const platformAtStart = state.platform;
+        const generationAtStart = state.pollingGeneration;
         setMessage('session-accounts-error', '');
+        if (smzdmSelected()) setLoginInFlight(true);
         try {
             const url = endpoint(root.dataset.loginUrlTemplate, 'platform', state.platform);
             const payload = await jsonResponse(await fetch(url, { method: 'POST', headers: { Accept: 'application/json' } }));
-            setMessage('session-login-status', `已创建${platformLabel(state.platform)}隔离浏览器 Profile，请在打开的窗口中完成交互登录。`);
+            if (!isCurrentContext(platformAtStart, generationAtStart)) return;
+            setMessage('session-login-status', `已创建${platformLabel(platformAtStart)}隔离浏览器 Profile，请在打开的人工登录窗口中完成交互登录。`);
             const targetAccountId = payload.account_id || payload.account?.account_id;
             if (targetAccountId) startTargetedPolling(targetAccountId);
-        } catch (error) { setMessage('session-accounts-error', error.message || '无法创建隔离账号登录。'); }
+        } catch (error) {
+            if (!isCurrentContext(platformAtStart, generationAtStart)) return;
+            if (platformAtStart === SMZDM_PLATFORM && error.code === 'LOGIN_IN_PROGRESS') {
+                setMessage('session-login-status', 'SMZDM 登录已在其他标签页进行中，请勿重复点击。');
+                await loadAccounts({ silent: true });
+            } else {
+                if (platformAtStart === SMZDM_PLATFORM) setLoginInFlight(false);
+                setMessage('session-accounts-error', loginRequestErrorMessage(error, '无法创建隔离账号登录。'));
+            }
+        }
     }
 
     async function logoutAccount(account) {

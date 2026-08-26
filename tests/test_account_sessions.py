@@ -1378,6 +1378,23 @@ def test_existing_account_login_route_reuses_profile_and_enables_interaction(
     monkeypatch.setattr(state, "submit", lambda work: captured.setdefault("submitted", work))
 
     account_id = "existing-account"
+    run(state.accounts.initialize())
+    profile = make_profile(tmp_path, "xiaoheihe", account_id)
+
+    async def insert_existing_account() -> None:
+        async with state.database.session() as session:
+            session.add(
+                PlatformAccount(
+                    account_id=account_id,
+                    platform="xiaoheihe",
+                    display_name="现有账号",
+                    profile_path=str(profile.resolve()),
+                    session_status="LOGIN_REQUIRED",
+                    persist_login=True,
+                )
+            )
+
+    run(insert_existing_account())
     response = app.test_client().post(f"/api/account-sessions/{account_id}/login")
 
     assert response.status_code == 202

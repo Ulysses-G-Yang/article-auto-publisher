@@ -2747,6 +2747,111 @@ def test_plan_status_waits_for_every_target_to_reach_terminal_state() -> None:
     assert _plan_status(["FAILED", "DRAFT_SAVED"]) == "PARTIAL_FAIL"
     assert _plan_status(["RESULT_UNKNOWN", "BLOCKED"]) == "FATAL"
     assert _plan_status(["DRAFT_SAVED_WITH_WARNINGS"]) == "SUCCESS"
+    # DELIVERY_INCOMPLETE 是独立的终态：全失败 → FATAL，混合成功 → PARTIAL_FAIL，
+    # 仍有目标未到终态 → 继续 EXECUTING。
+    assert _plan_status(["DELIVERY_INCOMPLETE"]) == "FATAL"
+    assert _plan_status(["DELIVERY_INCOMPLETE", "FAILED"]) == "FATAL"
+    assert _plan_status(["DELIVERY_INCOMPLETE", "DRAFT_SAVED"]) == "PARTIAL_FAIL"
+    assert _plan_status(["DELIVERY_INCOMPLETE", "QUEUED"]) == "EXECUTING"
+    assert _plan_status(
+        ["DELIVERY_INCOMPLETE", "DRAFT_SAVED", "PUBLISHED"]
+    ) == "PARTIAL_FAIL"
+
+
+def test_plan_target_sync_persists_degraded_and_delivery_incomplete(
+    tmp_path: Path,
+) -> None:
+    """DELIVERY_INCOMPLETE / 降级成功都需经 set_plan_target_result 落库并由
+    get_delivery_plan 回读：状态、degraded 标记与验证证据链条完整可见。"""
+    account_db = AccountDatabase(sqlite_url(tmp_path / "degraded-accounts.db"))
+    accounts = AccountSessionService(account_db, seed_legacy_profiles=False)
+    service = make_service(tmp_path, account_service=accounts)
+
+    async def scenario():
+        await accounts.initialize()
+        account = PlatformAccount(
+            account_id=str(uuid.uuid4()),
+            platform="xiaoheihe",
+            platform_user_id="degraded-target-1",
+            display_name="降级判定账号",
+            profile_path=str(tmp_path / "degraded-profile"),
+            status="ACTIVE",
+            session_status="VALID",
+            persist_login=True,
+        )
+        async with account_db.session() as session:
+            session.add(account)
+
+        await service.initialize()
+        draft = await service.create_draft(
+            CreateDraftRequest(
+                title="降级判定",
+                blocks=[{"type": "text", "text": "正文", "position": 0}],
+            )
+        )
+        targeted = await service.replace_targets(
+            draft["draft_id"],
+            ReplaceTargetsRequest(
+                revision=draft["revision"],
+                targets=[
+                    {
+                        "platform": "xiaoheihe",
+                        "account_id": account.account_id,
+                        "mode": "DRAFT",
+                    }
+                ],
+            ),
+            LOCAL_WEB_CONTEXT,
+        )
+        evidence = {
+            "draft_list_unique": True,
+            "draft_reopen_title": "降级判定",
+            "draft_reopen_dom_found": None,
+        }
+
+        # 情况一：全部通道都无法确认保存成功 → DELIVERY_INCOMPLETE，计划 FATAL。
+        plan = await service.create_delivery_plan(
+            draft["draft_id"], targeted["revision"], LOCAL_WEB_CONTEXT
+        )
+        incomplete = await service.set_plan_target_result(
+            plan["plan_id"],
+            plan["targets"][0]["target_id"],
+            status="DELIVERY_INCOMPLETE",
+            operation_id=str(uuid.uuid4()),
+            error_code="DELIVERY_INCOMPLETE",
+            error_message="草稿结果未确认，草稿箱也未出现同名草稿",
+            degraded=None,
+            verification_evidence=evidence,
+        )
+        assert incomplete["status"] == "FATAL"
+        incomplete_target = incomplete["targets"][0]
+        assert incomplete_target["status"] == "DELIVERY_INCOMPLETE"
+        assert incomplete_target["degraded"] is None
+        assert incomplete_target["verification_evidence"] == evidence
+        assert incomplete_target["error_code"] == "DELIVERY_INCOMPLETE"
+
+        # 情况二：草稿箱同名确认 → 降级成功，计划 SUCCESS 且标记不丢失。
+        degraded_plan = await service.create_delivery_plan(
+            draft["draft_id"], targeted["revision"], LOCAL_WEB_CONTEXT
+        )
+        success = await service.set_plan_target_result(
+            degraded_plan["plan_id"],
+            degraded_plan["targets"][0]["target_id"],
+            status="DRAFT_SAVED",
+            operation_id=str(uuid.uuid4()),
+            degraded="draft_list_confirmed",
+            verification_evidence=evidence,
+        )
+        assert success["status"] == "SUCCESS"
+        success_target = success["targets"][0]
+        assert success_target["status"] == "DRAFT_SAVED"
+        assert success_target["degraded"] == "draft_list_confirmed"
+        assert success_target["verification_evidence"] == evidence
+
+        await service.database.dispose()
+        await account_db.dispose()
+
+    run(scenario())
 
 
 def test_plan_query_reconciles_failed_operation_and_relogin_reason() -> None:
@@ -2804,6 +2909,8 @@ def test_plan_query_reconciles_failed_operation_and_relogin_reason() -> None:
         operation_id="operation-1",
         error_code="LOGIN_REQUIRED",
         error_message="账号登录态已失效",
+        degraded=None,
+        verification_evidence=None,
     )
 
 

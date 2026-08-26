@@ -101,7 +101,13 @@ PLAN_SUCCESS_TARGET_STATUSES = frozenset(
     }
 )
 PLAN_FAILURE_TARGET_STATUSES = frozenset(
-    {"FAILED", "BLOCKED", "RESULT_UNKNOWN", "FORMAT_REVIEW_REQUIRED"}
+    {
+        "FAILED",
+        "BLOCKED",
+        "RESULT_UNKNOWN",
+        "DELIVERY_INCOMPLETE",
+        "FORMAT_REVIEW_REQUIRED",
+    }
 )
 PLAN_OPERATION_SYNC_STATUSES = frozenset(
     {
@@ -113,6 +119,7 @@ PLAN_OPERATION_SYNC_STATUSES = frozenset(
         "PUBLISHED_WITH_WARNINGS",
         "FAILED",
         "RESULT_UNKNOWN",
+        "DELIVERY_INCOMPLETE",
     }
 )
 
@@ -887,6 +894,8 @@ class ContentStudioService:
         operation_id: str | None = None,
         error_code: str | None = None,
         error_message: str | None = None,
+        degraded: str | None = None,
+        verification_evidence: dict | None = None,
     ) -> dict:
         async with self.database.session() as session:
             plan = await self._load_plan(session, plan_id)
@@ -897,6 +906,12 @@ class ContentStudioService:
             target.operation_id = operation_id
             target.error_code = error_code
             target.error_message = error_message
+            target.degraded = degraded
+            target.verification_evidence = (
+                json.dumps(verification_evidence, ensure_ascii=False)
+                if verification_evidence is not None
+                else None
+            )
             target.execution_claim_id = None
             target.execution_claim_expires_at = None
             target.updated_at = _utc_now()
@@ -1294,7 +1309,22 @@ def public_plan_target(target: DeliveryPlanTarget) -> dict:
         "confirmation_required": target.status == "CONFIRMATION_REQUIRED",
         "error_code": target.error_code,
         "error_message": target.error_message,
+        "degraded": target.degraded,
+        "verification_evidence": _decode_target_evidence(
+            target.verification_evidence
+        ),
     }
+
+
+def _decode_target_evidence(raw: str | None) -> dict | None:
+    """把计划目标上的证据 JSON 解码为字典；无效或缺失返回 None。"""
+    if not raw:
+        return None
+    try:
+        value = json.loads(raw)
+    except (TypeError, ValueError):
+        return None
+    return value if isinstance(value, dict) else None
 
 
 def _canonicalize_v2_document(

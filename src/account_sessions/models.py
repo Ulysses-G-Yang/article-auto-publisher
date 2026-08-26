@@ -124,6 +124,9 @@ class DeliveryOperation(Base):
     verification_evidence: Mapped[str | None] = mapped_column(
         Text, nullable=True, default=None
     )
+    degraded: Mapped[str | None] = mapped_column(
+        String(32), nullable=True, default=None
+    )
     article_mapping_status: Mapped[str] = mapped_column(
         String(16),
         default="NOT_PENDING",

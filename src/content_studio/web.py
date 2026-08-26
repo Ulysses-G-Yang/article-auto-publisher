@@ -313,6 +313,7 @@ class ContentStudioRuntimeState:
                 operation_status == target.get("status")
                 and operation.get("error_code") == target.get("error_code")
                 and operation.get("error_message") == target.get("error_message")
+                and operation.get("degraded") == target.get("degraded")
             ):
                 continue
             await self.service.set_plan_target_result(
@@ -329,6 +330,8 @@ class ContentStudioRuntimeState:
                     )
                 ),
                 error_message=operation.get("error_message"),
+                degraded=operation.get("degraded"),
+                verification_evidence=operation.get("verification_evidence"),
             )
         return await self.service.get_delivery_plan(plan_id, access)
 
@@ -379,6 +382,8 @@ class ContentStudioRuntimeState:
                 target_id,
                 status=operation_status,
                 operation_id=operation_id,
+                degraded=operation.get("degraded"),
+                verification_evidence=operation.get("verification_evidence"),
             )
 
         except Exception as exc:
@@ -402,6 +407,8 @@ class ContentStudioRuntimeState:
                     operation_id=operation_id,
                     error_code=operation.get("error_code"),
                     error_message=operation.get("error_message"),
+                    degraded=operation.get("degraded"),
+                    verification_evidence=operation.get("verification_evidence"),
                 )
                 return
 

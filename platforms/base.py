@@ -623,18 +623,54 @@ class BasePlatform(ABC):
 
             # 7. 保存草稿
             db.add_task_log(task_id, "INFO", "保存草稿...")
-            draft_url = await self.save_draft(title)
+            try:
+                draft_url = await self.save_draft(title)
+                degraded = None
+            except DraftResultUnknownError as exc:
+                # 降级判定：保存动作已触发但完整证据链未走通时，
+                # 若草稿箱已出现标题唯一匹配的草稿，视为降级成功；
+                # 否则全部证据不足 → 投递未完成（不伪装成功）。
+                evidence = getattr(exc, "evidence", None)
+                ev_dict = (
+                    evidence.to_dict()
+                    if evidence is not None
+                    else (self._evidence_to_dict() or {})
+                )
+                if ev_dict.get("draft_list_title_unique") is True:
+                    draft_url = ev_dict.get("draft_url") or ""
+                    degraded = "draft_list_confirmed"
+                    db.add_task_log(
+                        task_id,
+                        "INFO",
+                        "草稿箱已确认标题唯一匹配的草稿（降级成功）",
+                    )
+                else:
+                    db.add_task_log(
+                        task_id,
+                        "WARN",
+                        "投递未完成：草稿保存结果无法在平台确认",
+                    )
+                    return {
+                        "success": False,
+                        "error_code": "DELIVERY_INCOMPLETE",
+                        "error": (
+                            "投递未完成：未能在平台确认草稿保存结果，"
+                            "请使用只读核验确认后手动处理"
+                        ),
+                        "verification_evidence": ev_dict,
+                    }
             await self.simulator.random_delay(1, 2)
 
-            # 草稿未真正保存（save_draft 返回空串）→ 如实报告失败，杜绝假成功
-            if not draft_url:
+            # 草稿未真正保存（save_draft 返回空串且未降级）→ 报告未完成，
+            # 不伪装成功；降级成功时 draft_url 可能为空，保留降级标记。
+            if not draft_url and degraded is None:
                 return {
                     "success": False,
-                    "error_code": "DRAFT_NOT_VERIFIED",
-                    "error": "草稿保存失败：未找到保存按钮或草稿箱未出现该草稿，请检查编辑器页面状态与登录态",
+                    "error_code": "DELIVERY_INCOMPLETE",
+                    "error": "投递未完成：未找到保存按钮或草稿箱未出现该草稿，请使用只读核验确认",
                 }
 
-            if cover_result.get("cover_status") == "pending_verification":
+            if cover_result.get("cover_status") == "pending_verification" and draft_url:
                 try:
                     persisted_cover = await self.verify_persisted_cover(
                         title=title,
@@ -708,6 +744,7 @@ class BasePlatform(ABC):
                 "cover_error": cover_result.get("error"),
                 "cover_error_code": cover_result.get("error_code"),
                 "verification_evidence": self._evidence_to_dict(),
+                "degraded": degraded,
             }
 
         except Exception as e:

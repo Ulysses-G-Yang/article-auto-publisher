@@ -342,6 +342,7 @@ def test_delivery_statuses_are_explicit_and_never_auto_retry_publish() -> None:
     assert "SUCCESS: '全部成功'" in script
     assert "FATAL: '全部失败'" in script
     assert "RESULT_UNKNOWN: '结果未知，需人工核对'" in script
+    assert "DELIVERY_INCOMPLETE: '投递未完成'" in script
     assert "XHS_CLOUD_DRAFT_UNAVAILABLE" in script
     assert "网页端无云端草稿" in script
     assert "DRAFT_SAVED_WITH_WARNINGS: '草稿已保存（有警告）'" in script
@@ -353,6 +354,7 @@ def test_delivery_statuses_are_explicit_and_never_auto_retry_publish() -> None:
     assert "platformDraftBoxUrl" in script
     assert "查看平台草稿箱" in script
     assert "['DRAFT_SAVED', 'DRAFT_SAVED_WITH_WARNINGS'].includes(target.status)" in script
+    assert "草稿已保存（草稿箱确认）" in script
     assert "retry-target" not in script
     assert "不提供公开发布自动重试按钮" in docs
 
@@ -370,7 +372,10 @@ def test_draft_evidence_and_readonly_verify_contracts() -> None:
     assert "核验平台草稿" in script
     assert "async function verifyDraft(target)" in script
     assert "verify-draft" in script
-    assert "['FAILED', 'RESULT_UNKNOWN', 'DRAFT_SAVED_WITH_WARNINGS']" in script
+    assert (
+        "['FAILED', 'RESULT_UNKNOWN', 'DELIVERY_INCOMPLETE', "
+        "'DRAFT_SAVED_WITH_WARNINGS']" in script
+    )
     assert "PROBE_UNSUPPORTED_PLATFORM" in script
     assert "PROBE_NOT_FOUND" in script
     assert "PROBE_TITLE_AMBIGUOUS" in script

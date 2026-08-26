@@ -4,7 +4,7 @@
 
 > 本版本由 `feature/shared-sdk-heartbeat-delay` 分支更新：新增
 > `delivery_tools` 外挂工具模块（共享 Playwright SDK、Cookie 心跳、
-> 随机真人延时），详见 §13。
+> 随机真人延时），详见 §11。
 
 ## 1. 本文目的
 
@@ -379,6 +379,27 @@ git diff --check                                                 # 通过
 - 测试：`tests/test_delivery_degraded.py`（10 个，publish 降级链 + DeliveryService
   落库）；`tests/test_content_studio.py` 聚合与计划目标回读；
   前端契约断言 `DELIVERY_INCOMPLETE` 标签与"草稿已保存（草稿箱确认）"。
+
+**交付状态（2026-08-25 终版，已推送）**：
+
+- 提交：`4297beea92408edb1329d46dcba359256b3dd41b`
+  `feat(delivery): relax save-success to degraded draft-box confirmation or delivery-incomplete`
+  （14 文件，+673/−13，含新测试文件 `tests/test_delivery_degraded.py`）。
+- 分支 `feature/shared-sdk-heartbeat-delay`；SSH 推送
+  `dc15582..4297bee HEAD -> feature/shared-sdk-heartbeat-delay` 后，
+  `git ls-remote origin` 与本地 `git rev-parse HEAD` 完全一致（40 位 SHA 匹配）。
+- 全量验证：`929 passed, 7 skipped`（exit 0；仅已知 heartbeat 守护线程
+  `PytestUnhandledThreadExceptionWarning`，非失败）；Ruff 仅剩
+  `platforms/base.py` 13 条 HEAD 即有的既有违规（本轮零新增，对照
+  `git show HEAD:` 核实）；`node --check web/static/js/content-studio.js`
+  与 `git diff --check` 通过。
+- 工作树干净，无未跟踪文件；未执行任何真实登录、草稿保存、公开发布或删除
+  副作用；`data/`、Profile、Cookie、Token、`uv.lock` 均未触碰；公开发布开关
+  保持关闭。
+
+后续待办（若需）：把该分支成果集成到 `integrate/weibo-draft-v0.4.3` 时，按
+§9 流程重跑定向 + 全量测试后再合并；`DELIVERY_INCOMPLETE` 的终端提示文案与
+"投递未完成"状态在前端是否追加全局汇总入口，由产品侧决定。
 
 ## 13. 最小验证与 Git 交付
 

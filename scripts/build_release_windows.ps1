@@ -6,7 +6,9 @@
 
 .DESCRIPTION
     构建过程先用 git archive 固定源码快照，再按白名单复制运行代码、Web
-    生产资产、运行依赖、Windows 启停脚本、配置模板和发布说明。不会把
+    生产资产、运行依赖、Windows 启停脚本、配置模板和发布说明。完整安装包
+    保留部署脚本；原地升级包会排除客户已有的部署脚本，避免覆盖本机启动配置。
+    不会把
     .git、data、数据库、Cookie、Profile、日志、测试、QA 截图、node_modules
     或 uv.lock 放进包内。
 #>
@@ -19,7 +21,7 @@ param(
     [string]$OutputDirectory = ".\build\release",
 
     [ValidatePattern('^[0-9]+\.[0-9]+\.[0-9]+(?:-[A-Za-z0-9.-]+)?$')]
-    [string]$Version = "0.4.3"
+    [string]$Version = "0.4.4"
 )
 
 $ErrorActionPreference = "Stop"
@@ -102,6 +104,12 @@ $hashOutput = "$archiveOutput.sha256"
 $upgradeName = "ArticleOps-upgrade-v$Version-$resolvedSha"
 $upgradeOutput = Join-Path $outputRoot "$upgradeName.zip"
 $upgradeHashOutput = "$upgradeOutput.sha256"
+$upgradeExcludedRuntimeScripts = @(
+    "scripts\setup_windows.ps1",
+    "scripts\start_production_windows.ps1",
+    "scripts\stop_production_windows.ps1",
+    "scripts\production_env.example.ps1"
+)
 
 try {
     New-Item -ItemType Directory -Force -Path $tempRoot, $extractRoot, $PackageRoot, $UpgradeRoot | Out-Null
@@ -145,6 +153,8 @@ try {
         "docs\releases\v0.4.1-rc1.md",
         "docs\releases\v0.4.2-hotfix.md",
         "docs\releases\v0.4.3-weibo-mcp.md",
+        "docs\releases\v0.4.4-draft-result-upgrade.md",
+        "docs\deployment\UPGRADE_v0.4.4.md",
         "docs\deployment\PRODUCTION_WINDOWS.md"
     )
     foreach ($relativePath in $releaseDocuments) {
@@ -164,7 +174,8 @@ try {
         "public_publish_default=false",
         "runtime_data=created by setup_windows.ps1; not included",
         "source_tests=excluded",
-        "source_qa=excluded"
+        "source_qa=excluded",
+        "upgrade_payload_excludes=$($upgradeExcludedRuntimeScripts -join ',')"
     )
     Set-Content -LiteralPath (Join-Path $PackageRoot "RELEASE_MANIFEST.txt") -Value $manifest -Encoding UTF8
 
@@ -208,8 +219,17 @@ try {
     $upgradePayloadRoot = Join-Path $UpgradeRoot "payload"
     New-Item -ItemType Directory -Force -Path $upgradePayloadRoot | Out-Null
     Copy-Item -Path (Join-Path $PackageRoot "*") -Destination $upgradePayloadRoot -Recurse -Force
+    foreach ($relativePath in $upgradeExcludedRuntimeScripts) {
+        $excludedPath = Join-Path $upgradePayloadRoot $relativePath
+        if (-not (Test-Path -LiteralPath $excludedPath -PathType Leaf)) {
+            throw "升级包预期排除文件不存在：$relativePath"
+        }
+        Remove-Item -LiteralPath $excludedPath -Force
+    }
     Copy-Item -LiteralPath (Join-Path $SourceRoot "scripts\apply_upgrade_windows.ps1") `
         -Destination (Join-Path $UpgradeRoot "apply_upgrade_windows.ps1") -Force
+    Copy-Item -LiteralPath (Join-Path $SourceRoot "docs\deployment\UPGRADE_v0.4.4.md") `
+        -Destination (Join-Path $UpgradeRoot "UPGRADE_v0.4.4.md") -Force
 
     $upgradeFiles = @(Get-ChildItem -LiteralPath $upgradePayloadRoot -Recurse -File | ForEach-Object {
         [ordered]@{
@@ -222,6 +242,7 @@ try {
         source_commit = $resolvedSha
         built_at_utc = [DateTime]::UtcNow.ToString('o')
         preserves = @("data", "uploads", "images", "Cookie", "Chrome Profile", "production_env.ps1")
+        excluded_payload_files = @($upgradeExcludedRuntimeScripts | ForEach-Object { $_.Replace('\', '/') })
         files = $upgradeFiles
     }
     $upgradeManifest | ConvertTo-Json -Depth 5 | Set-Content `
@@ -237,7 +258,19 @@ try {
     Write-Host "升级包 SHA256：$upgradeHashOutput" -ForegroundColor Green
     Write-Host "source_commit=$resolvedSha" -ForegroundColor Cyan
 } finally {
-    if (Test-Path -LiteralPath $tempRoot) {
-        Remove-Item -LiteralPath $tempRoot -Recurse -Force
+    if (Test-Path -LiteralPath $tempRoot -PathType Container) {
+        $resolvedTempRoot = (Resolve-Path -LiteralPath $tempRoot).Path
+        $fullTempRoot = [IO.Path]::GetFullPath($resolvedTempRoot).TrimEnd('\', '/')
+        $fullTempParent = [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\', '/')
+        $tempLeaf = Split-Path -Leaf $fullTempRoot
+        $isOwnedTempRoot = (
+            ($tempLeaf -match '^articleops-release-[0-9a-f]{32}$') -and
+            $fullTempRoot.StartsWith($fullTempParent + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)
+        )
+        if ($isOwnedTempRoot) {
+            Remove-Item -LiteralPath $fullTempRoot -Recurse -Force
+        } else {
+            Write-Warning "拒绝删除未验证的临时目录：$fullTempRoot"
+        }
     }
 }

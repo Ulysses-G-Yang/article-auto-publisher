@@ -53,6 +53,7 @@ def test_windows_setup_keeps_all_mutating_paths_closed_by_default() -> None:
 def test_release_whitelist_excludes_development_and_machine_state_files() -> None:
     script = read("scripts/build_release_windows.ps1")
 
+    assert '[string]$Version = "0.4.4"' in script
     assert '"requirements-dev.txt"' not in script
     assert '"tests"' not in script
     assert '"human"' in script
@@ -64,6 +65,37 @@ def test_release_whitelist_excludes_development_and_machine_state_files() -> Non
     assert '"scripts\\apply_upgrade_windows.ps1"' in script
     assert '"MCP_API_REFERENCE.md"' in script
     assert '"docs\\releases\\v0.4.3-weibo-mcp.md"' in script
+
+
+def test_upgrade_payload_preserves_customer_deployment_scripts() -> None:
+    script = read("scripts/build_release_windows.ps1")
+
+    assert "$upgradeExcludedRuntimeScripts = @(" in script
+    for relative_path in (
+        r"scripts\setup_windows.ps1",
+        r"scripts\start_production_windows.ps1",
+        r"scripts\stop_production_windows.ps1",
+        r"scripts\production_env.example.ps1",
+    ):
+        assert f'"{relative_path}"' in script
+    assert "Remove-Item -LiteralPath $excludedPath -Force" in script
+    assert "excluded_payload_files" in script
+    assert '"UPGRADE_v0.4.4.md"' in script
+    assert '"docs\\deployment\\UPGRADE_v0.4.4.md"' in script
+
+
+def test_v044_upgrade_guide_requires_validate_only_and_rejects_replacement_setup() -> None:
+    guide = read("docs/deployment/UPGRADE_v0.4.4.md")
+    release = read("docs/releases/v0.4.4-draft-result-upgrade.md")
+
+    assert "已有 ArticleOps v0.4.3 完整安装" in guide
+    assert "不要重新运行 `setup_windows.ps1`" in guide
+    assert "-ValidateOnly" in guide
+    assert "不停止服务、不复制文件、也不修改" in guide
+    assert "data\\upgrade_backups" in guide
+    assert "载荷不覆盖" in release
+    assert "ArticleOps-upgrade-v0.4.4-<source-sha>.zip" in guide
+    assert "powershell.exe -NoProfile -ExecutionPolicy Bypass -File" in release
 
 
 def test_windows_upgrade_preserves_runtime_state_and_rolls_back_code() -> None:

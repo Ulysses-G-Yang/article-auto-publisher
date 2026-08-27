@@ -880,16 +880,37 @@ def test_upload_image_sets_files_once_on_unique_body_input(tmp_path) -> None:
     platform.page = page
     platform._close_image_modal = AsyncMock()
     platform._editor_image_src_fingerprints = AsyncMock(
-        side_effect=[[], ["new-image"]]
+        side_effect=[
+            ["old-a", "old-b"],
+            ["old-a", "old-b", "new-image", "new-image"],
+            ["cdn-a", "cdn-b", "new-image"],
+            ["cdn-a", "cdn-b", "new-image"],
+            ["cdn-a", "cdn-b", "new-image"],
+        ]
     )
     platform._verify_image_content = AsyncMock(return_value={"success": True})
+    platform._verify_editor_image_sequence = AsyncMock(
+        return_value={"success": True}
+    )
 
-    result = asyncio.run(platform._upload_image(str(image_path)))
+    previous_paths = ["D:/fixture/old-a.png", "D:/fixture/old-b.png"]
+    result = asyncio.run(
+        platform._upload_image(
+            str(image_path),
+            previous_image_paths=previous_paths,
+        )
+    )
 
     assert result["success"] is True
     assert file_input.set_calls == [str(image_path.resolve())]
     assert upload_button.click_count == 1
     assert insert_button.click_count == 1
+    assert result["image_src_fingerprint"] == "new-image"
+    platform._verify_image_content.assert_not_awaited()
+    platform._verify_editor_image_sequence.assert_awaited_once_with(
+        [*previous_paths, str(image_path)],
+        ["cdn-a", "cdn-b", "new-image"],
+    )
 
 
 def test_modal_close_failure_is_not_silently_ignored() -> None:
@@ -922,7 +943,92 @@ def test_repeated_same_source_image_is_still_identified_as_one_new_image() -> No
     assert ZOLPlatform._new_image_fingerprint(
         ["same", "same"], ["same", "same", "other"]
     ) == "other"
+    assert (
+        ZOLPlatform._new_image_fingerprint(
+            ["blob-a", "blob-b"], ["cdn-a", "cdn-b", "new"]
+        )
+        is None
+    )
     assert ZOLPlatform._new_image_fingerprint(["same"], ["same"]) is None
+    assert ZOLPlatform._new_image_fingerprint(
+        ["same"], ["same", "new", "duplicate"]
+    ) is None
+
+
+def test_image_content_uses_final_order_slot_when_src_fingerprint_drifts() -> None:
+    payload = _pattern_bytes()
+    first = MagicMock()
+    target = MagicMock()
+    target.evaluate = AsyncMock(return_value=True)
+    target.get_attribute = AsyncMock(return_value="")
+    target.screenshot = AsyncMock(return_value=payload)
+    images = MagicMock()
+    images.count = AsyncMock(return_value=2)
+    images.nth.side_effect = lambda index: [first, target][index]
+    editor = MagicMock()
+    editor.locator.return_value = images
+    platform = ZOLPlatform()
+    platform._resolve_content_editor = AsyncMock(return_value=(editor, "iframe"))
+    platform._editor_image_src_fingerprints = AsyncMock(
+        return_value=["cdn-old", "cdn-target"]
+    )
+
+    observed = asyncio.run(
+        platform._read_stable_editor_image_bytes(
+            ["blob-old", "blob-target"],
+            "blob-target",
+            target_index=1,
+        )
+    )
+
+    assert observed == payload
+    images.nth.assert_called_once_with(1)
+
+
+def test_editor_image_sequence_fails_closed_when_old_slots_reorder() -> None:
+    platform = ZOLPlatform()
+    platform._verify_image_content = AsyncMock(
+        side_effect=[
+            {
+                "success": False,
+                "error_code": "ZOL_IMAGE_CONTENT_VERIFY_FAILED",
+                "error": "wrong slot",
+            }
+        ]
+    )
+
+    result = asyncio.run(
+        platform._verify_editor_image_sequence(
+            ["D:/fixture/first.png", "D:/fixture/second.png"],
+            ["second-slot", "first-slot"],
+        )
+    )
+
+    assert result["success"] is False
+    assert result["error_code"] == "ZOL_IMAGE_ORDER_UNVERIFIED"
+    platform._verify_image_content.assert_awaited_once_with(
+        "D:/fixture/first.png",
+        ["second-slot", "first-slot"],
+        "second-slot",
+        target_index=0,
+    )
+
+
+def test_editor_image_sequence_accepts_src_drift_after_all_slots_match() -> None:
+    platform = ZOLPlatform()
+    platform._verify_image_content = AsyncMock(
+        side_effect=[{"success": True}, {"success": True}]
+    )
+
+    result = asyncio.run(
+        platform._verify_editor_image_sequence(
+            ["D:/fixture/first.png", "D:/fixture/second.png"],
+            ["cdn-first", "cdn-second"],
+        )
+    )
+
+    assert result == {"success": True}
+    assert platform._verify_image_content.await_count == 2
 
 
 def test_first_image_prefix_mismatch_stops_before_second_upload() -> None:

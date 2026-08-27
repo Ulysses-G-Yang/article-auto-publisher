@@ -6,7 +6,6 @@ import html
 import os
 import re
 import time
-from collections import Counter
 from dataclasses import dataclass
 from io import BytesIO
 from pathlib import Path
@@ -1854,6 +1853,7 @@ class ZOLPlatform(BasePlatform):
         )
         expected_tokens = self._expected_content_tokens(content_blocks)
         observed_image_fingerprints: list[str] = []
+        observed_image_paths: list[str] = []
         expected_headings = [
             token for token in expected_tokens if token.get("kind") == "heading"
         ]
@@ -1973,7 +1973,13 @@ class ZOLPlatform(BasePlatform):
                     image_file = self._image_path_for_block(block, images)
                     if image_file:
                         response_count_before = len(self._autosave_responses)
-                        upload_result = await self._upload_image(image_file) or {}
+                        if observed_image_paths:
+                            upload_result = await self._upload_image(
+                                image_file,
+                                previous_image_paths=list(observed_image_paths),
+                            ) or {}
+                        else:
+                            upload_result = await self._upload_image(image_file) or {}
                         if upload_result.get("success"):
                             await self._wait_for_bound_autosave(response_count_before)
                             fingerprint = upload_result.get("image_src_fingerprint")
@@ -1984,6 +1990,7 @@ class ZOLPlatform(BasePlatform):
                                 )
                             uploaded_images += 1
                             observed_image_fingerprints.append(fingerprint)
+                            observed_image_paths.append(image_file)
                             editor, editor_kind = await self._resolve_content_editor()
                             await self._commit_editor_dom_change(editor, editor_kind)
                             await asyncio.sleep(0.3)
@@ -2128,14 +2135,13 @@ class ZOLPlatform(BasePlatform):
         before_fingerprints: list[str],
         after_fingerprints: list[str],
     ) -> str | None:
-        """返回恰好新增一张图片的指纹，允许同源图片重复出现。"""
+        """仅在旧图片有序指纹前缀未变化时返回新增尾槽指纹。"""
 
         if len(after_fingerprints) != len(before_fingerprints) + 1:
             return None
-        new_counts = Counter(after_fingerprints) - Counter(before_fingerprints)
-        if sum(new_counts.values()) != 1:
+        if after_fingerprints[: len(before_fingerprints)] != before_fingerprints:
             return None
-        return next(iter(new_counts))
+        return after_fingerprints[-1]
 
     @staticmethod
     def _dhash_bytes(payload: bytes) -> int | None:
@@ -2202,6 +2208,8 @@ class ZOLPlatform(BasePlatform):
         image_path: str,
         after_fingerprints: list[str],
         new_fingerprint: str,
+        *,
+        target_index: int | None = None,
     ) -> dict:
         """比较本地文件与当前新增正文图片的渲染内容，不记录路径或 URL。"""
 
@@ -2216,6 +2224,7 @@ class ZOLPlatform(BasePlatform):
             observed = await self._read_stable_editor_image_bytes(
                 after_fingerprints,
                 new_fingerprint,
+                target_index=target_index,
             )
             if not observed:
                 return {
@@ -2252,6 +2261,8 @@ class ZOLPlatform(BasePlatform):
         self,
         expected_fingerprints: list[str],
         target_fingerprint: str,
+        *,
+        target_index: int | None = None,
     ) -> bytes:
         """在 TinyMCE 重渲染后重新定位图片并读取可比较内容。
 
@@ -2270,19 +2281,25 @@ class ZOLPlatform(BasePlatform):
             if len(current_fingerprints) != len(expected_fingerprints):
                 await asyncio.sleep(0.5)
                 continue
-            matching_indexes = [
-                index
-                for index, fingerprint in enumerate(current_fingerprints)
-                if fingerprint == target_fingerprint
-            ]
-            if not matching_indexes:
-                await asyncio.sleep(0.5)
-                continue
+            if target_index is not None:
+                if target_index < 0 or target_index >= len(current_fingerprints):
+                    return b""
+                image_index = target_index
+            else:
+                matching_indexes = [
+                    index
+                    for index, fingerprint in enumerate(current_fingerprints)
+                    if fingerprint == target_fingerprint
+                ]
+                if not matching_indexes:
+                    await asyncio.sleep(0.5)
+                    continue
+                image_index = matching_indexes[-1]
             image_nodes = editor.locator("img")
             if await image_nodes.count() != len(current_fingerprints):
                 await asyncio.sleep(0.5)
                 continue
-            image = image_nodes.nth(matching_indexes[-1])
+            image = image_nodes.nth(image_index)
             try:
                 ready = bool(
                     await image.evaluate(
@@ -2323,7 +2340,42 @@ class ZOLPlatform(BasePlatform):
             await asyncio.sleep(0.5)
         return b""
 
-    async def _upload_image(self, image_path: str):
+    async def _verify_editor_image_sequence(
+        self,
+        image_paths: list[str],
+        fingerprints: list[str],
+    ) -> dict:
+        """按 DOM 槽位逐张核对本地图片，证明重渲染后图序未改变。"""
+
+        if len(image_paths) != len(fingerprints):
+            return {
+                "success": False,
+                "error_code": "ZOL_IMAGE_ORDER_UNVERIFIED",
+                "error": "正文图片数量与预期图序不一致",
+            }
+        for index, (expected_path, fingerprint) in enumerate(
+            zip(image_paths, fingerprints, strict=True)
+        ):
+            result = await self._verify_image_content(
+                expected_path,
+                fingerprints,
+                fingerprint,
+                target_index=index,
+            )
+            if not result.get("success"):
+                return {
+                    **result,
+                    "error_code": "ZOL_IMAGE_ORDER_UNVERIFIED",
+                    "error": "正文图片重渲染后无法确认原有图序",
+                }
+        return {"success": True}
+
+    async def _upload_image(
+        self,
+        image_path: str,
+        *,
+        previous_image_paths: list[str] | None = None,
+    ):
         """通过真实 ZOL 图片弹窗上传一张图片并验证正文 DOM 指纹。"""
         image_name = Path(str(image_path)).name
         if not image_path or not os.path.isfile(str(image_path)):
@@ -2382,8 +2434,25 @@ class ZOLPlatform(BasePlatform):
             await insert_button.click(timeout=5000)
 
             deadline = asyncio.get_running_loop().time() + 15
+            stable_fingerprints: list[str] | None = None
+            stable_reads = 0
             while asyncio.get_running_loop().time() < deadline:
                 after_fingerprints = await self._editor_image_src_fingerprints()
+                if len(after_fingerprints) != before_count + 1:
+                    # ZOL 重渲染期间可能短暂同时保留旧节点和克隆节点。未知额外
+                    # 节点不能删除或忽略；等 DOM 自行收口，超时后仍 fail closed。
+                    stable_fingerprints = None
+                    stable_reads = 0
+                    await asyncio.sleep(0.5)
+                    continue
+                if after_fingerprints == stable_fingerprints:
+                    stable_reads += 1
+                else:
+                    stable_fingerprints = list(after_fingerprints)
+                    stable_reads = 1
+                if stable_reads < 2:
+                    await asyncio.sleep(0.5)
+                    continue
                 new_fingerprint = self._new_image_fingerprint(
                     before_fingerprints,
                     after_fingerprints,
@@ -2393,9 +2462,37 @@ class ZOLPlatform(BasePlatform):
                         image_path,
                         after_fingerprints,
                         new_fingerprint,
+                        target_index=before_count,
                     )
                     if not content_result.get("success"):
                         return content_result
+                else:
+                    prior_paths = list(previous_image_paths or [])
+                    if len(prior_paths) != before_count:
+                        return {
+                            "success": False,
+                            "error_code": "ZOL_IMAGE_ORDER_UNVERIFIED",
+                            "error": "旧图片地址已变化且缺少可核验的历史图序",
+                        }
+                    sequence_result = await self._verify_editor_image_sequence(
+                        [*prior_paths, image_path],
+                        after_fingerprints,
+                    )
+                    if not sequence_result.get("success"):
+                        return sequence_result
+                    new_fingerprint = after_fingerprints[-1]
+
+                if new_fingerprint is not None:
+                    final_fingerprints = await self._editor_image_src_fingerprints()
+                    if final_fingerprints != after_fingerprints:
+                        # 内容读取期间若 CDN 地址或 iframe 再次切换，重新等待稳定
+                        # 快照并复核最终顺序槽位，不能返回过期指纹。
+                        stable_fingerprints = list(final_fingerprints)
+                        stable_reads = (
+                            1 if len(final_fingerprints) == before_count + 1 else 0
+                        )
+                        await asyncio.sleep(0.5)
+                        continue
                     await self._close_image_modal(modal)
                     logger.info(
                         "ZOL 图片上传并验证成功: filename={}, before={}, after={}",
@@ -2407,14 +2504,14 @@ class ZOLPlatform(BasePlatform):
                         "success": True,
                         "filename": image_name,
                         "before_count": before_count,
-                        "after_count": len(after_fingerprints),
-                        "image_src_fingerprint": new_fingerprint,
+                        "after_count": len(final_fingerprints),
+                        "image_src_fingerprint": final_fingerprints[before_count],
                     }
                 await asyncio.sleep(0.5)
             return {
                 "success": False,
                 "error_code": "ZOL_IMAGE_UPLOAD_VERIFY_FAILED",
-                "error": "图片插入后正文 DOM 未出现恰好一张新图片",
+                "error": "图片插入后正文 DOM 未形成稳定且可核验的唯一新增图片槽位",
             }
         except BrowserLifecycleError:
             raise

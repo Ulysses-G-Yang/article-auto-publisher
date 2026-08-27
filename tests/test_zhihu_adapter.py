@@ -435,6 +435,7 @@ class _FakeEditorPage:
         drafts_api_titles=None,
     ):
         self.url = ""
+        self.goto_urls: list[str] = []
         self.keyboard = _FakeEditorKeyboard(self)
         self.title = _FakeLocator(self, text=title_text)
         self.body = _FakeLocator(self, text=body_text)
@@ -452,6 +453,7 @@ class _FakeEditorPage:
         return False
 
     async def goto(self, url: str, **_kwargs) -> None:
+        self.goto_urls.append(url)
         self.url = url
 
     async def reload(self, **_kwargs) -> None:
@@ -536,6 +538,16 @@ def test_navigate_to_editor_opens_write_page_and_waits_for_title() -> None:
     run(platform.navigate_to_editor())
 
     assert "write" in page.url
+
+
+def test_navigate_to_editor_avoids_legacy_404_route_as_first_choice() -> None:
+    page = _FakeEditorPage()
+    platform = _make_delivery_platform(page)
+    platform.platform_cfg["editor_url"] = "https://www.zhihu.com/write"
+
+    run(platform.navigate_to_editor())
+
+    assert page.goto_urls == ["https://zhuanlan.zhihu.com/write"]
 
 
 def test_fill_title_writes_into_title_field() -> None:

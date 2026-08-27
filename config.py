@@ -55,7 +55,7 @@ DEFAULT_CONFIG = {
             "home_url": "https://www.zhihu.com/",
             "login_url": "https://www.zhihu.com/signin",
             "identity_api_path": "/api/v4/me",
-            "editor_url": "https://www.zhihu.com/write",
+            "editor_url": "https://zhuanlan.zhihu.com/write",
             "title_max_length": 40,
         },
         "weibo": {

@@ -45,6 +45,7 @@ from platforms.content_validation import (
 TITLE_SELECTOR = "textarea.Input[placeholder^='请输入标题']"
 BODY_SELECTOR = "div.notranslate.public-DraftEditor-content"
 EDITOR_URL = "https://zhuanlan.zhihu.com/write"
+LEGACY_EDITOR_URL = "https://www.zhihu.com/write"
 DRAFTS_URL = "https://www.zhihu.com/creator/manage/creation/drafts"
 BODY_IMAGE_INPUT = "input[type=file]:not(.UploadPicture-input)[accept*='image']"
 
@@ -197,7 +198,15 @@ class ZhihuPlatform(BasePlatform):
         """
         self._require_page_alive("知乎打开编辑器")
         configured = self.platform_cfg.get("editor_url") or EDITOR_URL
-        urls = [configured] if configured == EDITOR_URL else [configured, EDITOR_URL]
+        if configured == LEGACY_EDITOR_URL:
+            # ``www.zhihu.com/write`` 偶尔先渲染 404 再跨域重定向。直接打开
+            # 专栏编辑器，避免把平台中间页暴露给用户；旧地址只保留兜底。
+            urls = [EDITOR_URL, LEGACY_EDITOR_URL]
+        elif configured == EDITOR_URL:
+            urls = [EDITOR_URL]
+        else:
+            # 显式自定义地址仍优先，官方专栏编辑器作为安全回退。
+            urls = [configured, EDITOR_URL]
         last_error: Exception | None = None
         for url in urls:
             try:

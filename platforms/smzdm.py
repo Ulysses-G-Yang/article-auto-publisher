@@ -52,9 +52,13 @@ IDENTITY_UID_KEYS = {"smzdm_id", "uid", "user_id", "id"}
 TITLE_SELECTOR = "textarea.article-title"
 BODY_SELECTOR = "div.ProseMirror"
 DRAFTS_URL = "https://post.smzdm.com/tougao/"
+SAVE_DRAFT_ENDPOINT = "https://post.smzdm.com/api/draft/save"
 BODY_IMAGE_TRIGGER = ".right-menu-bar:has(svg.zicon-picture)"
 BODY_IMAGE_INPUT = 'input[type="file"][accept*="image"]'
 CHROME_PROFILE_LOCK_NAMES = ("SingletonLock", "SingletonCookie", "SingletonSocket")
+SAVE_RESPONSE_TOP_LEVEL_ID_KEYS = ("draft_id", "draftId", "article_id", "articleId")
+SAVE_RESPONSE_DATA_ID_KEYS = (*SAVE_RESPONSE_TOP_LEVEL_ID_KEYS, "id")
+SAVE_RESPONSE_CODE_KEYS = ("code", "error_code", "errorCode", "errno", "errcode")
 
 NativeChromeRunner = Callable[[Path, str, float], Awaitable[None]]
 
@@ -194,6 +198,7 @@ class SmzdmPlatform(BasePlatform):
         self._pending_cover_path = ""
         self._preflight_title = ""
         self._preflight_draft_ids: frozenset[str] | None = None
+        self._preflight_editor_draft_id: str | None = None
 
     async def initialize(self):
         await super().initialize()
@@ -541,6 +546,9 @@ class SmzdmPlatform(BasePlatform):
         （0/30），正文 ``div.ProseMirror``（TipTap），「草稿将自动保存」。
         """
         self._require_page_alive("smzdm 打开编辑器")
+        # preflight 发生在打开本次编辑器之前；旧页面上的 /edit/{id} 绝不能被
+        # 当作本次草稿壳。只有点击“发布新文章”并看到标题框后才允许绑定。
+        self._preflight_editor_draft_id = None
         try:
             await self.page.goto(
                 "https://post.smzdm.com/tougao/",
@@ -577,6 +585,11 @@ class SmzdmPlatform(BasePlatform):
                 state="visible",
                 timeout=20000,
             )
+            if self._preflight_draft_ids is not None:
+                current_entity = self._current_draft_entity()
+                self._preflight_editor_draft_id = (
+                    current_entity[0] if current_entity is not None else None
+                )
         except BrowserLifecycleError:
             raise
         except Exception as exc:
@@ -1459,7 +1472,8 @@ class SmzdmPlatform(BasePlatform):
         """在写入编辑器前冻结草稿箱实体基线。
 
         什么值得买允许同名草稿，因此不能再用标题唯一性证明本次副作用。
-        这里记录所有可验证的 ``/edit/{draft_id}``，保存后只认唯一新增 ID。
+        这里只冻结草稿箱实体；本次“发布新文章”生成的 ``/edit/{draft_id}``
+        必须等 ``navigate_to_editor()`` 完成后、写入标题前再绑定。
         """
 
         expected_title = " ".join(str(title or "").split())
@@ -1467,12 +1481,13 @@ class SmzdmPlatform(BasePlatform):
             raise DraftResultUnknownError(
                 "DRAFT_BASELINE_UNAVAILABLE: smzdm 缺少可核验标题"
             )
+        self._preflight_editor_draft_id = None
         entities = await self._load_draft_entities_once()
         self._preflight_title = expected_title
         self._preflight_draft_ids = frozenset(entities)
 
     async def save_draft(self, title: str = "") -> str:
-        """强制刷新自动保存，按实体 ID 差集定位并重开核验完整图文。"""
+        """强制刷新自动保存，绑定精确实体并重开核验完整图文。"""
 
         self._require_page_alive("smzdm 保存草稿")
         evidence = DraftVerificationEvidence()
@@ -1494,22 +1509,25 @@ class SmzdmPlatform(BasePlatform):
             raise DraftResultUnknownError(
                 "DRAFT_BASELINE_UNAVAILABLE: smzdm 缺少与本次一致的草稿 ID 基线"
             )
-        captured: dict = {}
+        captured_records: set[tuple[int | None, str | None, frozenset[str]]] = set()
 
         async def _on_response(response) -> None:
             try:
-                if response.request.method in ("POST", "PUT", "PATCH") and (
-                    "save" in response.url.lower()
-                    or "draft" in response.url.lower()
-                    or "edit" in response.url.lower()
+                if (
+                    response.request.method in ("POST", "PUT", "PATCH")
+                    and str(response.url or "") == SAVE_DRAFT_ENDPOINT
                 ):
-                    captured["status"] = response.status
+                    status = response.status if isinstance(response.status, int) else None
+                    platform_code = None
+                    draft_ids: frozenset[str] = frozenset()
                     try:
                         body = await response.json()
                         if isinstance(body, dict):
-                            captured["error_code"] = body.get("error_code")
+                            platform_code = self._save_response_code(body)
+                            draft_ids = self._save_response_draft_ids(body)
                     except Exception:
                         pass
+                    captured_records.add((status, platform_code, draft_ids))
             except Exception:  # noqa: BLE001
                 pass
 
@@ -1523,7 +1541,7 @@ class SmzdmPlatform(BasePlatform):
             await editor.evaluate("el => el.blur()")
             await self.simulator.random_delay(1, 2)
             for _ in range(20):
-                if captured.get("status"):
+                if captured_records:
                     break
                 await asyncio.sleep(1)
             await self.simulator.random_delay(1, 2)
@@ -1543,19 +1561,94 @@ class SmzdmPlatform(BasePlatform):
             except Exception:  # noqa: BLE001
                 pass
 
-        status = captured.get("status")
-        evidence.mark_save_response(status=status, code=captured.get("error_code"))
+        if not captured_records:
+            evidence.mark_save_response(status=None)
+            raise DraftResultUnknownError(
+                "DRAFT_RESULT_UNKNOWN: smzdm 本次未捕获到成功自动保存响应",
+                evidence=evidence.finalize(error_code="DRAFT_RESULT_UNKNOWN"),
+            )
+        if len(captured_records) != 1:
+            evidence.mark_save_response(status=None, code="ambiguous")
+            evidence.mark_entity_binding(
+                bound=False,
+                source="save_response_id",
+                id_match=False,
+            )
+            raise DraftResultUnknownError(
+                "DRAFT_RESULT_UNKNOWN: smzdm 同一触发窗口捕获到冲突的保存响应",
+                evidence=evidence.finalize(error_code="DRAFT_RESULT_UNKNOWN"),
+            )
+        status, platform_code, response_ids = next(iter(captured_records))
+        evidence.mark_save_response(status=status, code=platform_code)
         if not isinstance(status, int) or not 200 <= status < 300:
             raise DraftResultUnknownError(
                 "DRAFT_RESULT_UNKNOWN: smzdm 本次未捕获到成功自动保存响应",
                 evidence=evidence.finalize(error_code="DRAFT_RESULT_UNKNOWN"),
             )
+        if platform_code not in (None, "0"):
+            raise DraftResultUnknownError(
+                "DRAFT_RESULT_UNKNOWN: smzdm 自动保存平台码未确认成功",
+                evidence=evidence.finalize(error_code="DRAFT_RESULT_UNKNOWN"),
+            )
         try:
-            edit_url = await self._find_unique_new_draft()
-            evidence.mark_draft_list(match_count=1)
+            if len(response_ids) > 1:
+                evidence.mark_entity_binding(
+                    bound=False,
+                    source="save_response_id",
+                    id_match=False,
+                )
+                raise DraftResultUnknownError(
+                    "DRAFT_RESULT_UNKNOWN: smzdm 保存响应包含冲突的草稿 ID",
+                    evidence=evidence.finalize(error_code="DRAFT_RESULT_UNKNOWN"),
+                )
+            response_id = next(iter(response_ids)) if len(response_ids) == 1 else None
+            current_entity = self._current_draft_entity()
+            current_id = current_entity[0] if current_entity is not None else None
+            baseline_ids = self._preflight_draft_ids or frozenset()
+            preflight_shell_id = self._preflight_editor_draft_id
+            if (
+                response_id is not None
+                and current_id is not None
+                and response_id != current_id
+            ):
+                evidence.mark_entity_binding(
+                    bound=False,
+                    source="save_response_id",
+                    id_match=False,
+                )
+                raise DraftResultUnknownError(
+                    "DRAFT_RESULT_UNKNOWN: smzdm 保存响应与当前编辑页草稿 ID 不一致",
+                    evidence=evidence.finalize(error_code="DRAFT_RESULT_UNKNOWN"),
+                )
+
+            candidate_id = response_id or current_id
+            binding_source = (
+                "save_response_id" if response_id is not None else "existing_draft_id"
+            )
+            if candidate_id is None:
+                edit_url = await self._find_unique_new_draft()
+                evidence.mark_draft_list(match_count=1)
+                binding_source = "baseline_new_id"
+            else:
+                if candidate_id in baseline_ids and candidate_id != preflight_shell_id:
+                    evidence.mark_entity_binding(
+                        bound=False,
+                        source=binding_source,
+                        id_match=False,
+                    )
+                    candidate_source = (
+                        "保存响应"
+                        if binding_source == "save_response_id"
+                        else "当前编辑页"
+                    )
+                    raise DraftResultUnknownError(
+                        f"DRAFT_RESULT_UNKNOWN: smzdm {candidate_source}指向无关的保存前草稿",
+                        evidence=evidence.finalize(error_code="DRAFT_RESULT_UNKNOWN"),
+                    )
+                _, edit_url = self._validated_draft_entity(f"/edit/{candidate_id}")
             evidence.mark_entity_binding(
                 bound=True,
-                source="baseline_new_id",
+                source=binding_source,
                 id_match=True,
             )
             evidence.set_draft_url(edit_url)
@@ -1593,6 +1686,63 @@ class SmzdmPlatform(BasePlatform):
                 "DRAFT_RESULT_UNKNOWN: smzdm 持久化草稿核验失败",
                 evidence=evidence.finalize(error_code="DRAFT_RESULT_UNKNOWN"),
             ) from exc
+
+    @staticmethod
+    def _safe_draft_id(value: object) -> str | None:
+        if isinstance(value, bool) or not isinstance(value, (str, int)):
+            return None
+        draft_id = str(value).strip()
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", draft_id):
+            return None
+        return draft_id
+
+    @classmethod
+    def _save_response_draft_ids(cls, payload: dict) -> frozenset[str]:
+        """从精确保存端点响应的白名单标量字段提取 ID 集合。
+
+        调用方已锁定 ``SAVE_DRAFT_ENDPOINT``，所以只在这里允许 ``data.id``。
+        """
+
+        candidates = {
+            draft_id
+            for key in SAVE_RESPONSE_TOP_LEVEL_ID_KEYS
+            if (draft_id := cls._safe_draft_id(payload.get(key))) is not None
+        }
+        data = payload.get("data")
+        if isinstance(data, dict):
+            candidates.update(
+                draft_id
+                for key in SAVE_RESPONSE_DATA_ID_KEYS
+                if (draft_id := cls._safe_draft_id(data.get(key))) is not None
+            )
+        return frozenset(candidates)
+
+    @staticmethod
+    def _save_response_code(payload: dict) -> str | None:
+        """将平台码压缩成非隐私标签；不保留响应正文或任意字符串。"""
+
+        codes: set[str] = set()
+        for key in SAVE_RESPONSE_CODE_KEYS:
+            if key not in payload or payload[key] in (None, ""):
+                continue
+            value = payload[key]
+            if isinstance(value, bool) or not isinstance(value, (str, int)):
+                codes.add("invalid")
+            elif str(value).strip() == "0":
+                codes.add("0")
+            else:
+                codes.add("nonzero")
+        if not codes:
+            return None
+        return next(iter(codes)) if len(codes) == 1 else "ambiguous"
+
+    def _current_draft_entity(self) -> tuple[str, str] | None:
+        """仅接受当前页精确、无参数的同源 ``/edit/{id}`` 地址。"""
+
+        try:
+            return self._validated_draft_entity(getattr(self.page, "url", ""))
+        except DraftResultUnknownError:
+            return None
 
     @staticmethod
     def _validated_draft_entity(raw_url: str) -> tuple[str, str]:

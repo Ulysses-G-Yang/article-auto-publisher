@@ -1,226 +1,135 @@
 {% extends "base.html" %}
-{% block title %}仪表盘 - 自动化文章发布工具{% endblock %}
+{% block title %}发布概览 - ArticleOps{% endblock %}
 {% block header_title %}发布概览{% endblock %}
 {% block content %}
-<div x-data="dashboard" x-init="fetchData()" class="container">
-    <div class="page-heading">
-        <div><h1>发布概览</h1><p>查看跨平台发布任务状态与处理进度。</p></div>
-        <div class="d-flex gap-2">
-            <span class="badge bg-secondary fs-6" x-text="'队列: ' + status.queue_size"></span>
-            <span class="badge bg-success fs-6" x-text="'运行中' " x-show="status.running"></span>
-        </div>
-    </div>
+<div x-data="dashboard" class="app-page dashboard-page">
+    <nav aria-label="面包屑导航">
+        <ol class="breadcrumb">
+            <li class="breadcrumb-item active" aria-current="page">发布概览</li>
+        </ol>
+    </nav>
 
-    <!-- 状态卡片 -->
-    <div class="row g-3 mb-4">
-        <div class="col-md-3">
-            <div class="card border-primary">
-                <div class="card-body text-center">
-                    <h1 class="text-primary" x-text="tasks.length"></h1>
-                    <small class="text-muted">总任务数</small>
-                </div>
-            </div>
+    <header class="page-heading dashboard-heading">
+        <div>
+            <span class="page-kicker">WORKSPACE OVERVIEW</span>
+            <h1>发布概览</h1>
+            <p>在一个列表里掌握内容、投递和任务处理状态。</p>
         </div>
-        <div class="col-md-3">
-            <div class="card border-warning">
-                <div class="card-body text-center">
-                    <h1 class="text-warning" x-text="tasks.filter(t => t.status === 'queued' || t.status === 'processing' || t.status === 'retrying').length"></h1>
-                    <small class="text-muted">进行中</small>
-                </div>
-            </div>
+        <div class="page-heading-actions">
+            <span class="live-status" :class="status.running ? 'is-running' : ''" role="status" aria-live="polite">
+                <span class="status-dot" aria-hidden="true"></span>
+                <span x-text="status.running ? '队列正在处理' : '队列空闲'"></span>
+            </span>
+            <span class="queue-count"><span class="queue-count-label">待处理</span><strong x-text="status.queue_size ?? 0"></strong></span>
+            <a class="btn btn-primary" href="/upload"><i class="cil-plus" aria-hidden="true"></i> 新建内容</a>
         </div>
-        <div class="col-md-3">
-            <div class="card border-success">
-                <div class="card-body text-center">
-                    <h1 class="text-success" x-text="tasks.filter(t => t.status === 'completed' || t.status === 'completed_with_warnings').length"></h1>
-                    <small class="text-muted">草稿已保存</small>
-                </div>
-            </div>
-        </div>
-        <div class="col-md-3">
-            <div class="card border-danger">
-                <div class="card-body text-center">
-                    <h1 class="text-danger" x-text="tasks.filter(t => t.status === 'failed').length"></h1>
-                    <small class="text-muted">失败</small>
-                </div>
-            </div>
-        </div>
-    </div>
+    </header>
 
-    <!-- 最近投递（新架构 delivery_operations）置顶显示 -->
-    <div class="card mb-4">
-        <div class="card-header d-flex justify-content-between align-items-center">
-            <h5 class="mb-0"><i class="cil-paper-plane me-1"></i>最近投递</h5>
-            <button class="btn btn-sm btn-outline-secondary" @click="loadDeliveries">
-                <i class="cil-reload me-1"></i>刷新
+    <section class="overview-strip" aria-label="任务概览">
+        <article class="overview-stat overview-stat-primary">
+            <span class="overview-stat-icon" aria-hidden="true"><i class="cil-notes"></i></span>
+            <div><span>全部任务</span><strong x-text="tasks.length">—</strong><small>当前工作区</small></div>
+        </article>
+        <article class="overview-stat overview-stat-warning">
+            <span class="overview-stat-icon" aria-hidden="true"><i class="cil-clock"></i></span>
+            <div><span>处理中</span><strong x-text="tasks.filter(t => ['queued', 'processing', 'retrying'].includes(t.status)).length">—</strong><small>排队与执行中</small></div>
+        </article>
+        <article class="overview-stat overview-stat-success">
+            <span class="overview-stat-icon" aria-hidden="true"><i class="cil-check-circle"></i></span>
+            <div><span>草稿已保存</span><strong x-text="tasks.filter(t => ['completed', 'completed_with_warnings'].includes(t.status)).length">—</strong><small>可继续查看</small></div>
+        </article>
+        <article class="overview-stat overview-stat-danger">
+            <span class="overview-stat-icon" aria-hidden="true"><i class="cil-warning"></i></span>
+            <div><span>需要关注</span><strong x-text="tasks.filter(t => ['failed', 'needs_selection'].includes(t.status)).length">—</strong><small>失败或待补充</small></div>
+        </article>
+    </section>
+
+    <section class="content-section" aria-labelledby="delivery-title">
+        <div class="section-heading">
+            <div>
+                <span class="section-kicker">DELIVERY ACTIVITY</span>
+                <h2 id="delivery-title">最近投递</h2>
+                <p>每个账号的结果独立展示，结果未知不会被伪装成成功。</p>
+            </div>
+            <button class="btn btn-ghost-secondary" type="button" @click="loadDeliveries" :disabled="loadingDeliveries">
+                <i class="cil-reload" :class="loadingDeliveries ? 'is-spinning' : ''" aria-hidden="true"></i><span>刷新</span>
             </button>
         </div>
-        <div class="table-responsive">
-            <table class="table table-hover mb-0">
-                <thead>
-                    <tr>
-                        <th>平台</th>
-                        <th>账号</th>
-                        <th>模式</th>
-                        <th>状态</th>
-                        <th>时间</th>
-                        <th>操作</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    <template x-if="deliveries.length === 0">
-                        <tr>
-                            <td colspan="6" class="empty-state">
-                                <i class="cil-paper-plane fs-3 d-block mb-2"></i>
-                                暂无投递记录，去 <a href="/upload">创作与投递</a>
-                            </td>
-                        </tr>
-                    </template>
-                    <template x-for="op in deliveries" :key="op.operation_id">
-                        <tr>
-                            <td><span class="badge bg-info" x-text="platformLabel(op.platform)"></span></td>
-                            <td x-text="op.account_display_name || '-'"></td>
-                            <td><span class="badge text-bg-secondary" x-text="op.mode === 'PUBLISH' ? '公开发布' : '平台草稿'"></span></td>
-                            <td>
-                                <span class="badge" :class="deliveryClass(op.status, op)" x-text="deliveryLabel(op.status, op)"></span>
-                                <small class="d-block text-danger" x-show="op.error_code" x-text="op.error_code"></small>
-                                <small class="d-block text-warning" x-show="deliveryDetail(op)" x-text="deliveryDetail(op)"></small>
-                            </td>
-                            <td><small class="text-muted" x-text="formatTime(op.created_at)"></small></td>
-                            <td>
-                                <a x-show="deliveryDraftHref(op)" :href="deliveryDraftHref(op)" target="_blank" rel="noopener noreferrer" class="btn btn-sm btn-outline-primary">
-                                    <i class="cil-external-link"></i> 草稿箱
-                                </a>
-                            </td>
-                        </tr>
-                    </template>
-                </tbody>
-            </table>
+        <div class="card data-card">
+            <div class="table-responsive">
+                <table class="table table-hover align-middle data-table mb-0">
+                    <caption class="visually-hidden">最近投递记录</caption>
+                    <thead>
+                        <tr><th scope="col">平台</th><th scope="col">账号</th><th scope="col">模式</th><th scope="col">状态</th><th scope="col">时间</th><th scope="col" class="text-end">操作</th></tr>
+                    </thead>
+                    <tbody>
+                        <template x-if="deliveries.length === 0">
+                            <tr><td colspan="6"><div class="empty-state compact-empty"><i class="cil-paper-plane" aria-hidden="true"></i><strong>暂无投递记录</strong><span>从<a href="/upload">创作与投递</a>开始建立第一条记录。</span></div></td></tr>
+                        </template>
+                        <template x-for="op in deliveries" :key="op.operation_id">
+                            <tr>
+                                <td><span class="platform-pill" x-text="platformLabel(op.platform)"></span></td>
+                                <td class="data-table-primary" x-text="op.account_display_name || '账号信息不可用'"></td>
+                                <td><span class="mode-pill" x-text="op.mode === 'PUBLISH' ? '公开发布' : '平台草稿'"></span></td>
+                                <td>
+                                    <span class="status-label" :class="deliveryClass(op.status, op)" x-text="deliveryLabel(op.status, op)"></span>
+                                    <small class="table-detail table-detail-danger" x-show="op.error_code" x-text="op.error_code"></small>
+                                    <small class="table-detail table-detail-warning" x-show="deliveryDetail(op)" x-text="deliveryDetail(op)"></small>
+                                </td>
+                                <td><time class="table-time" x-text="formatTime(op.created_at)"></time></td>
+                                <td class="text-end">
+                                    <a x-show="deliveryDraftHref(op)" :href="deliveryDraftHref(op)" target="_blank" rel="noopener noreferrer" class="btn btn-sm btn-outline-primary"><i class="cil-external-link" aria-hidden="true"></i> 草稿箱</a>
+                                    <span x-show="!deliveryDraftHref(op)" class="text-muted">—</span>
+                                </td>
+                            </tr>
+                        </template>
+                    </tbody>
+                </table>
+            </div>
         </div>
-    </div>
+    </section>
 
-    <!-- 任务列表（legacy 队列） -->
-    <div class="card">
-        <div class="card-header d-flex justify-content-between align-items-center">
-            <h5 class="mb-0">任务列表</h5>
-            <button class="btn btn-sm btn-outline-secondary" @click="fetchData">
-                <i class="cil-reload me-1"></i>刷新
+    <section class="content-section" aria-labelledby="task-title">
+        <div class="section-heading">
+            <div>
+                <span class="section-kicker">LEGACY WORKFLOW</span>
+                <h2 id="task-title">任务列表</h2>
+                <p>保留历史队列入口，点击任务编号查看完整日志和文章预览。</p>
+            </div>
+            <button class="btn btn-ghost-secondary" type="button" @click="fetchData" :disabled="loadingTasks">
+                <i class="cil-reload" :class="loadingTasks ? 'is-spinning' : ''" aria-hidden="true"></i><span>刷新任务</span>
             </button>
         </div>
-        <div class="table-responsive">
-            <table class="table table-hover mb-0">
-                <thead>
-                    <tr>
-                        <th>#</th>
-                        <th>文章</th>
-                        <th>平台</th>
-                        <th>标题</th>
-                        <th>状态</th>
-                        <th>重试</th>
-                        <th>创建时间</th>
-                        <th>操作</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    <template x-if="tasks.length === 0">
-                        <tr>
-                            <td colspan="8" class="empty-state">
-                                <i class="cil-inbox fs-3 d-block mb-2"></i>
-                                暂无任务，去 <a href="/upload">上传文章</a>
-                            </td>
-                        </tr>
-                    </template>
-                    <template x-for="task in tasks" :key="task.id">
-                        <tr>
-                            <td x-text="task.id"></td>
-                            <td>
-                                <span class="text-truncate d-inline-block" style="max-width:150px"
-                                      x-text="task.article_filename || '-'"></span>
-                            </td>
-                            <td>
-                                <span class="badge bg-info" x-text="platformLabel(task.platform)"></span>
-                            </td>
-                            <td>
-                                <span class="text-truncate d-inline-block" style="max-width:200px"
-                                      x-text="task.title_used || '-'"></span>
-                            </td>
-                            <td>
-                                <span class="badge" :class="statusClass(task.status)" x-text="statusLabel(task.status)"></span>
-                            </td>
-                            <td>
-                                <small class="text-muted" x-text="task.retry_count + '/' + 3"></small>
-                            </td>
-                            <td>
-                                <small class="text-muted" x-text="formatTime(task.created_at)"></small>
-                            </td>
-                            <td>
-                                <a :href="'/task/' + task.id" class="btn btn-sm btn-outline-primary">
-                                    <i class="cil-magnifying-glass"></i>
-                                </a>
-                            </td>
-                        </tr>
-                    </template>
-                </tbody>
-            </table>
+        <div class="card data-card">
+            <div class="table-responsive">
+                <table class="table table-hover align-middle data-table task-data-table mb-0">
+                    <caption class="visually-hidden">发布任务列表</caption>
+                    <thead>
+                        <tr><th scope="col">任务</th><th scope="col">文章</th><th scope="col">平台</th><th scope="col">标题</th><th scope="col">状态</th><th scope="col">重试</th><th scope="col">创建时间</th><th scope="col" class="text-end">操作</th></tr>
+                    </thead>
+                    <tbody>
+                        <template x-if="tasks.length === 0">
+                            <tr><td colspan="8"><div class="empty-state"><i class="cil-inbox" aria-hidden="true"></i><strong>暂无任务</strong><span>上传文章后，任务会显示在这里。</span></div></td></tr>
+                        </template>
+                        <template x-for="task in tasks" :key="task.id">
+                            <tr>
+                                <td><a class="task-id-link" :href="'/task/' + task.id" x-text="'#' + task.id"></a></td>
+                                <td><span class="table-truncate" :title="task.article_filename || ''" x-text="task.article_filename || '—'"></span></td>
+                                <td><span class="platform-pill" x-text="platformLabel(task.platform)"></span></td>
+                                <td><span class="table-truncate" :title="task.title_used || ''" x-text="task.title_used || '—'"></span></td>
+                                <td><span class="status-label" :class="statusClass(task.status)" x-text="statusLabel(task.status)"></span></td>
+                                <td><span class="retry-count" x-text="(task.retry_count ?? 0) + '/3'"></span></td>
+                                <td><time class="table-time" x-text="formatTime(task.created_at)"></time></td>
+                                <td class="text-end"><a class="btn btn-sm btn-outline-primary" :href="'/task/' + task.id" :aria-label="'查看任务 #' + task.id"><i class="cil-arrow-right" aria-hidden="true"></i><span class="visually-hidden">查看任务</span></a></td>
+                            </tr>
+                        </template>
+                    </tbody>
+                </table>
+            </div>
         </div>
-    </div>
+    </section>
 
-    <!-- 最近投递（新架构 delivery_operations） -->
-    <div class="card mt-4">
-        <div class="card-header d-flex justify-content-between align-items-center">
-            <h5 class="mb-0">最近投递</h5>
-            <button class="btn btn-sm btn-outline-secondary" @click="loadDeliveries">
-                <i class="cil-reload me-1"></i>刷新
-            </button>
-        </div>
-        <div class="table-responsive">
-            <table class="table table-hover mb-0">
-                <thead>
-                    <tr>
-                        <th>平台</th>
-                        <th>账号</th>
-                        <th>模式</th>
-                        <th>状态</th>
-                        <th>时间</th>
-                        <th>操作</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    <template x-if="deliveries.length === 0">
-                        <tr>
-                            <td colspan="6" class="empty-state">
-                                <i class="cil-paper-plane fs-3 d-block mb-2"></i>
-                                暂无投递记录，去 <a href="/upload">创作与投递</a>
-                            </td>
-                        </tr>
-                    </template>
-                    <template x-for="op in deliveries" :key="op.operation_id">
-                        <tr>
-                            <td><span class="badge bg-info" x-text="platformLabel(op.platform)"></span></td>
-                            <td x-text="op.account_display_name || '-'"></td>
-                            <td><span class="badge text-bg-secondary" x-text="op.mode === 'PUBLISH' ? '公开发布' : '平台草稿'"></span></td>
-                            <td>
-                                <span class="badge" :class="deliveryClass(op.status, op)" x-text="deliveryLabel(op.status, op)"></span>
-                                <small class="d-block text-danger" x-show="op.error_code" x-text="op.error_code"></small>
-                                <small class="d-block text-warning" x-show="deliveryDetail(op)" x-text="deliveryDetail(op)"></small>
-                            </td>
-                            <td><small class="text-muted" x-text="formatTime(op.created_at)"></small></td>
-                            <td>
-                                <a x-show="deliveryDraftHref(op)" :href="deliveryDraftHref(op)" target="_blank" rel="noopener noreferrer" class="btn btn-sm btn-outline-primary">
-                                    <i class="cil-external-link"></i> 草稿箱
-                                </a>
-                            </td>
-                        </tr>
-                    </template>
-                </tbody>
-            </table>
-        </div>
-    </div>
-
-    <!-- 自动刷新 -->
-    <div class="text-muted text-center mt-3">
-        <small>每 5 秒自动刷新</small>
-    </div>
+    <p class="page-refresh-note"><i class="cil-sync" aria-hidden="true"></i>每 5 秒自动同步一次，页面不会改变任务状态。</p>
 </div>
 
 <script>
@@ -230,25 +139,41 @@ document.addEventListener('alpine:init', () => {
         deliveries: [],
         status: { queue_size: 0, running: false },
         timer: null,
+        loadingTasks: false,
+        loadingDeliveries: false,
 
         async fetchData() {
-            try {
-                const [taskRes, statusRes] = await Promise.all([
-                    fetch('/api/tasks'),
-                    fetch('/api/status'),
-                ]);
-                this.tasks = await taskRes.json();
-                this.status = await statusRes.json();
-            } catch (e) {}
+            if (this.loadingTasks) return;
+            this.loadingTasks = true;
+            const [taskResult, statusResult] = await Promise.allSettled([
+                fetch('/api/tasks').then(async (response) => {
+                    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+                    return response.json();
+                }),
+                fetch('/api/status').then(async (response) => {
+                    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+                    return response.json();
+                }),
+            ]);
+            if (taskResult.status === 'fulfilled' && Array.isArray(taskResult.value)) this.tasks = taskResult.value;
+            if (statusResult.status === 'fulfilled' && statusResult.value) this.status = statusResult.value;
+            this.loadingTasks = false;
             await this.loadDeliveries();
         },
 
         async loadDeliveries() {
+            if (this.loadingDeliveries) return;
+            this.loadingDeliveries = true;
             try {
-                const res = await fetch('/api/delivery-operations?limit=20');
+                const res = await fetch('/api/delivery-operations?limit=20', { headers: { Accept: 'application/json' }, cache: 'no-store' });
+                if (!res.ok) throw new Error(`HTTP ${res.status}`);
                 const payload = await res.json();
                 this.deliveries = Array.isArray(payload.operations) ? payload.operations : [];
-            } catch (e) {}
+            } catch (e) {
+                this.deliveries = [];
+            } finally {
+                this.loadingDeliveries = false;
+            }
         },
 
         platformLabel(p) {
@@ -263,10 +188,9 @@ document.addEventListener('alpine:init', () => {
         deliveryLabel(s, operation = null) {
             const m = {
                 QUEUED: '已排队', RUNNING: '执行中', DRAFT_SAVED: '草稿已保存',
-                DRAFT_SAVED_WITH_WARNINGS: '草稿已保存（有警告）',
-                PUBLISHED: '已发布', PUBLISHED_WITH_WARNINGS: '已发布（图片未完整）',
-                FAILED: '失败', RESULT_UNKNOWN: '结果未知',
-                DELIVERY_INCOMPLETE: '投递未完成',
+                DRAFT_SAVED_WITH_WARNINGS: '草稿已保存（有警告）', PUBLISHED: '已发布',
+                PUBLISHED_WITH_WARNINGS: '已发布（图片未完整）', FAILED: '失败',
+                RESULT_UNKNOWN: '结果未知', DELIVERY_INCOMPLETE: '投递未完成',
                 CONFIRMATION_REQUIRED: '待公开确认', BLOCKED: '已拦截',
             };
             if (s === 'DRAFT_SAVED' && operation?.degraded) return '草稿已保存（待核对）';
@@ -275,34 +199,19 @@ document.addEventListener('alpine:init', () => {
 
         deliveryClass(s, operation = null) {
             const m = {
-                DRAFT_SAVED: 'bg-success', PUBLISHED: 'bg-success',
-                DRAFT_SAVED_WITH_WARNINGS: 'bg-warning text-dark',
-                PUBLISHED_WITH_WARNINGS: 'bg-warning text-dark',
-                FAILED: 'bg-danger', RESULT_UNKNOWN: 'bg-warning text-dark',
-                DELIVERY_INCOMPLETE: 'bg-warning text-dark',
-                BLOCKED: 'bg-danger',
+                DRAFT_SAVED: 'is-success', PUBLISHED: 'is-success',
+                DRAFT_SAVED_WITH_WARNINGS: 'is-warning', PUBLISHED_WITH_WARNINGS: 'is-warning',
+                FAILED: 'is-danger', RESULT_UNKNOWN: 'is-warning', DELIVERY_INCOMPLETE: 'is-warning', BLOCKED: 'is-danger',
             };
-            if (s === 'DRAFT_SAVED' && operation?.degraded) return 'bg-warning text-dark';
-            return m[s] || 'bg-light text-dark';
+            if (s === 'DRAFT_SAVED' && operation?.degraded) return 'is-warning';
+            return m[s] || 'is-neutral';
         },
 
         deliveryDetail(operation) {
             if (!operation) return '';
             const warningStatus = ['DRAFT_SAVED_WITH_WARNINGS', 'PUBLISHED_WITH_WARNINGS'].includes(operation.status);
-            if (warningStatus) {
-                return operation.error_message
-                    || operation.verification_evidence?.summary
-                    || '草稿已保存，完整性待核对。';
-            }
-            if (operation.degraded) {
-                return operation.error_message
-                    || operation.verification_evidence?.summary
-                    || '草稿已保存，完整性待核对。';
-            }
-            if (operation.status === 'DELIVERY_INCOMPLETE') {
-                return operation.error_message
-                    || operation.verification_evidence?.summary
-                    || '投递未完成，请人工核对平台结果。';
+            if (warningStatus || operation.degraded || operation.status === 'DELIVERY_INCOMPLETE') {
+                return operation.error_message || operation.verification_evidence?.summary || '草稿已保存，完整性待核对。';
             }
             return operation.error_message || '';
         },
@@ -324,47 +233,34 @@ document.addEventListener('alpine:init', () => {
                 const parsed = new URL(value, window.location.href);
                 if (parsed.username || parsed.password) return '';
                 const secretKeys = ['access_token', 'api_key', 'apikey', 'auth', 'cookie', 'password', 'secret', 'token'];
-                const hasSecret = [...parsed.searchParams.keys(), ...new URLSearchParams(parsed.hash.slice(1)).keys()]
-                    .some(key => secretKeys.includes(key.toLowerCase()));
+                const hasSecret = [...parsed.searchParams.keys(), ...new URLSearchParams(parsed.hash.slice(1)).keys()].some(key => secretKeys.includes(key.toLowerCase()));
                 return hasSecret ? '' : value;
-            } catch (_) {
-                return '';
-            }
+            } catch (_) { return ''; }
         },
 
         deliveryDraftHref(operation) {
             if (!operation || !['DRAFT_SAVED', 'DRAFT_SAVED_WITH_WARNINGS'].includes(operation.status)) return '';
-            // 优先使用后端已确认的安全链接；空 draft_url 时只回退到已盘点入口。
             return this.safeDraftUrl(operation.draft_url) || this.platformDraftBoxUrl(operation.platform);
         },
 
         statusLabel(s) {
-            const m = {
-                queued: '排队中', processing: '处理中', completed: '已完成',
-                completed_with_warnings: '草稿已保存（有警告）',
-                failed: '失败', retrying: '重试中', cancelled: '已取消',
-                paused: '已暂停', needs_selection: '待选择话题',
-            };
+            const m = { queued: '排队中', processing: '处理中', completed: '已完成', completed_with_warnings: '草稿已保存（有警告）', failed: '失败', retrying: '重试中', cancelled: '已取消', paused: '已暂停', needs_selection: '待选择话题' };
             return m[s] || s;
         },
 
         statusClass(s) {
-            const m = {
-                queued: 'bg-secondary', processing: 'bg-warning text-dark',
-                completed: 'bg-success', completed_with_warnings: 'bg-warning text-dark',
-                failed: 'bg-danger', retrying: 'bg-info',
-                paused: 'bg-warning text-dark', needs_selection: 'bg-warning text-dark',
-            };
-            return m[s] || 'bg-light text-dark';
+            const m = { queued: 'is-neutral', processing: 'is-warning', completed: 'is-success', completed_with_warnings: 'is-warning', failed: 'is-danger', retrying: 'is-info', paused: 'is-warning', needs_selection: 'is-warning' };
+            return m[s] || 'is-neutral';
         },
 
-        formatTime(t) {
-            return t ? t.replace('T', ' ').substring(0, 19) : '-';
-        },
+        formatTime(t) { return t ? t.replace('T', ' ').substring(0, 19) : '—'; },
 
         init() {
+            this.fetchData();
             this.timer = setInterval(() => this.fetchData(), 5000);
         },
+
+        destroy() { if (this.timer) clearInterval(this.timer); },
     }));
 });
 </script>

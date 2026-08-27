@@ -398,6 +398,21 @@ def test_primary_action_reports_and_focuses_missing_fields() -> None:
     assert "至少选择一个投递目标" in script
 
 
+def test_studio_exposes_stage_state_and_compact_context_copy() -> None:
+    template = read("web/templates/upload.html")
+    styles = read("web/static/css/content-studio.css")
+    script = read("web/static/js/content-studio.js")
+
+    assert 'class="studio-heading-main"' in template
+    assert 'data-step-status' in template
+    assert 'class="studio-stage-index"' in template
+    assert 'class="draft-meta-help"' in template
+    assert "updateStudioProgress()" in script
+    assert "已选择" in script
+    assert "@media (max-width: 1199.98px)" in styles
+    assert ".studio-side { position: static; display: grid;" in styles
+
+
 def test_v2_draft_state_and_patch_never_silently_downgrade() -> None:
     script = read("web/static/js/content-studio.js")
 

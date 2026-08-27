@@ -11,7 +11,8 @@
   <link rel="stylesheet" href="{{ url_for('article_mvp_dashboard.static', filename='vendor/gridstack/gridstack.min.css') }}">
   <link rel="stylesheet" href="{{ url_for('article_mvp_dashboard.static', filename='dashboard.css') }}">
 </head>
-<body data-dashboard-api="{{ url_for('article_mvp_dashboard.api_dashboard') }}" data-legacy-summary-api="/api/legacy-summary">
+<body class="app-shell" data-dashboard-api="{{ url_for('article_mvp_dashboard.api_dashboard') }}" data-legacy-summary-api="/api/legacy-summary">
+  <a class="skip-link" href="#main-content">跳到主要内容</a>
   <aside id="app-sidebar" class="sidebar sidebar-dark sidebar-fixed border-end" aria-label="主导航">
     <div class="sidebar-header border-bottom">
       <a class="sidebar-brand" href="/" aria-label="文章自动发布首页">
@@ -33,7 +34,7 @@
     </nav>
 
     <div class="sidebar-footer border-top">
-      <div class="sidebar-status"><span class="status-dot"></span><span><strong>本机服务</strong><small>5000 端口 · 同一工作流</small></span></div>
+      <div class="sidebar-status"><span class="status-dot"></span><span><strong>服务在线</strong><small>ArticleOps 本机服务</small></span></div>
     </div>
   </aside>
   <div id="sidebar-backdrop" class="sidebar-backdrop"></div>
@@ -44,6 +45,11 @@
         <button id="sidebar-toggle" class="header-toggler btn" type="button" aria-label="切换导航" aria-controls="app-sidebar" aria-expanded="false">
           <i class="cil-menu" aria-hidden="true"></i>
         </button>
+
+        <div class="header-context ms-2 ms-lg-3">
+          <span class="header-kicker">ARTICLEOPS</span>
+          <strong>数据中心</strong>
+        </div>
 
         <div class="header-search ms-2 ms-lg-3">
           <i class="cil-magnifying-glass" aria-hidden="true"></i>
@@ -66,7 +72,7 @@
       </div>
     </header>
 
-    <main class="body flex-grow-1">
+    <main id="main-content" class="body flex-grow-1" tabindex="-1">
       <div class="container-fluid px-3 px-lg-4 py-4">
         <nav aria-label="面包屑导航">
           <ol class="breadcrumb mb-2">
@@ -77,6 +83,7 @@
 
         <div class="page-heading">
           <div>
+            <span class="page-kicker">OPERATIONS DATA</span>
             <h1>发布与采集数据中心</h1>
             <p>现役发布任务与小黑盒单链路数据，在同一服务内统一查看。</p>
           </div>
@@ -203,6 +210,7 @@
         </div>
       </div>
     </main>
+    <footer class="footer px-3 px-lg-4"><span>ArticleOps</span><span class="ms-auto">统一发布与数据工作台</span></footer>
   </div>
 
   <aside class="offcanvas offcanvas-end" tabindex="-1" id="module-settings" aria-labelledby="module-settings-title">

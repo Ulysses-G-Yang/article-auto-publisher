@@ -189,9 +189,17 @@
         const hasContent = Boolean(state.draft?.title?.trim() && publicBlocks().length);
         const hasTargets = Boolean(state.draft?.targets?.length);
         const hasPlan = Boolean(state.plan);
-        document.querySelector('[data-studio-step="1"]')?.classList.toggle('is-complete', hasContent);
-        document.querySelector('[data-studio-step="2"]')?.classList.toggle('is-complete', hasTargets);
-        document.querySelector('[data-studio-step="3"]')?.classList.toggle('is-complete', hasPlan);
+        const stepStates = [
+            [1, hasContent, hasContent ? '已完成' : '待完成'],
+            [2, hasTargets, hasTargets ? '已选择' : '待选择'],
+            [3, hasPlan, hasPlan ? '已生成' : '待生成'],
+        ];
+        stepStates.forEach(([number, complete, label]) => {
+            const step = document.querySelector(`[data-studio-step="${number}"]`);
+            step?.classList.toggle('is-complete', complete);
+            const status = step?.querySelector('[data-step-status]');
+            if (status) status.textContent = label;
+        });
     }
 
     function scrollToStudioStep(targetId) {

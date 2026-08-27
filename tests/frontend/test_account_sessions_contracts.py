@@ -166,3 +166,20 @@ def test_multi_account_area_has_mobile_and_accessibility_contracts() -> None:
     assert 'aria-label="关闭活动日志"' in template
     assert "@media (max-width: 575.98px)" in styles
     assert "grid-template-columns: 1fr" in styles
+
+
+def test_account_page_makes_workflow_and_state_text_explicit() -> None:
+    template = read("web/templates/accounts.html")
+    script = read("web/static/js/account-sessions.js")
+    styles = read("web/static/css/account-sessions.css")
+
+    assert 'class="account-workflow"' in template
+    assert "第一步：选择平台" in template
+    assert "第二步：查看账号" in template
+    assert "第三步：执行操作" in template
+    assert 'id="session-platform-summary"' in template
+    assert 'id="session-account-summary"' in template
+    assert "function updateAccountContext(accountCount = null)" in script
+    assert "function accountStateDescription(account, archived)" in script
+    assert "登录态有效，可用于投递" in script
+    assert ".session-account-actions .btn-outline-danger" in styles

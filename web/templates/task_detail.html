@@ -1,191 +1,135 @@
 {% extends "base.html" %}
-{% block title %}任务详情 - 自动化文章发布工具{% endblock %}
+{% block title %}任务详情 - ArticleOps{% endblock %}
 {% block header_title %}任务详情{% endblock %}
 {% block content %}
-<div x-data="taskDetail" class="container" style="max-width: 900px;">
-    <nav aria-label="breadcrumb" class="mb-3">
+<div x-data="taskDetail" class="app-page task-page">
+    <nav aria-label="面包屑导航">
         <ol class="breadcrumb">
-            <li class="breadcrumb-item"><a href="/">仪表盘</a></li>
-            <li class="breadcrumb-item active">任务 #{{ task.id if task else '' }}</li>
+            <li class="breadcrumb-item"><a href="/">发布概览</a></li>
+            <li class="breadcrumb-item active" aria-current="page">任务 #{{ task.id if task else '' }}</li>
         </ol>
     </nav>
 
-    <div class="page-heading">
-        <div><h1>任务详情</h1><p>查看任务参数、文章预览与执行日志。</p></div>
-    </div>
+    <header class="page-heading task-heading">
+        <div>
+            <span class="page-kicker">TASK DETAILS</span>
+            <h1>任务详情</h1>
+            <p>查看投递参数、文章内容和按时间排列的执行日志。</p>
+        </div>
+        <div class="task-heading-actions">
+            <a class="btn btn-ghost-secondary" href="/"><i class="cil-arrow-left" aria-hidden="true"></i> 返回概览</a>
+            <button class="btn btn-outline-primary" type="button" onclick="location.reload()"><i class="cil-reload" aria-hidden="true"></i> 刷新</button>
+        </div>
+    </header>
 
     {% if task %}
-    <!-- 任务概览 -->
-    <div class="card mb-4">
-        <div class="card-header d-flex justify-content-between align-items-center">
-            <h5 class="mb-0">任务 #{{ task.id }} 详情</h5>
-            <span class="badge fs-6 
-                {% if task.status == 'completed' %}bg-success
-                {% elif task.status == 'completed_with_warnings' %}bg-warning text-dark
-                {% elif task.status == 'failed' %}bg-danger
-                {% elif task.status == 'processing' %}bg-warning text-dark
-                {% elif task.status == 'retrying' %}bg-info
-                {% elif task.status == 'needs_selection' %}bg-warning text-dark
-                {% elif task.status == 'paused' %}bg-secondary
-                {% else %}bg-secondary{% endif %}">
-                {{ {'queued':'排队中','processing':'处理中','completed':'已完成','completed_with_warnings':'草稿已保存（有警告）','failed':'失败','retrying':'重试中','paused':'已暂停','needs_selection':'待选择','cancelled':'已取消'}.get(task.status, task.status) }}
-            </span>
-        </div>
-        <div class="card-body">
-            <div class="row g-3">
-                <div class="col-md-6">
-                    <label class="text-muted small">平台</label>
-                    <p class="fw-bold">{{ '中关村在线' if task.platform == 'zol' else '小黑盒' }}</p>
+    {% set status_style = 'is-neutral' %}
+    {% if task.status in ('completed',) %}{% set status_style = 'is-success' %}{% endif %}
+    {% if task.status in ('completed_with_warnings', 'processing', 'paused', 'needs_selection', 'retrying') %}{% set status_style = 'is-warning' %}{% endif %}
+    {% if task.status == 'failed' %}{% set status_style = 'is-danger' %}{% endif %}
+
+    <section class="card task-summary-card" aria-labelledby="task-summary-title">
+        <header class="task-summary-header">
+            <div>
+                <span class="section-kicker">WORK ITEM #{{ task.id }}</span>
+                <h2 id="task-summary-title">任务概览</h2>
+                <p>创建于 {{ task.created_at or '时间未知' }}</p>
+            </div>
+            <span class="status-label {{ status_style }}">{{ {'queued':'排队中','processing':'处理中','completed':'已完成','completed_with_warnings':'草稿已保存（有警告）','failed':'失败','retrying':'重试中','paused':'已暂停','needs_selection':'待选择','cancelled':'已取消'}.get(task.status, task.status) }}</span>
+        </header>
+        <div class="task-summary-body">
+            <dl class="task-facts">
+                <div class="task-fact">
+                    <dt>平台</dt>
+                    <dd>{{ {'zol':'中关村在线','xiaoheihe':'小黑盒'}.get(task.platform, task.platform or '—') }}</dd>
                 </div>
-                <div class="col-md-6">
-                    <label class="text-muted small">文章</label>
-                    <p class="fw-bold">{{ article.filename if article else '-' }}</p>
+                <div class="task-fact task-fact-wide">
+                    <dt>来源文章</dt>
+                    <dd title="{{ article.filename if article else '' }}">{{ article.filename if article else '—' }}</dd>
                 </div>
-                <div class="col-md-6">
-                    <label class="text-muted small">使用标题</label>
-                    <p>{{ task.title_used or '-' }}</p>
+                <div class="task-fact task-fact-wide">
+                    <dt>投递标题</dt>
+                    <dd title="{{ task.title_used or '' }}">{{ task.title_used or '—' }}</dd>
                 </div>
-                <div class="col-md-6">
-                    <label class="text-muted small">匹配话题</label>
-                    <p>{{ task.topic_used or '-' }}</p>
+                <div class="task-fact">
+                    <dt>匹配话题</dt>
+                    <dd>{{ task.topic_used or '—' }}</dd>
                 </div>
                 {% if task.platform == 'xiaoheihe' %}
-                <div class="col-md-6">
-                    <label class="text-muted small">使用社区</label>
-                    <p>{{ task.community_used or '-' }}</p>
+                <div class="task-fact">
+                    <dt>使用社区</dt>
+                    <dd>{{ task.community_used or '—' }}</dd>
                 </div>
                 {% endif %}
-                <div class="col-md-4">
-                    <label class="text-muted small">重试次数</label>
-                    <p>{{ task.retry_count }}/3</p>
+                <div class="task-fact">
+                    <dt>重试次数</dt>
+                    <dd>{{ task.retry_count or 0 }}/3</dd>
                 </div>
-                <div class="col-md-4">
-                    <label class="text-muted small">草稿链接</label>
-                    <p>
-                        {% if task.draft_url %}
-                        <a href="{{ task.draft_url }}" target="_blank" rel="noopener noreferrer" aria-label="查看任务草稿（在新标签页打开）">查看草稿 <i class="cil-external-link"></i></a>
-                        {% else %}-{% endif %}
-                    </p>
-                </div>
-                <div class="col-md-4">
-                    <label class="text-muted small">创建时间</label>
-                    <p>{{ task.created_at or '-' }}</p>
+                <div class="task-fact">
+                    <dt>草稿链接</dt>
+                    <dd>
+                        {% if task.draft_url %}<a href="{{ task.draft_url }}" target="_blank" rel="noopener noreferrer" aria-label="查看任务草稿（在新标签页打开）">查看草稿 <i class="cil-external-link" aria-hidden="true"></i></a>{% else %}—{% endif %}
+                    </dd>
                 </div>
                 {% if task.expected_images or task.uploaded_images or task.media_status not in (None, 'not_checked') %}
-                <div class="col-md-6">
-                    <label class="text-muted small">图片处理</label>
-                    <p>
-                        {{ task.uploaded_images or 0 }}/{{ task.expected_images or 0 }} 张
-                        {% if task.media_status == 'completed' %}<span class="text-success">已完成</span>
-                        {% elif task.media_status in ('failed', 'partial') %}<span class="text-warning">{{ task.media_status }}</span>
-                        {% else %}<span class="text-muted">{{ task.media_status or '未检查' }}</span>{% endif %}
-                    </p>
+                <div class="task-fact">
+                    <dt>图片处理</dt>
+                    <dd>{{ task.uploaded_images or 0 }}/{{ task.expected_images or 0 }} 张 · {% if task.media_status == 'completed' %}已完成{% elif task.media_status in ('failed', 'partial') %}{{ task.media_status }}{% else %}{{ task.media_status or '未检查' }}{% endif %}</dd>
                 </div>
                 {% endif %}
-            </div>
+            </dl>
+
             {% if task.error_message %}
-            <div class="alert {% if task.status == 'completed_with_warnings' %}alert-warning{% else %}alert-danger{% endif %} mt-3 mb-0">
-                {% if task.error_code %}<strong>错误码：</strong>{{ task.error_code }}<br>{% endif %}
-                <strong>错误信息：</strong>{{ task.error_message }}
+            <div class="alert task-alert {% if task.status == 'completed_with_warnings' %}alert-warning{% else %}alert-danger{% endif %}" role="alert">
+                {% if task.error_code %}<strong>错误码：</strong>{{ task.error_code }}<br>{% endif %}<strong>错误信息：</strong>{{ task.error_message }}
             </div>
             {% endif %}
 
             {% if task.status == 'needs_selection' %}
-            <div class="alert alert-warning mt-3 mb-0" x-data="selectionForm">
-                <strong>自动选择没有找到结果。</strong>
-                <span class="d-block small mb-2">填写平台中的真实名称后继续，任务不会直接发布。</span>
-                <div class="row g-2">
+            <div class="task-action-panel" x-data="selectionForm">
+                <h3>补充平台信息后继续</h3>
+                <p>自动选择没有找到结果。填写真实名称后，任务会重新进入队列，不会直接公开发布。</p>
+                <div class="task-action-row">
                     {% if task.platform == 'xiaoheihe' %}
-                    <div class="col-md-6">
-                        <label class="form-label small">社区</label>
-                        <input class="form-control" x-model="community" placeholder="例如：游戏名称社区">
-                    </div>
-                    <div class="col-md-6">
-                        <label class="form-label small">话题</label>
-                        <input class="form-control" x-model="topic" placeholder="例如：攻略心得">
-                    </div>
+                    <div class="form-group"><label class="form-label" for="resume-community">社区</label><input id="resume-community" class="form-control" x-model="community" placeholder="例如：游戏名称社区"></div>
+                    <div class="form-group"><label class="form-label" for="resume-topic">话题</label><input id="resume-topic" class="form-control" x-model="topic" placeholder="例如：攻略心得"></div>
                     {% else %}
-                    <div class="col-md-6">
-                        <label class="form-label small">分类/话题</label>
-                        <input class="form-control" x-model="topic" placeholder="填写 ZOL 分类或话题">
-                    </div>
+                    <div class="form-group"><label class="form-label" for="resume-topic">分类 / 话题</label><input id="resume-topic" class="form-control" x-model="topic" placeholder="填写 ZOL 分类或话题"></div>
                     {% endif %}
+                    <button class="btn btn-primary" type="button" @click="resume()" :disabled="submitting"><span x-show="submitting" class="spinner-border spinner-border-sm me-1" aria-hidden="true"></span>继续执行</button>
+                    <span class="task-message" x-show="message" x-text="message" role="status" aria-live="polite"></span>
                 </div>
-                <button class="btn btn-sm btn-primary mt-3" @click="resume()" :disabled="submitting">
-                    <span x-show="submitting" class="spinner-border spinner-border-sm me-1"></span>
-                    继续执行
-                </button>
-                <span class="small ms-2" x-show="message" x-text="message"></span>
             </div>
             {% elif task.status == 'paused' %}
-            <div class="alert alert-secondary mt-3 mb-0" x-data="selectionForm">
-                服务重启时不会自动恢复历史任务。确认账号已登录后，可以手动恢复。
-                <button class="btn btn-sm btn-primary ms-2" @click="resume()" :disabled="submitting">
-                    <span x-show="submitting" class="spinner-border spinner-border-sm me-1"></span>
-                    恢复任务
-                </button>
-                <span class="small ms-2" x-show="message" x-text="message"></span>
+            <div class="task-action-panel" x-data="selectionForm">
+                <h3>任务已暂停</h3>
+                <p>服务重启时不会自动恢复历史任务。确认账号已登录后，可以手动恢复。</p>
+                <div class="task-action-row"><button class="btn btn-primary" type="button" @click="resume()" :disabled="submitting"><span x-show="submitting" class="spinner-border spinner-border-sm me-1" aria-hidden="true"></span>恢复任务</button><span class="task-message" x-show="message" x-text="message" role="status" aria-live="polite"></span></div>
             </div>
             {% endif %}
         </div>
-    </div>
+    </section>
 
-    <!-- 文章预览 -->
     {% if article %}
-    <div class="card mb-4">
-        <div class="card-header">
-            <h5 class="mb-0">文章内容预览</h5>
+    <section class="card task-content-card" aria-labelledby="article-preview-title">
+        <header class="task-section-header"><div><span class="section-kicker">CONTENT PREVIEW</span><h2 id="article-preview-title">文章内容预览</h2></div><span class="task-section-meta">字数 {{ article.char_count or 0 }} · 图片 {{ article.image_count or 0 }}</span></header>
+        <div class="article-preview">
+            {% if article.content_text %}<pre>{{ article.content_text[:2000] }}{% if article.content_text|length > 2000 %}
+…（更多内容已省略）{% endif %}</pre>{% else %}<div class="empty-state compact-empty"><i class="cil-notes" aria-hidden="true"></i><strong>暂无文章正文</strong><span>该任务未返回可预览的正文内容。</span></div>{% endif %}
         </div>
-        <div class="card-body">
-            {% set content = article.content_json %}
-            {% if content %}
-                {% set data = content|tojson|safe if content is string else content %}
-            {% endif %}
-            <p class="text-muted small">
-                字数: {{ article.char_count }} | 图片: {{ article.image_count }}
-            </p>
-            <div class="border rounded p-3 bg-light" style="max-height: 400px; overflow-y: auto;">
-                {% if article.content_text %}
-                    <pre class="mb-0" style="white-space: pre-wrap; font-family: inherit;">{{ article.content_text[:2000] }}
-                    {% if article.content_text|length > 2000 %}<span class="text-muted">... (更多内容已省略)</span>{% endif %}
-                    </pre>
-                {% endif %}
-            </div>
-        </div>
-    </div>
+    </section>
     {% endif %}
 
-    <!-- 执行日志 -->
-    <div class="card">
-        <div class="card-header d-flex justify-content-between align-items-center">
-            <h5 class="mb-0">执行日志</h5>
-            <button type="button" class="btn btn-sm btn-outline-secondary" onclick="location.reload()">
-                <i class="cil-reload me-1"></i>刷新
-            </button>
+    <section class="card task-log-card" aria-labelledby="task-log-title">
+        <header class="task-section-header"><div><span class="section-kicker">EXECUTION LOG</span><h2 id="task-log-title">执行日志</h2></div><span class="task-section-meta">按时间顺序记录</span></header>
+        <div class="log-container" role="log" aria-live="polite">
+            {% if logs %}
+                {% for log in logs %}<div class="log-line"><time class="log-time">{{ log.created_at }}</time><span class="log-level {% if log.level == 'ERROR' %}text-danger{% elif log.level == 'WARN' %}text-warning{% else %}text-info{% endif %}">[{{ log.level }}]</span><span class="log-message">{{ log.message }}</span></div>{% endfor %}
+            {% else %}<div class="log-empty">暂无日志</div>{% endif %}
         </div>
-        <div class="card-body p-0">
-            <div class="log-container p-3" style="max-height: 500px; overflow-y: auto; background:#1e1e1e; color:#d4d4d4; font-family: 'Cascadia Code', 'Fira Code', monospace; font-size: 0.85rem;">
-                {% if logs %}
-                    {% for log in logs %}
-                    <div class="log-line mb-1">
-                        <span class="log-time" style="color:#888">{{ log.created_at }}</span>
-                        <span class="log-level ms-2 fw-bold
-                            {% if log.level == 'ERROR' %}text-danger
-                            {% elif log.level == 'WARN' %}text-warning
-                            {% else %}text-info{% endif %}">
-                            [{{ log.level }}]
-                        </span>
-                        <span class="ms-2">{{ log.message }}</span>
-                    </div>
-                    {% endfor %}
-                {% else %}
-                    <div class="text-muted text-center py-3">暂无日志</div>
-                {% endif %}
-            </div>
-        </div>
-    </div>
+    </section>
     {% else %}
-    <div class="alert alert-warning">任务不存在</div>
+    <div class="alert alert-warning" role="alert">任务不存在</div>
     {% endif %}
 </div>
 

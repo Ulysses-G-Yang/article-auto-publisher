@@ -3,8 +3,8 @@
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <meta name="color-scheme" content="light dark">
-    <meta name="theme-color" content="#212631">
+    <meta name="color-scheme" content="light">
+    <meta name="theme-color" content="#0f172a">
     <title>{% block title %}ArticleOps 发布运营中心{% endblock %}</title>
     <link rel="stylesheet" href="{{ url_for('static', filename='vendor/coreui-template/css/style.min.css') }}">
     <link rel="stylesheet" href="{{ url_for('static', filename='vendor/coreui-template/simplebar/simplebar.css') }}">
@@ -13,7 +13,8 @@
     {% block extra_head %}{% endblock %}
     <script src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js" defer></script>
 </head>
-<body>
+<body class="app-shell">
+    <a class="skip-link" href="#main-content">跳到主要内容</a>
     <aside id="app-sidebar" class="sidebar sidebar-dark sidebar-fixed border-end" aria-label="主导航">
         <div class="sidebar-header border-bottom">
             <a class="sidebar-brand" href="/" aria-label="ArticleOps 发布运营中心首页">
@@ -22,7 +23,7 @@
             </a>
             <button id="sidebar-close" class="btn sidebar-close d-lg-none" type="button" aria-label="关闭导航"><i class="cil-x" aria-hidden="true"></i></button>
         </div>
-        <div class="sidebar-nav" data-simplebar>
+        <nav class="sidebar-nav" data-simplebar aria-label="业务导航">
             <div class="nav-title">工作台</div>
             <a class="nav-link {% if request.path == '/' or request.path.startswith('/task/') %}active{% endif %}" href="/" {% if request.path == '/' or request.path.startswith('/task/') %}aria-current="page"{% endif %}>
                 <i class="nav-icon cil-speedometer" aria-hidden="true"></i><span>发布概览</span>
@@ -37,9 +38,12 @@
             <a class="nav-link {% if request.path.startswith('/data-center') %}active{% endif %}" href="/data-center/" {% if request.path.startswith('/data-center') %}aria-current="page"{% endif %}>
                 <i class="nav-icon cil-chart" aria-hidden="true"></i><span>数据中心</span>
             </a>
-        </div>
+        </nav>
         <div class="sidebar-footer border-top">
-            <div class="sidebar-status"><span class="status-dot completed" aria-hidden="true"></span><span><strong>本机服务</strong><small>同一业务入口</small></span></div>
+            <div class="sidebar-status" title="当前页面使用同一个本机服务">
+                <span class="status-dot completed" aria-hidden="true"></span>
+                <span><strong>服务在线</strong><small>ArticleOps 本机服务</small></span>
+            </div>
         </div>
     </aside>
     <div id="sidebar-backdrop" class="sidebar-backdrop" aria-hidden="true"></div>
@@ -48,15 +52,19 @@
         <header class="header header-sticky p-0 border-bottom">
             <div class="container-fluid px-3 px-lg-4 header-main">
                 <button id="sidebar-toggle" class="header-toggler btn" type="button" aria-label="切换导航" aria-controls="app-sidebar" aria-expanded="false"><i class="cil-menu" aria-hidden="true"></i></button>
-                <div class="header-context ms-2 ms-lg-3"><strong>{% block header_title %}发布工作台{% endblock %}</strong><small class="d-none d-sm-block">自动化文章发布与数据采集</small></div>
+                <div class="header-context ms-2 ms-lg-3">
+                    <span class="header-kicker">ARTICLEOPS</span>
+                    <strong>{% block header_title %}发布工作台{% endblock %}</strong>
+                </div>
                 <div class="header-actions ms-auto">
+                    <span class="header-service-state d-none d-md-inline-flex"><span class="status-dot completed" aria-hidden="true"></span>服务在线</span>
                 </div>
             </div>
         </header>
-        <main class="body flex-grow-1 app-main">
+        <main id="main-content" class="body flex-grow-1 app-main" tabindex="-1">
             <div class="container-fluid px-3 px-lg-4 py-4">{% block content %}{% endblock %}</div>
         </main>
-        <footer class="footer px-3 px-lg-4"><span>ArticleOps</span><span class="ms-auto">CoreUI Free Bootstrap Admin Template v5.6.0</span></footer>
+        <footer class="footer px-3 px-lg-4"><span>ArticleOps</span><span class="ms-auto">统一发布与数据工作台</span></footer>
     </div>
 
     <script src="{{ url_for('static', filename='vendor/coreui-template/js/coreui.bundle.min.js') }}"></script>

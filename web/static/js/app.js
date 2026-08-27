@@ -1,4 +1,20 @@
 const SIDEBAR_STORAGE_KEY = 'articleops.sidebar-collapsed.v1';
+
+function readShellPreference(key) {
+    try {
+        return window.localStorage.getItem(key);
+    } catch (_) {
+        return null;
+    }
+}
+
+function writeShellPreference(key, value) {
+    try {
+        window.localStorage.setItem(key, value);
+    } catch (_) {
+        // 隐私模式或禁用存储时，导航仍应正常工作，只是不持久化偏好。
+    }
+}
 // CoreUI's Bootstrap-compatible components are the sole runtime implementation.
 // Keep the historical `bootstrap.*` calls working while legacy pages migrate.
 const bootstrap = window.coreui;
@@ -57,6 +73,7 @@ function setSidebarOpen(open) {
     document.body.classList.toggle('sidebar-mobile-open', open);
     const button = document.getElementById('sidebar-toggle');
     if (button) button.setAttribute('aria-expanded', String(open));
+    if (!open) document.getElementById('sidebar-toggle')?.focus({ preventScroll: true });
 }
 
 function toggleSidebar() {
@@ -65,19 +82,27 @@ function toggleSidebar() {
         return;
     }
     const collapsed = document.body.classList.toggle('sidebar-collapsed');
-    localStorage.setItem(SIDEBAR_STORAGE_KEY, String(collapsed));
+    writeShellPreference(SIDEBAR_STORAGE_KEY, String(collapsed));
 }
 
 function initSidebar() {
-    if (window.innerWidth >= 992 && localStorage.getItem(SIDEBAR_STORAGE_KEY) === 'true') {
+    const sidebar = document.getElementById('app-sidebar');
+    if (!sidebar || sidebar.dataset.initialized === 'true') return;
+    sidebar.dataset.initialized = 'true';
+    if (window.innerWidth >= 992 && readShellPreference(SIDEBAR_STORAGE_KEY) === 'true') {
         document.body.classList.add('sidebar-collapsed');
     }
     document.getElementById('sidebar-toggle')?.addEventListener('click', toggleSidebar);
     document.getElementById('sidebar-close')?.addEventListener('click', () => setSidebarOpen(false));
     document.getElementById('sidebar-backdrop')?.addEventListener('click', () => setSidebarOpen(false));
-    document.querySelectorAll('#app-sidebar a').forEach(link => link.addEventListener('click', () => setSidebarOpen(false)));
+    document.querySelectorAll('#app-sidebar a').forEach(link => link.addEventListener('click', () => {
+        if (window.innerWidth < 992) setSidebarOpen(false);
+    }));
     document.addEventListener('keydown', event => {
         if (event.key === 'Escape') setSidebarOpen(false);
+    });
+    window.addEventListener('resize', () => {
+        if (window.innerWidth >= 992) document.body.classList.remove('sidebar-mobile-open');
     });
 }
 

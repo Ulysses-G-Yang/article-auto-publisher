@@ -58,6 +58,26 @@
         return Object.fromEntries(PUBLIC_ACCOUNT_FIELDS.map(field => [field, account?.[field] ?? null]));
     }
 
+    function updateAccountContext(accountCount = null) {
+        const platform = state.platforms.find(item => item.id === state.platform);
+        const platformSummary = byId('session-platform-summary');
+        const accountSummary = byId('session-account-summary');
+        if (platformSummary) {
+            platformSummary.textContent = platform ? `${platform.display_name}账号` : '尚未选择平台';
+        }
+        if (accountSummary) {
+            if (!platform) {
+                accountSummary.textContent = '选择平台后才会读取账号信息';
+            } else if (accountCount === null) {
+                accountSummary.textContent = '正在读取该平台的账号信息';
+            } else if (accountCount === 0) {
+                accountSummary.textContent = '暂无可用账号，可在下方创建隔离登录态';
+            } else {
+                accountSummary.textContent = `已读取 ${accountCount} 个账号，请查看状态后选择操作`;
+            }
+        }
+    }
+
     async function jsonResponse(response) {
         const payload = await response.json().catch(() => ({}));
         if (!response.ok) {
@@ -164,17 +184,35 @@
         return element;
     }
 
+    function accountStateDescription(account, archived) {
+        if (archived) return '已归档，历史记录仍保留';
+        const descriptions = {
+            VALID: '登录态有效，可用于投递',
+            LOGIN_REQUIRED: '需要重新登录后才能投递',
+            EXPIRED: '登录态已过期，请重新验证',
+            ERROR: '验证出现异常，可查看活动日志',
+            VERIFYING: '正在验证登录态，请稍候',
+            BUSY: '账号正在处理中，请稍候',
+            UNVERIFIED: '尚未验证当前登录态',
+        };
+        return descriptions[account.session_status] || '状态待确认';
+    }
+
     function accountCard(account) {
         const card = document.createElement('article');
         card.className = 'session-account-card';
         const archived = account.status === 'ARCHIVED';
         card.classList.toggle('is-archived', archived);
         card.dataset.accountId = account.account_id;
+        card.dataset.sessionStatus = account.session_status || 'UNKNOWN';
         const top = document.createElement('div'); top.className = 'session-account-top';
         const identity = document.createElement('div'); identity.className = 'session-account-identity';
         const name = document.createElement('strong'); name.textContent = account.display_name || '未命名账号';
         const masked = document.createElement('span'); masked.textContent = account.masked_platform_user_id || '平台 ID 已隐藏';
-        identity.append(name, masked);
+        const stateDescription = document.createElement('span');
+        stateDescription.className = 'session-account-state';
+        stateDescription.textContent = accountStateDescription(account, archived);
+        identity.append(name, masked, stateDescription);
         const badges = document.createElement('div'); badges.className = 'session-account-badges';
         badges.append(badge(account.status), badge(account.session_status));
         top.append(identity, badges);
@@ -313,6 +351,7 @@
         const list = byId('session-account-list');
         const archivedCount = state.accounts.filter(account => account.status === 'ARCHIVED').length;
         const visibleAccounts = state.accounts.filter(account => state.showArchived || account.status !== 'ARCHIVED');
+        updateAccountContext(visibleAccounts.length);
         list.replaceChildren(...visibleAccounts.map(accountCard));
         list.classList.toggle('d-none', visibleAccounts.length === 0);
         byId('session-accounts-empty').classList.toggle('d-none', visibleAccounts.length > 0);
@@ -321,6 +360,7 @@
 
     async function loadAccounts(options = {}) {
         if (!state.platform) return;
+        updateAccountContext(null);
         const sequence = ++state.requestSequence;
         state.requestController?.abort();
         state.requestController = new AbortController();
@@ -350,6 +390,7 @@
         if (!selectedPlatform?.account_enabled) return;
         state.platform = platform;
         state.accounts = [];
+        updateAccountContext(null);
         state.pollingGeneration += 1;
         state.targetedPolls.forEach(timer => clearTimeout(timer));
         state.targetedPolls.clear();

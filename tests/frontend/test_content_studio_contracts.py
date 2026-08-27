@@ -200,7 +200,7 @@ def test_existing_targets_survive_account_metadata_loading() -> None:
     assert "...existingTarget," in script
     assert "function reconcileLoadedAccountSelection" in script
     assert "selected.filter(accountId => !validIds.has(accountId))" in script
-    assert "if (render && invalidIds.length) rebuildTargets();" in script
+    assert "if (render && reconcile && invalidIds.length) rebuildTargets();" in script
     assert "当前不是 VALID" in script
     assert "switcherAccountLoadFailed: {}" in script
     assert "部分平台账号加载失败，本次全选未保存" in script
@@ -637,6 +637,30 @@ def test_empty_valid_account_state_links_to_platform_account_management() -> Non
     )[0]
     assert "accounts?platform=" in empty_branch
     assert "VALID 登录态" in empty_branch
+
+
+def test_target_accounts_refresh_after_login_and_explain_non_valid_state() -> None:
+    template = read("web/templates/upload.html")
+    script = read("web/static/js/content-studio.js")
+
+    assert "20260827-account-refresh" in template
+    assert "switcherAccountDiagnostics: {}" in script
+    assert "cache: 'no-store'" in script
+    assert "async function refreshEnabledSwitcherAccounts" in script
+    assert "window.addEventListener('focus'" in script
+    assert "window.addEventListener('pageshow'" in script
+    assert "document.addEventListener('visibilitychange'" in script
+    assert "delete state.switcherAccounts[platformId]" in script
+    refresh_branch = script.split(
+        "async function refreshEnabledSwitcherAccounts", 1
+    )[1].split("function reRenderSwitcherRow", 1)[0]
+    assert "reconcile: false" in refresh_branch
+    assert "rebuildTargets()" not in refresh_branch
+    assert "刷新账号状态" in script
+    assert "{ reconcile: false }" in script
+    assert "if (render && reconcile && invalidIds.length) rebuildTargets();" in script
+    assert "验证异常" in script
+    assert "function clearSwitcherAccountError" in script
 
 
 def test_format_review_targets_are_warning_only_and_never_execute() -> None:

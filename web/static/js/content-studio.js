@@ -50,12 +50,15 @@
         // iOS 风格目标选择器（竖排滑块）：平台开关 → 账号多选 → 每平台模式
         switcherToggles: {},
         switcherAccounts: {},
+        switcherAccountDiagnostics: {},
         switcherSelected: {},
         switcherModes: {},
         switcherControllers: {},
         switcherSequences: {},
         switcherAccountLoadFailed: {},
         bulkAccountSelecting: false,
+        accountRefreshPromise: null,
+        lastAccountRefreshAt: 0,
         targetSaveDesired: [],
         targetSavePending: null,
         targetSavePromise: null,
@@ -1498,14 +1501,37 @@
         const accounts = state.switcherAccounts[platformId] || [];
         const selected = state.switcherSelected[platformId] || [];
         if (accounts.length === 0) {
+            const unavailable = state.switcherAccountDiagnostics[platformId] || [];
             const empty = document.createElement('div');
             empty.className = 'target-accounts-empty';
-            empty.textContent = '该平台暂无可用账号（需要 VALID 登录态）。';
+            if (unavailable.length) {
+                const labels = {
+                    VERIFYING: '正在验证',
+                    UNVERIFIED: '尚未验证',
+                    LOGIN_REQUIRED: '需要重新登录',
+                    EXPIRED: '登录态已过期',
+                    ERROR: '验证异常',
+                    BUSY: '账号正忙',
+                };
+                const states = Array.from(new Set(unavailable.map(account =>
+                    labels[account.session_status] || account.session_status || '状态未知')));
+                empty.textContent = `检测到 ${unavailable.length} 个账号，但当前状态为“${states.join('、')}”，尚不能投递。`;
+            } else {
+                empty.textContent = '该平台暂无可用账号（需要 VALID 登录态）。';
+            }
+            const refresh = document.createElement('button');
+            refresh.type = 'button';
+            refresh.className = 'btn btn-sm btn-outline-primary';
+            refresh.textContent = '刷新账号状态';
+            refresh.addEventListener('click', () => loadSwitcherAccounts(
+                platformId,
+                { reconcile: false },
+            ));
             const link = document.createElement('a');
             link.className = 'btn btn-sm btn-outline-secondary';
             link.href = `/accounts?platform=${encodeURIComponent(platformId)}`;
             link.textContent = '前往账号管理';
-            return [empty, link];
+            return [empty, refresh, link];
         }
         return accounts.map(account => {
             const wrap = document.createElement('label');
@@ -1532,7 +1558,7 @@
             state.switcherSelected[platformId] = selected
                 .filter(accountId => validIds.has(accountId));
         }
-        if (invalidIds.length) {
+        if (invalidIds.length && apply) {
             setMessage(
                 'target-builder-error',
                 `${platformLabel(platformId)}有 ${invalidIds.length} 个历史目标账号当前不是 VALID，已从本次选择中移除；历史投递记录不受影响。`,
@@ -1541,7 +1567,23 @@
         return invalidIds;
     }
 
-    async function loadSwitcherAccounts(platformId, { render = true } = {}) {
+    function clearSwitcherAccountError(platformId) {
+        const error = byId('target-builder-error');
+        if (!error) return;
+        const text = error.textContent || '';
+        const label = platformLabel(platformId);
+        const isAccountLoadError = text.startsWith(`加载${label}账号失败：`);
+        const isInvalidSelectionError = text.startsWith(`${label}有 `)
+            && text.includes('当前不是 VALID');
+        if (isAccountLoadError || isInvalidSelectionError) {
+            setMessage('target-builder-error', '');
+        }
+    }
+
+    async function loadSwitcherAccounts(
+        platformId,
+        { render = true, reconcile = render } = {},
+    ) {
         const sequence = (state.switcherSequences[platformId] || 0) + 1;
         state.switcherSequences[platformId] = sequence;
         state.switcherControllers[platformId]?.abort();
@@ -1553,21 +1595,31 @@
         updateBulkTargetControls();
         try {
             const url = endpoint(root.dataset.accountsUrlTemplate, 'platform', platformId);
-            const payload = await jsonResponse(await fetch(url, { signal: controller.signal, headers: { Accept: 'application/json' } }));
+            const payload = await jsonResponse(await fetch(url, {
+                signal: controller.signal,
+                cache: 'no-store',
+                headers: { Accept: 'application/json' },
+            }));
             if (sequence !== state.switcherSequences[platformId]) return null;
             if (payload.platform && payload.platform !== platformId) throw new Error('账号响应与所选平台不匹配');
-            state.switcherAccounts[platformId] = (Array.isArray(payload.accounts) ? payload.accounts : []).filter(account => account.session_status === 'VALID');
+            const allAccounts = Array.isArray(payload.accounts) ? payload.accounts : [];
+            state.switcherAccountDiagnostics[platformId] = allAccounts.filter(account =>
+                account.status === 'ACTIVE' && account.session_status !== 'VALID');
+            state.switcherAccounts[platformId] = allAccounts.filter(account =>
+                account.status === 'ACTIVE' && account.session_status === 'VALID');
             state.switcherAccountLoadFailed[platformId] = false;
+            clearSwitcherAccountError(platformId);
             const invalidIds = reconcileLoadedAccountSelection(
                 platformId,
                 state.switcherAccounts[platformId],
-                { apply: render },
+                { apply: reconcile },
             );
             if (render) reRenderSwitcherRow(platformId);
-            if (render && invalidIds.length) rebuildTargets();
+            if (render && reconcile && invalidIds.length) rebuildTargets();
         } catch (error) {
             if (error.name === 'AbortError' || sequence !== state.switcherSequences[platformId]) return null;
             state.switcherAccounts[platformId] = [];
+            state.switcherAccountDiagnostics[platformId] = [];
             state.switcherAccountLoadFailed[platformId] = true;
             setMessage('target-builder-error', `加载${platformLabel(platformId)}账号失败：${error.message || '未知错误'}`);
             if (render) reRenderSwitcherRow(platformId);
@@ -1578,6 +1630,22 @@
         return state.switcherAccountLoadFailed[platformId]
             ? null
             : (state.switcherAccounts[platformId] || []);
+    }
+
+    async function refreshEnabledSwitcherAccounts({ force = false } = {}) {
+        if (document.hidden || state.accountRefreshPromise) return state.accountRefreshPromise;
+        const platformIds = enabledPlatformIds();
+        if (!platformIds.length) return null;
+        const now = Date.now();
+        if (!force && now - state.lastAccountRefreshAt < 1000) return null;
+        state.lastAccountRefreshAt = now;
+        state.accountRefreshPromise = Promise.all(platformIds.map(platformId =>
+            loadSwitcherAccounts(platformId, { render: false, reconcile: false })))
+            .finally(() => {
+                state.accountRefreshPromise = null;
+                renderTargetSwitcher();
+            });
+        return state.accountRefreshPromise;
     }
 
     function reRenderSwitcherRow(platformId) {
@@ -1597,6 +1665,8 @@
         const nextSelected = { ...state.switcherSelected };
         for (const platform of deliverable) {
             nextToggles[platform.id] = !turnOff;
+            delete state.switcherAccounts[platform.id];
+            delete state.switcherAccountDiagnostics[platform.id];
             if (turnOff) {
                 state.switcherControllers[platform.id]?.abort();
                 delete state.switcherControllers[platform.id];
@@ -1637,10 +1707,6 @@
         let allAccountsLoaded = true;
         try {
             const loaded = await Promise.all(platformIds.map(async platformId => {
-                if (Array.isArray(state.switcherAccounts[platformId])
-                    && !state.switcherAccountLoadFailed[platformId]) {
-                    return [platformId, state.switcherAccounts[platformId]];
-                }
                 const accounts = await loadSwitcherAccounts(platformId, { render: false });
                 return [platformId, accounts];
             }));
@@ -1670,6 +1736,8 @@
         const platform = state.platforms.find(item => item.id === platformId);
         if (!platform?.delivery_enabled) return;
         state.switcherToggles[platformId] = checked;
+        delete state.switcherAccounts[platformId];
+        delete state.switcherAccountDiagnostics[platformId];
         if (!checked) {
             state.switcherControllers[platformId]?.abort();
             delete state.switcherControllers[platformId];
@@ -2429,6 +2497,23 @@
 
     function bindEvents() {
         window.addEventListener('hashchange', syncStudioStepFromLocation);
+        window.addEventListener('focus', () => {
+            refreshEnabledSwitcherAccounts().catch(error => {
+                setMessage('target-builder-error', `刷新账号状态失败：${error.message || '未知错误'}`);
+            });
+        });
+        window.addEventListener('pageshow', event => {
+            if (!event.persisted) return;
+            refreshEnabledSwitcherAccounts({ force: true }).catch(error => {
+                setMessage('target-builder-error', `刷新账号状态失败：${error.message || '未知错误'}`);
+            });
+        });
+        document.addEventListener('visibilitychange', () => {
+            if (document.hidden) return;
+            refreshEnabledSwitcherAccounts().catch(error => {
+                setMessage('target-builder-error', `刷新账号状态失败：${error.message || '未知错误'}`);
+            });
+        });
         window.addEventListener('popstate', () => {
             openDraftFromLocation().catch(error => {
                 setMessage('studio-fatal', `加载工作台失败：${error.message || '未知错误'}`);

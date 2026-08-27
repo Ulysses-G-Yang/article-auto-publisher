@@ -118,6 +118,12 @@
 .session-add-row > div > strong { color: #0f172a; font-size: .82rem; }
 .session-add-row > div > span:last-child { color: #64748b; font-size: .7rem; }
 .session-add-row > .btn { min-height: 44px; flex: 0 0 auto; }
+.smzdm-login-guidance { display: flex; align-items: flex-start; gap: .75rem; margin-top: 1rem; padding: 1rem; border: 1px solid var(--app-card-border); border-left: 4px solid var(--app-primary); border-radius: var(--app-radius); background: var(--app-surface); background: color-mix(in srgb, var(--app-primary) 5%, var(--app-surface)); color: var(--app-text); }
+.smzdm-login-guidance.d-none { display: none; }
+.smzdm-login-guidance-icon { display: grid; width: 44px; height: 44px; flex: 0 0 44px; place-items: center; border-radius: var(--app-radius-control); background: var(--app-surface); background: color-mix(in srgb, var(--app-primary) 12%, var(--app-surface)); color: var(--app-primary); font-size: 1.1rem; }
+.smzdm-login-guidance strong { display: block; font-size: .82rem; line-height: 1.5; }
+.smzdm-login-guidance ol { margin: .5rem 0 0; padding-left: 1.15rem; color: var(--app-muted); font-size: .72rem; line-height: 1.6; }
+.smzdm-login-guidance li + li { margin-top: .2rem; }
 .account-activity-drawer { --cui-offcanvas-width: min(500px, 100vw); }
 .account-activity-drawer .offcanvas-header { padding: 1.1rem 1.25rem; border-bottom-color: #e2e8f0 !important; }
 .account-activity-drawer .offcanvas-body { padding: 1.25rem; }
@@ -139,6 +145,7 @@
     .session-account-list { grid-template-columns: 1fr; }
     .session-add-row { align-items: stretch; flex-direction: column; gap: .8rem; }
     .session-add-row > .btn { width: 100%; }
+    .smzdm-login-guidance { padding: .8rem; }
 }
 
 @media (max-width: 575.98px) {

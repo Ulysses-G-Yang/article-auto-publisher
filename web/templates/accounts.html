@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 {% block title %}账号管理 - 自动化文章发布工具{% endblock %}
 {% block header_title %}平台账号{% endblock %}
-{% block extra_head %}<link rel="stylesheet" href="{{ url_for('static', filename='css/account-sessions.css') }}">{% endblock %}
+{% block extra_head %}<link rel="stylesheet" href="{{ url_for('static', filename='css/account-sessions.css', v='20260827-smzdm-native-login') }}">{% endblock %}
 {% block content %}
 <div class="container account-page-shell">
     <div class="page-heading account-page-heading">
@@ -45,9 +45,20 @@
             <div class="account-list-heading"><div><span class="section-eyebrow">第二步：查看账号</span><h3>账号状态</h3></div><span class="account-list-note">状态文字与颜色同时呈现</span></div>
             <div id="session-accounts-empty" class="empty-state d-none"><i class="cil-user-unfollow" aria-hidden="true"></i><strong>该平台还没有账号</strong><span>添加账号会创建新的隔离浏览器 Profile。</span></div>
             <div id="session-account-list" class="session-account-list d-none" aria-live="polite"></div>
+            <aside id="smzdm-login-guidance" class="smzdm-login-guidance d-none" aria-labelledby="smzdm-login-guidance-title">
+                <div class="smzdm-login-guidance-icon" aria-hidden="true"><i class="cil-browser"></i></div>
+                <div>
+                    <strong id="smzdm-login-guidance-title">什么值得买需要在原生 Chrome 中人工登录</strong>
+                    <ol>
+                        <li>点击“重新登录”或“添加账号”后，在打开的原生 Chrome 窗口中人工完成验证。</li>
+                        <li>系统不会代拖滑块，也不会自动刷新什么值得买页面。</li>
+                        <li>登录完成后请关闭整个 Chrome 窗口；本页每 2.5 秒仅查询一次本机账号状态。</li>
+                    </ol>
+                </div>
+            </aside>
             <div id="session-login-status" class="alert alert-info d-none mt-3 mb-0" role="status"></div>
             <div class="session-add-row">
-                <div><span class="section-eyebrow">第三步：执行操作</span><strong>还没有要管理的账号？</strong><span>新账号会创建独立 Profile，并打开交互登录窗口。</span></div>
+                <div><span class="section-eyebrow">第三步：执行操作</span><strong>还没有要管理的账号？</strong><span>新账号会创建独立 Profile，并在原生 Chrome 人工窗口中打开交互登录。</span></div>
                 <button id="add-platform-account" class="btn btn-primary" type="button" disabled><i class="cil-plus me-1" aria-hidden="true"></i>添加该平台账号</button>
             </div>
         </div>
@@ -65,4 +76,4 @@
 </section>
 {% endblock %}
 
-{% block extra_scripts %}<script src="{{ url_for('static', filename='js/account-sessions.js', v='20260821-account-lifecycle') }}"></script>{% endblock %}
+{% block extra_scripts %}<script src="{{ url_for('static', filename='js/account-sessions.js', v='20260827-smzdm-native-login') }}"></script>{% endblock %}

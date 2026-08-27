@@ -144,6 +144,7 @@ def test_session_policy_and_activity_have_independent_states() -> None:
 
 
 def test_polling_is_targeted_bounded_and_not_global() -> None:
+    template = read("web/templates/accounts.html")
     script = read("web/static/js/account-sessions.js")
 
     assert "const MAX_TARGETED_POLLS = 12" in script
@@ -153,6 +154,38 @@ def test_polling_is_targeted_bounded_and_not_global() -> None:
     assert "attempts >= MAX_TARGETED_POLLS" in script
     assert "setInterval" not in script
     assert "window.setInterval" not in script
+    assert "本页每 2.5 秒仅查询一次本机账号状态" in template
+    assert "系统不会代拖滑块，也不会自动刷新什么值得买页面" in template
+    assert "系统不会代拖滑块，也不会自动刷新平台" in script
+
+
+def test_smzdm_manual_login_guidance_is_platform_scoped() -> None:
+    template = read("web/templates/accounts.html")
+    script = read("web/static/js/account-sessions.js")
+
+    assert 'id="smzdm-login-guidance"' in template
+    assert "原生 Chrome 中人工登录" in template
+    assert "完成后请关闭整个 Chrome 窗口" in template
+    assert "function updateSmzdmLoginGuidance()" in script
+    assert "guidance.classList.toggle('d-none', !smzdmSelected())" in script
+    assert "updateSmzdmLoginGuidance();" in script
+    assert "function smzdmManualLoginMessage(accountLabelText)" in script
+    assert "RATE_LIMITED" in script
+    assert "不会自动重试或刷新平台" in script
+
+
+def test_smzdm_native_chrome_errors_have_actionable_messages() -> None:
+    script = read("web/static/js/account-sessions.js")
+
+    expected_messages = {
+        "SMZDM_NATIVE_CHROME_NOT_FOUND": "请先安装或修复 Chrome",
+        "LOGIN_WINDOW_STILL_OPEN": "请完成登录后关闭整个 Chrome 窗口",
+        "SMZDM_PROFILE_NOT_RELEASED": "请关闭该账号的整个 Chrome 窗口",
+        "SMZDM_NATIVE_LOGIN_FAILED": "然后重试一次",
+    }
+    for error_code, action in expected_messages.items():
+        assert f"{error_code}:" in script
+        assert action in script
 
 
 def test_multi_account_area_has_mobile_and_accessibility_contracts() -> None:

@@ -58,6 +58,7 @@ def make_policy() -> HeartbeatPolicy:
 async def add_account(
     database: AccountDatabase,
     *,
+    platform: str = "xiaoheihe",
     platform_user_id: str | None = None,
     status: str = "ACTIVE",
     session_status: str = "VALID",
@@ -76,7 +77,7 @@ async def add_account(
     account_id = str(uuid.uuid4())
     account = PlatformAccount(
         account_id=account_id,
-        platform="xiaoheihe",
+        platform=platform,
         platform_user_id=platform_user_id or f"platform-user-{account_id}",
         display_name="测试账号",
         profile_path=str(profile_path or f"/not-used-by-fake-verify/{uuid.uuid4()}"),
@@ -922,6 +923,84 @@ class _ServiceFakePlatform:
         self.cleaned = True
         if self.cleanup_error is not None:
             raise self.cleanup_error
+
+
+class _SmzdmInteractiveFakePlatform:
+    platform_name = "smzdm"
+
+    def __init__(self) -> None:
+        self.events: list[str] = []
+        self.logged_in = False
+
+    async def initialize(self) -> None:
+        self.events.append("initialize")
+
+    async def check_login(self) -> bool:
+        self.events.append("check-login")
+        if not self.logged_in:
+            raise AssertionError("SMZDM interactive login must skip the pre-login check")
+        return True
+
+    async def login(self) -> None:
+        self.events.append("login")
+        await self.initialize()
+        self.logged_in = True
+
+    async def fetch_identity_payload(self) -> dict:
+        self.events.append("identity")
+        return {"ok": True, "user_id": "fake-id", "display_name": "Fake"}
+
+    async def cleanup(self) -> None:
+        self.events.append("cleanup")
+
+
+def test_smzdm_interactive_login_skips_precheck_then_verifies_once(
+    tmp_path: Path,
+) -> None:
+    from account_sessions.account_service import AccountSessionService
+
+    async def scenario() -> tuple[dict, _SmzdmInteractiveFakePlatform, AccountDatabase]:
+        database = AccountDatabase(database_url(tmp_path))
+        await database.initialize()
+        profile = tmp_path / "profiles" / "smzdm" / "interactive"
+        profile.mkdir(parents=True)
+        account = await add_account(
+            database,
+            platform="smzdm",
+            profile_path=profile,
+            platform_user_id="fake-id",
+            session_status="UNVERIFIED",
+        )
+        platform = _SmzdmInteractiveFakePlatform()
+        service = AccountSessionService(
+            database,
+            seed_legacy_profiles=False,
+            platform_factory=lambda _account: platform,
+            allowed_profile_roots=(tmp_path / "profiles",),
+        )
+        try:
+            result = await service.verify_account(
+                account.account_id,
+                HEARTBEAT_ACCESS_CONTEXT,
+                allow_interactive_login=True,
+            )
+            return result, platform, database
+        except BaseException:
+            await database.dispose()
+            raise
+
+    result, platform, database = run(scenario())
+    try:
+        assert result["session_status"] == "VALID"
+        assert platform.events == [
+            "login",
+            "initialize",
+            "check-login",
+            "identity",
+            "cleanup",
+        ]
+    finally:
+        run(database.dispose())
 
 
 def test_account_service_check_login_false_is_login_required_without_interactive_login(

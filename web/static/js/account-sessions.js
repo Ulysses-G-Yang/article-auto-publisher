@@ -38,10 +38,14 @@
     };
 
     const loginErrorMessages = {
-        RATE_LIMITED: '平台提示“您的操作过于频繁，请稍后再试”，未自动重试。',
-        LOGIN_REQUIRED: '登录未完成，请在浏览器窗口中完成登录。',
-        BROWSER_CONTEXT_CLOSED: '登录窗口已关闭，未完成登录。',
-        LOGIN_IN_PROGRESS: 'SMZDM 登录已在其他标签页进行中，请勿重复点击。',
+        RATE_LIMITED: '什么值得买提示“操作过于频繁”。系统已停止本次状态查询，不会自动重试或刷新平台；请关闭整个 Chrome 窗口，稍后再人工登录。',
+        LOGIN_REQUIRED: '登录未完成，请在原生 Chrome 窗口中人工完成验证，完成后关闭整个 Chrome 窗口。',
+        BROWSER_CONTEXT_CLOSED: '原生 Chrome 窗口已关闭，登录尚未完成。',
+        LOGIN_IN_PROGRESS: '什么值得买人工登录窗口正在使用中，请勿重复点击。',
+        SMZDM_NATIVE_CHROME_NOT_FOUND: '未找到可用的原生 Chrome。请先安装或修复 Chrome，再重新发起什么值得买登录；系统不会改用自动化浏览器。',
+        LOGIN_WINDOW_STILL_OPEN: '原生 Chrome 登录窗口仍未关闭。请完成登录后关闭整个 Chrome 窗口，本页会继续查询本机账号状态。',
+        SMZDM_PROFILE_NOT_RELEASED: '该账号的浏览器 Profile 仍被 Chrome 占用。请关闭该账号的整个 Chrome 窗口，等待几秒后再验证，不要重复点击登录。',
+        SMZDM_NATIVE_LOGIN_FAILED: '原生 Chrome 登录窗口启动失败。请确认 Chrome 可以正常打开、该账号旧窗口已经关闭，然后重试一次。',
     };
 
     function endpoint(template, key, value) {
@@ -90,6 +94,17 @@
 
     function smzdmSelected() {
         return state.platform === SMZDM_PLATFORM;
+    }
+
+    function updateSmzdmLoginGuidance() {
+        const guidance = byId('smzdm-login-guidance');
+        if (!guidance) return;
+        guidance.classList.toggle('d-none', !smzdmSelected());
+    }
+
+    function smzdmManualLoginMessage(accountLabelText) {
+        const target = accountLabelText ? ` ${accountLabelText}` : '';
+        return `已在原生 Chrome 中打开${target}的人工登录窗口。请人工完成验证，完成后关闭整个 Chrome 窗口；系统不会代拖滑块，也不会自动刷新平台。本页每 2.5 秒仅查询本机账号状态。`;
     }
 
     function loginErrorMessage(code) {
@@ -401,6 +416,7 @@
         byId('add-platform-account').disabled = false;
         byId('add-platform-account').textContent = `添加${selectedPlatform.display_name}账号`;
         setMessage('session-login-status', '');
+        updateSmzdmLoginGuidance();
         loadAccounts();
     }
 
@@ -421,7 +437,7 @@
 
     async function verifyAccount(account) {
         if (smzdmSelected() && (state.loginInFlight || account.login_in_progress)) {
-            setMessage('session-login-status', 'SMZDM 登录已在进行中，请勿重复点击。');
+            setMessage('session-login-status', '什么值得买人工登录窗口正在使用中，请勿重复点击。');
             return;
         }
         const platformAtStart = state.platform;
@@ -437,7 +453,7 @@
         } catch (error) {
             if (!isCurrentContext(platformAtStart, generationAtStart)) return;
             if (platformAtStart === SMZDM_PLATFORM && error.code === 'LOGIN_IN_PROGRESS') {
-                setMessage('session-login-status', 'SMZDM 登录已在其他标签页进行中，请勿重复点击。');
+                setMessage('session-login-status', '什么值得买人工登录窗口正在使用中，请勿重复点击。');
                 await loadAccounts({ silent: true });
             } else {
                 if (platformAtStart === SMZDM_PLATFORM) setLoginInFlight(false);
@@ -448,7 +464,7 @@
 
     async function loginAccount(account) {
         if (smzdmSelected() && (state.loginInFlight || account.login_in_progress)) {
-            setMessage('session-login-status', 'SMZDM 登录已在进行中，请勿重复点击。');
+            setMessage('session-login-status', '什么值得买人工登录窗口正在使用中，请勿重复点击。');
             return;
         }
         const platformAtStart = state.platform;
@@ -459,12 +475,14 @@
             const url = endpoint(root.dataset.accountLoginUrlTemplate, 'account_id', account.account_id);
             await jsonResponse(await fetch(url, { method: 'POST', headers: { Accept: 'application/json' } }));
             if (!isCurrentContext(platformAtStart, generationAtStart)) return;
-            setMessage('session-login-status', `正在为 ${accountLabel(account)} 打开人工登录窗口；将复用该账号的隔离 Profile。`);
+            setMessage('session-login-status', platformAtStart === SMZDM_PLATFORM
+                ? smzdmManualLoginMessage(accountLabel(account))
+                : `正在为 ${accountLabel(account)} 打开人工登录窗口；将复用该账号的隔离 Profile。`);
             startTargetedPolling(account.account_id);
         } catch (error) {
             if (!isCurrentContext(platformAtStart, generationAtStart)) return;
             if (platformAtStart === SMZDM_PLATFORM && error.code === 'LOGIN_IN_PROGRESS') {
-                setMessage('session-login-status', 'SMZDM 登录已在其他标签页进行中，请勿重复点击。');
+                setMessage('session-login-status', '什么值得买人工登录窗口正在使用中，请勿重复点击。');
                 await loadAccounts({ silent: true });
             } else {
                 if (platformAtStart === SMZDM_PLATFORM) setLoginInFlight(false);
@@ -528,7 +546,7 @@
     async function addPlatformAccount() {
         if (!state.platform) return;
         if (smzdmSelected() && state.loginInFlight) {
-            setMessage('session-login-status', 'SMZDM 登录已在进行中，请勿重复点击。');
+            setMessage('session-login-status', '什么值得买人工登录窗口正在使用中，请勿重复点击。');
             return;
         }
         const platformAtStart = state.platform;
@@ -539,13 +557,15 @@
             const url = endpoint(root.dataset.loginUrlTemplate, 'platform', state.platform);
             const payload = await jsonResponse(await fetch(url, { method: 'POST', headers: { Accept: 'application/json' } }));
             if (!isCurrentContext(platformAtStart, generationAtStart)) return;
-            setMessage('session-login-status', `已创建${platformLabel(platformAtStart)}隔离浏览器 Profile，请在打开的人工登录窗口中完成交互登录。`);
+            setMessage('session-login-status', platformAtStart === SMZDM_PLATFORM
+                ? smzdmManualLoginMessage('新账号')
+                : `已创建${platformLabel(platformAtStart)}隔离浏览器 Profile，请在打开的人工登录窗口中完成交互登录。`);
             const targetAccountId = payload.account_id || payload.account?.account_id;
             if (targetAccountId) startTargetedPolling(targetAccountId);
         } catch (error) {
             if (!isCurrentContext(platformAtStart, generationAtStart)) return;
             if (platformAtStart === SMZDM_PLATFORM && error.code === 'LOGIN_IN_PROGRESS') {
-                setMessage('session-login-status', 'SMZDM 登录已在其他标签页进行中，请勿重复点击。');
+                setMessage('session-login-status', '什么值得买人工登录窗口正在使用中，请勿重复点击。');
                 await loadAccounts({ silent: true });
             } else {
                 if (platformAtStart === SMZDM_PLATFORM) setLoginInFlight(false);

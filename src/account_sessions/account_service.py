@@ -294,11 +294,23 @@ class AccountSessionService:
         platform = self.platform_factory(account)
         try:
             with lease:
-                await platform.initialize()
-                valid = await _check_login(platform, read_only=not allow_interactive_login)
-                if not valid and allow_interactive_login:
+                # SMZDM 的显式人工登录直接交接给同一 Profile 的原生 Chrome。
+                # 不在交接前 initialize 或 check_login，确保原生 Chrome 前
+                # 完全没有 Playwright 进程或 HOME/login 自动化导航。login()
+                # 会在原生窗口关闭且 Profile 解锁后自行 initialize，随后
+                # 这里只做一次现有登录态和身份验证。
+                if allow_interactive_login and account.platform == "smzdm":
                     await platform.login()
                     valid = await _check_login(platform, read_only=False)
+                else:
+                    await platform.initialize()
+                    valid = await _check_login(
+                        platform,
+                        read_only=not allow_interactive_login,
+                    )
+                    if not valid and allow_interactive_login:
+                        await platform.login()
+                        valid = await _check_login(platform, read_only=False)
                 if not valid:
                     raise AccountIdentityError(
                         "登录态已失效，需要重新登录",

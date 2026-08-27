@@ -4,9 +4,10 @@
 - smzdm Web 登录页（https://zhiyou.smzdm.com/user/login）只有
   手机号/邮箱 + 密码 + 「60 天内免登录」表单，**没有扫码登录**
   （页面上 120x120 二维码是 App 下载码，不是登录码）。
-- 因此本适配器采用「人工凭据登录」：打开可见浏览器窗口，由用户在
-  窗口内输入账号密码（凭据不进入代码、不存储、不记录），适配器
-  轮询会话 cookie 确认登录成功。
+- 因此本适配器采用「原生 Chrome 人工凭据登录」：显式登录时先释放
+  空白 Playwright context，再以同一账号 Profile 启动不带自动化或远程
+  调试参数的系统 Chrome，只打开登录页。用户完成操作并关闭整个窗口后，
+  才重新建立 Playwright context，执行一次只读会话与身份确认。
 
 登录成功信号：.smzdm.com 出现 sess 会话 cookie（登录后才下发）。
 身份提取采用「捕获页面自身响应」模式 + 首页 DOM 兜底。
@@ -17,7 +18,11 @@ from __future__ import annotations
 import asyncio
 import copy
 import json
+import os
 import re
+import shutil
+import subprocess
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from urllib.parse import urljoin, urlsplit
 
@@ -28,7 +33,6 @@ from platforms.base import (
     BrowserLifecycleError,
     DraftResultUnknownError,
     DraftVerificationEvidence,
-    LoginRequiredError,
     PlatformAutomationError,
     SelectorError,
 )
@@ -42,7 +46,6 @@ from platforms.media_progress import safe_media_progress
 
 LOGIN_URL = "https://zhiyou.smzdm.com/user/login"
 HOME_URL = "https://zhiyou.smzdm.com/"
-USERNAME_SELECTOR = "input#username.form-input"
 RATE_LIMIT_NOTICE = "您的操作过于频繁，请稍后再试"
 IDENTITY_NAME_KEYS = {"nickname", "user_name", "screen_name", "name", "nick"}
 IDENTITY_UID_KEYS = {"smzdm_id", "uid", "user_id", "id"}
@@ -51,6 +54,9 @@ BODY_SELECTOR = "div.ProseMirror"
 DRAFTS_URL = "https://post.smzdm.com/tougao/"
 BODY_IMAGE_TRIGGER = ".right-menu-bar:has(svg.zicon-picture)"
 BODY_IMAGE_INPUT = 'input[type="file"][accept*="image"]'
+CHROME_PROFILE_LOCK_NAMES = ("SingletonLock", "SingletonCookie", "SingletonSocket")
+
+NativeChromeRunner = Callable[[Path, str, float], Awaitable[None]]
 
 
 class PlatformNotImplementedError(PlatformAutomationError):
@@ -71,18 +77,116 @@ class SmzdmLoginCheckError(PlatformAutomationError):
     error_code = "SMZDM_LOGIN_CHECK_ERROR"
 
 
+class SmzdmNativeChromeNotFoundError(PlatformAutomationError):
+    """系统没有找到可供人工登录使用的原生 Chrome。"""
+
+    error_code = "SMZDM_NATIVE_CHROME_NOT_FOUND"
+
+
+class SmzdmLoginWindowStillOpenError(PlatformAutomationError):
+    """原生 Chrome 登录窗口仍在运行，禁止自动结束用户进程。"""
+
+    error_code = "LOGIN_WINDOW_STILL_OPEN"
+
+
+class SmzdmProfileNotReleasedError(PlatformAutomationError):
+    """原生或 Playwright Chrome 尚未释放账号 Profile。"""
+
+    error_code = "SMZDM_PROFILE_NOT_RELEASED"
+
+
+class SmzdmNativeLoginLaunchError(PlatformAutomationError):
+    """原生 Chrome 人工登录交接无法安全完成。"""
+
+    error_code = "SMZDM_NATIVE_LOGIN_FAILED"
+
+
+def _find_system_chrome() -> Path | None:
+    """定位 Windows 系统 Chrome；不记录任何候选绝对路径。"""
+
+    candidates: list[Path] = []
+    for variable in ("PROGRAMFILES", "PROGRAMFILES(X86)", "LOCALAPPDATA"):
+        root = os.environ.get(variable, "").strip()
+        if root:
+            candidates.append(
+                Path(root) / "Google" / "Chrome" / "Application" / "chrome.exe"
+            )
+    for command in ("chrome.exe", "chrome"):
+        resolved = shutil.which(command)
+        if resolved:
+            candidates.append(Path(resolved))
+    return next((candidate for candidate in candidates if candidate.is_file()), None)
+
+
+async def _run_native_chrome_login(
+    profile_dir: Path,
+    login_url: str,
+    timeout_seconds: float,
+) -> None:
+    """用同一 Profile 启动无自动化参数的系统 Chrome，并等待整个窗口退出。"""
+
+    chrome = _find_system_chrome()
+    if chrome is None:
+        raise SmzdmNativeChromeNotFoundError(
+            "SMZDM_NATIVE_CHROME_NOT_FOUND: 未找到系统 Chrome"
+        )
+    try:
+        process = await asyncio.create_subprocess_exec(
+            str(chrome),
+            f"--user-data-dir={profile_dir}",
+            "--new-window",
+            "--no-first-run",
+            "--no-default-browser-check",
+            login_url,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except FileNotFoundError as exc:
+        raise SmzdmNativeChromeNotFoundError(
+            "SMZDM_NATIVE_CHROME_NOT_FOUND: 未找到系统 Chrome"
+        ) from exc
+    except Exception as exc:
+        raise SmzdmNativeLoginLaunchError(
+            "SMZDM_NATIVE_LOGIN_FAILED: 无法启动原生 Chrome 登录窗口"
+        ) from exc
+
+    try:
+        await asyncio.wait_for(process.wait(), timeout=timeout_seconds)
+    except TimeoutError as exc:
+        raise SmzdmLoginWindowStillOpenError(
+            "LOGIN_WINDOW_STILL_OPEN: 人工登录等待超时，请关闭整个 Chrome 窗口"
+        ) from exc
+    except asyncio.CancelledError as exc:
+        raise SmzdmLoginWindowStillOpenError(
+            "LOGIN_WINDOW_STILL_OPEN: 登录任务已取消，请关闭整个 Chrome 窗口"
+        ) from exc
+
+    if process.returncode not in (0, None):
+        raise SmzdmNativeLoginLaunchError(
+            "SMZDM_NATIVE_LOGIN_FAILED: 原生 Chrome 异常退出"
+        )
+
+
 class SmzdmPlatform(BasePlatform):
     """什么值得买账号会话与 DRAFT-only 图文投递适配器。"""
 
     platform_name = "smzdm"
     SESSION_COOKIE_NAMES = frozenset({"sess"})
-    LOGIN_POLL_ATTEMPTS = 120
-    LOGIN_POLL_INTERVAL_SECONDS = 3
+    NATIVE_LOGIN_TIMEOUT_SECONDS = 15 * 60
+    PROFILE_RELEASE_POLL_ATTEMPTS = 60
+    PROFILE_RELEASE_POLL_INTERVAL_SECONDS = 0.5
     POST_IMAGE_PARAGRAPH_POLL_ATTEMPTS = 20
     POST_IMAGE_PARAGRAPH_POLL_INTERVAL_SECONDS = 0.25
 
-    def __init__(self, **kwargs):
+    def __init__(
+        self,
+        *,
+        native_chrome_runner: NativeChromeRunner | None = None,
+        **kwargs,
+    ):
         super().__init__(**kwargs)
+        self._native_chrome_runner = native_chrome_runner or _run_native_chrome_login
         self.last_login_error = ""
         self._identity_payload: dict[str, str | int | bool] | None = None
         self._expected_persisted_blocks: list[dict] | None = None
@@ -169,26 +273,73 @@ class SmzdmPlatform(BasePlatform):
             ) from exc
 
     async def login(self):
-        """打开 smzdm 登录页，由用户在可见窗口中输入凭据完成登录。"""
+        """交接给原生 Chrome 人工登录；关闭窗口后恢复 Playwright 只读验证。"""
 
-        self._require_page_alive("smzdm 打开登录页")
-        await self.page.goto(
+        profile_dir = self.profile_dir
+        if profile_dir is None or not profile_dir.is_dir():
+            raise SmzdmNativeLoginLaunchError(
+                "SMZDM_NATIVE_LOGIN_FAILED: 账号 Profile 不存在"
+            )
+
+        await self._close_playwright_for_native_login()
+        await self._wait_for_profile_release(profile_dir)
+        await self._native_chrome_runner(
+            profile_dir,
             LOGIN_URL,
-            wait_until="domcontentloaded",
-            timeout=20000,
+            float(self.NATIVE_LOGIN_TIMEOUT_SECONDS),
         )
-        await self._wait_for_login_form_or_rate_limit()
-        await self._show_login_hint()
+        await self._wait_for_profile_release(profile_dir)
+        try:
+            await self.initialize()
+        except PlatformAutomationError as exc:
+            if "PROFILE_IN_USE" in str(exc):
+                raise SmzdmProfileNotReleasedError(
+                    "SMZDM_PROFILE_NOT_RELEASED: 原生 Chrome 未释放账号 Profile"
+                ) from exc
+            raise
+        self.last_login_error = ""
 
-        for _ in range(self.LOGIN_POLL_ATTEMPTS):
-            self._require_page_alive("smzdm 等待登录")
-            await self._raise_if_rate_limited()
-            if await self._has_session_cookie_signal():
-                self.last_login_error = ""
+    async def _close_playwright_for_native_login(self) -> None:
+        """关闭当前空白 Playwright context，确保原生 Chrome 独占 Profile。"""
+
+        context = self.context
+        playwright = self.playwright
+        close_error: Exception | None = None
+        try:
+            if context is not None:
+                await context.close()
+        except Exception as exc:  # noqa: BLE001
+            if not self._exception_means_browser_closed(exc):
+                close_error = exc
+        finally:
+            self.context = None
+            self.page = None
+            self.browser = None
+        try:
+            if playwright is not None:
+                await playwright.stop()
+        except Exception as exc:  # noqa: BLE001
+            if close_error is None and not self._exception_means_browser_closed(exc):
+                close_error = exc
+        finally:
+            self.playwright = None
+        if close_error is not None:
+            raise SmzdmNativeLoginLaunchError(
+                "SMZDM_NATIVE_LOGIN_FAILED: 无法安全释放自动化浏览器"
+            ) from close_error
+
+    async def _wait_for_profile_release(self, profile_dir: Path) -> None:
+        """等待 Chrome 自己移除 Profile 锁；绝不删除锁文件。"""
+
+        for _ in range(self.PROFILE_RELEASE_POLL_ATTEMPTS):
+            if not any(
+                (profile_dir / name).exists() for name in CHROME_PROFILE_LOCK_NAMES
+            ):
                 return
-            await asyncio.sleep(self.LOGIN_POLL_INTERVAL_SECONDS)
-        self.last_login_error = "LOGIN_REQUIRED: smzdm 登录超时，请重新完成登录"
-        raise LoginRequiredError(self.last_login_error)
+            await asyncio.sleep(self.PROFILE_RELEASE_POLL_INTERVAL_SECONDS)
+        raise SmzdmProfileNotReleasedError(
+            "SMZDM_PROFILE_NOT_RELEASED: Chrome 未释放账号 Profile"
+        )
 
     async def _visible_rate_limit_notice(self) -> bool:
         """只读可见页面/iframe 元素，不读取表单、Cookie 或网络响应。"""
@@ -228,53 +379,6 @@ class SmzdmPlatform(BasePlatform):
         if await self._visible_rate_limit_notice():
             self.last_login_error = "RATE_LIMITED"
             raise SmzdmRateLimitedError("RATE_LIMITED")
-
-    async def _wait_for_login_form_or_rate_limit(self) -> None:
-        """把 20 秒表单等待切成有界小步，期间立即识别限频提示。"""
-
-        wait_for_selector = getattr(self.page, "wait_for_selector", None)
-        if not callable(wait_for_selector):
-            await self._raise_if_rate_limited()
-            return
-        deadline = asyncio.get_running_loop().time() + 20
-        while True:
-            await self._raise_if_rate_limited()
-            remaining = deadline - asyncio.get_running_loop().time()
-            if remaining <= 0:
-                return
-            try:
-                await wait_for_selector(
-                    USERNAME_SELECTOR,
-                    state="visible",
-                    timeout=min(500, max(1, int(remaining * 1000))),
-                )
-                return
-            except Exception as exc:
-                if self._exception_means_browser_closed(exc):
-                    raise BrowserLifecycleError(
-                        "BROWSER_CONTEXT_CLOSED: smzdm 登录表单等待时页面已关闭"
-                    ) from exc
-
-    async def _show_login_hint(self):
-        """页面顶部显示登录提示条。"""
-
-        try:
-            await self.page.evaluate(
-                """() => {
-                    const div = document.createElement('div');
-                    div.id = 'smzdm-login-hint';
-                    div.style.cssText = 'position:fixed;top:10px;left:50%;'
-                        + 'transform:translateX(-50%);background:#fe6d01;color:#fff;'
-                        + 'padding:12px 24px;border-radius:8px;font-size:16px;'
-                        + 'z-index:999999;box-shadow:0 4px 12px rgba(0,0,0,0.3);'
-                        + 'text-align:center;';
-                    div.innerHTML = '请在下方表单输入手机号/邮箱和密码登录'
-                        + '（可勾选 60 天内免登录）<br><small>登录成功后此窗口自动关闭</small>';
-                    document.body.appendChild(div);
-                }"""
-            )
-        except Exception:
-            pass
 
     async def fetch_identity_payload(self) -> dict[str, str | int | bool]:
         """返回 smzdm 同源确认的最小平台身份（捕获 + DOM 兜底）。"""

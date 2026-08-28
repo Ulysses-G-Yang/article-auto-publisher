@@ -15,6 +15,7 @@ import uuid
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timedelta, timezone
 from typing import Any
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
@@ -431,6 +432,179 @@ class DeliveryService:
         operation, account = await self._load_operation(operation_id)
         access.require("logs.read", account.account_id)
         return operation_payload(operation, account)
+
+    async def reconcile_readonly_draft_verification(
+        self,
+        operation_id: str,
+        access: AccessContext,
+        probe: dict,
+    ) -> dict:
+        """用只读草稿证据调和结果未知执行单，绝不重新执行平台操作。
+
+        只读探针只能证明云端草稿实体存在，不能证明冻结图文完整，因此只会
+        升级为 ``DRAFT_SAVED_WITH_WARNINGS``。能与原执行单 URL/ID 对上时记录
+        为精确绑定；只有唯一同标题卡片时也允许解除“失败”展示，但明确记录
+        为“未归因到本次执行”，不创建文章映射。
+        """
+
+        operation, account = await self._load_operation(operation_id)
+        access.require("draft.create", account.account_id)
+        access.require("logs.read", account.account_id)
+
+        previous_status = str(operation.status or "")
+        current_payload = operation_payload(operation, account)
+        response = {
+            "status_updated": False,
+            "previous_status": previous_status,
+            "operation_status": previous_status,
+            "operation": current_payload,
+        }
+        if operation.mode != "DRAFT":
+            response["reconciliation_reason"] = "NOT_DRAFT_OPERATION"
+            return response
+        if previous_status not in {"RESULT_UNKNOWN", "DELIVERY_INCOMPLETE"}:
+            response["reconciliation_reason"] = "STATUS_NOT_RECONCILABLE"
+            return response
+
+        existing_evidence = _decode_evidence(operation.verification_evidence) or {}
+        binding_method = _readonly_probe_binding_method(
+            operation,
+            existing_evidence,
+            probe,
+        )
+        if binding_method is None:
+            response["reconciliation_reason"] = "DRAFT_ENTITY_NOT_BOUND"
+            return response
+
+        now = datetime.now(timezone.utc)
+        draft_url = str(probe.get("draft_url") or "").strip()
+        candidate_id = _readonly_probe_entity_id(
+            operation.platform,
+            draft_url,
+            probe.get("structure"),
+        )
+        previous_error_code = operation.error_code
+        exact_binding = binding_method in {"draft_url", "platform_article_id"}
+        merged_evidence = dict(existing_evidence)
+        merged_evidence.update(
+            {
+                "draft_url": draft_url,
+                "draft_list_title_unique": int(probe.get("match_count") or 0) == 1,
+                "draft_list_match_count": int(probe.get("match_count") or 0),
+            }
+        )
+        if exact_binding:
+            merged_evidence["draft_entity_bound"] = True
+            merged_evidence["draft_entity_source"] = (
+                existing_evidence.get("draft_entity_source")
+                or "existing_draft_id"
+            )
+        else:
+            merged_evidence["draft_entity_bound"] = False
+            merged_evidence["draft_entity_source"] = "title_match_without_baseline"
+            merged_evidence["draft_entity_id_match"] = False
+        if binding_method in {"draft_url", "platform_article_id"}:
+            merged_evidence["draft_entity_id_match"] = True
+        merged_evidence["readonly_probe"] = {
+            "confirmed_at": now.isoformat(),
+            "draft_url": draft_url,
+            "entity_id": candidate_id,
+            "binding_method": binding_method,
+            "attributed_to_operation": exact_binding,
+            "match_count": int(probe.get("match_count") or 0),
+            "previous_status": previous_status,
+            "previous_error_code": previous_error_code,
+            "previous_entity_bound": existing_evidence.get("draft_entity_bound"),
+        }
+        evidence_json = json.dumps(merged_evidence, ensure_ascii=False)
+        warning_code = (
+            "DRAFT_CONTENT_UNVERIFIED"
+            if exact_binding
+            else "DRAFT_ENTITY_UNATTRIBUTED"
+        )
+        warning_message = (
+            "只读核验已确认云端草稿存在，完整图文仍需人工核对"
+            if exact_binding
+            else "平台存在唯一同标题草稿，但未能证明由本次执行新建；请人工核对"
+        )
+
+        previous_evidence_raw = operation.verification_evidence
+        evidence_condition = (
+            DeliveryOperation.verification_evidence.is_(None)
+            if previous_evidence_raw is None
+            else DeliveryOperation.verification_evidence == previous_evidence_raw
+        )
+        values: dict[str, Any] = {
+            "status": "DRAFT_SAVED_WITH_WARNINGS",
+            "draft_url": draft_url,
+            "error_code": warning_code,
+            "error_message": warning_message,
+            "verification_evidence": evidence_json,
+        }
+        if exact_binding:
+            values.update(
+                {
+                    "article_mapping_status": (
+                        ARTICLE_MAPPING_PENDING
+                        if self.delivery_event_sink is not None
+                        else ARTICLE_MAPPING_NOT_PENDING
+                    ),
+                    "article_mapping_error_code": None,
+                    "article_mapping_last_attempt_at": None,
+                }
+            )
+        if exact_binding and candidate_id:
+            values["platform_article_id"] = candidate_id
+
+        updated = False
+        async with self.database.session() as session:
+            result = await session.execute(
+                update(DeliveryOperation)
+                .where(
+                    DeliveryOperation.operation_id == operation_id,
+                    DeliveryOperation.mode == "DRAFT",
+                    DeliveryOperation.status == previous_status,
+                    evidence_condition,
+                )
+                .values(**values)
+                .execution_options(synchronize_session=False)
+            )
+            updated = result.rowcount == 1
+            if updated:
+                session.add(
+                    activity_for(
+                        account,
+                        access,
+                        action="DRAFT_PROBE_STATUS_RECONCILED",
+                        level="WARN",
+                        message=(
+                            "只读核验确认云端草稿实体，执行单由"
+                            f" {previous_status} 调和为草稿已保存（需核对）"
+                        ),
+                        operation_id=operation_id,
+                    )
+                )
+
+        if updated and exact_binding:
+            await self._dispatch_article_mapping(operation_id)
+        operation, current_account = await self._load_operation(operation_id)
+        response.update(
+            {
+                "status_updated": updated,
+                "operation_status": operation.status,
+                "operation": operation_payload(operation, current_account),
+                "reconciliation_reason": (
+                    (
+                        "DRAFT_ENTITY_CONFIRMED"
+                        if exact_binding
+                        else "DRAFT_CARD_CONFIRMED_UNATTRIBUTED"
+                    )
+                    if updated
+                    else "CONCURRENT_STATE_CHANGED"
+                ),
+            }
+        )
+        return response
 
     async def list_recent_operations(
         self,
@@ -1089,6 +1263,139 @@ def _decode_evidence(raw: str | None) -> dict | None:
     except (TypeError, ValueError):
         return None
     return value if isinstance(value, dict) else None
+
+
+def _canonical_draft_url(value: object) -> str | None:
+    """规范化受控草稿 URL，供同一实体比较；不发起网络请求。"""
+
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    try:
+        parsed = urlsplit(raw)
+    except ValueError:
+        return None
+    if not parsed.scheme or not parsed.netloc:
+        return None
+    query = urlencode(sorted(parse_qsl(parsed.query, keep_blank_values=True)))
+    path = parsed.path.rstrip("/") or "/"
+    fragment = parsed.fragment.rstrip("/")
+    return urlunsplit(
+        (
+            parsed.scheme.lower(),
+            parsed.netloc.lower(),
+            path,
+            query,
+            fragment,
+        )
+    )
+
+
+def _readonly_probe_entity_id(
+    platform: str,
+    draft_url: object,
+    structure: object,
+) -> str | None:
+    """从平台白名单 URL/结构字段提取稳定草稿 ID。"""
+
+    raw = str(draft_url or "").strip()
+    try:
+        parsed = urlsplit(raw)
+    except ValueError:
+        return None
+    host = parsed.netloc.lower().split(":", 1)[0]
+    allowed_hosts = {
+        "xiaoheihe": {"www.xiaoheihe.cn", "xiaoheihe.cn"},
+        "zol": {"post.zol.com.cn"},
+        "zhihu": {"www.zhihu.com", "zhihu.com", "zhuanlan.zhihu.com"},
+        "weibo": {"card.weibo.com", "me.weibo.com", "weibo.com"},
+        "smzdm": {"zhiyou.smzdm.com"},
+        "baijiahao": {"baijiahao.baidu.com"},
+    }
+    if host not in allowed_hosts.get(str(platform or ""), set()):
+        return None
+
+    structure_id: str | None = None
+    if isinstance(structure, dict):
+        for key in ("draft_id", "article_id"):
+            value = structure.get(key)
+            if isinstance(value, bool) or not isinstance(value, (str, int)):
+                continue
+            normalized = str(value).strip()
+            if normalized and len(normalized) <= 255:
+                structure_id = normalized
+                break
+
+    query = {key.lower(): value for key, value in parse_qsl(parsed.query)}
+    url_id: str | None = None
+    for key in ("draftid", "draft_id", "article_id"):
+        value = str(query.get(key) or "").strip()
+        if value and len(value) <= 255:
+            url_id = value
+            break
+
+    if url_id is None:
+        route = f"{parsed.path}/{parsed.fragment}"
+        patterns = {
+            "xiaoheihe": r"/article/(\d+)(?:/|$)",
+            "zhihu": r"/p/(\d+)(?:/|$)",
+            "weibo": r"/draft/(\d+)(?:/|$)",
+            "smzdm": r"/edit/(\d+)(?:/|$)",
+        }
+        pattern = patterns.get(str(platform or ""))
+        if pattern:
+            match = re.search(pattern, route, flags=re.IGNORECASE)
+            if match:
+                url_id = match.group(1)
+
+    if structure_id and url_id and structure_id != url_id:
+        return None
+    return structure_id or url_id
+
+
+def _readonly_probe_binding_method(
+    operation: DeliveryOperation,
+    evidence: dict,
+    probe: dict,
+) -> str | None:
+    """确认只读探针命中的是原执行单已知实体，而非仅标题相同。"""
+
+    if probe.get("title_matched") is not True:
+        return None
+    match_count = int(probe.get("match_count") or 0)
+    draft_url = str(probe.get("draft_url") or "").strip()
+    candidate_url = _canonical_draft_url(draft_url)
+    candidate_id = _readonly_probe_entity_id(
+        operation.platform,
+        draft_url,
+        probe.get("structure"),
+    )
+    if match_count < 1 or candidate_url is None or candidate_id is None:
+        return None
+
+    platform_article_id = str(operation.platform_article_id or "").strip()
+    if platform_article_id and platform_article_id != candidate_id:
+        return None
+
+    known_urls = {
+        value
+        for value in (
+            _canonical_draft_url(operation.draft_url),
+            _canonical_draft_url(evidence.get("draft_url")),
+        )
+        if value
+    }
+    if candidate_url in known_urls:
+        return "draft_url"
+
+    if platform_article_id and platform_article_id == candidate_id:
+        return "platform_article_id"
+
+    # 最低门槛只用于避免“平台明明有草稿，页面却一直失败”：该状态仍是
+    # WITH_WARNINGS，且不会创建文章映射或声称属于本次执行。
+    if match_count == 1:
+        return "unique_title_stable_entity"
+    return None
 
 
 def _evidence_confirms_entity(evidence: object) -> bool:

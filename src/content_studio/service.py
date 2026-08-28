@@ -897,6 +897,7 @@ class ContentStudioService:
         target_id: str,
         *,
         status: str,
+        expected_status: str | None = None,
         operation_id: str | None = None,
         error_code: str | None = None,
         error_message: str | None = None,
@@ -908,19 +909,38 @@ class ContentStudioService:
             target = await session.get(DeliveryPlanTarget, target_id)
             if target is None or target.plan_id != plan_id:
                 raise DraftValidationError("投递计划目标不存在")
-            target.status = status
-            target.operation_id = operation_id
-            target.error_code = error_code
-            target.error_message = error_message
-            target.degraded = degraded
-            target.verification_evidence = (
-                json.dumps(verification_evidence, ensure_ascii=False)
-                if verification_evidence is not None
-                else None
-            )
-            target.execution_claim_id = None
-            target.execution_claim_expires_at = None
-            target.updated_at = _utc_now()
+            target_values = {
+                "status": status,
+                "operation_id": operation_id,
+                "error_code": error_code,
+                "error_message": error_message,
+                "degraded": degraded,
+                "verification_evidence": (
+                    json.dumps(verification_evidence, ensure_ascii=False)
+                    if verification_evidence is not None
+                    else None
+                ),
+                "execution_claim_id": None,
+                "execution_claim_expires_at": None,
+                "updated_at": _utc_now(),
+            }
+            if expected_status is None:
+                for key, value in target_values.items():
+                    setattr(target, key, value)
+            else:
+                updated = await session.execute(
+                    update(DeliveryPlanTarget)
+                    .where(
+                        DeliveryPlanTarget.target_id == target_id,
+                        DeliveryPlanTarget.plan_id == plan_id,
+                        DeliveryPlanTarget.status == expected_status,
+                    )
+                    .values(**target_values)
+                    .execution_options(synchronize_session=False)
+                )
+                if updated.rowcount != 1:
+                    return await self._plan_payload(session, plan)
+                await session.refresh(target)
             await session.flush()
             statuses = list(
                 (

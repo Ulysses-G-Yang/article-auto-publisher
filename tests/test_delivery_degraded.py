@@ -14,6 +14,7 @@ from __future__ import annotations
 # ruff: noqa: E402, I001
 
 import asyncio
+import json
 import sys
 import uuid
 from datetime import datetime, timezone
@@ -29,11 +30,83 @@ if str(SRC_ROOT) not in sys.path:
 
 from account_sessions.account_service import AccountSessionService
 from account_sessions.database import AccountDatabase
-from account_sessions.delivery_service import DeliveryService
+from account_sessions.delivery_service import DeliveryService, _readonly_probe_entity_id
 from account_sessions.errors import AccountUnavailableError
 from account_sessions.models import DeliveryOperation, PlatformAccount
 from account_sessions.permissions import LOCAL_WEB_CONTEXT
 from platforms.base import BasePlatform, DraftResultUnknownError, DraftVerificationEvidence
+
+
+@pytest.mark.parametrize(
+    ("platform", "draft_url", "structure", "expected"),
+    [
+        (
+            "xiaoheihe",
+            "https://www.xiaoheihe.cn/creator/editor/edit/article/188000366",
+            {},
+            "188000366",
+        ),
+        (
+            "zol",
+            "https://post.zol.com.cn/v2/manage/publish?draftId=4567",
+            {},
+            "4567",
+        ),
+        (
+            "zhihu",
+            "https://zhuanlan.zhihu.com/p/2076357674413863724/edit",
+            {},
+            "2076357674413863724",
+        ),
+        (
+            "weibo",
+            "https://card.weibo.com/article/v5/editor#/draft/3930546",
+            {},
+            "3930546",
+        ),
+        (
+            "smzdm",
+            "https://zhiyou.smzdm.com/user/article/edit/8910",
+            {"draft_id": "8910"},
+            "8910",
+        ),
+        (
+            "baijiahao",
+            "https://baijiahao.baidu.com/builder/rc/edit?article_id=1122",
+            {},
+            "1122",
+        ),
+    ],
+)
+def test_readonly_probe_extracts_only_stable_platform_entity_ids(
+    platform: str,
+    draft_url: str,
+    structure: dict,
+    expected: str,
+) -> None:
+    assert _readonly_probe_entity_id(platform, draft_url, structure) == expected
+
+
+def test_readonly_probe_rejects_entity_id_from_untrusted_host() -> None:
+    assert (
+        _readonly_probe_entity_id(
+            "smzdm",
+            "https://example.invalid/user/article/edit/8910",
+            {"draft_id": "8910"},
+        )
+        is None
+    )
+
+
+def test_readonly_probe_rejects_structure_and_url_id_conflict() -> None:
+    assert (
+        _readonly_probe_entity_id(
+            "smzdm",
+            "https://zhiyou.smzdm.com/user/article/edit/8910",
+            {"draft_id": "9999"},
+        )
+        is None
+    )
 
 
 def account_url(tmp_path: Path) -> str:
@@ -359,6 +432,228 @@ def test_publish_full_success_is_not_degraded() -> None:
 
 
 class TestDeliveryServiceDegradedPersistence:
+    @pytest.mark.asyncio
+    async def test_readonly_probe_reconciles_exact_unknown_draft_without_retry(
+        self, tmp_path: Path
+    ) -> None:
+        database, delivery, account = await make_delivery(tmp_path)
+        try:
+            operation_id = str(uuid.uuid4())
+            await insert_operation(database, account, operation_id)
+            completed_at = datetime(2026, 8, 28, tzinfo=timezone.utc)
+            draft_url = "https://card.weibo.com/article/v5/editor#/draft/3930546"
+            async with database.session() as session:
+                operation = await session.get(DeliveryOperation, operation_id)
+                assert operation is not None
+                operation.status = "RESULT_UNKNOWN"
+                operation.error_code = "DRAFT_RESULT_UNKNOWN"
+                operation.error_message = "保存后核验超时"
+                operation.draft_url = draft_url
+                operation.completed_at = completed_at
+                operation.verification_evidence = json.dumps(
+                    {
+                        "draft_url": draft_url,
+                        "draft_entity_bound": True,
+                        "summary": "本次草稿实体已绑定，完整图文待核对",
+                    },
+                    ensure_ascii=False,
+                )
+
+            result = await delivery.reconcile_readonly_draft_verification(
+                operation_id,
+                LOCAL_WEB_CONTEXT,
+                {
+                    "title_matched": True,
+                    "match_count": 1,
+                    "draft_url": draft_url,
+                    "structure": {"source": "draft_list_id"},
+                },
+            )
+
+            assert result["status_updated"] is True
+            assert result["operation_status"] == "DRAFT_SAVED_WITH_WARNINGS"
+            operation = await read_operation(database, operation_id)
+            assert operation.status == "DRAFT_SAVED_WITH_WARNINGS"
+            assert operation.error_code == "DRAFT_CONTENT_UNVERIFIED"
+            assert operation.platform_article_id == "3930546"
+            stored_completed_at = operation.completed_at
+            assert stored_completed_at is not None
+            if stored_completed_at.tzinfo is None:
+                stored_completed_at = stored_completed_at.replace(tzinfo=timezone.utc)
+            assert stored_completed_at == completed_at
+            evidence = json.loads(operation.verification_evidence or "{}")
+            assert evidence["readonly_probe"]["previous_error_code"] == (
+                "DRAFT_RESULT_UNKNOWN"
+            )
+            assert evidence["readonly_probe"]["binding_method"] == "draft_url"
+        finally:
+            await database.dispose()
+
+    @pytest.mark.asyncio
+    async def test_readonly_probe_marks_unique_cloud_card_as_unattributed_warning(
+        self, tmp_path: Path
+    ) -> None:
+        database, delivery, account = await make_delivery(tmp_path)
+        try:
+            operation_id = str(uuid.uuid4())
+            await insert_operation(database, account, operation_id)
+            async with database.session() as session:
+                operation = await session.get(DeliveryOperation, operation_id)
+                assert operation is not None
+                operation.status = "RESULT_UNKNOWN"
+                operation.error_code = "DRAFT_RESULT_UNKNOWN"
+                operation.verification_evidence = json.dumps(
+                    {"draft_entity_bound": False},
+                    ensure_ascii=False,
+                )
+
+            result = await delivery.reconcile_readonly_draft_verification(
+                operation_id,
+                LOCAL_WEB_CONTEXT,
+                {
+                    "title_matched": True,
+                    "match_count": 1,
+                    "draft_url": (
+                        "https://card.weibo.com/article/v5/editor#/draft/3930546"
+                    ),
+                    "structure": {"source": "draft_list_id"},
+                },
+            )
+
+            assert result["status_updated"] is True
+            assert result["reconciliation_reason"] == (
+                "DRAFT_CARD_CONFIRMED_UNATTRIBUTED"
+            )
+            operation = await read_operation(database, operation_id)
+            assert operation.status == "DRAFT_SAVED_WITH_WARNINGS"
+            assert operation.error_code == "DRAFT_ENTITY_UNATTRIBUTED"
+            assert operation.platform_article_id is None
+            assert operation.article_mapping_status == "NOT_PENDING"
+            evidence = json.loads(operation.verification_evidence or "{}")
+            assert evidence["draft_entity_bound"] is False
+            assert evidence["readonly_probe"]["attributed_to_operation"] is False
+        finally:
+            await database.dispose()
+
+    @pytest.mark.asyncio
+    async def test_legacy_entity_flag_without_id_stays_unattributed(
+        self, tmp_path: Path
+    ) -> None:
+        database, delivery, account = await make_delivery(tmp_path)
+        try:
+            operation_id = str(uuid.uuid4())
+            await insert_operation(database, account, operation_id)
+            async with database.session() as session:
+                operation = await session.get(DeliveryOperation, operation_id)
+                assert operation is not None
+                operation.status = "DELIVERY_INCOMPLETE"
+                operation.error_code = "DELIVERY_INCOMPLETE"
+                operation.verification_evidence = json.dumps(
+                    {"draft_entity_bound": True},
+                    ensure_ascii=False,
+                )
+
+            result = await delivery.reconcile_readonly_draft_verification(
+                operation_id,
+                LOCAL_WEB_CONTEXT,
+                {
+                    "title_matched": True,
+                    "match_count": 1,
+                    "draft_url": (
+                        "https://card.weibo.com/article/v5/editor#/draft/3930546"
+                    ),
+                    "structure": {"source": "draft_list_id"},
+                },
+            )
+
+            assert result["status_updated"] is True
+            assert result["operation_status"] == "DRAFT_SAVED_WITH_WARNINGS"
+            assert result["operation"]["verification_evidence"]["readonly_probe"][
+                "binding_method"
+            ] == "unique_title_stable_entity"
+            assert result["operation"]["verification_evidence"][
+                "draft_entity_bound"
+            ] is False
+            assert result["operation"]["article_mapping_status"] == "NOT_PENDING"
+        finally:
+            await database.dispose()
+
+    @pytest.mark.asyncio
+    async def test_readonly_probe_never_promotes_definite_failure(
+        self, tmp_path: Path
+    ) -> None:
+        database, delivery, account = await make_delivery(tmp_path)
+        try:
+            operation_id = str(uuid.uuid4())
+            await insert_operation(database, account, operation_id)
+            async with database.session() as session:
+                operation = await session.get(DeliveryOperation, operation_id)
+                assert operation is not None
+                operation.status = "FAILED"
+                operation.error_code = "LOGIN_REQUIRED"
+                operation.draft_url = (
+                    "https://card.weibo.com/article/v5/editor#/draft/3930546"
+                )
+
+            result = await delivery.reconcile_readonly_draft_verification(
+                operation_id,
+                LOCAL_WEB_CONTEXT,
+                {
+                    "title_matched": True,
+                    "match_count": 1,
+                    "draft_url": (
+                        "https://card.weibo.com/article/v5/editor#/draft/3930546"
+                    ),
+                    "structure": {"source": "draft_list_id"},
+                },
+            )
+
+            assert result["status_updated"] is False
+            assert result["reconciliation_reason"] == "STATUS_NOT_RECONCILABLE"
+            operation = await read_operation(database, operation_id)
+            assert operation.status == "FAILED"
+            assert operation.error_code == "LOGIN_REQUIRED"
+        finally:
+            await database.dispose()
+
+    @pytest.mark.asyncio
+    async def test_readonly_probe_rejects_conflicting_stored_entity_id(
+        self, tmp_path: Path
+    ) -> None:
+        database, delivery, account = await make_delivery(tmp_path)
+        try:
+            operation_id = str(uuid.uuid4())
+            await insert_operation(database, account, operation_id)
+            candidate_url = (
+                "https://card.weibo.com/article/v5/editor#/draft/3930546"
+            )
+            async with database.session() as session:
+                operation = await session.get(DeliveryOperation, operation_id)
+                assert operation is not None
+                operation.status = "RESULT_UNKNOWN"
+                operation.error_code = "DRAFT_RESULT_UNKNOWN"
+                operation.draft_url = candidate_url
+                operation.platform_article_id = "8888888"
+
+            result = await delivery.reconcile_readonly_draft_verification(
+                operation_id,
+                LOCAL_WEB_CONTEXT,
+                {
+                    "title_matched": True,
+                    "match_count": 1,
+                    "draft_url": candidate_url,
+                    "structure": {"source": "draft_list_id"},
+                },
+            )
+
+            assert result["status_updated"] is False
+            assert result["reconciliation_reason"] == "DRAFT_ENTITY_NOT_BOUND"
+            operation = await read_operation(database, operation_id)
+            assert operation.status == "RESULT_UNKNOWN"
+            assert operation.platform_article_id == "8888888"
+        finally:
+            await database.dispose()
+
     @pytest.mark.asyncio
     async def test_mark_failed_delivery_incomplete_sets_distinct_status(
         self, tmp_path: Path

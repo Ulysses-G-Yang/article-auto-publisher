@@ -379,6 +379,9 @@ def test_draft_evidence_and_readonly_verify_contracts() -> None:
     assert "PROBE_UNSUPPORTED_PLATFORM" in script
     assert "PROBE_NOT_FOUND" in script
     assert "PROBE_TITLE_AMBIGUOUS" in script
+    assert "payload.status_updated" in script
+    assert "执行状态已改为“草稿已保存（需核对）”" in script
+    assert "root.dataset.planDetailUrlTemplate" in script
     # 核验必须只读：前端只 POST verify-draft，绝不触发执行接口
     assert "核验中…" in script
 

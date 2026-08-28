@@ -2926,6 +2926,16 @@ def test_plan_target_sync_persists_degraded_and_delivery_incomplete(
         degraded_plan = await service.create_delivery_plan(
             draft["draft_id"], targeted["revision"], LOCAL_WEB_CONTEXT
         )
+        stale = await service.set_plan_target_result(
+            degraded_plan["plan_id"],
+            degraded_plan["targets"][0]["target_id"],
+            status="DRAFT_SAVED_WITH_WARNINGS",
+            expected_status="RESULT_UNKNOWN",
+            operation_id=str(uuid.uuid4()),
+            error_code="DRAFT_CONTENT_UNVERIFIED",
+        )
+        assert stale["targets"][0]["status"] == "READY"
+
         success = await service.set_plan_target_result(
             degraded_plan["plan_id"],
             degraded_plan["targets"][0]["target_id"],
@@ -2998,12 +3008,128 @@ def test_plan_query_reconciles_failed_operation_and_relogin_reason() -> None:
         "plan-1",
         "target-1",
         status="FAILED",
+        expected_status="QUEUED",
         operation_id="operation-1",
         error_code="LOGIN_REQUIRED",
         error_message="账号登录态已失效",
         degraded=None,
         verification_evidence=None,
     )
+
+
+def test_plan_query_promotes_readonly_verified_unknown_draft() -> None:
+    from content_studio.web import ContentStudioRuntimeState
+
+    target = {
+        "target_id": "target-probe",
+        "operation_id": "operation-probe",
+        "status": "RESULT_UNKNOWN",
+        "error_code": "DRAFT_RESULT_UNKNOWN",
+        "error_message": "保存结果未知",
+        "degraded": None,
+        "verification_evidence": None,
+    }
+    evidence = {
+        "draft_entity_bound": True,
+        "readonly_probe": {"binding_method": "draft_url"},
+    }
+    updated = {
+        "plan_id": "plan-probe",
+        "status": "SUCCESS",
+        "targets": [
+            {
+                **target,
+                "status": "DRAFT_SAVED_WITH_WARNINGS",
+                "error_code": "DRAFT_CONTENT_UNVERIFIED",
+                "error_message": "只读核验已确认云端草稿存在，完整图文仍需人工核对",
+                "verification_evidence": evidence,
+            }
+        ],
+    }
+    service = SimpleNamespace(
+        get_delivery_plan=AsyncMock(
+            side_effect=[
+                {
+                    "plan_id": "plan-probe",
+                    "status": "FATAL",
+                    "targets": [target],
+                },
+                updated,
+            ]
+        ),
+        set_plan_target_result=AsyncMock(),
+    )
+    delivery = SimpleNamespace(
+        get_operation=AsyncMock(
+            return_value={
+                "operation_id": "operation-probe",
+                "status": "DRAFT_SAVED_WITH_WARNINGS",
+                "error_code": "DRAFT_CONTENT_UNVERIFIED",
+                "error_message": (
+                    "只读核验已确认云端草稿存在，完整图文仍需人工核对"
+                ),
+                "degraded": None,
+                "verification_evidence": evidence,
+            }
+        )
+    )
+    state = ContentStudioRuntimeState.__new__(ContentStudioRuntimeState)
+    state.account_state = SimpleNamespace(delivery=delivery)
+    state.service = service
+
+    result = run(state.reconcile_plan_operations("plan-probe", LOCAL_WEB_CONTEXT))
+
+    assert result == updated
+    service.set_plan_target_result.assert_awaited_once_with(
+        "plan-probe",
+        "target-probe",
+        status="DRAFT_SAVED_WITH_WARNINGS",
+        expected_status="RESULT_UNKNOWN",
+        operation_id="operation-probe",
+        error_code="DRAFT_CONTENT_UNVERIFIED",
+        error_message="只读核验已确认云端草稿存在，完整图文仍需人工核对",
+        degraded=None,
+        verification_evidence=evidence,
+    )
+
+
+def test_plan_query_never_downgrades_verified_warning_target() -> None:
+    from content_studio.web import ContentStudioRuntimeState
+
+    target = {
+        "target_id": "target-warning",
+        "operation_id": "operation-warning",
+        "status": "DRAFT_SAVED_WITH_WARNINGS",
+        "error_code": "DRAFT_CONTENT_UNVERIFIED",
+        "error_message": "完整图文仍需人工核对",
+    }
+    current = {
+        "plan_id": "plan-warning",
+        "status": "SUCCESS",
+        "targets": [target],
+    }
+    service = SimpleNamespace(
+        get_delivery_plan=AsyncMock(side_effect=[current, current]),
+        set_plan_target_result=AsyncMock(),
+    )
+    delivery = SimpleNamespace(
+        get_operation=AsyncMock(
+            return_value={
+                "operation_id": "operation-warning",
+                "status": "RESULT_UNKNOWN",
+                "error_code": "DRAFT_RESULT_UNKNOWN",
+                "error_message": "旧状态",
+            }
+        )
+    )
+    state = ContentStudioRuntimeState.__new__(ContentStudioRuntimeState)
+    state.account_state = SimpleNamespace(delivery=delivery)
+    state.service = service
+
+    result = run(state.reconcile_plan_operations("plan-warning", LOCAL_WEB_CONTEXT))
+
+    assert result == current
+    service.set_plan_target_result.assert_not_awaited()
 
 
 def test_plan_query_marks_missing_operation_result_unknown() -> None:
@@ -3043,6 +3169,7 @@ def test_plan_query_marks_missing_operation_result_unknown() -> None:
         "plan-missing",
         "target-missing",
         status="RESULT_UNKNOWN",
+        expected_status="QUEUED",
         operation_id="operation-missing",
         error_code="DELIVERY_OPERATION_UNAVAILABLE",
         error_message="执行单状态不可读取，请人工核对平台结果",

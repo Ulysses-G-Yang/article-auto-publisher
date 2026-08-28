@@ -283,17 +283,25 @@ class ContentStudioRuntimeState:
 
         两个数据库采用最终一致性。后台协程可能在写回计划前中断，所以每次
         查询计划都对仍处于 CREATING/QUEUED/RUNNING 的目标做一次只读对账。
-        已进入终态的目标不会被旧的活动状态倒退覆盖。
+        只读草稿核验还允许把结果未知终态单向升级为草稿成功；其他终态不会
+        被旧状态倒退覆盖。
         """
 
         plan = await self.service.get_delivery_plan(plan_id, access)
         for target in plan["targets"]:
             operation_id = target.get("operation_id")
-            if not operation_id or target.get("status") not in {
+            target_status = str(target.get("status") or "")
+            active_status = target_status in {
                 "CREATING",
                 "QUEUED",
                 "RUNNING",
-            }:
+            }
+            readonly_upgrade_status = target_status in {
+                "RESULT_UNKNOWN",
+                "DELIVERY_INCOMPLETE",
+                "DRAFT_SAVED_WITH_WARNINGS",
+            }
+            if not operation_id or not (active_status or readonly_upgrade_status):
                 continue
             try:
                 operation = await self.account_state.delivery.get_operation(
@@ -301,10 +309,14 @@ class ContentStudioRuntimeState:
                     access,
                 )
             except Exception:
+                if not active_status:
+                    # 已进入终态时读取失败不能覆盖既有真值。
+                    continue
                 await self.service.set_plan_target_result(
                     plan_id,
                     target["target_id"],
                     status="RESULT_UNKNOWN",
+                    expected_status=target_status,
                     operation_id=operation_id,
                     error_code="DELIVERY_OPERATION_UNAVAILABLE",
                     error_message="执行单状态不可读取，请人工核对平台结果",
@@ -313,6 +325,20 @@ class ContentStudioRuntimeState:
             operation_status = str(operation.get("status") or "")
             if operation_status not in PLAN_OPERATION_SYNC_STATUSES:
                 continue
+            if not active_status:
+                allowed_upgrades = {
+                    "RESULT_UNKNOWN": {
+                        "DRAFT_SAVED_WITH_WARNINGS",
+                        "DRAFT_SAVED",
+                    },
+                    "DELIVERY_INCOMPLETE": {
+                        "DRAFT_SAVED_WITH_WARNINGS",
+                        "DRAFT_SAVED",
+                    },
+                    "DRAFT_SAVED_WITH_WARNINGS": {"DRAFT_SAVED"},
+                }
+                if operation_status not in allowed_upgrades.get(target_status, set()):
+                    continue
             if (
                 operation_status == target.get("status")
                 and operation.get("error_code") == target.get("error_code")
@@ -326,6 +352,7 @@ class ContentStudioRuntimeState:
                 plan_id,
                 target["target_id"],
                 status=operation_status,
+                expected_status=target_status,
                 operation_id=operation_id,
                 error_code=(
                     operation.get("error_code")

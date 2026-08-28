@@ -24,9 +24,16 @@ from account_sessions.permissions import AccessContext
 
 
 class _FakeOperation:
-    def __init__(self, *, title: str, platform: str = "zhihu") -> None:
+    def __init__(
+        self,
+        *,
+        title: str,
+        platform: str = "zhihu",
+        status: str = "RESULT_UNKNOWN",
+    ) -> None:
         self.title = title
         self.platform = platform
+        self.status = status
 
 
 class _FakeAccount:
@@ -50,6 +57,14 @@ def _service(platform_result=None, *, account=None):
     operation = _FakeOperation(title="测试文章")
     delivery = MagicMock()
     delivery._load_operation = AsyncMock(return_value=(operation, account or _FakeAccount()))
+    delivery.reconcile_readonly_draft_verification = AsyncMock(
+        return_value={
+            "status_updated": True,
+            "previous_status": "RESULT_UNKNOWN",
+            "operation_status": "DRAFT_SAVED_WITH_WARNINGS",
+            "operation": {"status": "DRAFT_SAVED_WITH_WARNINGS"},
+        }
+    )
 
     accounts = MagicMock()
     accounts._lease = MagicMock(
@@ -79,7 +94,7 @@ def _service(platform_result=None, *, account=None):
 class TestDraftVerifyService:
     @pytest.mark.asyncio
     async def test_found_single_draft(self) -> None:
-        service, platform, _ = _service(
+        service, platform, delivery = _service(
             {
                 "title_matched": True,
                 "match_count": 1,
@@ -91,14 +106,29 @@ class TestDraftVerifyService:
         assert result["title_matched"] is True
         assert result["match_count"] == 1
         assert result["draft_url"].startswith("https://")
+        assert result["status_updated"] is True
+        assert result["operation_status"] == "DRAFT_SAVED_WITH_WARNINGS"
         platform.verify_draft_readonly.assert_awaited_once_with("测试文章")
+        delivery.reconcile_readonly_draft_verification.assert_awaited_once_with(
+            "op-1",
+            _access(),
+            {
+                "title_matched": True,
+                "match_count": 1,
+                "draft_url": "https://zhuanlan.zhihu.com/p/123/edit",
+                "structure": {"source": "draft_list"},
+            },
+        )
 
     @pytest.mark.asyncio
     async def test_not_found(self) -> None:
-        service, _, _ = _service({"error_code": "PROBE_NOT_FOUND", "error_message": "无"})
+        service, _, delivery = _service(
+            {"error_code": "PROBE_NOT_FOUND", "error_message": "无"}
+        )
         result = await service.verify_draft("op-1", _access())
         assert result["error_code"] == PROBE_NOT_FOUND
         assert result["title_matched"] is False
+        delivery.reconcile_readonly_draft_verification.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_ambiguous(self) -> None:

@@ -2292,7 +2292,28 @@
                 return;
             }
             if (payload.title_matched) {
-                setResult(`只读核验：平台草稿箱存在标题唯一匹配的草稿${payload.draft_url ? '。可在平台直接核对' : ''}。`, 'success');
+                if (payload.status_updated) {
+                    const unattributed = payload.operation?.error_code === 'DRAFT_ENTITY_UNATTRIBUTED';
+                    setResult(
+                        unattributed
+                            ? '平台存在唯一同标题草稿；已改为“草稿已保存（需核对）”，但未确认由本次执行新建，系统不会重新投递。'
+                            : '已确认本次云端草稿实体；执行状态已改为“草稿已保存（需核对）”，系统不会重新投递。',
+                        unattributed ? 'warning' : 'success',
+                    );
+                    if (state.plan?.plan_id) {
+                        try {
+                            state.plan = await jsonResponse(await fetch(
+                                endpoint(root.dataset.planDetailUrlTemplate, 'plan_id', state.plan.plan_id),
+                                { headers: { Accept: 'application/json' } },
+                            ));
+                            renderPlan();
+                        } catch (error) {
+                            setResult('云端草稿已确认且执行单已更新；计划刷新失败，请刷新页面查看最新状态。', 'warning');
+                        }
+                    }
+                    return;
+                }
+                setResult(`只读核验：平台草稿箱存在标题唯一匹配的草稿${payload.draft_url ? '。可在平台直接核对' : ''}；未绑定到本次执行单时不会改写状态。`, 'success');
             } else if (payload.error_code === 'PROBE_NOT_FOUND') {
                 setResult('只读核验：平台草稿箱未找到该标题草稿。', 'danger');
             } else if (payload.error_code === 'PROBE_TITLE_AMBIGUOUS') {

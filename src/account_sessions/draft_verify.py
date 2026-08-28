@@ -10,7 +10,8 @@
 - Profile 租约复用（与投递/心跳共用 AccountProfileLease），PROFILE_IN_USE
   返回错误码而非强抢。
 - 平台未实现只读钩子 → PROBE_UNSUPPORTED_PLATFORM（fail-closed）。
-- 结果不落平台侧数据，仅写 account_activity 审计（action=DRAFT_PROBE）。
+- 结果不落平台侧数据；精确绑定原执行单实体时，只调和本地执行单状态，
+  绝不重新保存或发布。
 """
 
 from __future__ import annotations
@@ -106,11 +107,29 @@ class DraftVerifyService:
                 http_status=409,
             ) from exc
 
+        normalized = self._normalize_result(result)
         await self._record_probe(operation_id, account, access, result)
+        reconciliation = {
+            "status_updated": False,
+            "operation_status": str(getattr(operation, "status", "") or ""),
+        }
+        if normalized.get("title_matched") is True:
+            reconcile = getattr(
+                self.delivery,
+                "reconcile_readonly_draft_verification",
+                None,
+            )
+            if reconcile is not None:
+                reconciliation = await reconcile(
+                    operation_id,
+                    access,
+                    normalized,
+                )
         return {
             "operation_id": operation_id,
             "platform": operation.platform,
-            **self._normalize_result(result),
+            **normalized,
+            **reconciliation,
         }
 
     async def _load_operation(self, operation_id: str):

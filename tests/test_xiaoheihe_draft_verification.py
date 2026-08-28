@@ -28,6 +28,12 @@ class _FakePage:
         click_error=None,
         save_button_count: int = 1,
         save_button_text: str = "保存草稿",
+        open_result_url: str = (
+            "https://www.xiaoheihe.cn/creator/editor/edit/article/987654321"
+        ),
+        open_match_count: int = 1,
+        reopen_result_url: str | None = None,
+        title_text: str = "",
     ):
         self.url = url
         self.snapshots = list(snapshots or [])
@@ -37,20 +43,35 @@ class _FakePage:
         self.click_count = 0
         self.evaluate_scripts: list[str] = []
         self.goto_count = 0
+        self.goto_urls: list[str] = []
         self.save_button_count = save_button_count
         self.save_button_text = save_button_text
+        self.open_result_url = open_result_url
+        self.open_match_count = open_match_count
+        self.reopen_result_url = reopen_result_url
+        self.title_text = title_text
+        self.open_payloads: list[str] = []
 
     def is_closed(self) -> bool:
         return self.closed
 
     async def goto(self, url: str, **_kwargs):
-        self.url = url
+        if "/creator/editor/edit/article/" in url and self.reopen_result_url:
+            self.url = self.reopen_result_url
+        else:
+            self.url = url
         self.goto_count += 1
+        self.goto_urls.append(url)
 
-    async def evaluate(self, script: str, *_args):
+    async def evaluate(self, script: str, *args):
         self.evaluate_scripts.append(script)
         if self.evaluate_error is not None:
             raise self.evaluate_error
+        if "expectedOpaque" in script:
+            self.open_payloads.append(args[0] if args else {})
+            if self.open_match_count == 1:
+                self.url = self.open_result_url
+            return self.open_match_count
         if self.snapshots:
             return self.snapshots.pop(0)
         return []
@@ -60,16 +81,17 @@ class _FakePage:
         if self.click_error is not None:
             raise self.click_error
 
-    def locator(self, _selector: str):
-        return _FakeButtonList(self)
+    def locator(self, selector: str):
+        return _FakeButtonList(self, selector)
 
     async def close(self):
         self.closed = True
 
 
 class _FakeButton:
-    def __init__(self, page: _FakePage):
+    def __init__(self, page: _FakePage, selector: str):
         self.page = page
+        self.selector = selector
 
     async def is_visible(self):
         return True
@@ -78,6 +100,8 @@ class _FakeButton:
         return True
 
     async def inner_text(self):
+        if self.selector == XiaoheihePlatform.TITLE_FIELD:
+            return self.page.title_text
         return self.page.save_button_text
 
     async def get_attribute(self, name: str):
@@ -88,14 +112,15 @@ class _FakeButton:
 
 
 class _FakeButtonList:
-    def __init__(self, page: _FakePage):
+    def __init__(self, page: _FakePage, selector: str):
         self.page = page
+        self.selector = selector
 
     async def count(self):
         return self.page.save_button_count
 
     def nth(self, _index: int):
-        return _FakeButton(self.page)
+        return _FakeButton(self.page, self.selector)
 
 
 class _FakeContext:
@@ -116,17 +141,20 @@ def _platform(main_page: _FakePage, baseline_page: _FakePage) -> XiaoheihePlatfo
     platform.context = _FakeContext(baseline_page)
     platform.simulator = _NoDelay()
     platform._dismiss_overlays = _NoDelay().random_delay
+    platform.DRAFT_ROUTE_VERIFY_INTERVAL_SECONDS = 0
+    platform.DRAFT_CONTENT_POLL_DELAYS = (0,)
     return platform
 
 
-def _candidate(opaque: str, title: str) -> dict[str, str]:
-    return {"opaque": opaque, "title": title}
+def _candidate(opaque: str, preview: str) -> dict[str, str]:
+    return {"opaque": opaque, "preview": preview}
 
 
-def _main_page(*snapshots) -> _FakePage:
+def _main_page(*snapshots, title_text: str = "") -> _FakePage:
     return _FakePage(
         url="https://www.xiaoheihe.cn/creator/editor/fixture",
         snapshots=list(snapshots),
+        title_text=title_text,
     )
 
 
@@ -140,19 +168,27 @@ def _baseline_page(*snapshots) -> _FakePage:
 @pytest.mark.asyncio
 async def test_save_draft_requires_new_exact_matching_card_and_closes_baseline_page():
     expected = "一个带空格的测试标题"
-    baseline = _baseline_page([_candidate("old", "旧草稿")])
+    baseline = _baseline_page([_candidate("old", "旧正文摘要")])
     main = _main_page(
-        [_candidate("old", "旧草稿")],
-        [_candidate("old", "旧草稿"), _candidate("new", expected)],
+        [_candidate("old", "旧正文摘要")],
+        [_candidate("old", "旧正文摘要"), _candidate("new", "新正文摘要")],
+        title_text=expected,
     )
     platform = _platform(main, baseline)
 
     result = await platform.save_draft(expected)
 
-    assert result == XiaoheihePlatform.DRAFTS_URL
+    assert result == "https://www.xiaoheihe.cn/creator/editor/edit/article/987654321"
     assert main.click_count == 1
     assert baseline.closed is True
     assert platform.context.new_page_count == 1
+    assert main.open_payloads[-1] == "new"
+    assert main.goto_urls[-1] == result
+    evidence = platform._last_draft_evidence.to_dict()
+    assert evidence["draft_entity_bound"] is True
+    assert evidence["draft_entity_source"] == "baseline_new_id"
+    assert evidence["draft_entity_id_match"] is True
+    assert evidence["draft_url"] == result
 
 
 @pytest.mark.asyncio
@@ -163,12 +199,16 @@ async def test_save_draft_reloads_slow_draft_list_without_repeating_save():
         {"candidates": [], "reliable": True},
         {"candidates": [], "reliable": True},
         {"candidates": [_candidate("new", expected)], "reliable": True},
+        title_text=expected,
     )
     platform = _platform(main, baseline)
 
-    assert await platform.save_draft(expected) == XiaoheihePlatform.DRAFTS_URL
+    assert await platform.save_draft(expected) == (
+        "https://www.xiaoheihe.cn/creator/editor/edit/article/987654321"
+    )
     assert main.click_count == 1
-    assert main.goto_count == 3
+    # 打开草稿箱、两次只读刷新、按数字 ID 显式重开编辑页。
+    assert main.goto_count == 4
 
 
 @pytest.mark.asyncio
@@ -232,9 +272,12 @@ async def test_hidden_or_non_card_candidate_is_ignored_by_snapshot_contract():
     assert "article.creator-draft__item" in snapshot_script
     assert ".creator-draft__list" in snapshot_script
     assert ".creator-draft__content" in snapshot_script
-    assert "fingerprintOccurrences" in snapshot_script
+    assert "occurrence_count" in snapshot_script
+    assert ".creator-draft__image" in snapshot_script
+    assert "preview" in snapshot_script
+    assert "hasStableListRoot" not in snapshot_script
     assert r"replace(/\s+/g" in snapshot_script
-    assert r"return /\/creator\/editor\/draft\/" in snapshot_script
+    assert "edit/article/[0-9]+" in snapshot_script
     assert "[role='status']" not in snapshot_script
     assert "document.body.innerText" not in snapshot_script
 
@@ -272,10 +315,13 @@ async def test_explicit_visible_empty_state_is_valid_baseline_for_first_new_card
     baseline = _baseline_page({"candidates": [], "reliable": True})
     main = _main_page(
         {"candidates": [_candidate("new", title)], "reliable": True},
+        title_text=title,
     )
     platform = _platform(main, baseline)
 
-    assert await platform.save_draft(title) == XiaoheihePlatform.DRAFTS_URL
+    assert await platform.save_draft(title) == (
+        "https://www.xiaoheihe.cn/creator/editor/edit/article/987654321"
+    )
     assert main.click_count == 1
     assert baseline.closed is True
 
@@ -336,22 +382,150 @@ async def test_browser_close_during_save_is_terminal_without_retry():
     assert baseline.closed is True
 
 
-def test_new_matching_draft_requires_exactly_one_new_entity():
-    title = "精确标题"
-    baseline = [_candidate("old", title)]
+def test_new_draft_requires_exactly_one_new_entity_without_title_filter():
+    title = "编辑页真实标题"
+    baseline = [_candidate("old", "旧正文摘要")]
     assert XiaoheihePlatform._has_new_matching_draft(
         baseline,
-        [_candidate("old", title), _candidate("new", title)],
+        [_candidate("old", "旧正文摘要"), _candidate("new", "新正文摘要")],
         title,
     )
     assert not XiaoheihePlatform._has_new_matching_draft(
         baseline,
-        [_candidate("old", title), _candidate("new-1", title), _candidate("new-2", title)],
+        [
+            _candidate("old", "旧正文摘要"),
+            _candidate("new-1", "新摘要一"),
+            _candidate("new-2", "新摘要二"),
+        ],
         title,
     )
 
 
-def test_snapshot_projection_discards_untrusted_fields_and_normalizes_title():
+def test_old_card_and_one_distinct_new_preview_can_bind() -> None:
+    title = "标题不会出现在草稿卡摘要里"
+    baseline = [_candidate("fingerprint:old", "旧摘要")]
+    current = [
+        _candidate("fingerprint:old", "旧摘要"),
+        _candidate("fingerprint:new", "新摘要"),
+    ]
+
+    candidate = XiaoheihePlatform._new_matching_draft_candidate(
+        baseline,
+        current,
+        title,
+    )
+
+    assert candidate == current[1]
+
+
+def test_duplicate_fingerprint_cannot_bind_a_specific_new_card() -> None:
+    title = "完全相同的同名草稿"
+    current = [
+        {
+            "opaque": "fingerprint:same",
+            "preview": title,
+            "occurrence_count": 2,
+        }
+    ]
+
+    assert XiaoheihePlatform._new_matching_draft_candidate([], current, title) is None
+
+
+@pytest.mark.parametrize(
+    ("url", "draft_id"),
+    [
+        (
+            "https://www.xiaoheihe.cn/creator/editor/edit/article/188000366",
+            "188000366",
+        ),
+        ("https://www.xiaoheihe.cn/creator/editor/edit/article/not-a-number", ""),
+        ("https://example.com/creator/editor/edit/article/188000366", ""),
+        ("https://www.xiaoheihe.cn/creator/draft", ""),
+    ],
+)
+def test_real_editor_route_extracts_only_stable_numeric_id(
+    url: str,
+    draft_id: str,
+) -> None:
+    assert XiaoheihePlatform._draft_id_from_editor_url(url) == draft_id
+
+
+@pytest.mark.parametrize(
+    ("url", "accepted"),
+    [
+        ("https://www.xiaoheihe.cn/creator/draft", True),
+        ("https://www.xiaoheihe.cn/creator/draft?article_type=all", True),
+        ("http://www.xiaoheihe.cn/creator/draft", False),
+        ("https://www.xiaoheihe.cn/creator/draft-old", False),
+        ("https://example.com/?next=/creator/draft", False),
+    ],
+)
+def test_drafts_route_requires_exact_https_origin_and_path(
+    url: str,
+    accepted: bool,
+) -> None:
+    assert XiaoheihePlatform._is_drafts_route(url) is accepted
+
+
+@pytest.mark.asyncio
+async def test_save_draft_rejects_card_navigation_without_stable_id() -> None:
+    title = "路由缺少稳定 ID"
+    baseline = _baseline_page([_candidate("old", "旧草稿")])
+    main = _FakePage(
+        url="https://www.xiaoheihe.cn/creator/editor/fixture",
+        snapshots=[[_candidate("old", "旧草稿"), _candidate("new", title)]],
+        open_result_url=(
+            "https://www.xiaoheihe.cn/creator/editor/edit/article/not-a-number"
+        ),
+    )
+    platform = _platform(main, baseline)
+
+    with pytest.raises(DraftResultUnknownError, match="稳定 ID"):
+        await platform.save_draft(title)
+    assert main.click_count == 1
+    assert len(main.open_payloads) == 1
+
+
+@pytest.mark.asyncio
+async def test_save_draft_rejects_redirect_to_different_id_after_reopen() -> None:
+    title = "重开后不能串到另一篇草稿"
+    baseline = _baseline_page([_candidate("old", "旧摘要")])
+    main = _FakePage(
+        url="https://www.xiaoheihe.cn/creator/editor/fixture",
+        snapshots=[[_candidate("old", "旧摘要"), _candidate("new", "新摘要")]],
+        reopen_result_url=(
+            "https://www.xiaoheihe.cn/creator/editor/edit/article/222222222"
+        ),
+    )
+    platform = _platform(main, baseline)
+
+    with pytest.raises(DraftResultUnknownError, match="ID 不一致"):
+        await platform.save_draft(title)
+    assert len(main.open_payloads) == 1
+
+
+@pytest.mark.asyncio
+async def test_wrong_new_card_title_never_becomes_bound_success() -> None:
+    expected_title = "本次真正标题"
+    baseline = _baseline_page([_candidate("old", "旧摘要")])
+    main = _FakePage(
+        url="https://www.xiaoheihe.cn/creator/editor/fixture",
+        snapshots=[[_candidate("old", "旧摘要"), _candidate("new", "无关摘要")]],
+        title_text="另一篇并发新增草稿",
+    )
+    platform = _platform(main, baseline)
+    platform._expected_persisted_blocks = [{"type": "text", "text": "正文"}]
+
+    with pytest.raises(DraftResultUnknownError, match="标题不一致"):
+        await platform.save_draft(expected_title)
+
+    evidence = platform._last_draft_evidence.to_dict()
+    assert evidence["draft_entity_bound"] is False
+    assert evidence["draft_entity_id_match"] is False
+    assert evidence["reopen_title_match"] is False
+
+
+def test_snapshot_projection_keeps_only_opaque_entity_metadata():
     page = SimpleNamespace(
         url=XiaoheihePlatform.DRAFTS_URL,
         is_closed=lambda: False,
@@ -361,11 +535,11 @@ def test_snapshot_projection_discards_untrusted_fields_and_normalizes_title():
         return [
             {
                 "opaque": "draft-key",
-                "title": "  标题\n\t带空格  ",
+                "preview": "  正文摘要\n\t带空格  ",
                 "cookie": "should-not-survive",
                 "path": "D:\\Secret Folder\\article.png",
             },
-            {"opaque": "", "title": "无实体"},
+            {"opaque": "", "preview": "无实体"},
         ]
 
     page.evaluate = evaluate
@@ -379,6 +553,13 @@ def test_snapshot_projection_discards_untrusted_fields_and_normalizes_title():
     import asyncio
 
     result = asyncio.run(run())
-    assert result == [{"opaque": "draft-key", "title": "标题 带空格"}]
+    assert result == [
+        {
+            "opaque": "draft-key",
+            "occurrence_count": 1,
+            "card_index": -1,
+        }
+    ]
     assert "cookie" not in result[0]
     assert "path" not in result[0]
+    assert "preview" not in result[0]

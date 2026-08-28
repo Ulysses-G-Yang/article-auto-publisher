@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from types import SimpleNamespace
-
 import pytest
 
 from platforms.base import DraftResultUnknownError
@@ -26,6 +24,22 @@ class _TitleEditor:
 
     async def inner_text(self):
         return self.title
+
+
+class _ReopenPage:
+    def __init__(self, draft_id: str = "188000366") -> None:
+        self.url = (
+            "https://www.xiaoheihe.cn/creator/editor/edit/article/"
+            f"{draft_id}"
+        )
+        self.goto_urls: list[str] = []
+
+    def is_closed(self) -> bool:
+        return False
+
+    async def goto(self, url: str, **_kwargs) -> None:
+        self.url = url
+        self.goto_urls.append(url)
 
 
 def test_image_path_mapping_never_falls_back_to_first_unmatched_image():
@@ -89,19 +103,13 @@ async def test_editor_dom_reader_normalizes_entities_and_preserves_order():
 @pytest.mark.asyncio
 async def test_persisted_reopen_missing_tail_is_result_unknown(monkeypatch):
     platform = XiaoheihePlatform()
-    platform.page = SimpleNamespace(
-        url="https://www.xiaoheihe.cn/creator/editor/draft/article/test",
-        is_closed=lambda: False,
-    )
+    platform.page = _ReopenPage()
     platform.DRAFT_CONTENT_POLL_DELAYS = (0,)
     platform._expected_persisted_blocks = [
         {"type": "text", "text": "第一段"},
         {"type": "image", "position": 1},
         {"type": "text", "text": "必须存在的末尾段落"},
     ]
-
-    async def open_unique(_title):
-        return None
 
     async def first_visible(_selector):
         return _TitleEditor("唯一草稿标题")
@@ -115,7 +123,6 @@ async def test_persisted_reopen_missing_tail_is_result_unknown(monkeypatch):
             {"kind": "image"},
         ]
 
-    monkeypatch.setattr(platform, "_open_unique_matching_draft", open_unique)
     monkeypatch.setattr(platform, "_first_visible", first_visible)
     monkeypatch.setattr(platform, "_current_body_editor", current_editor)
     monkeypatch.setattr(platform, "_read_editor_dom_tokens", read_tokens)
@@ -126,6 +133,9 @@ async def test_persisted_reopen_missing_tail_is_result_unknown(monkeypatch):
     message = str(exc_info.value)
     assert "必须存在的末尾段落" not in message
     assert "expected=T:3,I,T:9" in message
+    assert platform.page.goto_urls == [
+        "https://www.xiaoheihe.cn/creator/editor/edit/article/188000366"
+    ]
 
 
 @pytest.mark.asyncio
@@ -137,15 +147,9 @@ async def test_persisted_reopen_accepts_exact_full_structure(monkeypatch):
         {"type": "text", "text": "末尾段落"},
     ]
     platform = XiaoheihePlatform()
-    platform.page = SimpleNamespace(
-        url="https://www.xiaoheihe.cn/creator/editor/draft/article/test",
-        is_closed=lambda: False,
-    )
+    platform.page = _ReopenPage()
     platform.DRAFT_CONTENT_POLL_DELAYS = (0,)
     platform._expected_persisted_blocks = blocks
-
-    async def open_unique(_title):
-        return None
 
     async def first_visible(_selector):
         return _TitleEditor("唯一草稿标题")
@@ -156,9 +160,42 @@ async def test_persisted_reopen_accepts_exact_full_structure(monkeypatch):
     async def read_tokens(_editor):
         return XiaoheihePlatform._expected_content_tokens(blocks)
 
-    monkeypatch.setattr(platform, "_open_unique_matching_draft", open_unique)
     monkeypatch.setattr(platform, "_first_visible", first_visible)
     monkeypatch.setattr(platform, "_current_body_editor", current_editor)
     monkeypatch.setattr(platform, "_read_editor_dom_tokens", read_tokens)
 
     await platform._verify_persisted_draft_content("唯一草稿标题")
+    assert platform.page.goto_urls == [
+        "https://www.xiaoheihe.cn/creator/editor/edit/article/188000366"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_bound_draft_accepts_complete_seven_image_order(monkeypatch):
+    blocks: list[dict] = [{"type": "text", "text": "开头正文"}]
+    for position in range(1, 8):
+        blocks.extend(
+            [
+                {"type": "image", "position": position},
+                {"type": "text", "text": f"第{position}张图后的正文"},
+            ]
+        )
+    platform = XiaoheihePlatform()
+    platform.page = _ReopenPage()
+    platform.DRAFT_CONTENT_POLL_DELAYS = (0,)
+    platform._expected_persisted_blocks = blocks
+
+    async def first_visible(_selector):
+        return _TitleEditor("七图完整草稿")
+
+    async def current_editor():
+        return _TokenEditor([])
+
+    async def read_tokens(_editor):
+        return XiaoheihePlatform._expected_content_tokens(blocks)
+
+    monkeypatch.setattr(platform, "_first_visible", first_visible)
+    monkeypatch.setattr(platform, "_current_body_editor", current_editor)
+    monkeypatch.setattr(platform, "_read_editor_dom_tokens", read_tokens)
+
+    await platform._verify_open_draft_content("七图完整草稿", "188000366")

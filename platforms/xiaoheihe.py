@@ -3,7 +3,9 @@ import asyncio
 import copy
 import io
 import json
+import re
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from loguru import logger
 
@@ -11,6 +13,7 @@ from platforms.base import (
     BasePlatform,
     BrowserLifecycleError,
     DraftResultUnknownError,
+    DraftVerificationEvidence,
     SelectorError,
 )
 from platforms.content_validation import (
@@ -49,8 +52,13 @@ class XiaoheihePlatform(BasePlatform):
     )
     DRAFT_BOX_BTN = "button.editor-publish__btn.sub-btn.margin-left"  # 草稿箱
     DRAFTS_URL = "https://www.xiaoheihe.cn/creator/draft"
+    DRAFT_EDIT_PATH_PATTERN = re.compile(
+        r"^/creator/editor/edit/article/(?P<draft_id>[0-9]+)/?$"
+    )
     DRAFT_VERIFY_DELAYS = (1.0, 2.0, 3.0, 5.0, 8.0)
     DRAFT_CONTENT_POLL_DELAYS = (1.0, 2.0, 3.0)
+    DRAFT_ROUTE_VERIFY_ATTEMPTS = 30
+    DRAFT_ROUTE_VERIFY_INTERVAL_SECONDS = 0.25
     IDENTITY_CAPTURE_ATTEMPTS = 6
     IDENTITY_CAPTURE_INTERVAL_SECONDS = 0.5
     PUBLISH_NOW_BTN = "button.editor-publish__btn.main-btn"        # 发布
@@ -1690,13 +1698,15 @@ class XiaoheihePlatform(BasePlatform):
                 logger.warning("小黑盒返回编辑器失败: {}", exc)
 
     async def save_draft(self, title: str = "") -> str:
-        """保存草稿并返回草稿箱 URL；无法证明新草稿存在时返回空串。
+        """保存草稿并返回稳定编辑 URL；无法证明新草稿存在时返回空串。
 
         保存成功的唯一业务证据是：保存点击前在同一浏览器 Context 读取到的
-        草稿实体快照中不存在的、可见的具体草稿卡片，在保存后出现且标题精确匹配。
-        页面全局文本、同名旧卡片和空标题都不能作为成功证据。
+        草稿实体快照中不存在的唯一可见卡片，在保存后出现；点击该卡取得数字
+        草稿 ID，显式重开相同 ID 后再核对标题和完整图文。列表摘要不当作标题。
         """
         self._raise_if_page_closed("小黑盒保存草稿")
+        evidence = DraftVerificationEvidence()
+        self._last_draft_evidence = evidence
         expected_title = self._normalize_platform_title(title)
         if not expected_title:
             logger.warning("小黑盒保存草稿拒绝：平台标题为空")
@@ -1755,7 +1765,9 @@ class XiaoheihePlatform(BasePlatform):
                     "DRAFT_RESULT_UNKNOWN: 小黑盒保存后草稿实体无法证明"
                 )
             return draft_url
-        except DraftResultUnknownError:
+        except DraftResultUnknownError as exc:
+            if exc.evidence is None:
+                exc.evidence = evidence.finalize(error_code="DRAFT_RESULT_UNKNOWN")
             raise
         except Exception as exc:
             raise DraftResultUnknownError(
@@ -1797,18 +1809,22 @@ class XiaoheihePlatform(BasePlatform):
     @staticmethod
     def _is_drafts_route(url: str | None) -> bool:
         """只接受草稿箱路由，避免被导航/编辑器/登录页的文本误判。"""
-        return "/creator/draft" in str(url or "")
+        parts = urlsplit(str(url or "").strip())
+        return (
+            parts.scheme == "https"
+            and parts.netloc.lower() == "www.xiaoheihe.cn"
+            and parts.path.rstrip("/") == "/creator/draft"
+        )
 
     async def _snapshot_draft_state(
         self,
         page,
-    ) -> tuple[list[dict[str, str]], bool]:
+    ) -> tuple[list[dict[str, object]], bool]:
         """读取可见的具体草稿卡片，不扫描 document.body 全局文本。
 
-        页面结构可能随平台前端版本变化，因此这里只接受两类可追踪实体：
-        带 `data-draft-id` 的具体条目，或指向 `/creator/editor/draft/` 的具体
-        草稿链接。返回值只保留不透明实体键和规范化标题，绝不把原始 DOM 暴露给
-        日志、API 或调用方。
+        真实小黑盒卡片的 `.creator-draft__content` 是正文摘要而不是标题。
+        因此列表阶段只生成不可逆实体指纹并做保存前后差集；真正标题必须在点击
+        卡片、取得数字草稿 ID 并显式重开编辑页后核对。
         """
         self._raise_if_page_closed("读取小黑盒草稿卡片")
         if page is None or not self._is_drafts_route(getattr(page, "url", "")):
@@ -1817,7 +1833,10 @@ class XiaoheihePlatform(BasePlatform):
             raw_candidates = await page.evaluate(
                 r"""
                 () => {
-                    const draftLinkSelector = "a[href*='/creator/editor/draft/']";
+                    const draftLinkSelector = [
+                        "a[href*='/creator/editor/draft/']",
+                        "a[href*='/creator/editor/edit/article/']",
+                    ].join(",");
                     // 小黑盒当前真实草稿箱使用 article.creator-draft__item，
                     // 条目本身没有 href/data-draft-id；必须把它作为受控实体
                     // 读取，不能退回 document.body 的全文匹配。
@@ -1852,16 +1871,6 @@ class XiaoheihePlatform(BasePlatform):
                         ".draft-empty",
                         ".empty-draft",
                     ].join(",");
-                    const loadingSelector = [
-                        "[aria-busy='true']",
-                        ".loading",
-                        ".skeleton",
-                        "[class*='loading']",
-                        "[class*='skeleton']",
-                    ].join(",");
-                    const genericLabels = new Set([
-                        "草稿", "草稿箱", "编辑", "继续编辑", "打开", "删除",
-                    ]);
                     const emptyLabels = new Set([
                         "暂无草稿", "暂无草稿内容", "还没有草稿", "没有草稿",
                     ]);
@@ -1883,7 +1892,7 @@ class XiaoheihePlatform(BasePlatform):
                     };
 
                     const normalize = (value) => String(value || "")
-                        .replace(/\s+/g, " ").trim().slice(0, 30);
+                        .replace(/\s+/g, " ").trim();
 
                     const fingerprint = (value) => {
                         let hash = 2166136261;
@@ -1896,43 +1905,16 @@ class XiaoheihePlatform(BasePlatform):
 
                     const isConcreteDraftHref = (href) => {
                         try {
-                            const path = new URL(href, window.location.href).pathname;
-                            return /\/creator\/editor\/draft\/[^/]+\/?$/.test(path);
+                            const url = new URL(href, window.location.href);
+                            if (url.origin !== window.location.origin) return false;
+                            const path = url.pathname;
+                            const route = new RegExp(
+                                '/creator/editor/(?:draft/[^/]+|edit/article/[0-9]+)/?$'
+                            );
+                            return route.test(path);
                         } catch (_error) {
                             return false;
                         }
-                    };
-
-                    const titleSelector = [
-                        ".creator-draft__title",
-                        ".creator-draft__content-title",
-                        ".creator-draft__content",
-                        "[data-draft-title]",
-                        "[data-title]",
-                        "[class*='title']",
-                        "[class*='name']",
-                        "h1, h2, h3, h4, h5, h6",
-                    ].join(",");
-
-                    const readText = (element) => {
-                        if (!element) return "";
-                        const values = [];
-                        try {
-                            for (const attribute of ["data-title", "title", "aria-label"]) {
-                                const value = normalize(element.getAttribute(attribute));
-                                if (value) values.push(value);
-                            }
-                            const titleNode = element.matches(titleSelector)
-                                ? element
-                                : element.querySelector(titleSelector);
-                            if (titleNode) {
-                                const value = normalize(titleNode.textContent);
-                                if (value) values.push(value);
-                            }
-                        } catch (_error) {
-                            return "";
-                        }
-                        return values.find((value) => !genericLabels.has(value)) || "";
                     };
 
                     const listRootFor = (element) => {
@@ -1954,9 +1936,11 @@ class XiaoheihePlatform(BasePlatform):
                         }
                     };
 
-                    const seen = new Set();
+                    const byOpaque = new Map();
                     const processedRoots = new Set();
-                    const fingerprintOccurrences = new Map();
+                    const draftCards = Array.from(
+                        document.querySelectorAll(draftEntitySelector)
+                    );
                     const result = [];
                     for (const element of document.querySelectorAll(candidateSelector)) {
                         if (!visible(element)) continue;
@@ -1979,35 +1963,57 @@ class XiaoheihePlatform(BasePlatform):
                         if (!draftId && !href && !root.matches(draftEntitySelector)) continue;
                         if (href && !isConcreteDraftHref(href)) continue;
 
-                        const title = readText(root);
-                        if (!title) continue;
                         let opaque = draftId ? `data:${draftId}` : `href:${href}`;
                         if (!draftId && !href) {
                             // 真实 article 条目没有公开 ID；只用该条目自身的
-                            // 文本/元数据指纹做同页差异判断，绝不把全局正文当实体。
+                            // 正文摘要、类型和图片路径生成稳定指纹。编辑时间、按钮文字
+                            // 会随页面刷新变化，禁止纳入实体差集。
                             let identity = "";
                             try {
-                                identity = normalize(root.innerText || "");
+                                const preview = normalize(
+                                    root.querySelector(".creator-draft__content")?.textContent
+                                );
+                                const type = normalize(
+                                    root.querySelector(".creator-draft__type")?.textContent
+                                );
+                                const images = Array.from(
+                                    root.querySelectorAll(".creator-draft__image")
+                                ).map((image) => {
+                                    try {
+                                        const url = new URL(
+                                            image.getAttribute("src") || "",
+                                            window.location.href
+                                        );
+                                        return `${url.origin}${url.pathname}`;
+                                    } catch (_error) {
+                                        return "";
+                                    }
+                                }).filter(Boolean);
+                                if (!preview && !type && images.length === 0) continue;
+                                identity = JSON.stringify({preview, type, images});
                             } catch (_error) {
                                 identity = "";
                             }
                             if (!identity) continue;
-                            const fingerprintBase = `fingerprint:${fingerprint(identity)}`;
-                            const occurrence = fingerprintOccurrences.get(fingerprintBase) || 0;
-                            fingerprintOccurrences.set(fingerprintBase, occurrence + 1);
-                            opaque = `${fingerprintBase}:${occurrence}`;
+                            opaque = `fingerprint:${fingerprint(identity)}`;
                         }
-                        if (seen.has(opaque)) continue;
-                        seen.add(opaque);
-                        result.push({opaque, title});
+                        const existing = byOpaque.get(opaque);
+                        if (existing) {
+                            existing.occurrence_count += 1;
+                            existing.card_index = -1;
+                            continue;
+                        }
+                        const candidate = {
+                            opaque,
+                            occurrence_count: 1,
+                            card_index: draftCards.indexOf(root),
+                        };
+                        byOpaque.set(opaque, candidate);
+                        result.push(candidate);
                     }
                     const visibleListRoots = Array.from(
                         document.querySelectorAll(listRootSelector)
                     ).filter(visible);
-                    const hasStableListRoot = visibleListRoots.some((root) => {
-                        if (root.getAttribute("aria-busy") === "true") return false;
-                        return !root.querySelector(loadingSelector);
-                    });
                     const hasVisibleEmptyState = visibleListRoots.some((root) =>
                         Array.from(root.querySelectorAll(emptyStateSelector)).some(
                             (element) => {
@@ -2018,7 +2024,9 @@ class XiaoheihePlatform(BasePlatform):
                     );
                     return {
                         candidates: result,
-                        reliable: result.length > 0 || hasStableListRoot || hasVisibleEmptyState,
+                        // 仅列表骨架可见不能证明草稿箱为空；必须已有具体卡片，
+                        // 或平台明确渲染可见空态。
+                        reliable: result.length > 0 || hasVisibleEmptyState,
                     };
                 }
                 """
@@ -2052,21 +2060,32 @@ class XiaoheihePlatform(BasePlatform):
             if not isinstance(item, dict):
                 continue
             opaque = item.get("opaque")
-            title = self._normalize_platform_title(item.get("title"))
-            if not isinstance(opaque, str) or not opaque or not title:
+            if not isinstance(opaque, str) or not opaque:
                 continue
             if opaque in seen:
                 continue
             seen.add(opaque)
-            candidates.append({"opaque": opaque[:512], "title": title})
+            occurrence_count = item.get("occurrence_count", 1)
+            card_index = item.get("card_index", -1)
+            if not isinstance(occurrence_count, int) or occurrence_count < 1:
+                continue
+            if not isinstance(card_index, int):
+                card_index = -1
+            candidates.append(
+                {
+                    "opaque": opaque[:512],
+                    "occurrence_count": occurrence_count,
+                    "card_index": card_index,
+                }
+            )
         return candidates, reliable or bool(candidates)
 
-    async def _snapshot_draft_candidates(self, page) -> list[dict[str, str]]:
+    async def _snapshot_draft_candidates(self, page) -> list[dict[str, object]]:
         """兼容性投影：只返回安全的具体草稿候选，不暴露可靠性细节。"""
         candidates, _reliable = await self._snapshot_draft_state(page)
         return candidates
 
-    async def _collect_draft_baseline(self) -> list[dict[str, str]] | None:
+    async def _collect_draft_baseline(self) -> list[dict[str, object]] | None:
         """在同一 Context 的独立页面读取保存前草稿卡片快照并始终关闭页面。"""
         context = self.context
         new_page = getattr(context, "new_page", None) if context is not None else None
@@ -2109,14 +2128,14 @@ class XiaoheihePlatform(BasePlatform):
                         )
 
     @staticmethod
-    def _has_new_matching_draft(
-        baseline: list[dict[str, str]],
-        current: list[dict[str, str]],
-        expected_title: str,
-    ) -> bool:
-        """只接受 baseline 之外的唯一新实体，且平台标题必须精确匹配。"""
-        if current is None or not current or not expected_title:
-            return False
+    def _new_draft_candidate(
+        baseline: list[dict[str, object]],
+        current: list[dict[str, object]],
+    ) -> dict[str, object] | None:
+        """返回 baseline 之外唯一且无指纹冲突的新草稿实体。"""
+
+        if current is None or not current:
+            return None
         baseline_keys = {
             item.get("opaque")
             for item in baseline
@@ -2126,19 +2145,110 @@ class XiaoheihePlatform(BasePlatform):
             item for item in current
             if isinstance(item, dict)
             and item.get("opaque") not in baseline_keys
-            and item.get("title") == expected_title
+            and item.get("occurrence_count", 1) == 1
         ]
-        return len(matches) == 1
+        return matches[0] if len(matches) == 1 else None
 
-    async def _open_unique_matching_draft(self, expected_title: str) -> None:
-        """只点击标题精确且全页唯一的真实草稿卡片。"""
+    @staticmethod
+    def _new_matching_draft_candidate(
+        baseline: list[dict[str, object]],
+        current: list[dict[str, object]],
+        expected_title: str,
+    ) -> dict[str, object] | None:
+        """旧私有入口兼容；列表摘要不是标题，因此不参与实体差集。"""
+
+        del expected_title
+        return XiaoheihePlatform._new_draft_candidate(baseline, current)
+
+    @staticmethod
+    def _has_new_matching_draft(
+        baseline: list[dict[str, object]],
+        current: list[dict[str, object]],
+        expected_title: str,
+    ) -> bool:
+        """兼容性布尔投影：是否存在唯一可绑定的新草稿卡。"""
+
+        return XiaoheihePlatform._new_matching_draft_candidate(
+            baseline,
+            current,
+            expected_title,
+        ) is not None
+
+    @classmethod
+    def _draft_id_from_editor_url(cls, url: str | None) -> str:
+        """从已观察到的小黑盒编辑路由提取稳定数字草稿 ID。"""
+
+        parts = urlsplit(str(url or "").strip())
+        if parts.scheme != "https" or parts.netloc.lower() != "www.xiaoheihe.cn":
+            return ""
+        match = cls.DRAFT_EDIT_PATH_PATTERN.fullmatch(parts.path)
+        return match.group("draft_id") if match else ""
+
+    @classmethod
+    def _canonical_draft_editor_url(cls, draft_id: str) -> str:
+        """由已校验的数字 ID 构造无 query/fragment 的规范编辑 URL。"""
+
+        if not str(draft_id).isdigit():
+            return ""
+        return (
+            "https://www.xiaoheihe.cn/creator/editor/edit/article/"
+            f"{draft_id}"
+        )
+
+    async def _reopen_bound_draft(self, draft_id: str) -> str:
+        """按数字 ID 显式重开草稿，并拒绝任何异域或串稿重定向。"""
+
+        editor_url = self._canonical_draft_editor_url(draft_id)
+        if not editor_url:
+            raise DraftResultUnknownError(
+                "DRAFT_RESULT_UNKNOWN: 小黑盒草稿 ID 无效"
+            )
+        try:
+            await self.page.goto(
+                editor_url,
+                wait_until="domcontentloaded",
+                timeout=30000,
+            )
+        except Exception as exc:
+            if self._exception_means_browser_closed(exc):
+                raise BrowserLifecycleError(
+                    "BROWSER_CONTEXT_CLOSED: 重开小黑盒草稿时页面已关闭"
+                ) from exc
+            raise DraftResultUnknownError(
+                "DRAFT_RESULT_UNKNOWN: 小黑盒草稿无法按稳定 ID 重开"
+            ) from exc
+        if self._draft_id_from_editor_url(self.page.url) != draft_id:
+            raise DraftResultUnknownError(
+                "DRAFT_RESULT_UNKNOWN: 小黑盒草稿重开后 ID 不一致"
+            )
+        return editor_url
+
+    async def _open_unique_new_draft(
+        self,
+        expected_candidate: dict[str, object],
+    ) -> str:
+        """点击唯一新增卡片，取得数字 ID 后显式重开规范编辑 URL。"""
+
+        expected_opaque = str(expected_candidate.get("opaque") or "")
+        if not expected_opaque:
+            raise DraftResultUnknownError(
+                "DRAFT_RESULT_UNKNOWN: 小黑盒新增草稿缺少实体指纹"
+            )
 
         try:
             match_count = await self.page.evaluate(
                 r"""
-                (expectedTitle) => {
+                (expectedOpaque) => {
                     const normalize = (value) => String(value || '')
-                        .replace(/\s+/g, ' ').trim().slice(0, 30);
+                        .replace(/\s+/g, ' ').trim();
+                    const fingerprint = (value) => {
+                        let hash = 2166136261;
+                        for (const character of String(value || '')) {
+                            hash ^= character.charCodeAt(0);
+                            hash = Math.imul(hash, 16777619);
+                        }
+                        return (hash >>> 0).toString(16).padStart(8, '0');
+                    };
                     const visible = (element) => {
                         if (!element || element.hidden ||
                             element.getAttribute('aria-hidden') === 'true') return false;
@@ -2148,19 +2258,57 @@ class XiaoheihePlatform(BasePlatform):
                         const rect = element.getBoundingClientRect();
                         return rect.width > 0 && rect.height > 0;
                     };
-                    const cards = Array.from(document.querySelectorAll(
+                    const cardOpaque = (card) => {
+                        const draftIdNode = card.querySelector('[data-draft-id]');
+                        const draftId = String(
+                            card.getAttribute('data-draft-id') ||
+                            (draftIdNode ? draftIdNode.getAttribute('data-draft-id') : '') || ''
+                        ).trim();
+                        if (draftId) return `data:${draftId}`;
+                        const link = card.querySelector(
+                            "a[href*='/creator/editor/draft/']," +
+                            "a[href*='/creator/editor/edit/article/']"
+                        );
+                        const href = link ? String(link.getAttribute('href') || '') : '';
+                        if (href) return `href:${href}`;
+                        const type = normalize(
+                            card.querySelector('.creator-draft__type')?.textContent
+                        );
+                        const preview = normalize(
+                            card.querySelector('.creator-draft__content')?.textContent
+                        );
+                        const images = Array.from(
+                            card.querySelectorAll('.creator-draft__image')
+                        ).map((image) => {
+                            try {
+                                const url = new URL(
+                                    image.getAttribute('src') || '',
+                                    window.location.href
+                                );
+                                return `${url.origin}${url.pathname}`;
+                            } catch (_error) {
+                                return '';
+                            }
+                        }).filter(Boolean);
+                        const identity = JSON.stringify({preview, type, images});
+                        return `fingerprint:${fingerprint(identity)}`;
+                    };
+                    const matches = Array.from(document.querySelectorAll(
                         '.creator-draft__list article.creator-draft__item'
                     )).filter((card) => {
                         if (!visible(card)) return false;
-                        const title = card.querySelector('.creator-draft__content');
-                        return title && visible(title) &&
-                            normalize(title.textContent) === expectedTitle;
+                        return cardOpaque(card) === expectedOpaque;
                     });
-                    if (cards.length === 1) cards[0].click();
-                    return cards.length;
+                    if (matches.length === 1) {
+                        const clickTarget = matches[0].querySelector(
+                            '.creator-draft__item-main'
+                        ) || matches[0];
+                        clickTarget.click();
+                    }
+                    return matches.length;
                 }
                 """,
-                expected_title,
+                expected_opaque,
             )
         except Exception as exc:
             if self._exception_means_browser_closed(exc):
@@ -2172,22 +2320,62 @@ class XiaoheihePlatform(BasePlatform):
             ) from exc
         if match_count != 1:
             raise DraftResultUnknownError(
-                "DRAFT_RESULT_UNKNOWN: 小黑盒同名草稿实体不唯一"
+                "DRAFT_RESULT_UNKNOWN: 小黑盒新增草稿实体无法唯一定位"
             )
 
-    async def _verify_persisted_draft_content(self, expected_title: str) -> None:
-        """重新打开平台草稿，核验真正落盘的完整图文结构。"""
+        draft_id = ""
+        for _attempt in range(self.DRAFT_ROUTE_VERIFY_ATTEMPTS):
+            draft_id = self._draft_id_from_editor_url(self.page.url)
+            if draft_id:
+                break
+            await asyncio.sleep(self.DRAFT_ROUTE_VERIFY_INTERVAL_SECONDS)
+        if not draft_id:
+            raise DraftResultUnknownError(
+                "DRAFT_RESULT_UNKNOWN: 小黑盒草稿卡未进入带稳定 ID 的编辑页面"
+            )
 
+        return await self._reopen_bound_draft(draft_id)
+
+    async def _open_unique_matching_draft(self, expected_title: str) -> str:
+        """旧私有入口不再按摘要猜标题；仅允许重开当前已绑定数字 ID。"""
+
+        del expected_title
+        draft_id = self._draft_id_from_editor_url(self.page.url)
+        if not draft_id:
+            raise DraftResultUnknownError(
+                "DRAFT_RESULT_UNKNOWN: 小黑盒当前页面没有已绑定草稿 ID"
+            )
+        return await self._reopen_bound_draft(draft_id)
+
+    async def _verify_persisted_draft_content(self, expected_title: str) -> None:
+        """兼容入口：按标题唯一打开草稿，再核验完整图文结构。"""
+
+        editor_url = await self._open_unique_matching_draft(expected_title)
+        await self._verify_open_draft_content(
+            expected_title,
+            self._draft_id_from_editor_url(editor_url),
+        )
+
+    async def _verify_open_draft_content(
+        self,
+        expected_title: str,
+        expected_draft_id: str,
+        evidence: DraftVerificationEvidence | None = None,
+    ) -> bool:
+        """对已经绑定并打开的草稿编辑页核验真正落盘的图文结构。"""
+
+        if not expected_draft_id:
+            raise DraftResultUnknownError(
+                "DRAFT_RESULT_UNKNOWN: 小黑盒持久化核验缺少草稿 ID"
+            )
         blocks = self._expected_persisted_blocks
-        if blocks is None:
-            return
-        expected_tokens = self._expected_content_tokens(blocks)
+        expected_tokens = self._expected_content_tokens(blocks or [])
         actual_tokens: list[dict] = []
-        await self._open_unique_matching_draft(expected_title)
+        title_matched = False
         for delay in self.DRAFT_CONTENT_POLL_DELAYS:
             await asyncio.sleep(delay)
             try:
-                if "creator/editor" not in str(self.page.url or ""):
+                if self._draft_id_from_editor_url(self.page.url) != expected_draft_id:
                     continue
                 title_editor = await self._first_visible(self.TITLE_FIELD)
                 if title_editor is None:
@@ -2197,15 +2385,37 @@ class XiaoheihePlatform(BasePlatform):
                 )
                 if actual_title != expected_title:
                     continue
+                title_matched = True
+                if evidence is not None:
+                    evidence.mark_reopen(
+                        title_match=True,
+                        dom_blocks_match=None,
+                    )
+                if blocks is None:
+                    return False
                 editor = await self._current_body_editor()
                 actual_tokens = await self._read_editor_dom_tokens(editor)
                 if self._content_tokens_match(expected_tokens, actual_tokens):
-                    return
+                    if evidence is not None:
+                        evidence.mark_reopen(
+                            title_match=True,
+                            dom_blocks_match=True,
+                        )
+                    return True
             except Exception as exc:
                 if self._exception_means_browser_closed(exc):
                     raise BrowserLifecycleError(
                         "BROWSER_CONTEXT_CLOSED: 小黑盒持久化正文核验时页面已关闭"
                     ) from exc
+        if evidence is not None:
+            evidence.mark_reopen(
+                title_match=title_matched,
+                dom_blocks_match=False if title_matched and blocks is not None else None,
+            )
+        if not title_matched:
+            raise DraftResultUnknownError(
+                "DRAFT_RESULT_UNKNOWN: 小黑盒草稿重开后标题不一致"
+            )
         raise DraftResultUnknownError(
             "DRAFT_RESULT_UNKNOWN: 小黑盒草稿重开后图文结构不完整; "
             f"expected={self._content_token_shape(expected_tokens)}; "
@@ -2215,7 +2425,7 @@ class XiaoheihePlatform(BasePlatform):
     async def _verify_draft_in_drafts(
         self,
         expected_title: str,
-        baseline: list[dict[str, str]],
+        baseline: list[dict[str, object]],
     ) -> str:
         """保存后轮询具体草稿卡片，确认新实体出现；失败返回空串。"""
         try:
@@ -2259,13 +2469,33 @@ class XiaoheihePlatform(BasePlatform):
                     )
             await self.simulator.random_delay(delay, delay + 0.5)
             current, reliable = await self._snapshot_draft_state(self.page)
-            if reliable and self._has_new_matching_draft(
-                baseline,
-                current,
-                expected_title,
-            ):
-                await self._verify_persisted_draft_content(expected_title)
-                return drafts_url
+            candidate = self._new_draft_candidate(baseline, current) if reliable else None
+            if candidate is not None:
+                evidence = self._last_draft_evidence
+                edit_url = await self._open_unique_new_draft(candidate)
+                draft_id = self._draft_id_from_editor_url(edit_url)
+                evidence.set_draft_url(edit_url)
+                try:
+                    await self._verify_open_draft_content(
+                        expected_title,
+                        draft_id,
+                        evidence,
+                    )
+                    evidence.mark_entity_binding(
+                        bound=True,
+                        source="baseline_new_id",
+                        id_match=True,
+                    )
+                except Exception:
+                    title_matched = evidence.reopen_title_match is True
+                    evidence.mark_entity_binding(
+                        bound=title_matched,
+                        source="baseline_new_id",
+                        id_match=title_matched,
+                    )
+                    raise
+                evidence.finalize()
+                return edit_url
         logger.warning("小黑盒草稿箱未确认保存后新增的匹配草稿卡片")
         return ""
 

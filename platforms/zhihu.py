@@ -21,6 +21,7 @@ import asyncio
 import copy
 import io
 import re
+from html.parser import HTMLParser
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -29,6 +30,7 @@ from loguru import logger
 from platforms.base import (
     BasePlatform,
     BrowserLifecycleError,
+    DraftBaselineError,
     DraftResultUnknownError,
     DraftVerificationEvidence,
     LoginRequiredError,
@@ -46,8 +48,174 @@ TITLE_SELECTOR = "textarea.Input[placeholder^='请输入标题']"
 BODY_SELECTOR = "div.notranslate.public-DraftEditor-content"
 EDITOR_URL = "https://zhuanlan.zhihu.com/write"
 LEGACY_EDITOR_URL = "https://www.zhihu.com/write"
-DRAFTS_URL = "https://www.zhihu.com/creator/manage/creation/drafts"
+DRAFTS_URL = "https://www.zhihu.com/creator/manage/creation/draft?type=article"
 BODY_IMAGE_INPUT = "input[type=file]:not(.UploadPicture-input)[accept*='image']"
+DRAFT_CARD_CLASS = "CreationManage-CreationCard"
+DRAFT_TITLE_CLASS = "CreationCardTitle-wrapper"
+DRAFT_EDIT_PATH_PATTERN = re.compile(r"^/p/(?P<draft_id>[0-9]+)/edit/?$")
+HTML_VOID_TAGS = frozenset(
+    {
+        "area",
+        "base",
+        "br",
+        "col",
+        "embed",
+        "hr",
+        "img",
+        "input",
+        "link",
+        "meta",
+        "param",
+        "source",
+        "track",
+        "wbr",
+    }
+)
+
+
+def _draft_id_from_edit_href(href: object) -> str:
+    """从知乎文章编辑链接提取数字草稿 ID；拒绝其他主机和路径。"""
+
+    raw_href = str(href or "").strip()
+    if not raw_href:
+        return ""
+    parts = urlsplit(raw_href)
+    if parts.scheme and parts.scheme != "https":
+        return ""
+    if parts.netloc and parts.netloc.lower() != "zhuanlan.zhihu.com":
+        return ""
+    match = DRAFT_EDIT_PATH_PATTERN.fullmatch(parts.path)
+    return match.group("draft_id") if match else ""
+
+
+class _ZhihuDraftCardParser(HTMLParser):
+    """只依赖知乎草稿卡语义类和编辑链接解析列表实体。"""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.cards: list[dict[str, str]] = []
+        self._depth = 0
+        self._card_depth: int | None = None
+        self._title_depth: int | None = None
+        self._title_parts: list[str] = []
+        self._draft_ids: set[str] = set()
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        self._depth += 1
+        normalized_tag = tag.lower()
+        attributes = dict(attrs)
+        classes = set(str(attributes.get("class") or "").split())
+        if self._card_depth is None and DRAFT_CARD_CLASS in classes:
+            self._card_depth = self._depth
+            self._title_depth = None
+            self._title_parts = []
+            self._draft_ids = set()
+        if self._card_depth is None:
+            if normalized_tag in HTML_VOID_TAGS:
+                self.handle_endtag(normalized_tag)
+            return
+        if self._title_depth is None and DRAFT_TITLE_CLASS in classes:
+            self._title_depth = self._depth
+        if normalized_tag == "a":
+            draft_id = _draft_id_from_edit_href(attributes.get("href"))
+            if draft_id:
+                self._draft_ids.add(draft_id)
+        if normalized_tag in HTML_VOID_TAGS:
+            self.handle_endtag(normalized_tag)
+
+    def handle_startendtag(
+        self,
+        tag: str,
+        attrs: list[tuple[str, str | None]],
+    ) -> None:
+        self.handle_starttag(tag, attrs)
+        if tag.lower() not in HTML_VOID_TAGS:
+            self.handle_endtag(tag)
+
+    def handle_data(self, data: str) -> None:
+        if self._card_depth is not None and self._title_depth is not None:
+            self._title_parts.append(data)
+
+    def handle_endtag(self, _tag: str) -> None:
+        if self._card_depth is not None:
+            if self._title_depth == self._depth:
+                self._title_depth = None
+            if self._card_depth == self._depth:
+                self._finish_card()
+        self._depth = max(0, self._depth - 1)
+
+    def close(self) -> None:
+        super().close()
+        if self._card_depth is not None:
+            self._finish_card()
+
+    def _finish_card(self) -> None:
+        title = " ".join(" ".join(self._title_parts).split())
+        if title and len(self._draft_ids) == 1:
+            draft_id = next(iter(self._draft_ids))
+            self.cards.append(
+                {
+                    "id": draft_id,
+                    "title": title,
+                    "edit_url": f"https://zhuanlan.zhihu.com/p/{draft_id}/edit",
+                }
+            )
+        self._card_depth = None
+        self._title_depth = None
+        self._title_parts = []
+        self._draft_ids = set()
+
+
+def parse_zhihu_draft_cards(html: str) -> list[dict[str, str]]:
+    """离线解析并按草稿 ID 去重；同一 ID 标题冲突时丢弃该实体。"""
+
+    parser = _ZhihuDraftCardParser()
+    parser.feed(str(html or ""))
+    parser.close()
+
+    by_id: dict[str, dict[str, str]] = {}
+    conflicted_ids: set[str] = set()
+    for card in parser.cards:
+        draft_id = card["id"]
+        if draft_id in conflicted_ids:
+            continue
+        previous = by_id.get(draft_id)
+        if previous is None:
+            by_id[draft_id] = card
+        elif previous["title"] != card["title"]:
+            by_id.pop(draft_id, None)
+            conflicted_ids.add(draft_id)
+    return list(by_id.values())
+
+
+def find_unique_exact_draft(
+    candidates: list[dict[str, str]],
+    expected_title: str,
+    *,
+    excluded_ids: frozenset[str] = frozenset(),
+) -> dict[str, str] | None:
+    """返回标题精确匹配的唯一新实体；可排除保存前草稿 ID。"""
+
+    normalized_title = " ".join(str(expected_title or "").split())
+    by_id: dict[str, dict[str, str]] = {}
+    conflicted_ids: set[str] = set()
+    for item in candidates:
+        draft_id = str(item.get("id") or "").strip()
+        title = " ".join(str(item.get("title") or "").split())
+        if not draft_id or draft_id in excluded_ids or draft_id in conflicted_ids:
+            continue
+        previous = by_id.get(draft_id)
+        if previous is None:
+            by_id[draft_id] = item
+        elif " ".join(str(previous.get("title") or "").split()) != title:
+            by_id.pop(draft_id, None)
+            conflicted_ids.add(draft_id)
+    matches = [
+        item
+        for item in by_id.values()
+        if " ".join(str(item.get("title") or "").split()) == normalized_title
+    ]
+    return matches[0] if len(matches) == 1 else None
 
 
 class PlatformNotImplementedError(PlatformAutomationError):
@@ -72,6 +240,12 @@ class ZhihuPlatform(BasePlatform):
         self._identity_payload: dict[str, str | int | bool] | None = None
         self._expected_persisted_blocks: list[dict] | None = None
         self._pending_cover_path = ""
+        self._preflight_title = ""
+        self._preflight_draft_ids: frozenset[str] | None = None
+        self._preflight_draft_sources: frozenset[str] | None = None
+        self._preflight_draft_ids_by_source: (
+            dict[str, frozenset[str]] | None
+        ) = None
 
     async def fetch_identity_payload(self) -> dict[str, str | int | bool]:
         """通过同源身份 API 返回最小、脱敏后的账号身份。"""
@@ -810,6 +984,73 @@ class ZhihuPlatform(BasePlatform):
             "selection": {},
         }
 
+    async def preflight_delivery(self, title: str) -> None:
+        """在写入编辑器前冻结知乎草稿 ID 基线。"""
+
+        self._require_page_alive("知乎草稿基线检查")
+        expected_title = " ".join(str(title or "").split())
+        self._preflight_title = ""
+        self._preflight_draft_ids = None
+        self._preflight_draft_sources = None
+        self._preflight_draft_ids_by_source = None
+        if not expected_title:
+            raise DraftBaselineError("DRAFT_BASELINE_FAILED: 知乎标题不能为空")
+
+        drafts_url = self.platform_cfg.get("drafts_url") or DRAFTS_URL
+        try:
+            await self.page.goto(
+                drafts_url,
+                wait_until="domcontentloaded",
+                timeout=30000,
+            )
+            await self.simulator.random_delay(1, 2)
+            source_candidates: dict[str, list[dict[str, str]]] = {}
+            api_candidates = await self._read_draft_candidates_from_api()
+            if api_candidates is not None:
+                source_candidates["api"] = api_candidates
+            dom_candidates = await self._read_draft_candidates_from_dom()
+            # 未取得卡片时，当前 DOM 可能是登录页、错误页或尚未水合的
+            # 空壳；在没有平台明确空态标记前，不能把空 HTML 当作可靠基线。
+            if dom_candidates:
+                source_candidates["dom"] = dom_candidates
+            if not source_candidates:
+                raise DraftBaselineError(
+                    "DRAFT_BASELINE_UNAVAILABLE: 知乎无法读取保存前草稿 ID"
+                )
+        except DraftBaselineError:
+            raise
+        except BrowserLifecycleError:
+            raise
+        except Exception as exc:
+            if self._exception_means_browser_closed(exc):
+                raise BrowserLifecycleError(
+                    "BROWSER_CONTEXT_CLOSED: 知乎草稿基线检查时页面已关闭"
+                ) from exc
+            raise DraftBaselineError(
+                "DRAFT_BASELINE_FAILED: 知乎草稿基线检查失败"
+            ) from exc
+
+        self._preflight_title = expected_title
+        self._preflight_draft_sources = frozenset(source_candidates)
+        self._preflight_draft_ids_by_source = {
+            source: frozenset(
+                str(item.get("id") or "").strip()
+                for item in items
+                if str(item.get("id") or "").strip()
+            )
+            for source, items in source_candidates.items()
+        }
+        candidates = [
+            item
+            for items in source_candidates.values()
+            for item in items
+        ]
+        self._preflight_draft_ids = frozenset(
+            str(item.get("id") or "").strip()
+            for item in candidates
+            if str(item.get("id") or "").strip()
+        )
+
     async def save_draft(self, title: str = "") -> str:
         """等待自动保存，取得唯一草稿 ID，并重开核验完整持久化正文。"""
 
@@ -821,6 +1062,16 @@ class ZhihuPlatform(BasePlatform):
             raise DraftResultUnknownError(
                 "DRAFT_RESULT_UNKNOWN: 知乎自动保存结果缺少可核验标题",
                 evidence=evidence.finalize(error_code="DRAFT_RESULT_UNKNOWN"),
+            )
+        if (
+            self._preflight_draft_ids is None
+            or self._preflight_draft_sources is None
+            or self._preflight_draft_ids_by_source is None
+            or self._preflight_title != expected_title
+        ):
+            raise DraftResultUnknownError(
+                "DRAFT_BASELINE_UNAVAILABLE: 知乎缺少与本次一致的草稿 ID 基线",
+                evidence=evidence.finalize(error_code="DRAFT_BASELINE_UNAVAILABLE"),
             )
 
         # 知乎从标题首次输入起便可能产生自动保存副作用；此处以后任何
@@ -853,10 +1104,18 @@ class ZhihuPlatform(BasePlatform):
         await self.simulator.random_delay(3, 5)
 
         try:
-            draft = await self._find_unique_exact_draft(expected_title)
+            draft = await self._find_unique_exact_draft(
+                expected_title,
+                excluded_ids=self._preflight_draft_ids,
+                baseline_ids_by_source=self._preflight_draft_ids_by_source,
+            )
             if draft is None:
                 await self.simulator.random_delay(3, 5)
-                draft = await self._find_unique_exact_draft(expected_title)
+                draft = await self._find_unique_exact_draft(
+                    expected_title,
+                    excluded_ids=self._preflight_draft_ids,
+                    baseline_ids_by_source=self._preflight_draft_ids_by_source,
+                )
             if draft is None:
                 evidence.mark_draft_list(match_count=0)
                 raise DraftResultUnknownError(
@@ -864,11 +1123,9 @@ class ZhihuPlatform(BasePlatform):
                     evidence=evidence.finalize(error_code="DRAFT_RESULT_UNKNOWN"),
                 )
             evidence.mark_draft_list(match_count=1)
-            # 知乎当前只有标题列表匹配和列表返回 ID，没有保存前后基线或
-            # 保存响应 ID 绑定；同名旧草稿不能被宣称为本次实体。
             evidence.mark_entity_binding(
-                bound=False,
-                source="title_match_without_baseline",
+                bound=True,
+                source="baseline_new_id",
             )
             edit_url = self._draft_edit_url(draft.get("id"))
             evidence.set_draft_url(edit_url)
@@ -878,8 +1135,6 @@ class ZhihuPlatform(BasePlatform):
             except Exception:
                 evidence.mark_reopen(title_match=True, dom_blocks_match=False)
                 raise
-            # 完整重开核验仍沿用原成功路径；实体绑定字段仅用于异常时
-            # 阻止标题唯一降级，不改变正常 save_draft 的兼容返回。
             evidence.finalize()
         except Exception as exc:
             if isinstance(exc, DraftResultUnknownError):
@@ -937,8 +1192,73 @@ class ZhihuPlatform(BasePlatform):
                 "error_message": "草稿箱核验失败",
             }
 
-    async def _find_unique_exact_draft(self, expected_title: str) -> dict | None:
-        """只接受列表 API 中标题精确且唯一的草稿实体。"""
+    async def _find_unique_exact_draft(
+        self,
+        expected_title: str,
+        *,
+        excluded_ids: frozenset[str] = frozenset(),
+        baseline_ids_by_source: dict[str, frozenset[str]] | None = None,
+    ) -> dict | None:
+        """API 优先；API 未命中时用稳定草稿卡 DOM 作只读兜底。"""
+
+        if baseline_ids_by_source is not None:
+            if not baseline_ids_by_source:
+                return None
+            matched_by_source: dict[str, dict[str, str]] = {}
+            for source, baseline_ids in baseline_ids_by_source.items():
+                if source == "api":
+                    source_candidates = await self._read_draft_candidates_from_api()
+                elif source == "dom":
+                    source_candidates = await self._read_draft_candidates_from_dom()
+                else:
+                    return None
+                if source_candidates is None:
+                    return None
+                match = find_unique_exact_draft(
+                    source_candidates,
+                    expected_title,
+                    excluded_ids=baseline_ids,
+                )
+                if match is None:
+                    return None
+                matched_by_source[source] = match
+
+            matched_ids = {
+                str(item.get("id") or "").strip()
+                for item in matched_by_source.values()
+            }
+            if len(matched_ids) != 1:
+                return None
+            return matched_by_source.get("api") or matched_by_source.get("dom")
+
+        api_candidates = await self._read_draft_candidates_from_api()
+        if api_candidates is not None:
+            normalized_title = " ".join(str(expected_title or "").split())
+            new_api_ids = {
+                str(item.get("id") or "").strip()
+                for item in api_candidates
+                if str(item.get("id") or "").strip()
+                and str(item.get("id") or "").strip() not in excluded_ids
+                and " ".join(str(item.get("title") or "").split()) == normalized_title
+            }
+            if len(new_api_ids) == 1:
+                return find_unique_exact_draft(
+                    api_candidates,
+                    expected_title,
+                    excluded_ids=excluded_ids,
+                )
+            if len(new_api_ids) > 1:
+                return None
+
+        dom_candidates = await self._read_draft_candidates_from_dom() or []
+        return find_unique_exact_draft(
+            dom_candidates,
+            expected_title,
+            excluded_ids=excluded_ids,
+        )
+
+    async def _read_draft_candidates_from_api(self) -> list[dict[str, str]] | None:
+        """捕获知乎草稿列表 API；无法取得响应时返回 ``None``。"""
 
         try:
             async with self.page.expect_response(
@@ -966,19 +1286,20 @@ class ZhihuPlatform(BasePlatform):
             if not clicked:
                 return None
             response = await response_info.value
+            if not self._is_drafts_list_response(response):
+                return None
             payload = await response.json()
-            candidates = [
+            if not isinstance(payload, dict) or not isinstance(payload.get("data"), list):
+                return None
+            records = payload["data"]
+            return [
                 {
                     "id": str(item.get("id") or item.get("url_token") or ""),
                     "title": " ".join(str(item.get("title") or "").split()),
                 }
-                for item in (payload.get("data") or [])
+                for item in records
                 if isinstance(item, dict)
             ]
-            matches = [
-                item for item in candidates if item["id"] and item["title"] == expected_title
-            ]
-            return matches[0] if len(matches) == 1 else None
         except BrowserLifecycleError:
             raise
         except Exception as exc:
@@ -988,6 +1309,39 @@ class ZhihuPlatform(BasePlatform):
                 ) from exc
             logger.warning(
                 "知乎草稿列表 API 验证失败: error_type={}",
+                type(exc).__name__,
+            )
+            return None
+
+    async def _read_draft_candidates_from_dom(
+        self,
+    ) -> list[dict[str, str]] | None:
+        """读取当前草稿页 HTML，仅解析稳定语义类和数字编辑链接。"""
+
+        try:
+            parts = urlsplit(str(self.page.url or ""))
+            if (
+                parts.scheme != "https"
+                or parts.netloc.lower() != "www.zhihu.com"
+                or parts.path.rstrip("/")
+                not in {
+                    "/creator/manage/creation/draft",
+                    "/creator/manage/creation/drafts",
+                }
+            ):
+                return None
+            html = await self.page.content()
+            cards = parse_zhihu_draft_cards(html)
+            return cards or None
+        except BrowserLifecycleError:
+            raise
+        except Exception as exc:
+            if self._exception_means_browser_closed(exc):
+                raise BrowserLifecycleError(
+                    "BROWSER_CONTEXT_CLOSED: 知乎草稿卡 DOM 验证时页面已关闭"
+                ) from exc
+            logger.warning(
+                "知乎草稿卡 DOM 验证失败: error_type={}",
                 type(exc).__name__,
             )
             return None
@@ -1049,8 +1403,20 @@ class ZhihuPlatform(BasePlatform):
 
     @staticmethod
     def _is_drafts_list_response(response) -> bool:
-        parts = urlsplit(response.url)
-        return parts.path == "/api/v4/articles/my_drafts" and response.request.method == "GET"
+        parts = urlsplit(str(getattr(response, "url", "") or ""))
+        request = getattr(response, "request", None)
+        method = str(getattr(request, "method", "") or "").upper()
+        try:
+            status = int(getattr(response, "status", 0))
+        except (TypeError, ValueError):
+            return False
+        return (
+            parts.scheme == "https"
+            and parts.netloc.lower() == "www.zhihu.com"
+            and parts.path == "/api/v4/articles/my_drafts"
+            and method == "GET"
+            and 200 <= status < 300
+        )
 
     @staticmethod
     def _not_implemented(operation: str):

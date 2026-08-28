@@ -20,6 +20,7 @@ from account_sessions.identity import extract_identity
 from account_sessions.permissions import LOCAL_WEB_CONTEXT
 from platforms.base import (
     BrowserLifecycleError,
+    DraftBaselineError,
     DraftResultUnknownError,
     LoginRequiredError,
 )
@@ -28,6 +29,8 @@ from platforms.zhihu import (
     DRAFTS_URL,
     PlatformNotImplementedError,
     ZhihuPlatform,
+    find_unique_exact_draft,
+    parse_zhihu_draft_cards,
 )
 
 
@@ -402,10 +405,16 @@ class _FakeEditorKeyboard:
 
 
 class _FakeDraftsResponse:
-    def __init__(self, records):
+    def __init__(self, records, *, status=200, payload=None):
         self._records = records
+        self.status = status
+        self.url = "https://www.zhihu.com/api/v4/articles/my_drafts"
+        self.request = type("Request", (), {"method": "GET"})()
+        self._payload = payload
 
     async def json(self):
+        if self._payload is not None:
+            return self._payload
         return {
             "paging": {"totals": len(self._records)},
             "data": list(self._records),
@@ -413,13 +422,19 @@ class _FakeDraftsResponse:
 
 
 class _FakeResponseInfo:
-    def __init__(self, records):
+    def __init__(self, records, *, status=200, payload=None):
         self._records = records
+        self._status = status
+        self._payload = payload
 
     @property
     def value(self):
         async def _resolve():
-            return _FakeDraftsResponse(self._records)
+            return _FakeDraftsResponse(
+                self._records,
+                status=self._status,
+                payload=self._payload,
+            )
 
         return _resolve()
 
@@ -433,6 +448,9 @@ class _FakeEditorPage:
         title_text="",
         drafts_text="",
         drafts_api_titles=None,
+        drafts_html="",
+        drafts_api_status=200,
+        drafts_api_payload=None,
     ):
         self.url = ""
         self.goto_urls: list[str] = []
@@ -444,6 +462,9 @@ class _FakeEditorPage:
             item if isinstance(item, dict) else {"id": str(index + 1), "title": item}
             for index, item in enumerate(drafts_api_titles or [])
         ]
+        self.drafts_html = drafts_html
+        self.drafts_api_status = drafts_api_status
+        self.drafts_api_payload = drafts_api_payload
         self.selected_all = False
         self.active = None
         self.dom_tokens: list[dict] = []
@@ -458,6 +479,9 @@ class _FakeEditorPage:
 
     async def reload(self, **_kwargs) -> None:
         return None
+
+    async def content(self) -> str:
+        return self.drafts_html
 
     async def wait_for_selector(self, selector: str, **_kwargs):
         if ".DraftStatusTip" in selector:
@@ -498,7 +522,11 @@ class _FakeEditorPage:
 
             @property
             def value(self):
-                return _FakeResponseInfo(self.page.drafts_api_records).value
+                return _FakeResponseInfo(
+                    self.page.drafts_api_records,
+                    status=self.page.drafts_api_status,
+                    payload=self.page.drafts_api_payload,
+                ).value
 
         return _Expect(self)
 
@@ -529,6 +557,15 @@ def _make_delivery_platform(page=None):
     platform.simulator = _InstantSimulator()
     platform.PERSIST_VERIFY_INTERVAL_SECONDS = 0
     return platform
+
+
+def _set_draft_baseline(platform, title: str, *draft_ids: str) -> None:
+    platform._preflight_title = " ".join(title.split())
+    platform._preflight_draft_ids = frozenset(draft_ids)
+    platform._preflight_draft_sources = frozenset({"api"})
+    platform._preflight_draft_ids_by_source = {
+        "api": frozenset(draft_ids),
+    }
 
 
 def test_navigate_to_editor_opens_write_page_and_waits_for_title() -> None:
@@ -682,12 +719,313 @@ def test_media_error_never_exposes_physical_path(monkeypatch) -> None:
     assert "private.png" in rendered
 
 
+def test_parse_draft_card_fixture_uses_semantic_classes_and_deduplicates_links() -> None:
+    fixture = (
+        PROJECT_ROOT / "tests" / "fixtures" / "zhihu" / "draft_card.html"
+    ).read_text(encoding="utf-8")
+
+    assert parse_zhihu_draft_cards(fixture) == [
+        {
+            "id": "9876543210123456789",
+            "title": "脱敏测试标题：多屏工作流",
+            "edit_url": (
+                "https://zhuanlan.zhihu.com/p/9876543210123456789/edit"
+            ),
+        }
+    ]
+
+
+@pytest.mark.parametrize(
+    "href",
+    [
+        "https://example.com/p/123/edit",
+        "http://zhuanlan.zhihu.com/p/123/edit",
+        "https://zhuanlan.zhihu.com/p/not-digits/edit",
+        "https://zhuanlan.zhihu.com/question/123/edit",
+    ],
+)
+def test_parse_draft_cards_rejects_untrusted_edit_links(href: str) -> None:
+    html = f"""
+        <div class="CreationManage-CreationCard css-anything">
+          <div class="CreationCardTitle-wrapper css-random">测试标题</div>
+          <a href="{href}">编辑</a>
+        </div>
+    """
+
+    assert parse_zhihu_draft_cards(html) == []
+
+
+def test_parse_draft_cards_drops_conflicting_duplicate_id() -> None:
+    html = """
+        <div class="CreationManage-CreationCard css-one">
+          <div class="CreationCardTitle-wrapper css-title-one">标题一</div>
+          <a href="/p/123/edit">编辑</a>
+        </div>
+        <div class="CreationManage-CreationCard css-two">
+          <div class="CreationCardTitle-wrapper css-title-two">标题二</div>
+          <a href="/p/123/edit">编辑</a>
+        </div>
+    """
+
+    assert parse_zhihu_draft_cards(html) == []
+
+
+def test_unique_exact_draft_rejects_same_title_with_distinct_ids() -> None:
+    candidates = [
+        {"id": "123", "title": "同名草稿"},
+        {"id": "456", "title": "同名草稿"},
+    ]
+
+    assert find_unique_exact_draft(candidates, "同名草稿") is None
+
+
+def test_unique_exact_draft_deduplicates_repeated_same_entity() -> None:
+    candidates = [
+        {"id": "123", "title": "同一草稿"},
+        {"id": "123", "title": "同一草稿"},
+    ]
+
+    assert find_unique_exact_draft(candidates, "同一草稿") == candidates[0]
+
+
+def test_find_unique_exact_draft_keeps_api_as_primary_source() -> None:
+    fixture = (
+        PROJECT_ROOT / "tests" / "fixtures" / "zhihu" / "draft_card.html"
+    ).read_text(encoding="utf-8")
+    title = "脱敏测试标题：多屏工作流"
+    page = _FakeEditorPage(
+        drafts_api_titles=[{"id": "123", "title": title}],
+        drafts_html=fixture,
+    )
+    platform = _make_delivery_platform(page)
+
+    assert run(platform._find_unique_exact_draft(title)) == {
+        "id": "123",
+        "title": title,
+    }
+
+
+def test_find_unique_exact_draft_does_not_mask_ambiguous_api_with_dom() -> None:
+    fixture = (
+        PROJECT_ROOT / "tests" / "fixtures" / "zhihu" / "draft_card.html"
+    ).read_text(encoding="utf-8")
+    title = "脱敏测试标题：多屏工作流"
+    page = _FakeEditorPage(
+        drafts_api_titles=[
+            {"id": "123", "title": title},
+            {"id": "456", "title": title},
+        ],
+        drafts_html=fixture,
+    )
+    platform = _make_delivery_platform(page)
+
+    assert run(platform._find_unique_exact_draft(title)) is None
+
+
+def test_find_unique_exact_draft_falls_back_to_stable_dom_card() -> None:
+    fixture = (
+        PROJECT_ROOT / "tests" / "fixtures" / "zhihu" / "draft_card.html"
+    ).read_text(encoding="utf-8")
+    title = "脱敏测试标题：多屏工作流"
+    page = _FakeEditorPage(
+        drafts_api_titles=[{"id": "111", "title": "其他草稿"}],
+        drafts_html=fixture,
+    )
+    platform = _make_delivery_platform(page)
+
+    assert run(platform._find_unique_exact_draft(title)) == {
+        "id": "9876543210123456789",
+        "title": title,
+        "edit_url": "https://zhuanlan.zhihu.com/p/9876543210123456789/edit",
+    }
+
+
+def test_preflight_delivery_freezes_existing_draft_ids_before_editor_write() -> None:
+    page = _FakeEditorPage(
+        drafts_api_titles=[
+            {"id": "100", "title": "已有草稿"},
+            {"id": "200", "title": "允许同名"},
+        ]
+    )
+    platform = _make_delivery_platform(page)
+
+    run(platform.preflight_delivery("  允许同名  "))
+
+    assert platform._preflight_title == "允许同名"
+    assert platform._preflight_draft_ids == frozenset({"100", "200"})
+    assert platform._preflight_draft_sources == frozenset({"api"})
+    assert platform._preflight_draft_ids_by_source == {
+        "api": frozenset({"100", "200"}),
+    }
+    assert DRAFTS_URL in page.goto_urls
+
+
+def test_preflight_delivery_accepts_successfully_read_empty_draft_box(
+    monkeypatch,
+) -> None:
+    platform = _make_delivery_platform()
+
+    async def empty_api():
+        return []
+
+    async def empty_dom():
+        return []
+
+    monkeypatch.setattr(platform, "_read_draft_candidates_from_api", empty_api)
+    monkeypatch.setattr(platform, "_read_draft_candidates_from_dom", empty_dom)
+
+    run(platform.preflight_delivery("首次保存"))
+
+    assert platform._preflight_draft_ids == frozenset()
+    assert platform._preflight_draft_sources == frozenset({"api"})
+    assert platform._preflight_draft_ids_by_source == {"api": frozenset()}
+
+
+@pytest.mark.parametrize(
+    "page",
+    [
+        _FakeEditorPage(drafts_api_status=403),
+        _FakeEditorPage(drafts_api_payload={"error": "risk_control"}),
+    ],
+)
+def test_preflight_delivery_rejects_unverified_empty_api_response(page) -> None:
+    platform = _make_delivery_platform(page)
+
+    with pytest.raises(DraftBaselineError, match="DRAFT_BASELINE_UNAVAILABLE"):
+        run(platform.preflight_delivery("不能伪造空基线"))
+
+
+def test_required_api_baseline_does_not_mix_in_dom_only_candidate() -> None:
+    title = "同源差集"
+    fixture = (
+        PROJECT_ROOT / "tests" / "fixtures" / "zhihu" / "draft_card.html"
+    ).read_text(encoding="utf-8").replace("脱敏测试标题：多屏工作流", title)
+    page = _FakeEditorPage(
+        drafts_api_titles=[{"id": "200", "title": title}],
+        drafts_html=fixture,
+    )
+    platform = _make_delivery_platform(page)
+
+    assert run(
+        platform._find_unique_exact_draft(
+            title,
+            excluded_ids=frozenset({"200"}),
+            baseline_ids_by_source={"api": frozenset({"200"})},
+        )
+    ) is None
+
+
+def test_required_sources_must_identify_same_new_draft_id() -> None:
+    title = "同源差集"
+    fixture = (
+        PROJECT_ROOT / "tests" / "fixtures" / "zhihu" / "draft_card.html"
+    ).read_text(encoding="utf-8").replace("脱敏测试标题：多屏工作流", title)
+    page = _FakeEditorPage(
+        drafts_api_titles=[{"id": "300", "title": title}],
+        drafts_html=fixture,
+    )
+    page.url = DRAFTS_URL
+    platform = _make_delivery_platform(page)
+
+    assert run(
+        platform._find_unique_exact_draft(
+            title,
+            baseline_ids_by_source={
+                "api": frozenset(),
+                "dom": frozenset(),
+            },
+        )
+    ) is None
+
+
+def test_required_sources_accept_same_new_draft_id() -> None:
+    title = "同源一致"
+    html = f"""
+        <div class="CreationManage-CreationCard css-random">
+          <div class="CreationCardTitle-wrapper css-hash">{title}</div>
+          <a href="https://zhuanlan.zhihu.com/p/300/edit">编辑</a>
+        </div>
+    """
+    page = _FakeEditorPage(
+        drafts_api_titles=[{"id": "300", "title": title}],
+        drafts_html=html,
+    )
+    page.url = DRAFTS_URL
+    platform = _make_delivery_platform(page)
+
+    assert run(
+        platform._find_unique_exact_draft(
+            title,
+            baseline_ids_by_source={
+                "api": frozenset(),
+                "dom": frozenset(),
+            },
+        )
+    )["id"] == "300"
+
+
+@pytest.mark.parametrize(
+    ("url", "html"),
+    [
+        ("https://www.zhihu.com/signin", "<div>登录知乎</div>"),
+        (DRAFTS_URL, "<div id='root'></div>"),
+        ("https://www.zhihu.com/404", "<div>404</div>"),
+    ],
+)
+def test_dom_draft_candidates_reject_login_error_and_unhydrated_pages(
+    url: str,
+    html: str,
+) -> None:
+    page = _FakeEditorPage(drafts_html=html)
+    page.url = url
+    platform = _make_delivery_platform(page)
+
+    assert run(platform._read_draft_candidates_from_dom()) is None
+
+
+def test_save_draft_binds_unique_new_id_even_when_old_same_title_exists() -> None:
+    title = "允许同名"
+    page = _FakeEditorPage(
+        drafts_api_titles=[
+            {"id": "200", "title": title},
+            {"id": "300", "title": title},
+        ],
+        title_text=title,
+    )
+    page.dom_tokens = [{"kind": "text", "text": "正文"}]
+    platform = _make_delivery_platform(page)
+    platform._expected_persisted_blocks = [{"type": "text", "text": "正文"}]
+    _set_draft_baseline(platform, title, "200")
+
+    assert run(platform.save_draft(title)).endswith("/p/300/edit")
+    assert platform._last_draft_evidence.to_dict()["draft_entity_bound"] is True
+    assert (
+        platform._last_draft_evidence.to_dict()["draft_entity_source"]
+        == "baseline_new_id"
+    )
+
+
+def test_save_draft_does_not_reuse_old_same_title_without_new_id() -> None:
+    title = "已有同名草稿"
+    page = _FakeEditorPage(
+        drafts_api_titles=[{"id": "200", "title": title}],
+        title_text=title,
+    )
+    platform = _make_delivery_platform(page)
+    platform._expected_persisted_blocks = [{"type": "text", "text": "正文"}]
+    _set_draft_baseline(platform, title, "200")
+
+    with pytest.raises(DraftResultUnknownError, match="唯一草稿"):
+        run(platform.save_draft(title))
+
+
 def test_save_draft_returns_drafts_url_when_title_appears() -> None:
     title = "深夜食堂的标题"
     page = _FakeEditorPage(drafts_api_titles=[title], title_text=title)
     page.dom_tokens = [{"kind": "text", "text": "正文"}]
     platform = _make_delivery_platform(page)
     platform._expected_persisted_blocks = [{"type": "text", "text": "正文"}]
+    _set_draft_baseline(platform, title)
 
     url = run(platform.save_draft(title))
 
@@ -705,6 +1043,7 @@ def test_save_draft_rejects_duplicate_exact_titles() -> None:
     )
     platform = _make_delivery_platform(page)
     platform._expected_persisted_blocks = [{"type": "text", "text": "正文"}]
+    _set_draft_baseline(platform, title)
 
     with pytest.raises(DraftResultUnknownError, match="唯一草稿"):
         run(platform.save_draft(title))
@@ -719,6 +1058,7 @@ def test_save_draft_reopen_rejects_missing_persisted_tail() -> None:
         {"type": "text", "text": "第一段"},
         {"type": "text", "text": "第二段"},
     ]
+    _set_draft_baseline(platform, title)
 
     with pytest.raises(DraftResultUnknownError, match="图文结构不完整"):
         run(platform.save_draft(title))
@@ -730,6 +1070,7 @@ def test_persisted_reopen_waits_for_async_title_hydration(monkeypatch) -> None:
     page.dom_tokens = [{"kind": "text", "text": "正文"}]
     platform = _make_delivery_platform(page)
     platform._expected_persisted_blocks = [{"type": "text", "text": "正文"}]
+    _set_draft_baseline(platform, title)
     values = iter(["", title])
 
     async def delayed_input_value():
@@ -749,6 +1090,7 @@ def test_save_draft_returns_empty_when_title_missing() -> None:
     platform = _make_delivery_platform(page)
 
     platform._expected_persisted_blocks = [{"type": "text", "text": "正文"}]
+    _set_draft_baseline(platform, "深夜食堂的标题")
     with pytest.raises(DraftResultUnknownError):
         run(platform.save_draft("深夜食堂的标题"))
 
@@ -760,6 +1102,7 @@ def test_save_draft_requires_full_exact_title_from_api() -> None:
     )
     platform = _make_delivery_platform(page)
     platform._expected_persisted_blocks = [{"type": "text", "text": "正文"}]
+    _set_draft_baseline(platform, "凌晨三点，公司的智能马桶")
 
     with pytest.raises(DraftResultUnknownError):
         run(platform.save_draft("凌晨三点，公司的智能马桶"))
@@ -773,6 +1116,7 @@ def test_save_draft_fails_honestly_when_api_also_misses_title() -> None:
     platform = _make_delivery_platform(page)
 
     platform._expected_persisted_blocks = [{"type": "text", "text": "正文"}]
+    _set_draft_baseline(platform, "凌晨三点，公司的智能马桶")
     with pytest.raises(DraftResultUnknownError):
         run(platform.save_draft("凌晨三点，公司的智能马桶"))
 

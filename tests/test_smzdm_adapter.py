@@ -8,7 +8,7 @@ import pytest
 
 from platforms.base import DraftResultUnknownError
 from platforms.content_validation import ContentValidationError
-from platforms.smzdm import SmzdmPlatform
+from platforms.smzdm import DRAFT_LIST_URL, SmzdmPlatform
 
 
 def test_smzdm_image_mapping_is_exact_and_never_falls_back() -> None:
@@ -319,8 +319,18 @@ class DraftListPage:
         self.entities = entities
         self.goto = AsyncMock()
 
-    async def evaluate(self, _script: str) -> list[str]:
-        return list(self.entities)
+    async def evaluate(self, script: str) -> list[dict[str, str]]:
+        assert ".pandect-content-common" in script
+        return [
+            {
+                "title": "重复标题",
+                "title_href": "",
+                "status": "草稿",
+                "edit_href": edit_url,
+                "delete_id": edit_url.rsplit("/", 1)[-1],
+            }
+            for edit_url in self.entities
+        ]
 
 
 def test_smzdm_same_title_drafts_use_unique_new_entity_id() -> None:
@@ -340,6 +350,10 @@ def test_smzdm_same_title_drafts_use_unique_new_entity_id() -> None:
     assert result == "https://post.smzdm.com/edit/new-draft"
     assert platform._preflight_draft_ids == frozenset({"first", "second"})
     assert platform.page.goto.await_count == 2
+    assert all(
+        call.args[0] == DRAFT_LIST_URL
+        for call in platform.page.goto.await_args_list
+    )
 
 
 def test_smzdm_multiple_new_entity_ids_are_result_unknown() -> None:
@@ -369,3 +383,51 @@ def test_smzdm_multiple_new_entity_ids_are_result_unknown() -> None:
 def test_smzdm_rejects_unsafe_draft_edit_url(unsafe_url: str) -> None:
     with pytest.raises(DraftResultUnknownError, match="编辑地址无效"):
         SmzdmPlatform._validated_draft_entity(unsafe_url)
+
+
+def test_smzdm_real_cloud_list_keeps_same_title_drafts_by_stable_id() -> None:
+    entities = SmzdmPlatform._normalize_draft_list_rows(
+        [
+            {
+                "title": "同名文章",
+                "title_href": "https://post.smzdm.com/edit/ak8xo458",
+                "status": "草稿",
+                "edit_href": "https://post.smzdm.com/edit/ak8xo458",
+                "delete_id": "ak8xo458",
+            },
+            {
+                "title": "同名文章",
+                "title_href": "https://post.smzdm.com/edit/ad72o4dz",
+                "status": "草稿",
+                "edit_href": "https://post.smzdm.com/edit/ad72o4dz",
+                "delete_id": "ad72o4dz",
+            },
+            {
+                "title": "已发布文章",
+                "title_href": "https://post.smzdm.com/p/123/",
+                "status": "已发布",
+                "edit_href": "https://post.smzdm.com/edit/published-id",
+                "delete_id": "published-id",
+            },
+        ]
+    )
+
+    assert entities == {
+        "ak8xo458": ("https://post.smzdm.com/edit/ak8xo458", "同名文章"),
+        "ad72o4dz": ("https://post.smzdm.com/edit/ad72o4dz", "同名文章"),
+    }
+
+
+def test_smzdm_real_cloud_list_rejects_conflicting_card_ids() -> None:
+    with pytest.raises(DraftResultUnknownError, match="删除标识"):
+        SmzdmPlatform._normalize_draft_list_rows(
+            [
+                {
+                    "title": "目标文章",
+                    "title_href": "",
+                    "status": "草稿",
+                    "edit_href": "https://post.smzdm.com/edit/edit-id",
+                    "delete_id": "other-id",
+                }
+            ]
+        )

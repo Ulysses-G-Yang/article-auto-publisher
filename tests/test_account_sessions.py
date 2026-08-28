@@ -461,6 +461,14 @@ def test_draft_executor_records_platform_logs_and_success(tmp_path: Path) -> Non
                 "success": True,
                 "draft_url": "https://example.invalid/drafts/1",
                 "post_url": "",
+                "verification_evidence": {
+                    "draft_entity_bound": True,
+                    "draft_entity_source": "baseline_new_id",
+                    "draft_entity_id_match": True,
+                    "reopen_title_match": True,
+                    "reopen_dom_blocks_match": True,
+                    "draft_url": "https://example.invalid/drafts/1",
+                },
             }
 
         async def cleanup(self) -> None:
@@ -666,6 +674,14 @@ def test_media_incomplete_with_saved_draft_is_with_warnings_not_failed(
                 "expected_images": 3,
                 "uploaded_images": 0,
                 "failed_images": [{"filename": "a.png", "error": "风控"}],
+                "verification_evidence": {
+                    "draft_entity_bound": True,
+                    "draft_entity_source": "baseline_new_id",
+                    "draft_entity_id_match": True,
+                    "reopen_title_match": True,
+                    "reopen_dom_blocks_match": False,
+                    "draft_url": "https://example.invalid/drafts/media1",
+                },
             }
 
         async def cleanup(self) -> None:
@@ -793,6 +809,14 @@ def test_frozen_cover_payload_reaches_platform_without_public_path_exposure(
                 "post_url": "",
                 "media_status": "not_required",
                 "cover_status": "completed",
+                "verification_evidence": {
+                    "draft_entity_bound": True,
+                    "draft_entity_source": "baseline_new_id",
+                    "draft_entity_id_match": True,
+                    "reopen_title_match": True,
+                    "reopen_dom_blocks_match": True,
+                    "draft_url": "https://example.invalid/drafts/cover-ok",
+                },
             }
 
         async def cleanup(self) -> None:
@@ -879,6 +903,14 @@ def test_unsupported_frozen_cover_is_saved_with_explicit_warning(tmp_path: Path)
                 "cover_error": (
                     r"当前平台尚未实现封面投递: D:\Secret Folder\cover.png"
                 ),
+                "verification_evidence": {
+                    "draft_entity_bound": True,
+                    "draft_entity_source": "baseline_new_id",
+                    "draft_entity_id_match": True,
+                    "reopen_title_match": True,
+                    "reopen_dom_blocks_match": True,
+                    "draft_url": "https://example.invalid/drafts/cover-warning",
+                },
             }
 
         async def cleanup(self) -> None:
@@ -1000,8 +1032,8 @@ def test_invalid_cover_resolver_payload_fails_closed_before_platform_publish(
     run(database.dispose())
 
 
-def test_media_incomplete_without_draft_still_fails(tmp_path: Path) -> None:
-    """图片未完整且草稿也没保存：整体判失败，杜绝假成功。"""
+def test_media_incomplete_without_bound_draft_is_result_unknown(tmp_path: Path) -> None:
+    """适配器声称执行过保存但无实体绑定：结果未知，禁止假成功。"""
 
     class FakePlatform:
         platform_name = "xiaoheihe"
@@ -1052,7 +1084,14 @@ def test_media_incomplete_without_draft_still_fails(tmp_path: Path) -> None:
 
     with pytest.raises(AccountUnavailableError) as exc_info:
         run(delivery.execute_operation(queued["operation_id"], LOCAL_WEB_CONTEXT))
-    assert exc_info.value.error_code == "PLATFORM_MEDIA_INCOMPLETE"
+    assert exc_info.value.error_code == "DRAFT_RESULT_UNKNOWN"
+
+    async def load_operation() -> DeliveryOperation:
+        async with database.session() as session:
+            return await session.get(DeliveryOperation, queued["operation_id"])
+
+    stored = run(load_operation())
+    assert stored.status == "RESULT_UNKNOWN"
     run(database.dispose())
 
 

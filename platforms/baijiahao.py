@@ -75,6 +75,7 @@ class BaijiahaoPlatform(BasePlatform):
         self._preflight_draft_ids: frozenset[str] = frozenset()
         self._last_draft_entity_bound: bool | None = None
         self._last_draft_entity_source: str | None = None
+        self._last_draft_match_count: int | None = None
         self._media_progress_state: dict[str, int] | None = None
 
     async def initialize(self):
@@ -326,6 +327,7 @@ class BaijiahaoPlatform(BasePlatform):
         self._preflight_draft_ids = frozenset()
         self._last_draft_entity_bound = None
         self._last_draft_entity_source = None
+        self._last_draft_match_count = None
         expected_title = self._normalize_title(title)
         if not expected_title:
             raise DraftBaselineError("DRAFT_BASELINE_FAILED: 百家号标题不能为空")
@@ -439,9 +441,20 @@ class BaijiahaoPlatform(BasePlatform):
                     const preview = Array.from(row.querySelectorAll('a[href]'))
                         .find((link) => {
                             try {
-                                const parsed = new URL(link.href, location.href);
-                                return parsed.origin === location.origin
-                                    && parsed.pathname === '/builder/preview/s';
+                                const rawHref = link.getAttribute('href') || '';
+                                const parsed = new URL(rawHref, location.href);
+                                const values = Array.from(parsed.searchParams.entries());
+                                return /^https?:\\/\\//i.test(rawHref)
+                                    && ['http:', 'https:'].includes(parsed.protocol)
+                                    && parsed.hostname === 'baijiahao.baidu.com'
+                                    && parsed.port === ''
+                                    && parsed.username === ''
+                                    && parsed.password === ''
+                                    && parsed.pathname === '/builder/preview/s'
+                                    && parsed.hash === ''
+                                    && values.length === 1
+                                    && values[0][0] === 'id'
+                                    && /^[A-Za-z0-9_-]{1,128}$/.test(values[0][1]);
                             } catch (_) {
                                 return false;
                             }
@@ -449,7 +462,9 @@ class BaijiahaoPlatform(BasePlatform):
                     return {
                         index,
                         title,
-                        preview_href: preview ? preview.href : '',
+                        preview_href: preview
+                            ? (preview.getAttribute('href') || '')
+                            : '',
                     };
                 });
             }""",
@@ -1702,7 +1717,7 @@ class BaijiahaoPlatform(BasePlatform):
 
         try:
             edit_url = await self._find_unique_exact_draft(expected_title)
-            evidence.mark_draft_list(match_count=1)
+            evidence.mark_draft_list(match_count=self._last_draft_match_count)
             evidence.mark_entity_binding(
                 bound=self._last_draft_entity_bound is True,
                 source=self._last_draft_entity_source
@@ -1714,6 +1729,11 @@ class BaijiahaoPlatform(BasePlatform):
                 ),
             )
             evidence.set_draft_url(edit_url)
+            if self._last_draft_entity_bound is not True:
+                raise DraftResultUnknownError(
+                    "DRAFT_RESULT_UNKNOWN: 百家号缺少本次新增草稿的稳定 ID 绑定",
+                    evidence=evidence.finalize(error_code="DRAFT_RESULT_UNKNOWN"),
+                )
             try:
                 await self._verify_persisted_draft(expected_title, edit_url)
             except DraftResultUnknownError as exc:
@@ -1728,6 +1748,13 @@ class BaijiahaoPlatform(BasePlatform):
             return edit_url
         except DraftResultUnknownError as exc:
             if getattr(exc, "evidence", None) is None:
+                if (
+                    evidence.draft_list_match_count is None
+                    and self._last_draft_match_count is not None
+                ):
+                    evidence.mark_draft_list(
+                        match_count=self._last_draft_match_count
+                    )
                 if evidence.draft_entity_bound is None:
                     evidence.mark_entity_binding(
                         bound=False,
@@ -1790,6 +1817,7 @@ class BaijiahaoPlatform(BasePlatform):
     async def _find_unique_exact_draft(self, title: str) -> str:
         self._last_draft_entity_bound = None
         self._last_draft_entity_source = None
+        self._last_draft_match_count = None
         await self._open_works_page()
         matches: list[dict] = []
         baseline_count = getattr(self, "_preflight_matching_draft_count", 0)
@@ -1804,52 +1832,43 @@ class BaijiahaoPlatform(BasePlatform):
         for attempt in range(6):
             await self._search_works(title)
             matches = await self._matching_work_rows(title)
+            self._last_draft_match_count = len(matches)
             if len(matches) == baseline_count + 1:
-                candidates = [
-                    match
-                    for match in matches
-                    if (
-                        (draft_id := self._preview_article_id(
-                            str(match.get("preview_href") or "")
-                        ))
-                        and draft_id not in baseline_ids
+                post_by_id: dict[str, dict] = {}
+                post_ids_complete = True
+                for match in matches:
+                    draft_id = self._preview_article_id(
+                        str(match.get("preview_href") or "")
                     )
-                ]
-                if len(candidates) == 1:
-                    created_match = candidates[0]
+                    if draft_id is None or draft_id in post_by_id:
+                        post_ids_complete = False
+                        break
+                    post_by_id[draft_id] = match
+                baseline_ids_complete = len(baseline_ids) == baseline_count
+                new_ids = set(post_by_id).difference(baseline_ids)
+                if (
+                    baseline_ids_complete
+                    and post_ids_complete
+                    and len(post_by_id) == len(matches)
+                    and len(new_ids) == 1
+                ):
+                    created_match = post_by_id[new_ids.pop()]
                     self._last_draft_entity_bound = True
                     self._last_draft_entity_source = "baseline_new_id"
-                    break
-                # 新版草稿列表不再给任何一行暴露预览 ID。真实页面按最近
-                # 修改时间倒序；数量严格只增加一条时，第 0 个精确标题行是
-                # 本次新增实体。随后必须重开并核验冻结内容，不能只凭顺序
-                # 宣告成功。这里一旦得到数量证据便停止轮询，避免反复操作
-                # 草稿箱搜索框。
-                if matches and int(matches[0].get("index", -1)) == 0:
-                    created_match = matches[0]
-                    # 没有稳定预览 ID 时，数量 + 行顺序不能证明这是
-                    # 本次实体；后续即使拿到编辑地址也保持未绑定。
-                    self._last_draft_entity_bound = False
-                    self._last_draft_entity_source = "title_match_without_baseline"
                     break
             if attempt + 1 < 6:
                 await self.page.reload(wait_until="domcontentloaded", timeout=30000)
                 await self.simulator.random_delay(1, 2)
         if created_match is None:
+            self._last_draft_entity_bound = False
+            self._last_draft_entity_source = "baseline_new_id"
             raise DraftResultUnknownError(
                 "DRAFT_RESULT_UNKNOWN: 百家号无法从同名草稿中唯一识别本次新增实体"
             )
-        # 百家号“修改”是 React 处理器调用 window.open，而不是当前页链接。
-        # 浏览器可能拦截该弹窗，导致平台已保存成功但验证器误报结果未知。
-        # 作品行还提供同源预览链接，其 id 与编辑器 article_id 相同；只从
-        # 唯一匹配行提取该稳定 ID，再由持久化核验函数主动打开编辑页。
+        # 真实作品行的预览链接可能是 HTTP，但这里只提取通过严格校验的
+        # 稳定 ID；编辑页始终由 _edit_url_from_preview_href 规范为 HTTPS。
         preview_href = str(created_match.get("preview_href") or "")
-        if preview_href:
-            return self._edit_url_from_preview_href(preview_href)
-        return await self._open_exact_draft_via_modify(
-            title,
-            row_index=int(created_match.get("index", -1)),
-        )
+        return self._edit_url_from_preview_href(preview_href)
 
     async def verify_draft_readonly(self, title: str) -> dict:
         """只读核验：在百家号草稿作品页按标题搜索并匹配唯一草稿行。
@@ -2020,9 +2039,14 @@ class BaijiahaoPlatform(BasePlatform):
         """从同源预览地址提取非敏感草稿 ID；无可靠 ID 时返回 ``None``。"""
 
         parts = urlsplit(str(value or ""))
+        try:
+            port = parts.port
+        except ValueError:
+            return None
         if (
-            parts.scheme != "https"
-            or parts.netloc != "baijiahao.baidu.com"
+            parts.scheme not in {"http", "https"}
+            or parts.hostname != "baijiahao.baidu.com"
+            or port is not None
             or parts.path != "/builder/preview/s"
             or parts.username
             or parts.password

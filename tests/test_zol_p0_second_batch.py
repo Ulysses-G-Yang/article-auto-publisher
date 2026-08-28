@@ -96,24 +96,50 @@ def test_new_draft_requires_total_increment_and_unique_exact_title_entity() -> N
     unchanged_total = _snapshot(1, ("old", "同名草稿"))
     exact_new = _snapshot(2, ("old", "旧草稿"), ("new", "新草稿"))
 
-    assert ZOLPlatform._new_draft_id_for_title(before, same_title, "同名草稿") is None
+    assert (
+        ZOLPlatform._new_draft_id_for_title(before, same_title, "同名草稿")
+        == "new"
+    )
     assert ZOLPlatform._new_draft_id_for_title(
         before, unchanged_total, "同名草稿"
     ) is None
     assert ZOLPlatform._new_draft_id_for_title(before, exact_new, "新草稿") == "new"
 
 
-def test_zol_preflight_runs_before_auto_saving_editor_navigation() -> None:
+def test_zol_preflight_freezes_api_ids_and_allows_same_title() -> None:
     platform = ZOLPlatform()
-    draft_page = AsyncMock()
     platform.page = SimpleNamespace(on=Mock(), remove_listener=Mock())
-    platform._prepare_draft_verification_page = AsyncMock(return_value=draft_page)
+    baseline = _snapshot(2, ("old-a", "唯一标题"), ("old-b", "唯一标题"))
+    platform._fetch_draft_snapshot = AsyncMock(return_value=baseline)
 
     asyncio.run(platform.preflight_delivery("  唯一标题  "))
 
-    platform._prepare_draft_verification_page.assert_awaited_once_with("唯一标题")
+    platform._fetch_draft_snapshot.assert_awaited_once_with()
+    assert platform._draft_baseline == baseline
+    assert platform._draft_preflight_title == "唯一标题"
     platform.page.on.assert_called_once_with("response", platform._autosave_listener)
-    draft_page.close.assert_awaited_once()
+
+
+def test_readonly_probe_uses_api_stable_id_for_exact_editor_url() -> None:
+    platform = ZOLPlatform()
+    draft_page = SimpleNamespace(close=AsyncMock())
+    platform.context = SimpleNamespace(new_page=AsyncMock(return_value=draft_page))
+    platform._fetch_draft_snapshot = AsyncMock(
+        return_value=_snapshot(
+            2,
+            ("other-id", "另一篇"),
+            ("exact-id", "唯一标题"),
+        )
+    )
+
+    result = asyncio.run(platform.verify_draft_readonly(" 唯一标题 "))
+
+    assert result["title_matched"] is True
+    assert result["match_count"] == 1
+    assert result["structure"] == {"source": "draft_list_api"}
+    assert "draftId=exact-id" in result["draft_url"]
+    platform._fetch_draft_snapshot.assert_awaited_once_with(draft_page)
+    draft_page.close.assert_awaited_once_with()
 
 
 def test_media_binding_saves_once_then_reopens_exact_draft_id() -> None:
@@ -208,44 +234,9 @@ class _SaveResponse:
         return self.payload
 
 
-class _SaveCard(FakeLocator):
-    def __init__(self, text: str, attributes: dict | None = None) -> None:
-        super().__init__(tag="article", text=text, attributes=attributes)
-
-
-class _CardCollection:
-    def __init__(self, cards: list[_SaveCard]) -> None:
-        self.cards = cards
-
-    async def count(self) -> int:
-        return len(self.cards)
-
-    def nth(self, index: int):
-        return self.cards[index]
-
-
 class _DraftVerificationPage:
-    def __init__(self, card_states: list[list[_SaveCard]]) -> None:
-        self.card_states = list(card_states)
-        self.cards = []
+    def __init__(self) -> None:
         self.closed = False
-        self.goto_calls = []
-
-    async def goto(self, url: str, **_kwargs) -> None:
-        self.goto_calls.append(url)
-        if self.card_states:
-            self.cards = self.card_states.pop(0)
-
-    async def wait_for_load_state(self, *_args, **_kwargs) -> None:
-        return None
-
-    async def wait_for_timeout(self, _timeout: int) -> None:
-        return None
-
-    def locator(self, selector: str):
-        if selector == ".article-card":
-            return _CardCollection(self.cards)
-        return _CardCollection([])
 
     async def close(self) -> None:
         self.closed = True
@@ -293,20 +284,31 @@ class _SavePage:
 def _save_platform(
     *,
     responses: list[_SaveResponse],
-    card_states: list[list[_SaveCard]],
+    title: str = "新草稿",
+    baseline: _ZOLDraftSnapshot | None = None,
+    after: _ZOLDraftSnapshot | None = None,
 ) -> tuple[ZOLPlatform, _DraftVerificationPage]:
-    draft_page = _DraftVerificationPage(card_states)
+    draft_page = _DraftVerificationPage()
+    baseline = baseline or _snapshot(0)
+    after = after or _snapshot(1, ("new-id", title))
     platform = ZOLPlatform()
     platform.page = _SavePage(responses, draft_page)
     platform.context = platform.page.context
     platform.simulator.random_delay = AsyncMock()
     platform.DRAFT_RESPONSE_WAIT_SECONDS = 0
-    platform.DRAFT_CARD_POLL_DELAYS = (0, 0)
+    platform.DRAFT_LIST_POLL_DELAYS = (0, 0)
+    platform._draft_baseline = baseline
+    platform._draft_preflight_title = title
+    platform._expected_persisted_blocks = [{"type": "text", "text": "正文"}]
+    platform._fetch_draft_snapshot = AsyncMock(side_effect=[baseline, after, after])
+    platform._verify_persisted_draft_content = AsyncMock(
+        side_effect=lambda draft_id, _title: platform._draft_editor_url(draft_id)
+    )
     return platform, draft_page
 
 
 def test_navigate_to_editor_does_not_require_draft_list_baseline() -> None:
-    platform, _draft_page = _save_platform(responses=[], card_states=[[]])
+    platform, _draft_page = _save_platform(responses=[])
     platform._editor_probe_count = AsyncMock(return_value=1)
     platform._safe_simulate_scroll = AsyncMock()
     platform._fetch_draft_snapshot = AsyncMock(
@@ -394,133 +396,115 @@ def test_save_draft_uses_exact_control_once_and_proves_new_entity() -> None:
                 url="https://open-api.zol.com.cn/api/v1/creator.content.draft.save.orther",
             )
         ],
-        card_states=[[], [_SaveCard("新草稿", {"data-draft-id": "new-id"})]],
     )
 
     result = asyncio.run(platform.save_draft("新草稿"))
 
-    assert result.endswith("/v2/manage/works/draft")
+    assert "draftId=new-id" in result
     assert platform.page.control.click_count == 1
     assert platform.context.new_page_count == 1
     assert draft_page.closed is True
-
-
-def test_save_draft_accepts_unique_title_card_without_card_id() -> None:
-    platform, _draft_page = _save_platform(
-        responses=[_SaveResponse({"code": 0, "data": {"articleId": "article-1"}})],
-        card_states=[[], [_SaveCard("新草稿"),]],
+    assert platform._fetch_draft_snapshot.await_count == 2
+    platform._verify_persisted_draft_content.assert_awaited_once_with(
+        "new-id",
+        "新草稿",
     )
 
-    assert asyncio.run(platform.save_draft("新草稿")).endswith("/draft")
 
-
-def test_save_draft_binds_matching_id_among_same_title_cards() -> None:
+def test_save_draft_allows_existing_same_title_via_unique_new_api_id() -> None:
+    baseline = _snapshot(1, ("old-id", "同名草稿"))
+    after = _snapshot(
+        2,
+        ("old-id", "同名草稿"),
+        ("new-id", "同名草稿"),
+    )
     platform, _draft_page = _save_platform(
         responses=[_SaveResponse({"errcode": 0, "data": {"draftId": "new-id"}})],
-        card_states=[
-            [],
-            [
-                _SaveCard("同名草稿", {"data-draft-id": "old-id"}),
-                _SaveCard("同名草稿", {"data-draft-id": "new-id"}),
-            ],
-        ],
+        title="同名草稿",
+        baseline=baseline,
+        after=after,
     )
 
-    assert asyncio.run(platform.save_draft("同名草稿")).endswith("/draft")
+    result = asyncio.run(platform.save_draft("同名草稿"))
+
+    assert "draftId=new-id" in result
     evidence = platform._last_draft_evidence.to_dict()
     assert evidence["draft_list_match_count"] == 2
     assert evidence["draft_entity_bound"] is True
     assert evidence["draft_entity_id_match"] is True
 
 
-def test_save_draft_rejects_duplicate_title_cards() -> None:
+def test_save_response_id_must_equal_unique_new_api_entity() -> None:
     platform, draft_page = _save_platform(
-        responses=[_SaveResponse({"errcode": 0, "data": {"draftId": "new-id"}})],
-        card_states=[[], [_SaveCard("新草稿"), _SaveCard("新草稿")]],
+        responses=[
+            _SaveResponse({"errcode": 0, "data": {"draftId": "response-id"}})
+        ],
     )
 
-    with pytest.raises(DraftResultUnknownError, match="DRAFT_RESULT_UNKNOWN") as caught:
+    with pytest.raises(DraftResultUnknownError, match="唯一新增实体不一致") as caught:
         asyncio.run(platform.save_draft("新草稿"))
 
     assert platform.page.control.click_count == 1
     assert draft_page.closed is True
     assert caught.value.evidence.to_dict()["draft_entity_bound"] is False
-    evidence = platform._last_draft_evidence.to_dict()
-    assert evidence["draft_entity_bound"] is False
-    assert evidence["draft_entity_id_match"] is False
+    assert platform._last_draft_evidence.draft_entity_id_match is False
+    platform._verify_persisted_draft_content.assert_not_awaited()
 
 
-def test_save_draft_rejects_missing_card_and_mismatched_card_id() -> None:
-    for after_cards in (
-        [],
-        [_SaveCard("另一篇", {"data-draft-id": "new-id"})],
-        [_SaveCard("新草稿", {"data-draft-id": "other-id"})],
-        [
-            _SaveCard("新草稿", {"data-draft-id": "old-id"}),
-            _SaveCard("新草稿", {"data-draft-id": "other-id"}),
-        ],
-    ):
-        platform, draft_page = _save_platform(
-            responses=[_SaveResponse({"errcode": 0, "data": {"draftId": "new-id"}})],
-            card_states=[[], after_cards, after_cards],
-        )
-        with pytest.raises(DraftResultUnknownError, match="DRAFT_RESULT_UNKNOWN") as caught:
-            asyncio.run(platform.save_draft("新草稿"))
-        evidence = platform._last_draft_evidence.to_dict()
-        if after_cards and (
-            after_cards[0].attributes.get("data-draft-id") == "other-id"
-            or len(after_cards) == 2
-        ):
-            assert caught.value.evidence.to_dict()["draft_entity_bound"] is False
-            assert evidence["draft_entity_bound"] is False
-            assert evidence["draft_entity_id_match"] is False
-        assert platform.page.control.click_count == 1
-        assert draft_page.closed is True
-
-
-def test_save_click_without_response_is_unknown_and_never_retries() -> None:
-    platform, draft_page = _save_platform(responses=[], card_states=[[], []])
-
-    with pytest.raises(DraftResultUnknownError, match="DRAFT_RESULT_UNKNOWN"):
-        asyncio.run(platform.save_draft("未证明草稿"))
-
-    assert platform.page.control.click_count == 1
-    assert platform.context.new_page_count == 1
-    assert draft_page.closed is True
-
-
-def test_save_verification_page_is_closed_after_response_proof_failure() -> None:
+@pytest.mark.parametrize(
+    "after",
+    [
+        _snapshot(0),
+        _snapshot(1, ("new-id", "另一篇")),
+        _snapshot(2, ("new-id", "新草稿"), ("other-id", "新草稿")),
+    ],
+)
+def test_save_draft_rejects_unproved_new_api_entity(
+    after: _ZOLDraftSnapshot,
+) -> None:
     platform, draft_page = _save_platform(
         responses=[_SaveResponse({"errcode": 0, "data": {"draftId": "new-id"}})],
-        card_states=[[], [_SaveCard("新草稿", {"data-draft-id": "other-id"})]],
+        after=after,
     )
 
-    with pytest.raises(DraftResultUnknownError, match="DRAFT_RESULT_UNKNOWN"):
+    with pytest.raises(DraftResultUnknownError, match="getlist") as caught:
         asyncio.run(platform.save_draft("新草稿"))
 
+    evidence = caught.value.evidence.to_dict()
+    assert evidence["draft_entity_bound"] is False
+    assert platform.page.control.click_count == 1
     assert draft_page.closed is True
 
 
-def test_existing_same_title_after_editor_entry_is_unknown_and_never_clicked() -> None:
-    platform, draft_page = _save_platform(
-        responses=[_SaveResponse({"errcode": 0, "data": {"draftId": "new-id"}})],
-        card_states=[[_SaveCard("新草稿")]],
-    )
+def test_unobserved_getlist_change_never_triggers_second_save() -> None:
+    changed = _snapshot(1, ("silent-id", "新草稿"))
+    platform, draft_page = _save_platform(responses=[])
+    platform._fetch_draft_snapshot = AsyncMock(return_value=changed)
 
-    with pytest.raises(DraftResultUnknownError, match="DRAFT_RESULT_UNKNOWN"):
+    with pytest.raises(DraftResultUnknownError, match="未观测的草稿实体变化"):
         asyncio.run(platform.save_draft("新草稿"))
 
     assert platform.page.control.click_count == 0
     assert draft_page.closed is True
 
 
+def test_save_click_without_response_is_unknown_and_never_retries() -> None:
+    platform, draft_page = _save_platform(responses=[])
+
+    with pytest.raises(DraftResultUnknownError, match="DRAFT_RESULT_UNKNOWN"):
+        asyncio.run(platform.save_draft("新草稿"))
+
+    assert platform.page.control.click_count == 1
+    assert platform.context.new_page_count == 1
+    assert draft_page.closed is True
+
+
 def test_autosave_same_entity_multiple_times_is_verified_without_click() -> None:
+    after = _snapshot(1, ("same-id", "自动保存草稿"))
     platform, draft_page = _save_platform(
         responses=[],
-        card_states=[
-            [_SaveCard("自动保存草稿", {"data-draft-id": "same-id"})],
-            [_SaveCard("自动保存草稿", {"data-draft-id": "same-id"})],
-        ],
+        title="自动保存草稿",
+        after=after,
     )
     platform._autosave_responses = [
         _SaveResponse({"errcode": 0, "data": {"draftId": "same-id"}}),
@@ -529,20 +513,20 @@ def test_autosave_same_entity_multiple_times_is_verified_without_click() -> None
 
     result = asyncio.run(platform.save_draft("自动保存草稿"))
 
-    assert result.endswith("/draft")
+    assert "draftId=same-id" in result
     assert platform.page.control.click_count == 0
     assert draft_page.closed is True
 
 
 def test_autosave_multiple_entities_is_unknown_and_never_clicked() -> None:
-    platform, draft_page = _save_platform(responses=[], card_states=[])
+    platform, draft_page = _save_platform(responses=[])
     platform._autosave_responses = [
         _SaveResponse({"errcode": 0, "data": {"draftId": "first-id"}}),
         _SaveResponse({"errcode": 0, "data": {"draftId": "second-id"}}),
     ]
 
     with pytest.raises(DraftResultUnknownError, match="多个草稿实体"):
-        asyncio.run(platform.save_draft("重复自动保存"))
+        asyncio.run(platform.save_draft("新草稿"))
 
     assert platform.page.control.click_count == 0
     assert platform.context.new_page_count == 0
@@ -550,65 +534,46 @@ def test_autosave_multiple_entities_is_unknown_and_never_clicked() -> None:
 
 
 def test_autosave_proof_does_not_require_visible_manual_save_control() -> None:
+    after = _snapshot(1, ("auto-id", "自动保存草稿"))
     platform, _draft_page = _save_platform(
         responses=[],
-        card_states=[
-            [_SaveCard("自动保存草稿", {"data-draft-id": "auto-id"})],
-            [_SaveCard("自动保存草稿", {"data-draft-id": "auto-id"})],
-        ],
+        title="自动保存草稿",
+        after=after,
     )
     platform.page.control = FakeLocator(count=0, visible=False)
     platform._autosave_responses = [
         _SaveResponse({"errcode": 0, "data": {"draftId": "auto-id"}})
     ]
 
-    assert asyncio.run(platform.save_draft("自动保存草稿")).endswith("/draft")
+    assert "draftId=auto-id" in asyncio.run(
+        platform.save_draft("自动保存草稿")
+    )
 
 
-def test_preview_response_is_ignored_before_unique_save_response() -> None:
+@pytest.mark.parametrize(
+    "preview_url",
+    [
+        "https://open-api.zol.com.cn/api/v1/creator.content.preview",
+        "https://open-api.zol.com.cn/api/v1/creator.content.previewWap",
+    ],
+)
+def test_preview_responses_are_ignored_before_unique_save_response(
+    preview_url: str,
+) -> None:
     platform, _draft_page = _save_platform(
         responses=[
             _SaveResponse(
                 {"errcode": 0, "data": {"id": "preview-id"}},
-                url="https://open-api.zol.com.cn/api/v1/creator.content.preview",
+                url=preview_url,
             ),
             _SaveResponse(
                 {"errcode": 0, "data": {"draftId": "new-id"}},
                 url="https://open-api.zol.com.cn/api/v1/creator.content.draft.save.orther",
             ),
         ],
-        card_states=[[], [_SaveCard("新草稿", {"data-draft-id": "new-id"})]],
     )
 
-    assert asyncio.run(platform.save_draft("新草稿")).endswith("/draft")
-
-
-def test_preview_wap_response_is_ignored_before_unique_save_response() -> None:
-    platform, _draft_page = _save_platform(
-        responses=[
-            _SaveResponse(
-                {"errcode": 0, "data": {"id": "preview-id"}},
-                url="https://open-api.zol.com.cn/api/v1/creator.content.previewWap",
-            ),
-            _SaveResponse(
-                {"errcode": 0, "data": {"draftId": "new-id"}},
-                url="https://open-api.zol.com.cn/api/v1/creator.content.draft.save.orther",
-            ),
-        ],
-        card_states=[[], [_SaveCard("新草稿", {"data-draft-id": "new-id"})]],
-    )
-
-    assert asyncio.run(platform.save_draft("新草稿")).endswith("/draft")
-
-
-def test_title_match_requires_an_exact_nonempty_card_line() -> None:
-    platform, _draft_page = _save_platform(
-        responses=[_SaveResponse({"errcode": 0, "data": {"draftId": "new-id"}})],
-        card_states=[[], [_SaveCard("新草稿 - 副本")]],
-    )
-
-    with pytest.raises(DraftResultUnknownError, match="DRAFT_RESULT_UNKNOWN"):
-        asyncio.run(platform.save_draft("新草稿"))
+    assert "draftId=new-id" in asyncio.run(platform.save_draft("新草稿"))
 
 
 def test_multiple_successful_save_responses_are_ambiguous() -> None:
@@ -617,7 +582,6 @@ def test_multiple_successful_save_responses_are_ambiguous() -> None:
             _SaveResponse({"errcode": 0, "data": {"draftId": "first"}}),
             _SaveResponse({"errcode": 0, "data": {"draftId": "second"}}),
         ],
-        card_states=[[], [_SaveCard("新草稿")]],
     )
 
     with pytest.raises(DraftResultUnknownError, match="DRAFT_RESULT_UNKNOWN"):
@@ -627,7 +591,8 @@ def test_multiple_successful_save_responses_are_ambiguous() -> None:
 def test_bound_draft_always_gets_one_final_explicit_save_on_exact_editor_id() -> None:
     platform, draft_page = _save_platform(
         responses=[_SaveResponse({"errcode": 0, "data": {"draftId": "bound-id"}})],
-        card_states=[[_SaveCard("完整草稿", {"data-draft-id": "bound-id"})]],
+        title="完整草稿",
+        after=_snapshot(1, ("bound-id", "完整草稿")),
     )
     platform.page.url = (
         "https://post.zol.com.cn/v2/create/article?draftId=bound-id&businessType=1"
@@ -638,7 +603,7 @@ def test_bound_draft_always_gets_one_final_explicit_save_on_exact_editor_id() ->
     ]
     platform._final_content_response_index = len(platform._autosave_responses)
 
-    assert asyncio.run(platform.save_draft("完整草稿")).endswith("/draft")
+    assert "draftId=bound-id" in asyncio.run(platform.save_draft("完整草稿"))
     assert platform.page.control.click_count == 1
     assert draft_page.closed is True
 
@@ -646,7 +611,8 @@ def test_bound_draft_always_gets_one_final_explicit_save_on_exact_editor_id() ->
 def test_bound_draft_final_save_rejects_mismatched_response_id() -> None:
     platform, _draft_page = _save_platform(
         responses=[_SaveResponse({"errcode": 0, "data": {"draftId": "other-id"}})],
-        card_states=[],
+        title="完整草稿",
+        after=_snapshot(1, ("bound-id", "完整草稿")),
     )
     platform.page.url = (
         "https://post.zol.com.cn/v2/create/article?draftId=bound-id&businessType=1"
@@ -669,6 +635,7 @@ def test_persisted_content_reopen_requires_full_ordered_tail_and_images() -> Non
     platform.DRAFT_CONTENT_POLL_DELAYS = (0,)
     platform.page = SimpleNamespace(goto=AsyncMock(), wait_for_timeout=AsyncMock())
     platform._editor_probe_count = AsyncMock(return_value=1)
+    platform._read_editor_title = AsyncMock(return_value="唯一标题")
     platform._resolve_content_editor = AsyncMock(
         return_value=(FakeLocator(tag="body"), "iframe")
     )
@@ -681,7 +648,9 @@ def test_persisted_content_reopen_requires_full_ordered_tail_and_images() -> Non
         ]
     )
 
-    asyncio.run(platform._verify_persisted_draft_content("bound-id"))
+    asyncio.run(
+        platform._verify_persisted_draft_content("bound-id", "唯一标题")
+    )
 
     platform._read_editor_dom_tokens = AsyncMock(
         return_value=[
@@ -691,7 +660,26 @@ def test_persisted_content_reopen_requires_full_ordered_tail_and_images() -> Non
         ]
     )
     with pytest.raises(DraftResultUnknownError, match="重开后图文结构不完整"):
-        asyncio.run(platform._verify_persisted_draft_content("bound-id"))
+        asyncio.run(
+            platform._verify_persisted_draft_content("bound-id", "唯一标题")
+        )
+
+
+def test_persisted_content_reopen_requires_exact_title() -> None:
+    platform = ZOLPlatform()
+    platform._expected_persisted_blocks = [{"type": "text", "text": "正文"}]
+    platform.DRAFT_CONTENT_POLL_DELAYS = (0,)
+    platform.page = SimpleNamespace(goto=AsyncMock(), wait_for_timeout=AsyncMock())
+    platform._editor_probe_count = AsyncMock(return_value=1)
+    platform._read_editor_title = AsyncMock(return_value="另一篇")
+    platform._resolve_content_editor = AsyncMock()
+
+    with pytest.raises(DraftResultUnknownError, match="重开后标题不一致"):
+        asyncio.run(
+            platform._verify_persisted_draft_content("bound-id", "唯一标题")
+        )
+
+    platform._resolve_content_editor.assert_not_awaited()
 
 
 class _Modal:

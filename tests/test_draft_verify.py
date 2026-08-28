@@ -196,26 +196,40 @@ class TestBasePlatformHook:
 class TestPlatformReadonlyVerify:
     @pytest.mark.asyncio
     async def test_zol_found_and_not_found(self) -> None:
-        from platforms.zol import ZOLPlatform
+        from platforms.zol import ZOLPlatform, _ZOLDraftSnapshot
 
-        # found: 1 张匹配卡片
+        def snapshot(*pairs: tuple[str, str]) -> _ZOLDraftSnapshot:
+            title_to_ids: dict[str, set[str]] = {}
+            for draft_id, draft_title in pairs:
+                title_to_ids.setdefault(draft_title, set()).add(draft_id)
+            return _ZOLDraftSnapshot(
+                total_num=len(pairs),
+                draft_ids=frozenset(draft_id for draft_id, _title in pairs),
+                title_to_ids={
+                    draft_title: frozenset(draft_ids)
+                    for draft_title, draft_ids in title_to_ids.items()
+                },
+            )
+
+        # found: getlist 返回 1 个稳定 ID
         platform = ZOLPlatform()
         page = AsyncMock()
         platform.context = MagicMock()
         platform.context.new_page = AsyncMock(return_value=page)
-        platform._navigate_draft_verification_page = AsyncMock()
-        platform._matching_draft_cards = AsyncMock(return_value=["card1"])
+        platform._fetch_draft_snapshot = AsyncMock(
+            return_value=snapshot(("draft-1", "测试标题"))
+        )
         result = await platform.verify_draft_readonly("测试标题")
         assert result["title_matched"] is True
         assert result["match_count"] == 1
+        assert "draftId=draft-1" in result["draft_url"]
         page.close.assert_awaited()
 
         # not found
         platform2 = ZOLPlatform()
         platform2.context = MagicMock()
         platform2.context.new_page = AsyncMock(return_value=AsyncMock())
-        platform2._navigate_draft_verification_page = AsyncMock()
-        platform2._matching_draft_cards = AsyncMock(return_value=[])
+        platform2._fetch_draft_snapshot = AsyncMock(return_value=snapshot())
         result2 = await platform2.verify_draft_readonly("不存在的标题")
         assert result2["error_code"] == PROBE_NOT_FOUND
 
@@ -223,8 +237,12 @@ class TestPlatformReadonlyVerify:
         platform3 = ZOLPlatform()
         platform3.context = MagicMock()
         platform3.context.new_page = AsyncMock(return_value=AsyncMock())
-        platform3._navigate_draft_verification_page = AsyncMock()
-        platform3._matching_draft_cards = AsyncMock(return_value=["a", "b"])
+        platform3._fetch_draft_snapshot = AsyncMock(
+            return_value=snapshot(
+                ("draft-a", "同名标题"),
+                ("draft-b", "同名标题"),
+            )
+        )
         result3 = await platform3.verify_draft_readonly("同名标题")
         assert result3["error_code"] == PROBE_TITLE_AMBIGUOUS
 
@@ -246,7 +264,13 @@ class TestPlatformReadonlyVerify:
         # found: 一个 li 标题匹配
         async def evaluate(script, *args):
             return [
-                {"href": "https://post.smzdm.com/edit/draft-1", "text": "测试标题 继续编辑"},
+                {
+                    "title": "测试标题",
+                    "title_href": "",
+                    "status": "草稿",
+                    "edit_href": "https://post.smzdm.com/edit/draft-1",
+                    "delete_id": "draft-1",
+                },
             ]
 
         platform.page.evaluate = AsyncMock(side_effect=evaluate)
@@ -257,7 +281,13 @@ class TestPlatformReadonlyVerify:
         # not found: 标题不匹配
         async def evaluate_not_found(script, *args):
             return [
-                {"href": "https://post.smzdm.com/edit/draft-1", "text": "别的标题 继续编辑"},
+                {
+                    "title": "别的标题",
+                    "title_href": "",
+                    "status": "草稿",
+                    "edit_href": "https://post.smzdm.com/edit/draft-1",
+                    "delete_id": "draft-1",
+                },
             ]
 
         platform.page.evaluate = AsyncMock(side_effect=evaluate_not_found)
@@ -281,8 +311,20 @@ class TestPlatformReadonlyVerify:
 
         async def evaluate(script, *args):
             return [
-                {"href": "https://post.smzdm.com/edit/1", "text": "同名 继续编辑"},
-                {"href": "https://post.smzdm.com/edit/2", "text": "同名 继续编辑"},
+                {
+                    "title": "同名",
+                    "title_href": "",
+                    "status": "草稿",
+                    "edit_href": "https://post.smzdm.com/edit/1",
+                    "delete_id": "1",
+                },
+                {
+                    "title": "同名",
+                    "title_href": "",
+                    "status": "草稿",
+                    "edit_href": "https://post.smzdm.com/edit/2",
+                    "delete_id": "2",
+                },
             ]
 
         platform.page.evaluate = AsyncMock(side_effect=evaluate)

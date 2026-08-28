@@ -1003,6 +1003,23 @@ def test_save_draft_binds_unique_new_id_even_when_old_same_title_exists() -> Non
         platform._last_draft_evidence.to_dict()["draft_entity_source"]
         == "baseline_new_id"
     )
+    assert platform._last_draft_evidence.to_dict()["draft_entity_id_match"] is True
+
+
+def test_save_draft_browser_close_after_autosave_is_result_unknown() -> None:
+    title = "自动保存后关闭"
+    page = _FakeEditorPage(drafts_api_titles=[{"id": "300", "title": title}])
+    platform = _make_delivery_platform(page)
+    platform._expected_persisted_blocks = [{"type": "text", "text": "正文"}]
+    _set_draft_baseline(platform, title, "200")
+
+    async def closed_goto(_url: str, **_kwargs) -> None:
+        raise RuntimeError("Target page, context or browser has been closed")
+
+    page.goto = closed_goto
+    with pytest.raises(DraftResultUnknownError, match="自动保存后页面已关闭") as caught:
+        run(platform.save_draft(title))
+    assert caught.value.evidence.to_dict()["unknown"] is True
 
 
 def test_save_draft_does_not_reuse_old_same_title_without_new_id() -> None:

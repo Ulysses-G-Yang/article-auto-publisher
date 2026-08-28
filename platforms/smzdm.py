@@ -52,6 +52,7 @@ IDENTITY_UID_KEYS = {"smzdm_id", "uid", "user_id", "id"}
 TITLE_SELECTOR = "textarea.article-title"
 BODY_SELECTOR = "div.ProseMirror"
 DRAFTS_URL = "https://post.smzdm.com/tougao/"
+DRAFT_LIST_URL = "https://zhiyou.smzdm.com/user/article/"
 SAVE_DRAFT_ENDPOINT = "https://post.smzdm.com/api/draft/save"
 BODY_IMAGE_TRIGGER = ".right-menu-bar:has(svg.zicon-picture)"
 BODY_IMAGE_INPUT = 'input[type="file"][accept*="image"]'
@@ -1766,6 +1767,84 @@ class SmzdmPlatform(BasePlatform):
         draft_id = match.group(1)
         return draft_id, f"https://post.smzdm.com/edit/{draft_id}"
 
+    @classmethod
+    def _normalize_draft_list_rows(
+        cls,
+        raw_items: object,
+    ) -> dict[str, tuple[str, str]]:
+        """把真实内容管理页卡片收敛为 ``id -> (编辑地址, 标题)``。
+
+        内容管理页同时包含已发布文章和草稿。只有状态文本精确为“草稿”的
+        ``.pandect-content-common`` 卡片才参与核验；编辑链接、标题链接中的
+        ``/edit/{id}``（若存在）以及删除按钮 ``data-postid`` 必须彼此一致。
+        """
+
+        if not isinstance(raw_items, list):
+            return {}
+        entities: dict[str, tuple[str, str]] = {}
+        for raw in raw_items:
+            if not isinstance(raw, dict):
+                continue
+            status = " ".join(str(raw.get("status") or "").split())
+            if status != "草稿":
+                continue
+            title = " ".join(str(raw.get("title") or "").split())
+            edit_href = str(raw.get("edit_href") or "").strip()
+            if not title or not edit_href:
+                continue
+            draft_id, edit_url = cls._validated_draft_entity(edit_href)
+
+            title_href = str(raw.get("title_href") or "").strip()
+            if title_href:
+                title_parts = urlsplit(urljoin(DRAFT_LIST_URL, title_href))
+                if re.fullmatch(
+                    r"/edit/[A-Za-z0-9_-]{1,128}",
+                    title_parts.path,
+                ):
+                    title_id, _ = cls._validated_draft_entity(title_href)
+                    if title_id != draft_id:
+                        raise DraftResultUnknownError(
+                            "DRAFT_RESULT_UNKNOWN: smzdm 草稿卡片编辑链接 ID 冲突"
+                        )
+
+            delete_id_raw = str(raw.get("delete_id") or "").strip()
+            if delete_id_raw:
+                delete_id = cls._safe_draft_id(delete_id_raw)
+                if delete_id is None or delete_id != draft_id:
+                    raise DraftResultUnknownError(
+                        "DRAFT_RESULT_UNKNOWN: smzdm 草稿卡片删除标识与编辑链接不一致"
+                    )
+
+            previous = entities.get(draft_id)
+            current = (edit_url, title)
+            if previous is not None and previous != current:
+                raise DraftResultUnknownError(
+                    "DRAFT_RESULT_UNKNOWN: smzdm 同一草稿 ID 对应冲突卡片"
+                )
+            entities[draft_id] = current
+        return entities
+
+    async def _read_draft_list_rows(self) -> dict[str, tuple[str, str]]:
+        raw_items = await self.page.evaluate(
+            """() => Array.from(
+                    document.querySelectorAll('.pandect-content-common')
+                ).map(card => {
+                    const titleRoot = card.querySelector('.p-pandect-content-title');
+                    const titleLink = titleRoot?.querySelector('a') || null;
+                    const status = titleRoot?.querySelector('em')?.textContent || '';
+                    const editLink = card.querySelector('a.isEdit_[href*="/edit/"]');
+                    const deleteButton = card.querySelector('.isDel_[data-postid]');
+                    return {
+                        title: (titleLink?.textContent || '').trim(),
+                        title_href: titleLink?.href || '',
+                        status: status.trim(),
+                        edit_href: editLink?.href || '',
+                        delete_id: deleteButton?.getAttribute('data-postid') || '',
+                    };
+                })"""
+        )
+        return self._normalize_draft_list_rows(raw_items)
+
     async def _load_draft_entities_once(
         self,
         *,
@@ -1775,7 +1854,7 @@ class SmzdmPlatform(BasePlatform):
 
         try:
             await self.page.goto(
-                DRAFTS_URL,
+                DRAFT_LIST_URL,
                 wait_until="domcontentloaded",
                 timeout=30000,
             )
@@ -1783,19 +1862,11 @@ class SmzdmPlatform(BasePlatform):
             stable_samples = 0
             latest: dict[str, str] = {}
             for attempt in range(20):
-                raw_urls = await self.page.evaluate(
-                    """() => Array.from(document.querySelectorAll('.draft-list li'))
-                        .map(item => Array.from(item.querySelectorAll('a'))
-                            .find(link => (link.innerText || '').trim() === '继续编辑')
-                            ?.href || '')
-                        .filter(Boolean)"""
-                )
-                if not isinstance(raw_urls, list):
-                    raw_urls = []
-                latest = {}
-                for raw_url in raw_urls:
-                    draft_id, edit_url = self._validated_draft_entity(raw_url)
-                    latest[draft_id] = edit_url
+                rows = await self._read_draft_list_rows()
+                latest = {
+                    draft_id: edit_url
+                    for draft_id, (edit_url, _title) in rows.items()
+                }
 
                 current_ids = frozenset(latest)
                 has_new_entity = (
@@ -1899,17 +1970,17 @@ class SmzdmPlatform(BasePlatform):
             ) from exc
 
     async def verify_draft_readonly(self, title: str) -> dict:
-        """只读核验：导航草稿箱，按标题文本匹配唯一草稿实体。
+        """只读核验真实内容管理页中的云端草稿卡片。
 
-        只读打开草稿箱列表并读取 li 的标题文本与“继续编辑”链接；
-        不打开编辑页（避免触发自动保存副作用）、不输入、不保存。
+        该探针仍只按标题服务于人工查询，所以同名时明确返回歧义；正式投递
+        使用保存前 ID 基线、保存响应 ID 和精确编辑页回读，不依赖标题唯一。
         """
         expected_title = " ".join(str(title or "").split())
         if not expected_title:
             return {"error_code": "PROBE_TITLE_MISSING", "error_message": "缺少可核验标题"}
         try:
             await self.page.goto(
-                DRAFTS_URL,
+                DRAFT_LIST_URL,
                 wait_until="domcontentloaded",
                 timeout=30000,
             )
@@ -1917,27 +1988,7 @@ class SmzdmPlatform(BasePlatform):
             stable_samples = 0
             entities: dict[str, tuple[str, str]] = {}
             for attempt in range(20):
-                raw_items = await self.page.evaluate(
-                    """() => Array.from(document.querySelectorAll('.draft-list li'))
-                        .map(item => {
-                            const link = Array.from(item.querySelectorAll('a'))
-                                .find(a => (a.innerText || '').trim() === '继续编辑');
-                            const text = (item.innerText || '').replace(/\\s+/g, ' ');
-                            return {href: link?.href || '', text: text};
-                        })
-                        .filter(item => item.href)"""
-                )
-                if not isinstance(raw_items, list):
-                    raw_items = []
-                entities = {}
-                for raw in raw_items:
-                    if not isinstance(raw, dict) or not raw.get("href"):
-                        continue
-                    draft_id, edit_url = self._validated_draft_entity(raw["href"])
-                    title_text = " ".join(
-                        str(raw.get("text") or "").replace("继续编辑", " ").split()
-                    )
-                    entities[draft_id] = (edit_url, title_text)
+                entities = await self._read_draft_list_rows()
 
                 current_ids = frozenset(entities)
                 if current_ids == previous_ids:
@@ -1960,7 +2011,10 @@ class SmzdmPlatform(BasePlatform):
                     "title_matched": True,
                     "match_count": 1,
                     "draft_url": matches[0][1],
-                    "structure": {"source": "draft_list"},
+                    "structure": {
+                        "source": "cloud_draft_list",
+                        "draft_id": matches[0][0],
+                    },
                 }
             if len(matches) > 1:
                 return {

@@ -81,6 +81,13 @@ class _IdentityPlatform:
             "success": True,
             "draft_url": "https://example.invalid/xiaoheihe/draft/verified",
             "post_url": "",
+            "verification_evidence": {
+                "draft_entity_bound": True,
+                "draft_entity_source": "save_response_id",
+                "draft_entity_id_match": True,
+                "reopen_title_match": True,
+                "reopen_dom_blocks_match": True,
+            },
         }
 
     async def cleanup(self) -> None:

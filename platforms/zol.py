@@ -66,18 +66,18 @@ class ZOLPlatform(BasePlatform):
     DRAFT_SAVE_SELECTOR = ".foot-item:has-text('存草稿')"
     DRAFT_RESPONSE_WAIT_SECONDS = 5.0
     DRAFT_RESPONSE_POLL_INTERVAL = 0.1
-    DRAFT_CARD_POLL_DELAYS = (0, 1, 2, 3, 4)
+    DRAFT_LIST_POLL_DELAYS = (0, 1, 2, 3, 4)
     DRAFT_CONTENT_POLL_DELAYS = (0, 1, 2)
-    DRAFT_CARD_SELECTORS = (
-        ".article-card",
-        ".draft-item",
-        "li.draft-item",
-    )
-    DRAFT_CARD_ID_ATTRIBUTES = (
-        "data-draft-id",
-        "data-content-id",
-        "data-article-id",
-        "data-id",
+    TITLE_SELECTORS = (
+        "input.main-title",
+        ".main-title",
+        "input[placeholder*='请输入文章标题']",
+        "#title",
+        "input[name='title']",
+        ".title-input input",
+        ".blog-title input",
+        "textarea[name='title']",
+        "[contenteditable='true'][data-placeholder*='标题']",
     )
     DRAFT_RESPONSE_ID_KEYS = ("draftId", "contentId", "articleId", "id")
 
@@ -86,6 +86,7 @@ class ZOLPlatform(BasePlatform):
         self.last_login_error = ""
         self.enable_heading_experiment = enable_heading_experiment
         self._draft_baseline: _ZOLDraftSnapshot | None = None
+        self._draft_preflight_title = ""
         self._autosave_responses: list[object] = []
         self._autosave_listener = None
         self._current_title = ""
@@ -669,19 +670,25 @@ class ZOLPlatform(BasePlatform):
             },
         )
 
-    async def _fetch_draft_snapshot(self) -> _ZOLDraftSnapshot:
-        """导航草稿箱并捕获唯一的 getlist 成功响应。"""
+    async def _fetch_draft_snapshot(self, page=None) -> _ZOLDraftSnapshot:
+        """在指定页面捕获草稿 getlist 响应并返回稳定实体快照。"""
 
-        self._require_page_alive("ZOL 读取草稿基线")
+        target_page = page or self.page
+        if target_page is None:
+            raise DraftBaselineError(
+                "DRAFT_BASELINE_UNAVAILABLE: ZOL 草稿列表页面不存在"
+            )
+        if target_page is self.page:
+            self._require_page_alive("ZOL 读取草稿基线")
         draft_url = self.platform_cfg.get(
             "draft_url", "https://post.zol.com.cn/v2/manage/works/draft"
         )
         try:
-            async with self.page.expect_response(
+            async with target_page.expect_response(
                 self._is_draft_list_response,
                 timeout=15000,
             ) as response_info:
-                await self.page.goto(
+                await target_page.goto(
                     draft_url,
                     wait_until="domcontentloaded",
                     timeout=15000,
@@ -718,7 +725,7 @@ class ZOLPlatform(BasePlatform):
         if len(new_ids) != 1:
             return None
         new_id = next(iter(new_ids))
-        if after.title_to_ids.get(expected_title, frozenset()) != {new_id}:
+        if new_id not in after.title_to_ids.get(expected_title, frozenset()):
             return None
         return new_id
 
@@ -773,18 +780,7 @@ class ZOLPlatform(BasePlatform):
                 f"ZOL_TITLE_VALIDATION_ERROR: 标题超过当前平台限制 {max_length} 个字，"
                 f"实际 {len(expected)} 个字"
             )
-        selectors = [
-            "input.main-title",
-            ".main-title",
-            "input[placeholder*='请输入文章标题']",
-            "#title",
-            "input[name='title']",
-            ".title-input input",
-            ".blog-title input",
-            "textarea[name='title']",
-            "[contenteditable='true'][data-placeholder*='标题']",
-        ]
-        for selector in selectors:
+        for selector in self.TITLE_SELECTORS:
             locator = self.page.locator(selector).first
             try:
                 if await locator.count() == 0 or not await locator.is_visible():
@@ -2923,140 +2919,20 @@ class ZOLPlatform(BasePlatform):
             },
         }
 
-    async def _draft_card_stable_id(self, card) -> str | None:
-        """从单张可见草稿卡片的白名单属性读取稳定 ID。"""
-
-        values = []
-        try:
-            for attribute in self.DRAFT_CARD_ID_ATTRIBUTES:
-                value = await card.get_attribute(attribute)
-                normalized = self._scalar_draft_id(value)
-                if normalized:
-                    values.append(normalized)
-        except Exception as exc:
-            raise DraftResultUnknownError(
-                "DRAFT_RESULT_UNKNOWN: 草稿卡片 ID 无法读取"
-            ) from exc
-        unique = set(values)
-        if len(unique) > 1:
-            raise DraftResultUnknownError(
-                "DRAFT_RESULT_UNKNOWN: 草稿卡片 ID 不唯一"
-            )
-        return values[0] if values else None
-
-    async def _visible_draft_cards(self, draft_page) -> list:
-        """只读取明确的草稿卡片，不扫描 body、tab 或导航文本。"""
-
-        for selector in self.DRAFT_CARD_SELECTORS:
-            try:
-                locator = draft_page.locator(selector)
-                count = await locator.count()
-                visible = []
-                for index in range(min(count, 100)):
-                    candidate = locator.nth(index)
-                    if await candidate.is_visible():
-                        visible.append(candidate)
-                if visible:
-                    return visible
-            except Exception as exc:
-                raise DraftResultUnknownError(
-                    "DRAFT_RESULT_UNKNOWN: 草稿卡片结构无法读取"
-                ) from exc
-        return []
-
-    async def _matching_draft_cards(self, draft_page, expected_title: str) -> list:
-        """按可见卡片内的独立文本行精确匹配标题。"""
-
-        matches = []
-        for card in await self._visible_draft_cards(draft_page):
-            try:
-                raw_text = await card.inner_text()
-            except Exception as exc:
-                raise DraftResultUnknownError(
-                    "DRAFT_RESULT_UNKNOWN: 草稿卡片标题无法读取"
-                ) from exc
-            lines = {
-                normalize_for_comparison(line)
-                for line in str(raw_text).splitlines()
-                if normalize_for_comparison(line)
-            }
-            if expected_title in lines:
-                matches.append(card)
-        return matches
-
-    async def _navigate_draft_verification_page(self, draft_page) -> None:
-        draft_url = self.platform_cfg.get(
-            "draft_url", "https://post.zol.com.cn/v2/manage/works/draft"
-        )
-        try:
-            await draft_page.goto(
-                draft_url,
-                wait_until="domcontentloaded",
-                timeout=15000,
-            )
-            wait_for_load_state = getattr(draft_page, "wait_for_load_state", None)
-            if callable(wait_for_load_state):
-                await wait_for_load_state("domcontentloaded", timeout=15000)
-            wait_for_timeout = getattr(draft_page, "wait_for_timeout", None)
-            if callable(wait_for_timeout):
-                await wait_for_timeout(500)
-        except Exception as exc:
-            raise DraftResultUnknownError(
-                "DRAFT_RESULT_UNKNOWN: 独立草稿页无法稳定打开"
-            ) from exc
-
-    async def _prepare_draft_verification_page(self, expected_title: str):
-        """点击前打开独立页面，阻止覆盖已有同名草稿。"""
-
-        if self.context is None:
-            raise DraftBaselineError(
-                "DRAFT_BASELINE_UNAVAILABLE: 无法创建独立草稿基线页面"
-            )
-        draft_page = None
-        transferred = False
-        try:
-            draft_page = await self.context.new_page()
-            await self._navigate_draft_verification_page(draft_page)
-            matches = await self._matching_draft_cards(draft_page, expected_title)
-            if matches:
-                raise DraftBaselineError(
-                    "DRAFT_BASELINE_UNAVAILABLE: 草稿箱已存在同名草稿"
-                )
-            transferred = True
-            return draft_page
-        except DraftBaselineError:
-            raise
-        except DraftResultUnknownError as exc:
-            raise DraftBaselineError(
-                "DRAFT_BASELINE_UNAVAILABLE: 草稿基线页面无法确认"
-            ) from exc
-        except Exception as exc:
-            raise DraftBaselineError(
-                "DRAFT_BASELINE_UNAVAILABLE: 草稿基线页面无法打开"
-            ) from exc
-        finally:
-            if draft_page is not None and not transferred:
-                try:
-                    await draft_page.close()
-                except Exception:
-                    logger.warning("ZOL 草稿基线页关闭失败，业务结果保持原状态")
-
     async def preflight_delivery(self, title: str) -> None:
-        """在进入会自动保存的 ZOL 编辑器前拒绝同标题草稿。"""
+        """写入前冻结 getlist 草稿 ID 基线；已有同名草稿不构成阻塞。"""
 
         expected_title = normalize_for_comparison(title)
         if not expected_title:
             raise DraftBaselineError("DRAFT_BASELINE_UNAVAILABLE: 草稿标题为空")
-        draft_page = await self._prepare_draft_verification_page(expected_title)
-        try:
-            self._bound_draft_id = None
-            self._current_title = ""
-            self._final_content_response_index = 0
-            self._expected_persisted_blocks = None
-            self._heading_sequence = 0
-            self._start_autosave_observer()
-        finally:
-            await draft_page.close()
+        self._draft_baseline = await self._fetch_draft_snapshot()
+        self._draft_preflight_title = expected_title
+        self._bound_draft_id = None
+        self._current_title = ""
+        self._final_content_response_index = 0
+        self._expected_persisted_blocks = None
+        self._heading_sequence = 0
+        self._start_autosave_observer()
 
     async def _unique_draft_id_from_responses(
         self,
@@ -3084,7 +2960,7 @@ class ZOLPlatform(BasePlatform):
         return next(iter(response_ids))
 
     async def _open_draft_verification_page(self):
-        """打开独立草稿页；调用方负责关闭。"""
+        """创建独立只读页面；首次导航由 getlist 捕获器负责。"""
 
         if self.context is None:
             raise DraftResultUnknownError(
@@ -3094,7 +2970,6 @@ class ZOLPlatform(BasePlatform):
         transferred = False
         try:
             draft_page = await self.context.new_page()
-            await self._navigate_draft_verification_page(draft_page)
             transferred = True
             return draft_page
         except DraftResultUnknownError:
@@ -3138,49 +3013,40 @@ class ZOLPlatform(BasePlatform):
         assert response_id is not None
         return response_id
 
-    async def _verify_saved_draft_card(
+    async def _verify_saved_draft_snapshot(
         self,
         draft_page,
         response_id: str,
         expected_title: str,
         evidence: DraftVerificationEvidence | None = None,
-    ) -> None:
-        """轮询独立草稿页，要求唯一标题行并核对卡片 ID。"""
+    ) -> _ZOLDraftSnapshot:
+        """要求保存响应 ID 等于 getlist 中唯一新增且标题匹配的实体。"""
 
-        for delay in self.DRAFT_CARD_POLL_DELAYS:
+        baseline = self._draft_baseline
+        if baseline is None:
+            raise DraftResultUnknownError(
+                "DRAFT_RESULT_UNKNOWN: ZOL 缺少保存前草稿 ID 基线"
+            )
+
+        latest: _ZOLDraftSnapshot | None = None
+        for delay in self.DRAFT_LIST_POLL_DELAYS:
             if delay:
                 await asyncio.sleep(delay)
-            await self._navigate_draft_verification_page(draft_page)
-            matches = await self._matching_draft_cards(draft_page, expected_title)
-            if evidence is not None:
-                evidence.mark_draft_list(match_count=len(matches))
-            if len(matches) > 1:
-                matching_ids = [
-                    card
-                    for card in matches
-                    if await self._draft_card_stable_id(card) == response_id
-                ]
-                if len(matching_ids) == 1:
-                    if evidence is not None:
-                        evidence.mark_entity_binding(
-                            bound=True,
-                            source="save_response_id",
-                            id_match=True,
-                        )
-                    return
-                if evidence is not None:
-                    evidence.mark_entity_binding(
-                        bound=False,
-                        source="save_response_id",
-                        id_match=False,
-                    )
-                raise DraftResultUnknownError(
-                    "DRAFT_RESULT_UNKNOWN: 保存后草稿标题不唯一"
-                )
-            if len(matches) != 1:
+            try:
+                latest = await self._fetch_draft_snapshot(draft_page)
+            except DraftBaselineError:
                 continue
-            card_id = await self._draft_card_stable_id(matches[0])
-            if card_id is not None and card_id != response_id:
+            matching_ids = latest.title_to_ids.get(expected_title, frozenset())
+            if evidence is not None:
+                evidence.mark_draft_list(match_count=len(matching_ids))
+            new_id = self._new_draft_id_for_title(
+                baseline,
+                latest,
+                expected_title,
+            )
+            if new_id is None:
+                continue
+            if new_id != response_id:
                 if evidence is not None:
                     evidence.mark_entity_binding(
                         bound=False,
@@ -3188,24 +3054,25 @@ class ZOLPlatform(BasePlatform):
                         id_match=False,
                     )
                 raise DraftResultUnknownError(
-                    "DRAFT_RESULT_UNKNOWN: 草稿卡片 ID 与保存响应不一致"
+                    "DRAFT_RESULT_UNKNOWN: 保存响应草稿 ID 与列表唯一新增实体不一致"
                 )
-            if card_id is None:
-                if evidence is not None:
-                    evidence.mark_entity_binding(
-                        bound=True,
-                        source="save_response_id",
-                        id_match=None,
-                    )
-            elif evidence is not None:
+            if evidence is not None:
                 evidence.mark_entity_binding(
                     bound=True,
                     source="save_response_id",
                     id_match=True,
                 )
-            return
+            self._draft_baseline = latest
+            return latest
+
+        if evidence is not None:
+            evidence.mark_entity_binding(
+                bound=False,
+                source="save_response_id",
+                id_match=None,
+            )
         raise DraftResultUnknownError(
-            "DRAFT_RESULT_UNKNOWN: 保存后草稿卡片在有界轮询内无法证明"
+            "DRAFT_RESULT_UNKNOWN: 保存后 getlist 无法证明唯一新增草稿实体"
         )
 
     @classmethod
@@ -3223,12 +3090,56 @@ class ZOLPlatform(BasePlatform):
         except Exception:
             return None
 
-    async def _verify_persisted_draft_content(self, response_id: str) -> None:
-        """重开唯一草稿并核验平台真正持久化的完整图文结构。"""
+    @classmethod
+    def _draft_editor_url(cls, draft_id: str) -> str:
+        """由已验证的草稿 ID 生成同源编辑地址。"""
+
+        normalized = cls._scalar_draft_id(draft_id)
+        if not normalized:
+            raise DraftResultUnknownError(
+                "DRAFT_RESULT_UNKNOWN: ZOL 草稿 ID 无效"
+            )
+        return "https://post.zol.com.cn/v2/create/article?" + urlencode(
+            {
+                "draftId": normalized,
+                "businessType": "1",
+                "editType": "1",
+                "isSecond": "0",
+            }
+        )
+
+    async def _read_editor_title(self) -> str:
+        """读取当前可见标题控件，拒绝把外层容器当成标题。"""
+
+        for selector in self.TITLE_SELECTORS:
+            locator = self.page.locator(selector).first
+            try:
+                if await locator.count() == 0 or not await locator.is_visible():
+                    continue
+                tag_name = await locator.evaluate("el => el.tagName.toLowerCase()")
+                if tag_name in ("input", "textarea"):
+                    return normalize_for_comparison(await locator.input_value())
+                if await locator.get_attribute("contenteditable"):
+                    return normalize_for_comparison(await locator.inner_text())
+            except Exception as exc:
+                if self._exception_means_browser_closed(exc):
+                    raise BrowserLifecycleError(
+                        "BROWSER_CONTEXT_CLOSED: ZOL 重开草稿读取标题时页面已关闭"
+                    ) from exc
+        raise SelectorError("ZOL_DRAFT_TITLE_READBACK_FAILED: 重开后标题控件不可读")
+
+    async def _verify_persisted_draft_content(
+        self,
+        response_id: str,
+        expected_title: str,
+    ) -> str:
+        """按唯一 ID 重开并核验标题及平台真正持久化的完整图文结构。"""
 
         blocks = self._expected_persisted_blocks
         if blocks is None:
-            return
+            raise DraftResultUnknownError(
+                "DRAFT_RESULT_UNKNOWN: ZOL 缺少冻结内容核验快照"
+            )
         expected_image_count = sum(
             1 for block in blocks if isinstance(block, dict) and block.get("type") == "image"
         )
@@ -3237,14 +3148,8 @@ class ZOLPlatform(BasePlatform):
             ["expected-image"] * expected_image_count,
         )
         actual_tokens: list[dict] = []
-        editor_url = "https://post.zol.com.cn/v2/create/article?" + urlencode(
-            {
-                "draftId": response_id,
-                "businessType": "1",
-                "editType": "1",
-                "isSecond": "0",
-            }
-        )
+        title_matched = False
+        editor_url = self._draft_editor_url(response_id)
         for delay in self.DRAFT_CONTENT_POLL_DELAYS:
             if delay:
                 await asyncio.sleep(delay)
@@ -3257,15 +3162,23 @@ class ZOLPlatform(BasePlatform):
                 await self.page.wait_for_timeout(1500)
                 if await self._editor_probe_count() != 1:
                     continue
+                actual_title = await self._read_editor_title()
+                title_matched = actual_title == expected_title
+                if not title_matched:
+                    continue
                 editor, editor_kind = await self._resolve_content_editor()
                 actual_tokens = await self._read_editor_dom_tokens(editor, editor_kind)
                 if self._content_tokens_match(expected_tokens, actual_tokens):
-                    return
+                    return editor_url
             except Exception as exc:
                 if self._exception_means_browser_closed(exc):
                     raise BrowserLifecycleError(
                         "BROWSER_CONTEXT_CLOSED: ZOL 持久化正文核验时页面已关闭"
                     ) from exc
+        if not title_matched:
+            raise DraftResultUnknownError(
+                "DRAFT_RESULT_UNKNOWN: ZOL 草稿重开后标题不一致"
+            )
         raise DraftResultUnknownError(
             "DRAFT_RESULT_UNKNOWN: ZOL 草稿重开后图文结构不完整; "
             f"expected={self._content_token_shape(expected_tokens, limit=40)}; "
@@ -3289,6 +3202,13 @@ class ZOLPlatform(BasePlatform):
         expected_title = normalize_for_comparison(title)
         if not expected_title:
             raise SelectorError("ZOL_DRAFT_TITLE_MISSING: 保存草稿缺少标题")
+        if (
+            self._draft_baseline is None
+            or self._draft_preflight_title != expected_title
+        ):
+            raise DraftBaselineError(
+                "DRAFT_BASELINE_UNAVAILABLE: ZOL 缺少与本次标题一致的保存前 ID 基线"
+            )
 
         clicked = False
         draft_page = None
@@ -3336,29 +3256,22 @@ class ZOLPlatform(BasePlatform):
                         "DRAFT_RESULT_UNKNOWN: 最终保存响应与绑定草稿不一致"
                     )
             elif autosave_id is not None:
-                if (
-                    self._bound_draft_id is not None
-                    and autosave_id != self._bound_draft_id
-                ):
-                    evidence.mark_entity_binding(
-                        bound=False,
-                        source="existing_draft_id",
-                        id_match=False,
-                    )
-                    raise DraftResultUnknownError(
-                        "DRAFT_RESULT_UNKNOWN: 最终保存实体与绑定草稿不一致"
-                    )
                 response_id = autosave_id
             else:
-                # 即使网络监听未获得可用响应，只要草稿箱已出现同名实体，
-                # 就证明编辑器发生了未观测副作用；此时绝不能再点击保存。
-                existing = await self._matching_draft_cards(
-                    draft_page,
-                    expected_title,
-                )
-                if existing:
+                # 没有保存响应时先用 getlist 排除未观测自动保存。只要实体集合
+                # 已变化，就不能再点击，避免把一个不确定副作用扩展成第二次保存。
+                try:
+                    observed = await self._fetch_draft_snapshot(draft_page)
+                except DraftBaselineError as exc:
                     raise DraftResultUnknownError(
-                        "DRAFT_RESULT_UNKNOWN: 检测到未观测的自动保存草稿"
+                        "DRAFT_RESULT_UNKNOWN: 无法排除未观测的自动保存草稿"
+                    ) from exc
+                if (
+                    observed.total_num != self._draft_baseline.total_num
+                    or observed.draft_ids != self._draft_baseline.draft_ids
+                ):
+                    raise DraftResultUnknownError(
+                        "DRAFT_RESULT_UNKNOWN: getlist 已出现未观测的草稿实体变化"
                     )
 
                 control = self.page.locator(self.DRAFT_SAVE_SELECTOR)
@@ -3369,29 +3282,27 @@ class ZOLPlatform(BasePlatform):
                 clicked = True
                 response_id = await self._collect_draft_save_response(control)
 
-            # 保存响应/自动保存响应已给出合法实体 ID；列表核对只负责
-            # 发现明确的错误 ID，并在那种情况下将绑定翻转为 False。
-            evidence.mark_entity_binding(
-                bound=True,
-                source="save_response_id",
-                id_match=True,
-            )
             await self.simulator.random_delay(2, 5)
-            await self._verify_saved_draft_card(
+            await self._verify_saved_draft_snapshot(
                 draft_page,
                 response_id,
                 expected_title,
                 evidence,
             )
             try:
-                await self._verify_persisted_draft_content(response_id)
+                draft_url = await self._verify_persisted_draft_content(
+                    response_id,
+                    expected_title,
+                )
             except DraftResultUnknownError as exc:
-                if "图文结构不完整" in str(exc):
+                if "标题不一致" in str(exc):
+                    evidence.mark_reopen(
+                        title_match=False,
+                        dom_blocks_match=None,
+                    )
+                elif "图文结构不完整" in str(exc):
                     evidence.mark_reopen(title_match=True, dom_blocks_match=False)
                 raise
-            draft_url = self.platform_cfg.get(
-                "draft_url", "https://post.zol.com.cn/v2/manage/works/draft"
-            )
             draft_fingerprint = hashlib.sha256(response_id.encode()).hexdigest()[:8]
             logger.info(
                 "ZOL 草稿实体验证成功: draft_id_fingerprint={}",
@@ -3430,11 +3341,7 @@ class ZOLPlatform(BasePlatform):
                     logger.warning("ZOL 草稿核验页关闭失败，业务结果保持原状态")
 
     async def verify_draft_readonly(self, title: str) -> dict:
-        """只读核验：打开 ZOL 草稿箱按标题匹配唯一草稿卡片。
-
-        复用 _navigate_draft_verification_page + _matching_draft_cards
-        （均为只读：打开草稿页、读取卡片，不点击、不输入、不保存）。
-        """
+        """只读核验：通过 getlist 按标题列出稳定草稿 ID，不打开编辑页。"""
         expected_title = normalize_for_comparison(title)
         if not expected_title:
             return {"error_code": "PROBE_TITLE_MISSING", "error_message": "缺少可核验标题"}
@@ -3443,17 +3350,16 @@ class ZOLPlatform(BasePlatform):
         draft_page = None
         try:
             draft_page = await self.context.new_page()
-            await self._navigate_draft_verification_page(draft_page)
-            matches = await self._matching_draft_cards(draft_page, expected_title)
+            snapshot = await self._fetch_draft_snapshot(draft_page)
+            matches = snapshot.title_to_ids.get(expected_title, frozenset())
             count = len(matches)
             if count == 1:
+                draft_id = next(iter(matches))
                 return {
                     "title_matched": True,
                     "match_count": 1,
-                    "draft_url": self.platform_cfg.get(
-                        "draft_url", "https://post.zol.com.cn/v2/manage/works/draft"
-                    ),
-                    "structure": {"source": "draft_list"},
+                    "draft_url": self._draft_editor_url(draft_id),
+                    "structure": {"source": "draft_list_api"},
                 }
             if count > 1:
                 return {

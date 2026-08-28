@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import hashlib
+import re
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -44,6 +45,8 @@ LOGIN_URL = (
     "&source=miniblog&disp=popup&url=https%3A%2F%2Fweibo.com%2F"
 )
 HOME_URL = "https://weibo.com/"
+DRAFTS_URL = "https://card.weibo.com/article/v5/editor#/draft"
+DRAFT_HASH_PATTERN = re.compile(r"^/draft/(?P<draft_id>[1-9][0-9]*)$")
 BODY_SELECTOR = "div.tiptap.ProseMirror:visible"
 BODY_IMAGE_ICON_FINGERPRINT = (
     "81fecffe5f54bf65524a7465730d595b95fbf6be95d1bb792f1682118b03d00a"
@@ -82,7 +85,8 @@ class WeiboPlatform(BasePlatform):
         self._editing_existing_draft = False
         self._preflight_title = ""
         self._active_draft_id = ""
-        self._draft_title_baseline_count: int | None = None
+        self._preflight_draft_ids_by_title: dict[str, frozenset[str]] | None = None
+        self._preflight_all_draft_ids: frozenset[str] | None = None
         self._expected_persisted_blocks: list[dict] | None = None
         self._expected_persisted_image_count = 0
         self._media_progress_state: dict | None = None
@@ -93,7 +97,8 @@ class WeiboPlatform(BasePlatform):
         self._editing_existing_draft = False
         self._preflight_title = ""
         self._active_draft_id = ""
-        self._draft_title_baseline_count = None
+        self._preflight_draft_ids_by_title = None
+        self._preflight_all_draft_ids = None
         self._expected_persisted_blocks = None
         self._expected_persisted_image_count = 0
         self._media_progress_state = None
@@ -344,11 +349,276 @@ class WeiboPlatform(BasePlatform):
             f"PLATFORM_NOT_IMPLEMENTED: 微博{operation}能力尚未接入"
         )
 
+    @staticmethod
+    def _normalize_draft_title(title: object) -> str:
+        return str(title or "").strip()
+
+    @classmethod
+    def _draft_id_from_editor_url(cls, url: object) -> str:
+        """只接受微博头条文章的规范 HTTPS 草稿编辑地址。"""
+
+        parts = urlsplit(str(url or "").strip())
+        if (
+            parts.scheme != "https"
+            or parts.netloc.lower() != "card.weibo.com"
+            or parts.path.rstrip("/") != "/article/v5/editor"
+            or parts.query
+        ):
+            return ""
+        match = DRAFT_HASH_PATTERN.fullmatch(parts.fragment)
+        return match.group("draft_id") if match else ""
+
+    @classmethod
+    def _draft_editor_url(cls, draft_id: object) -> str:
+        safe_id = str(draft_id or "").strip()
+        if not re.fullmatch(r"[1-9][0-9]*", safe_id):
+            return ""
+        return f"https://card.weibo.com/article/v5/editor#/draft/{safe_id}"
+
+    async def _current_draft_id(self) -> str:
+        draft_id = str(
+            await self.page.evaluate(
+                r"""() => {
+                    const match = location.hash.match(/^#\/draft\/([1-9]\d*)$/);
+                    return match ? match[1] : '';
+                }"""
+            )
+            or ""
+        )
+        return draft_id if re.fullmatch(r"[1-9][0-9]*", draft_id) else ""
+
+    async def _open_draft_list(self) -> None:
+        await self.page.goto(
+            DRAFTS_URL,
+            wait_until="domcontentloaded",
+            timeout=30000,
+        )
+        await self.page.wait_for_function(
+            """() => Array.from(document.querySelectorAll('*')).some((node) =>
+                (node.innerText || '').trim() === '写文章'
+                && node.children.length <= 3
+            )""",
+            timeout=15000,
+        )
+
+    async def _read_visible_draft_cards(self) -> list[dict[str, object]]:
+        """读取可见草稿卡的标题和受信任编辑 URL，不读取正文摘要。"""
+
+        raw_cards = await self.page.evaluate(
+            r"""() => {
+                const visible = (node) => {
+                    const rect = node.getBoundingClientRect();
+                    const style = getComputedStyle(node);
+                    return rect.width > 0 && rect.height > 0
+                        && style.display !== 'none'
+                        && style.visibility !== 'hidden';
+                };
+                const exactDraftUrl = (href) => {
+                    try {
+                        const url = new URL(href, location.href);
+                        return url.origin === 'https://card.weibo.com'
+                            && url.pathname.replace(/\/$/, '') === '/article/v5/editor'
+                            && !url.search
+                            && /^#\/draft\/[1-9]\d*$/.test(url.hash)
+                            ? url.href
+                            : '';
+                    } catch (_error) {
+                        return '';
+                    }
+                };
+                return Array.from(document.querySelectorAll('.list-item'))
+                    .filter(visible)
+                    .map((card, cardIndex) => {
+                        const title = (card.innerText || '')
+                            .split(/\r?\n/, 1)[0].trim();
+                        const linkNodes = [
+                            ...(card.matches('a[href]') ? [card] : []),
+                            ...card.querySelectorAll('a[href]'),
+                        ];
+                        const editUrls = Array.from(new Set(
+                            linkNodes.map((node) => exactDraftUrl(
+                                node.getAttribute('href') || ''
+                            )).filter(Boolean)
+                        ));
+                        return {card_index: cardIndex, title, edit_urls: editUrls};
+                    });
+            }"""
+        )
+        if not isinstance(raw_cards, list):
+            raise DraftBaselineError(
+                "DRAFT_BASELINE_FAILED: 微博草稿卡结构无法读取"
+            )
+
+        cards: list[dict[str, object]] = []
+        title_occurrences: dict[str, int] = {}
+        for raw in raw_cards:
+            if not isinstance(raw, dict):
+                raise DraftBaselineError(
+                    "DRAFT_BASELINE_FAILED: 微博草稿卡结构无效"
+                )
+            title = self._normalize_draft_title(raw.get("title"))
+            urls = raw.get("edit_urls")
+            if not isinstance(urls, list):
+                raise DraftBaselineError(
+                    "DRAFT_BASELINE_FAILED: 微博草稿卡编辑地址结构无效"
+                )
+            draft_ids = {
+                self._draft_id_from_editor_url(url)
+                for url in urls
+                if self._draft_id_from_editor_url(url)
+            }
+            if len(draft_ids) > 1:
+                raise DraftBaselineError(
+                    "DRAFT_BASELINE_FAILED: 微博单个草稿卡包含冲突 ID"
+                )
+            occurrence = title_occurrences.get(title, 0)
+            title_occurrences[title] = occurrence + 1
+            cards.append(
+                {
+                    "title": title,
+                    "title_occurrence": occurrence,
+                    "draft_id": next(iter(draft_ids), ""),
+                }
+            )
+        return cards
+
+    async def _open_draft_card_for_id(
+        self,
+        *,
+        title: str,
+        title_occurrence: int,
+    ) -> str:
+        clicked = await self.page.evaluate(
+            r"""(target) => {
+                const visible = (node) => {
+                    const rect = node.getBoundingClientRect();
+                    const style = getComputedStyle(node);
+                    return rect.width > 0 && rect.height > 0
+                        && style.display !== 'none'
+                        && style.visibility !== 'hidden';
+                };
+                const matches = Array.from(document.querySelectorAll('.list-item'))
+                    .filter((card) => visible(card)
+                        && (card.innerText || '').split(/\r?\n/, 1)[0].trim()
+                            === target.title);
+                const card = matches[target.occurrence];
+                if (!card) return false;
+                card.click();
+                return true;
+            }""",
+            {"title": title, "occurrence": title_occurrence},
+        )
+        if not clicked:
+            raise DraftBaselineError(
+                "DRAFT_BASELINE_FAILED: 微博草稿卡无法按标题序号打开"
+            )
+        await self.page.wait_for_function(
+            r"""() => /^#\/draft\/[1-9]\d*$/.test(location.hash)""",
+            timeout=20000,
+        )
+        await self.page.wait_for_selector(
+            "textarea[placeholder='请输入标题']",
+            state="visible",
+            timeout=20000,
+        )
+        draft_id = await self._current_draft_id()
+        title_field = self.page.locator(
+            "textarea[placeholder='请输入标题']"
+        ).first
+        if (
+            not draft_id
+            or self._normalize_draft_title(await title_field.input_value()) != title
+        ):
+            raise DraftBaselineError(
+                "DRAFT_BASELINE_FAILED: 微博草稿卡打开后的 ID 或标题不一致"
+            )
+        return draft_id
+
+    async def _collect_draft_ids_by_title(
+        self,
+        *,
+        only_title: str | None = None,
+        guard_mutations: bool = False,
+    ) -> dict[str, frozenset[str]]:
+        """将草稿标题映射到稳定 ID；同名实体保留为 ID 集合。"""
+
+        route_registered = False
+
+        async def _readonly_guard(route, request) -> None:
+            method = str(request.method or "").upper()
+            if method not in {"GET", "HEAD", "OPTIONS"}:
+                await route.abort("blockedbyclient")
+                return
+            await route.continue_()
+
+        try:
+            if guard_mutations:
+                await self.page.route("**/*", _readonly_guard)
+                route_registered = True
+            await self._open_draft_list()
+            initial_cards = await self._read_visible_draft_cards()
+            if only_title is not None:
+                normalized_only_title = self._normalize_draft_title(only_title)
+                initial_cards = [
+                    card
+                    for card in initial_cards
+                    if card.get("title") == normalized_only_title
+                ]
+
+            by_title: dict[str, set[str]] = {}
+            seen_ids: set[str] = set()
+            navigated = False
+            for card in initial_cards:
+                title = str(card.get("title") or "")
+                draft_id = str(card.get("draft_id") or "")
+                if not draft_id:
+                    await self._open_draft_list()
+                    current_cards = await self._read_visible_draft_cards()
+                    matching_cards = [
+                        current
+                        for current in current_cards
+                        if current.get("title") == title
+                    ]
+                    occurrence = int(card.get("title_occurrence") or 0)
+                    if occurrence >= len(matching_cards):
+                        raise DraftBaselineError(
+                            "DRAFT_BASELINE_FAILED: 微博草稿列表读取期间结构发生变化"
+                        )
+                    current = matching_cards[occurrence]
+                    current_id = str(current.get("draft_id") or "")
+                    draft_id = current_id or await self._open_draft_card_for_id(
+                        title=title,
+                        title_occurrence=occurrence,
+                    )
+                    navigated = navigated or not current_id
+                if not re.fullmatch(r"[1-9][0-9]*", draft_id):
+                    raise DraftBaselineError(
+                        "DRAFT_BASELINE_FAILED: 微博草稿卡缺少稳定数字 ID"
+                    )
+                if draft_id in seen_ids:
+                    raise DraftBaselineError(
+                        "DRAFT_BASELINE_FAILED: 微博多个草稿卡映射到同一 ID"
+                    )
+                seen_ids.add(draft_id)
+                by_title.setdefault(title, set()).add(draft_id)
+            if navigated:
+                await self._open_draft_list()
+            return {
+                title: frozenset(draft_ids)
+                for title, draft_ids in by_title.items()
+            }
+        finally:
+            if route_registered:
+                try:
+                    await self.page.unroute("**/*", _readonly_guard)
+                except Exception:  # noqa: BLE001
+                    pass
+
     async def preflight_delivery(self, title: str) -> None:
-        """冻结标题，并证明新建或显式恢复的唯一草稿基线。"""
+        """冻结标题和 title→IDs 基线；同名草稿不再阻止新建或恢复。"""
 
         self._require_page_alive("微博草稿基线检查")
-        expected_title = str(title or "").strip()
+        expected_title = self._normalize_draft_title(title)
         if not expected_title:
             raise DraftBaselineError("DRAFT_BASELINE_FAILED: 微博标题不能为空")
         if len(expected_title) > 32:
@@ -356,39 +626,9 @@ class WeiboPlatform(BasePlatform):
                 "DRAFT_BASELINE_FAILED: 微博头条文章标题不能超过 32 个字符"
             )
         try:
-            await self.page.goto(
-                "https://card.weibo.com/article/v5/editor#/draft",
-                wait_until="domcontentloaded",
-                timeout=30000,
-            )
-            await self.page.wait_for_function(
-                """() => Array.from(document.querySelectorAll('*')).some((node) =>
-                    (node.innerText || '').trim() === '写文章'
-                    && node.children.length <= 3
-                )""",
-                timeout=15000,
-            )
-            matches = int(
-                await self.page.evaluate(
-                    r"""(title) => {
-                        const visible = (node) => {
-                            const rect = node.getBoundingClientRect();
-                            const style = getComputedStyle(node);
-                            return rect.width > 0 && rect.height > 0
-                                && style.display !== 'none'
-                                && style.visibility !== 'hidden';
-                        };
-                        return Array.from(
-                            document.querySelectorAll('.list-item')
-                        ).filter((card) => {
-                            if (!visible(card)) return false;
-                            const firstLine = (card.innerText || '')
-                                .split(/\r?\n/, 1)[0].trim();
-                            return firstLine === title;
-                        }).length;
-                    }""",
-                    expected_title,
-                )
+            baseline = await self._collect_draft_ids_by_title(
+                only_title=expected_title,
+                guard_mutations=True,
             )
         except DraftBaselineError:
             raise
@@ -398,54 +638,55 @@ class WeiboPlatform(BasePlatform):
                     "BROWSER_CONTEXT_CLOSED: 微博草稿基线检查时页面已关闭"
                 ) from exc
             raise DraftBaselineError(
-                "DRAFT_BASELINE_FAILED: 微博无法确认同名草稿基线"
+                "DRAFT_BASELINE_FAILED: 微博无法确认草稿 ID 基线"
             ) from exc
+
+        self._preflight_title = expected_title
+        self._preflight_draft_ids_by_title = baseline
+        self._preflight_all_draft_ids = frozenset(
+            draft_id
+            for draft_ids in baseline.values()
+            for draft_id in draft_ids
+        )
         self._editing_existing_draft = False
-        if self._resume_existing_title:
-            if expected_title != self._resume_existing_title or matches != 1:
+        wants_resume = bool(
+            self._resume_existing_title or self._resume_existing_draft_id
+        )
+        if wants_resume:
+            resume_title = self._normalize_draft_title(self._resume_existing_title)
+            resume_id = str(self._resume_existing_draft_id or "").strip()
+            if (
+                expected_title != resume_title
+                or not re.fullmatch(r"[1-9][0-9]*", resume_id)
+                or resume_id not in baseline.get(expected_title, frozenset())
+            ):
                 raise DraftBaselineError(
-                    "DRAFT_BASELINE_FAILED: 微博待恢复草稿标题不唯一或与冻结标题不一致"
+                    "DRAFT_BASELINE_FAILED: 微博待恢复草稿 ID 不在冻结标题基线中"
                 )
-            await self._open_resumed_draft(expected_title)
-            self._preflight_title = expected_title
-            self._draft_title_baseline_count = 1
+            await self._open_resumed_draft(expected_title, resume_id)
             self._editing_existing_draft = True
             return
-        if matches:
+
+    async def _open_resumed_draft(
+        self,
+        expected_title: str,
+        expected_draft_id: str,
+    ) -> None:
+        """按冻结 draft ID 直接恢复，不要求标题在列表中唯一。"""
+
+        editor_url = self._draft_editor_url(expected_draft_id)
+        if not editor_url:
             raise DraftBaselineError(
-                "DRAFT_BASELINE_FAILED: 微博已存在同名草稿，禁止自动重复创建"
+                "DRAFT_BASELINE_FAILED: 微博待恢复草稿 ID 无效"
             )
-        self._preflight_title = expected_title
-        self._draft_title_baseline_count = 0
-
-    async def _open_resumed_draft(self, expected_title: str) -> None:
-        """只打开唯一精确标题草稿，并把当前编辑器绑定到预期 draft ID。"""
-
-        clicked = await self.page.evaluate(
-            r"""(title) => {
-                const visible = (node) => {
-                    const rect = node.getBoundingClientRect();
-                    const style = getComputedStyle(node);
-                    return rect.width > 0 && rect.height > 0
-                        && style.display !== 'none' && style.visibility !== 'hidden';
-                };
-                const matches = Array.from(
-                    document.querySelectorAll('.list-item')
-                ).filter((card) => visible(card)
-                    && (card.innerText || '').split(/\r?\n/, 1)[0].trim() === title);
-                if (matches.length !== 1) return false;
-                matches[0].click();
-                return true;
-            }""",
-            expected_title,
+        await self.page.goto(
+            editor_url,
+            wait_until="domcontentloaded",
+            timeout=30000,
         )
-        if not clicked:
-            raise DraftBaselineError(
-                "DRAFT_BASELINE_FAILED: 微博待恢复草稿无法唯一打开"
-            )
         await self.page.wait_for_function(
-            r"""() => /^#\/draft\/\d+$/.test(location.hash)
-                && !location.hash.endsWith('/0')""",
+            r"""(draftId) => location.hash === `#/draft/${draftId}`""",
+            arg=expected_draft_id,
             timeout=20000,
         )
         await self.page.wait_for_selector(
@@ -458,23 +699,8 @@ class WeiboPlatform(BasePlatform):
             state="visible",
             timeout=20000,
         )
-        draft_id = str(
-            await self.page.evaluate(
-                r"""() => {
-                    const match = location.hash.match(/^#\/draft\/(\d+)$/);
-                    return match ? match[1] : '';
-                }"""
-            )
-            or ""
-        )
-        if not draft_id.isdigit() or int(draft_id) <= 0:
-            raise DraftBaselineError(
-                "DRAFT_BASELINE_FAILED: 微博待恢复草稿 ID 无效"
-            )
-        if (
-            self._resume_existing_draft_id
-            and draft_id != self._resume_existing_draft_id
-        ):
+        draft_id = await self._current_draft_id()
+        if draft_id != expected_draft_id:
             raise DraftBaselineError(
                 "DRAFT_BASELINE_FAILED: 微博待恢复草稿 ID 与验收门不一致"
             )
@@ -498,14 +724,18 @@ class WeiboPlatform(BasePlatform):
         if self._editing_existing_draft:
             await self._verify_current_resumed_draft()
             return
-        if not self._preflight_title or self._draft_title_baseline_count != 0:
+        if (
+            not self._preflight_title
+            or self._preflight_draft_ids_by_title is None
+            or self._preflight_all_draft_ids is None
+        ):
             raise DraftBaselineError(
-                "DRAFT_BASELINE_FAILED: 微博缺少唯一标题草稿基线"
+                "DRAFT_BASELINE_FAILED: 微博缺少草稿 ID 基线"
             )
         create_started = False
         try:
             await self.page.goto(
-                "https://card.weibo.com/article/v5/editor#/draft",
+                DRAFTS_URL,
                 wait_until="domcontentloaded",
                 timeout=30000,
             )
@@ -522,7 +752,7 @@ class WeiboPlatform(BasePlatform):
             before_draft_id = str(
                 await self.page.evaluate(
                     r"""() => {
-                        const match = location.hash.match(/^#\/draft\/(\d+)$/);
+                        const match = location.hash.match(/^#\/draft\/([1-9]\d*)$/);
                         return match ? match[1] : '';
                     }"""
                 )
@@ -558,8 +788,8 @@ class WeiboPlatform(BasePlatform):
             # 一个不同的正整数 ID，才能证明当前编辑器属于本次新草稿。
             await self.page.wait_for_function(
                 r"""(beforeId) => {
-                    const match = location.hash.match(/^#\/draft\/(\d+)$/);
-                    return Boolean(match && match[1] !== '0' && match[1] !== beforeId);
+                    const match = location.hash.match(/^#\/draft\/([1-9]\d*)$/);
+                    return Boolean(match && match[1] !== beforeId);
                 }""",
                 arg=before_draft_id,
                 timeout=20000,
@@ -577,22 +807,14 @@ class WeiboPlatform(BasePlatform):
                 )
             except Exception:
                 pass
-            draft_id = str(
-                await self.page.evaluate(
-                    r"""() => {
-                        const match = location.hash.match(/^#\/draft\/(\d+)$/);
-                        return match ? match[1] : '';
-                    }"""
-                )
-                or ""
-            )
+            draft_id = await self._current_draft_id()
             if (
-                not draft_id.isdigit()
-                or int(draft_id) <= 0
+                not draft_id
                 or draft_id == before_draft_id
+                or draft_id in self._preflight_all_draft_ids
             ):
                 raise DraftResultUnknownError(
-                    "DRAFT_RESULT_UNKNOWN: 微博创建响应已返回但无法绑定新的草稿 ID"
+                    "DRAFT_RESULT_UNKNOWN: 微博创建响应未绑定基线之外的新草稿 ID"
                 )
             self._active_draft_id = draft_id
             editor_state = await self.page.evaluate(
@@ -641,23 +863,19 @@ class WeiboPlatform(BasePlatform):
         """任何覆盖写入前再次证明页面仍是验收门绑定的那一篇草稿。"""
 
         expected_id = self._active_draft_id
+        baseline = self._preflight_draft_ids_by_title
         if (
             not self._preflight_title
-            or self._draft_title_baseline_count != 1
-            or not expected_id.isdigit()
+            or baseline is None
+            or expected_id not in baseline.get(
+                self._preflight_title,
+                frozenset(),
+            )
         ):
             raise DraftBaselineError(
                 "DRAFT_BASELINE_FAILED: 微博现有草稿恢复基线不完整"
             )
-        current_id = str(
-            await self.page.evaluate(
-                r"""() => {
-                    const match = location.hash.match(/^#\/draft\/(\d+)$/);
-                    return match ? match[1] : '';
-                }"""
-            )
-            or ""
-        )
+        current_id = await self._current_draft_id()
         title_field = self.page.locator(
             "textarea[placeholder='请输入标题']"
         ).first
@@ -1723,36 +1941,41 @@ class WeiboPlatform(BasePlatform):
         self._require_page_alive("微博保存草稿")
         evidence = DraftVerificationEvidence()
         self._last_draft_evidence = evidence
-        expected_title = str(title or "").strip()
-        expected_baseline_count = 1 if self._editing_existing_draft else 0
+        expected_title = self._normalize_draft_title(title)
+        baseline = self._preflight_draft_ids_by_title
+        all_baseline_ids = self._preflight_all_draft_ids
         if (
             not expected_title
             or expected_title != self._preflight_title
-            or self._draft_title_baseline_count != expected_baseline_count
+            or baseline is None
+            or all_baseline_ids is None
         ):
             raise DraftBaselineError(
-                "DRAFT_BASELINE_FAILED: 微博缺少与本次一致的唯一标题基线"
+                "DRAFT_BASELINE_FAILED: 微博缺少与本次一致的草稿 ID 基线"
             )
         if self._expected_persisted_blocks is None:
             raise DraftBaselineError(
                 "DRAFT_BASELINE_FAILED: 微博缺少冻结内容核验快照"
             )
         draft_id = self._active_draft_id
-        if not draft_id.isdigit():
+        baseline_title_ids = baseline.get(expected_title, frozenset())
+        if (
+            not re.fullmatch(r"[1-9][0-9]*", draft_id)
+            or (
+                self._editing_existing_draft
+                and draft_id not in baseline_title_ids
+            )
+            or (
+                not self._editing_existing_draft
+                and draft_id in all_baseline_ids
+            )
+        ):
             raise DraftBaselineError(
-                "DRAFT_BASELINE_FAILED: 微博缺少当前草稿 ID"
+                "DRAFT_BASELINE_FAILED: 微博当前草稿 ID 与保存前基线冲突"
             )
 
         try:
-            current_id = str(
-                await self.page.evaluate(
-                    r"""() => {
-                        const match = location.hash.match(/^#\/draft\/(\d+)$/);
-                        return match ? match[1] : '';
-                    }"""
-                )
-                or ""
-            )
+            current_id = await self._current_draft_id()
             title_field = self.page.locator(
                 "textarea[placeholder='请输入标题']"
             ).first
@@ -1801,7 +2024,11 @@ class WeiboPlatform(BasePlatform):
             try:
                 url = response.url
                 method = str(response.request.method or "").upper()
-                if "draft/save" in url and method in {"POST", "PUT"}:
+                if (
+                    "draft/save" in url
+                    and method in {"POST", "PUT"}
+                    and "status" not in captured
+                ):
                     captured["status"] = response.status
                     try:
                         body = await response.json()
@@ -1875,76 +2102,53 @@ class WeiboPlatform(BasePlatform):
                     evidence=evidence.finalize(error_code="DRAFT_RESULT_UNKNOWN"),
                 )
 
-            await self.page.goto(
-                "https://card.weibo.com/article/v5/editor#/draft",
-                wait_until="domcontentloaded",
-                timeout=30000,
-            )
-            opened = False
-            for _ in range(4):
-                await self.simulator.random_delay(2, 3)
-                card_result = await self.page.evaluate(
-                    r"""(title) => {
-                        const visible = (node) => {
-                            const rect = node.getBoundingClientRect();
-                            const style = getComputedStyle(node);
-                            return rect.width > 0 && rect.height > 0
-                                && style.display !== 'none'
-                                && style.visibility !== 'hidden';
-                        };
-                        const matches = Array.from(
-                            document.querySelectorAll('.list-item')
-                        ).filter((card) => visible(card)
-                            && (card.innerText || '').split(/\r?\n/, 1)[0].trim()
-                                === title);
-                        if (matches.length !== 1) {
-                            return {clicked: false, count: matches.length};
-                        }
-                        matches[0].click();
-                        return {clicked: true, count: 1};
-                    }""",
-                    expected_title,
+            try:
+                current_by_title = await self._collect_draft_ids_by_title(
+                    only_title=expected_title,
                 )
-                if not isinstance(card_result, dict) or not card_result.get("clicked"):
-                    continue
-                evidence.mark_draft_list(match_count=card_result.get("count"))
-                for _ in range(10):
-                    observed_id = str(
-                        await self.page.evaluate(
-                            r"""() => {
-                                const match = location.hash.match(/^#\/draft\/(\d+)$/);
-                                return match ? match[1] : '';
-                            }"""
-                        )
-                        or ""
-                    )
-                    if observed_id == draft_id:
-                        evidence.mark_entity_binding(
-                            bound=True,
-                            source=(
-                                "existing_draft_id"
-                                if self._editing_existing_draft
-                                else "save_response_id"
-                            ),
-                            id_match=True,
-                        )
-                        opened = True
-                        break
-                    await asyncio.sleep(0.5)
-                if opened:
-                    break
-            if not opened:
+            except Exception as exc:
+                raise DraftResultUnknownError(
+                    "DRAFT_RESULT_UNKNOWN: 微博保存后无法读取草稿 ID 列表",
+                    evidence=evidence.finalize(error_code="DRAFT_RESULT_UNKNOWN"),
+                ) from exc
+            matching_ids = current_by_title.get(expected_title, frozenset())
+            evidence.mark_draft_list(match_count=len(matching_ids))
+            binding_source = (
+                "existing_draft_id"
+                if self._editing_existing_draft
+                else "baseline_new_id"
+            )
+            draft_url = self._draft_editor_url(draft_id)
+            evidence.set_draft_url(draft_url)
+            if draft_id not in matching_ids:
                 evidence.mark_entity_binding(
                     bound=False,
-                    source=(
-                        "existing_draft_id"
-                        if self._editing_existing_draft
-                        else "save_response_id"
-                    ),
+                    source=binding_source,
                     id_match=False,
                 )
                 raise DraftResultUnknownError(
-                    "DRAFT_RESULT_UNKNOWN: 微博未找到标题精确匹配且绑定本次 ID 的唯一草稿",
+                    "DRAFT_RESULT_UNKNOWN: 微博未找到标题精确匹配且绑定本次 ID 的草稿",
+                    evidence=evidence.finalize(error_code="DRAFT_RESULT_UNKNOWN"),
+                )
+
+            evidence.mark_entity_binding(
+                bound=True,
+                source=binding_source,
+                id_match=True,
+            )
+            await self.page.goto(
+                draft_url,
+                wait_until="domcontentloaded",
+                timeout=30000,
+            )
+            await self.page.wait_for_function(
+                r"""(draftId) => location.hash === `#/draft/${draftId}`""",
+                arg=draft_id,
+                timeout=20000,
+            )
+            if await self._current_draft_id() != draft_id:
+                raise DraftResultUnknownError(
+                    "DRAFT_RESULT_UNKNOWN: 微博草稿重开后 ID 不一致",
                     evidence=evidence.finalize(error_code="DRAFT_RESULT_UNKNOWN"),
                 )
 
@@ -1982,11 +2186,8 @@ class WeiboPlatform(BasePlatform):
                 captured.get("status"),
                 captured.get("code"),
             )
-            evidence.set_draft_url(
-                f"https://card.weibo.com/article/v5/editor#/draft/{draft_id}"
-            )
             evidence.finalize()
-            return f"https://card.weibo.com/article/v5/editor#/draft/{draft_id}"
+            return draft_url
         except DraftBaselineError:
             evidence.finalize(error_code="DRAFT_BASELINE_UNAVAILABLE")
             raise
@@ -2016,49 +2217,43 @@ class WeiboPlatform(BasePlatform):
                     pass
 
     async def verify_draft_readonly(self, title: str) -> dict:
-        """只读核验：在微博草稿箱按标题查找唯一草稿，返回结构摘要。
+        """只读核验：返回标题实体的规范 ID URL；同名时仅接受已知目标 ID。
 
-        只导航草稿箱列表页并按标题匹配卡片；不点击草稿、不重开编辑页。
+        必要的卡片导航会拦截全部非只读请求，不输入、不保存、不发布。
         """
-        expected_title = str(title or "").strip()
+        expected_title = self._normalize_draft_title(title)
         if not expected_title:
             return {"error_code": "PROBE_TITLE_MISSING", "error_message": "缺少可核验标题"}
         try:
-            await self.page.goto(
-                "https://card.weibo.com/article/v5/editor#/draft",
-                wait_until="domcontentloaded",
-                timeout=30000,
+            by_title = await self._collect_draft_ids_by_title(
+                only_title=expected_title,
+                guard_mutations=True,
             )
-            match_count = 0
-            for _ in range(4):
-                await self.simulator.random_delay(2, 3)
-                result = await self.page.evaluate(
-                    r"""(title) => {
-                        const visible = (node) => {
-                            const rect = node.getBoundingClientRect();
-                            const style = getComputedStyle(node);
-                            return rect.width > 0 && rect.height > 0
-                                && style.display !== 'none'
-                                && style.visibility !== 'hidden';
-                        };
-                        const matches = Array.from(
-                            document.querySelectorAll('.list-item')
-                        ).filter((card) => visible(card)
-                            && (card.innerText || '').split(/\r?\n/, 1)[0].trim()
-                                === title);
-                        return matches.length;
-                    }""",
-                    expected_title,
-                )
-                if isinstance(result, int) and result > 0:
-                    match_count = result
-                    break
+            matching_ids = by_title.get(expected_title, frozenset())
+            match_count = len(matching_ids)
+            preferred_ids = (
+                self._active_draft_id,
+                self._resume_existing_draft_id,
+            )
+            target_id = next(
+                (
+                    candidate
+                    for candidate in preferred_ids
+                    if candidate in matching_ids
+                ),
+                "",
+            )
             if match_count == 1:
+                target_id = next(iter(matching_ids))
+            if target_id:
                 return {
                     "title_matched": True,
-                    "match_count": 1,
-                    "draft_url": "https://card.weibo.com/article/v5/editor#/draft",
-                    "structure": {"source": "draft_list"},
+                    "match_count": match_count,
+                    "draft_url": self._draft_editor_url(target_id),
+                    "structure": {
+                        "source": "draft_list_id",
+                        "id_targeted": match_count > 1,
+                    },
                 }
             if match_count > 1:
                 return {

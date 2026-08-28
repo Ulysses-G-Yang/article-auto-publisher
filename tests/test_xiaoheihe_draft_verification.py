@@ -382,6 +382,22 @@ async def test_browser_close_during_save_is_terminal_without_retry():
     assert baseline.closed is True
 
 
+@pytest.mark.asyncio
+async def test_non_browser_error_after_save_attempt_is_result_unknown():
+    baseline = _baseline_page([_candidate("old", "旧草稿")])
+    main = _FakePage(
+        url="https://www.xiaoheihe.cn/creator/editor/fixture",
+        click_error=RuntimeError("click result unavailable"),
+    )
+    platform = _platform(main, baseline)
+
+    with pytest.raises(DraftResultUnknownError, match="可能已触发") as caught:
+        await platform.save_draft("保存结果未知")
+    assert caught.value.evidence.to_dict()["unknown"] is True
+    assert main.click_count == 1
+    assert baseline.closed is True
+
+
 def test_new_draft_requires_exactly_one_new_entity_without_title_filter():
     title = "编辑页真实标题"
     baseline = [_candidate("old", "旧正文摘要")]

@@ -1095,11 +1095,13 @@ class ZhihuPlatform(BasePlatform):
             )
         except Exception as exc:
             if self._exception_means_browser_closed(exc):
-                raise BrowserLifecycleError(
-                    "BROWSER_CONTEXT_CLOSED: 知乎打开草稿箱时页面已关闭"
+                raise DraftResultUnknownError(
+                    "DRAFT_RESULT_UNKNOWN: 知乎自动保存后页面已关闭",
+                    evidence=evidence.finalize(error_code="DRAFT_RESULT_UNKNOWN"),
                 ) from exc
             raise DraftResultUnknownError(
-                "DRAFT_RESULT_UNKNOWN: 知乎自动保存后无法打开草稿箱"
+                "DRAFT_RESULT_UNKNOWN: 知乎自动保存后无法打开草稿箱",
+                evidence=evidence.finalize(error_code="DRAFT_RESULT_UNKNOWN"),
             ) from exc
         await self.simulator.random_delay(3, 5)
 
@@ -1126,6 +1128,7 @@ class ZhihuPlatform(BasePlatform):
             evidence.mark_entity_binding(
                 bound=True,
                 source="baseline_new_id",
+                id_match=True,
             )
             edit_url = self._draft_edit_url(draft.get("id"))
             evidence.set_draft_url(edit_url)
@@ -1139,9 +1142,12 @@ class ZhihuPlatform(BasePlatform):
         except Exception as exc:
             if isinstance(exc, DraftResultUnknownError):
                 raise
-            if self._exception_means_browser_closed(exc):
-                raise BrowserLifecycleError(
-                    "BROWSER_CONTEXT_CLOSED: 知乎验证草稿箱时页面已关闭"
+            if isinstance(exc, BrowserLifecycleError) or self._exception_means_browser_closed(
+                exc
+            ):
+                raise DraftResultUnknownError(
+                    "DRAFT_RESULT_UNKNOWN: 知乎自动保存后验证页面已关闭",
+                    evidence=evidence.finalize(error_code="DRAFT_RESULT_UNKNOWN"),
                 ) from exc
             raise DraftResultUnknownError(
                 "DRAFT_RESULT_UNKNOWN: 知乎持久化草稿核验失败",

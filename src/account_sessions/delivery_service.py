@@ -300,10 +300,33 @@ class DeliveryService:
                     evidence=result.get("verification_evidence"),
                 )
             media_incomplete = result.get("media_status") in {"partial", "failed"}
-            entity_confirmed = _evidence_confirms_entity(
-                result.get("verification_evidence")
+            verification_evidence = result.get("verification_evidence")
+            entity_confirmed = _evidence_confirms_entity(verification_evidence)
+            content_confirmed = _evidence_confirms_complete_draft(
+                verification_evidence
             )
-            verification_warning = bool(result.get("draft_verification_warning"))
+            if operation.mode == "DRAFT" and not entity_confirmed:
+                # 适配器返回 success/draft_url 也不能代替本次副作用证明。
+                # 未绑定稳定草稿 ID 时，可能已经发生保存，必须停为结果未知，
+                # 不能用同名标题、当前页 URL 或普通 2xx 伪报成功。
+                raise AccountUnavailableError(
+                    "平台可能已执行保存，但未能绑定本次云端草稿实体",
+                    error_code="DRAFT_RESULT_UNKNOWN",
+                    evidence=verification_evidence,
+                )
+            verification_warning = bool(
+                result.get("draft_verification_warning")
+            ) or (
+                operation.mode == "DRAFT"
+                and entity_confirmed
+                and not content_confirmed
+            )
+            if verification_warning:
+                result.setdefault("draft_verification_warning", True)
+                result.setdefault(
+                    "draft_verification_warning_message",
+                    "云端草稿实体已确认，但重开后的完整图文仍需核对",
+                )
             cover_strategy = str(cover.get("strategy") or "NONE").upper()
             cover_status = result.get("cover_status")
             cover_incomplete = (
@@ -1075,6 +1098,18 @@ def _evidence_confirms_entity(evidence: object) -> bool:
         return False
     bound = evidence.get("draft_entity_bound")
     return bound is True
+
+
+def _evidence_confirms_complete_draft(evidence: object) -> bool:
+    """完整成功还必须证明精确实体重开后的标题与图文均一致。"""
+
+    if not _evidence_confirms_entity(evidence):
+        return False
+    assert isinstance(evidence, dict)
+    return (
+        evidence.get("reopen_title_match") is True
+        and evidence.get("reopen_dom_blocks_match") is True
+    )
 
 
 def _append_buffered_logs(

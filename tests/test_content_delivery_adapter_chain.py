@@ -33,6 +33,7 @@ from content_studio.contracts import (
 )
 from content_studio.database import ContentDatabase, sqlite_url
 from content_studio.service import ContentStudioService
+from platforms.base import DraftVerificationEvidence
 from platforms.xiaoheihe import XiaoheihePlatform
 from platforms.zol import ZOLPlatform
 from tests.test_regression import FakePage, FakeXiaoPage
@@ -110,7 +111,17 @@ class _AdapterRuntimeMixin:
 
     async def save_draft(self, title: str = "") -> str:
         self.draft_calls += 1
-        return f"https://example.invalid/{self.platform_name}/draft/1"
+        draft_url = f"https://example.invalid/{self.platform_name}/draft/1"
+        evidence = DraftVerificationEvidence()
+        evidence.mark_entity_binding(
+            bound=True,
+            source="save_response_id",
+            id_match=True,
+        )
+        evidence.mark_reopen(title_match=True, dom_blocks_match=True)
+        evidence.set_draft_url(draft_url)
+        self._last_draft_evidence = evidence.finalize()
+        return draft_url
 
     async def cleanup(self) -> None:
         self.context = None

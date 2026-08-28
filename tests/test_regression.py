@@ -1809,7 +1809,8 @@ class RegressionTests(DatabaseTestCase):
         platform = WeiboPlatform()
         platform.simulator.random_delay = AsyncMock()
         platform._preflight_title = "微博标题"
-        platform._draft_title_baseline_count = 0
+        platform._preflight_draft_ids_by_title = {"微博标题": frozenset()}
+        platform._preflight_all_draft_ids = frozenset()
 
         response = type(
             "CreateResponse",

@@ -577,28 +577,61 @@ class _Response:
         return {"code": 100000}
 
 
-class _PreflightPage:
-    def __init__(self, *, match_count: int = 0) -> None:
-        self.goto = AsyncMock()
-        self.wait_for_function = AsyncMock()
+class _DraftCardPage:
+    def __init__(self) -> None:
         self.expression = ""
-        self.match_count = match_count
 
-    async def evaluate(self, expression: str, title: str) -> int:
+    async def evaluate(self, expression: str):
         self.expression = expression
-        assert title == "唯一标题"
-        return self.match_count
+        return [
+            {
+                "title": "同名标题",
+                "edit_urls": [
+                    "https://card.weibo.com/article/v5/editor#/draft/4183001",
+                ],
+            },
+            {
+                "title": "同名标题",
+                "edit_urls": [
+                    "https://card.weibo.com/article/v5/editor#/draft/4183002",
+                ],
+            },
+        ]
 
 
 def test_weibo_preflight_keeps_javascript_newline_regex_literal() -> None:
-    page = _PreflightPage()
+    page = _DraftCardPage()
     platform = WeiboPlatform()
     platform.page = page
 
-    asyncio.run(platform.preflight_delivery("唯一标题"))
+    cards = asyncio.run(platform._read_visible_draft_cards())
 
     assert r".split(/\r?\n/, 1)" in page.expression
     assert "\r" not in page.expression
+    assert [card["draft_id"] for card in cards] == ["4183001", "4183002"]
+
+
+@pytest.mark.parametrize(
+    ("url", "draft_id"),
+    [
+        (
+            "https://card.weibo.com/article/v5/editor#/draft/4183001",
+            "4183001",
+        ),
+        ("https://card.weibo.com/article/v5/editor#/draft/0", ""),
+        ("http://card.weibo.com/article/v5/editor#/draft/4183001", ""),
+        ("https://example.com/article/v5/editor#/draft/4183001", ""),
+        (
+            "https://card.weibo.com/article/v5/editor?next=1#/draft/4183001",
+            "",
+        ),
+    ],
+)
+def test_weibo_accepts_only_canonical_numeric_draft_urls(
+    url: str,
+    draft_id: str,
+) -> None:
+    assert WeiboPlatform._draft_id_from_editor_url(url) == draft_id
 
 
 class _ResumeField:
@@ -621,8 +654,7 @@ class _ResumeLocator:
 
 
 class _ResumePage:
-    def __init__(self, *, match_count: int = 1, draft_id: str = "4183864") -> None:
-        self.match_count = match_count
+    def __init__(self, *, draft_id: str = "4183864") -> None:
         self.draft_id = draft_id
         self.title_field = _ResumeField("唯一标题")
         self.body = _ResumeField("")
@@ -631,14 +663,8 @@ class _ResumePage:
         self.wait_for_selector = AsyncMock()
         self.evaluate_calls = 0
 
-    async def evaluate(self, script: str, argument=None):
+    async def evaluate(self, script: str, _argument=None):
         self.evaluate_calls += 1
-        if "return Array.from" in script and "matches[0].click" not in script:
-            assert argument == "唯一标题"
-            return self.match_count
-        if "matches[0].click" in script:
-            assert argument == "唯一标题"
-            return self.match_count == 1
         if "location.hash.match" in script:
             return self.draft_id
         raise AssertionError("unexpected resume evaluate call")
@@ -657,35 +683,71 @@ class _ResumePage:
         raise AssertionError("恢复现有草稿不得等待 create 请求")
 
 
-def test_weibo_resume_requires_unique_title_and_exact_draft_id() -> None:
+def test_weibo_preflight_allows_existing_same_title_for_new_draft() -> None:
+    page = _ResumePage()
+    platform = WeiboPlatform()
+    platform.page = page
+    platform._collect_draft_ids_by_title = AsyncMock(
+        return_value={"唯一标题": frozenset({"4183001", "4183002"})}
+    )
+
+    asyncio.run(platform.preflight_delivery("唯一标题"))
+
+    platform._collect_draft_ids_by_title.assert_awaited_once_with(
+        only_title="唯一标题",
+        guard_mutations=True,
+    )
+    assert platform._editing_existing_draft is False
+    assert platform._preflight_draft_ids_by_title == {
+        "唯一标题": frozenset({"4183001", "4183002"})
+    }
+    assert platform._preflight_all_draft_ids == frozenset(
+        {"4183001", "4183002"}
+    )
+    page.goto.assert_not_awaited()
+
+
+def test_weibo_resume_uses_exact_id_when_same_title_has_multiple_drafts() -> None:
     page = _ResumePage()
     platform = WeiboPlatform(
         resume_existing_title="唯一标题",
         resume_existing_draft_id="4183864",
     )
     platform.page = page
+    platform._collect_draft_ids_by_title = AsyncMock(
+        return_value={"唯一标题": frozenset({"4183001", "4183864"})}
+    )
 
     asyncio.run(platform.preflight_delivery("唯一标题"))
     asyncio.run(platform.navigate_to_editor())
     asyncio.run(platform.fill_title("唯一标题"))
 
     assert platform._editing_existing_draft is True
-    assert platform._draft_title_baseline_count == 1
     assert platform._active_draft_id == "4183864"
-    page.goto.assert_awaited_once()
+    assert platform._preflight_draft_ids_by_title == {
+        "唯一标题": frozenset({"4183001", "4183864"})
+    }
+    page.goto.assert_awaited_once_with(
+        "https://card.weibo.com/article/v5/editor#/draft/4183864",
+        wait_until="domcontentloaded",
+        timeout=30000,
+    )
 
 
-@pytest.mark.parametrize("match_count", [0, 2])
-def test_weibo_resume_rejects_missing_or_ambiguous_title(match_count: int) -> None:
-    page = _PreflightPage(match_count=match_count)
+def test_weibo_resume_rejects_id_missing_from_same_title_baseline() -> None:
+    page = _ResumePage()
     platform = WeiboPlatform(
         resume_existing_title="唯一标题",
         resume_existing_draft_id="4183864",
     )
     platform.page = page
+    platform._collect_draft_ids_by_title = AsyncMock(
+        return_value={"唯一标题": frozenset({"4183001", "4183002"})}
+    )
 
-    with pytest.raises(DraftBaselineError, match="标题不唯一"):
+    with pytest.raises(DraftBaselineError, match="ID 不在"):
         asyncio.run(platform.preflight_delivery("唯一标题"))
+    page.goto.assert_not_awaited()
 
 
 def test_weibo_resume_rejects_unexpected_draft_id() -> None:
@@ -695,6 +757,9 @@ def test_weibo_resume_rejects_unexpected_draft_id() -> None:
         resume_existing_draft_id="4183864",
     )
     platform.page = page
+    platform._collect_draft_ids_by_title = AsyncMock(
+        return_value={"唯一标题": frozenset({"4183864", "4183999"})}
+    )
 
     with pytest.raises(DraftBaselineError, match="ID"):
         asyncio.run(platform.preflight_delivery("唯一标题"))
@@ -741,6 +806,7 @@ class _NewDraftPage:
     def __init__(self, *, change_id: bool = True) -> None:
         self.draft_id = "4181973"
         self.goto = AsyncMock()
+        self.wait_for_function = AsyncMock()
         self.wait_for_selector = AsyncMock()
         self.write_button = _WriteButton(self, change_id=change_id)
 
@@ -771,7 +837,10 @@ def test_weibo_new_draft_requires_create_response_and_changed_positive_id() -> N
     platform = WeiboPlatform()
     platform.page = page
     platform._preflight_title = "唯一标题"
-    platform._draft_title_baseline_count = 0
+    platform._preflight_draft_ids_by_title = {
+        "唯一标题": frozenset({"4181001", "4181002"})
+    }
+    platform._preflight_all_draft_ids = frozenset({"4181001", "4181002"})
 
     asyncio.run(platform.navigate_to_editor())
 
@@ -784,9 +853,26 @@ def test_weibo_create_response_without_new_id_is_result_unknown() -> None:
     platform = WeiboPlatform()
     platform.page = page
     platform._preflight_title = "唯一标题"
-    platform._draft_title_baseline_count = 0
+    platform._preflight_draft_ids_by_title = {
+        "唯一标题": frozenset({"4181973"})
+    }
+    platform._preflight_all_draft_ids = frozenset({"4181973"})
 
-    with pytest.raises(DraftResultUnknownError, match="禁止重试"):
+    with pytest.raises(DraftResultUnknownError, match="基线之外"):
+        asyncio.run(platform.navigate_to_editor())
+
+
+def test_weibo_create_response_cannot_reuse_any_baseline_draft_id() -> None:
+    page = _NewDraftPage()
+    platform = WeiboPlatform()
+    platform.page = page
+    platform._preflight_title = "唯一标题"
+    platform._preflight_draft_ids_by_title = {
+        "其他标题": frozenset({"4182999"})
+    }
+    platform._preflight_all_draft_ids = frozenset({"4182999"})
+
+    with pytest.raises(DraftResultUnknownError, match="基线之外"):
         asyncio.run(platform.navigate_to_editor())
 
 
@@ -836,6 +922,7 @@ class _SavePage:
         self.route = AsyncMock(side_effect=self._register_route)
         self.unroute = AsyncMock()
         self.goto = AsyncMock()
+        self.wait_for_function = AsyncMock()
         self.wait_for_selector = AsyncMock()
         self.remove_listener = Mock()
         self.blocked_route = _Route()
@@ -886,24 +973,42 @@ def _save_platform(page: _SavePage) -> WeiboPlatform:
     platform.page = page
     platform.simulator.random_delay = AsyncMock()
     platform._preflight_title = "唯一标题"
-    platform._draft_title_baseline_count = 0
+    platform._preflight_draft_ids_by_title = {
+        "唯一标题": frozenset({"76543210"})
+    }
+    platform._preflight_all_draft_ids = frozenset({"76543210"})
     platform._active_draft_id = "87654321"
     platform._expected_persisted_blocks = [{"type": "text", "text": "正文"}]
     platform._expected_persisted_image_count = 0
     platform._validate_dom_exact = AsyncMock()
+    platform._collect_draft_ids_by_title = AsyncMock(
+        return_value={"唯一标题": frozenset({"76543210", "87654321"})}
+    )
     return platform
 
 
-def test_weibo_draft_requires_current_id_and_title_entity() -> None:
+def test_weibo_draft_binds_active_id_even_when_same_title_is_not_unique() -> None:
     page = _SavePage()
     platform = _save_platform(page)
 
     result = asyncio.run(platform.save_draft("唯一标题"))
 
     assert result.endswith("#/draft/87654321")
+    evidence = platform._last_draft_evidence.to_dict()
+    assert evidence["draft_list_match_count"] == 2
+    assert evidence["draft_list_title_unique"] is False
+    assert evidence["draft_entity_bound"] is True
+    assert evidence["draft_entity_source"] == "baseline_new_id"
+    platform._collect_draft_ids_by_title.assert_awaited_once_with(
+        only_title="唯一标题"
+    )
     page.route.assert_awaited_once()
     page.unroute.assert_awaited_once()
-    page.goto.assert_awaited_once()
+    page.goto.assert_awaited_once_with(
+        "https://card.weibo.com/article/v5/editor#/draft/87654321",
+        wait_until="domcontentloaded",
+        timeout=30000,
+    )
 
 
 def test_weibo_publication_request_is_aborted_and_never_reported_as_draft() -> None:
@@ -927,6 +1032,56 @@ def test_weibo_ambiguous_save_button_does_not_click_or_navigate() -> None:
 
     page.goto.assert_not_awaited()
     page.unroute.assert_awaited_once()
+
+
+def test_weibo_readonly_returns_exact_url_for_unique_title_id() -> None:
+    platform = WeiboPlatform()
+    platform.page = SimpleNamespace()
+    platform._collect_draft_ids_by_title = AsyncMock(
+        return_value={"唯一标题": frozenset({"87654321"})}
+    )
+
+    result = asyncio.run(platform.verify_draft_readonly("唯一标题"))
+
+    assert result == {
+        "title_matched": True,
+        "match_count": 1,
+        "draft_url": (
+            "https://card.weibo.com/article/v5/editor#/draft/87654321"
+        ),
+        "structure": {"source": "draft_list_id", "id_targeted": False},
+    }
+
+
+def test_weibo_readonly_uses_known_id_when_title_is_duplicated() -> None:
+    platform = WeiboPlatform()
+    platform.page = SimpleNamespace()
+    platform._active_draft_id = "87654321"
+    platform._collect_draft_ids_by_title = AsyncMock(
+        return_value={
+            "同名标题": frozenset({"76543210", "87654321"}),
+        }
+    )
+
+    result = asyncio.run(platform.verify_draft_readonly("同名标题"))
+
+    assert result["match_count"] == 2
+    assert result["draft_url"].endswith("#/draft/87654321")
+    assert result["structure"]["id_targeted"] is True
+
+
+def test_weibo_readonly_rejects_same_title_without_target_id() -> None:
+    platform = WeiboPlatform()
+    platform.page = SimpleNamespace()
+    platform._collect_draft_ids_by_title = AsyncMock(
+        return_value={
+            "同名标题": frozenset({"76543210", "87654321"}),
+        }
+    )
+
+    result = asyncio.run(platform.verify_draft_readonly("同名标题"))
+
+    assert result["error_code"] == "PROBE_TITLE_AMBIGUOUS"
 
 
 @pytest.mark.parametrize(

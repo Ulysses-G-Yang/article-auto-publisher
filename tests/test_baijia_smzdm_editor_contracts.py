@@ -557,9 +557,14 @@ def test_baijia_save_toast_navigation_race_still_uses_persisted_reopen() -> None
     platform.page = _BaijiaSavePage()
     platform._preflight_title = "唯一标题"
     platform._expected_persisted_blocks = [{"type": "text", "text": "正文"}]
-    platform._find_unique_exact_draft = AsyncMock(
-        return_value="https://baijiahao.baidu.com/builder/rc/edit?type=news&article_id=123"
-    )
+
+    async def find_bound_draft(_title: str) -> str:
+        platform._last_draft_entity_bound = True
+        platform._last_draft_entity_source = "baseline_new_id"
+        platform._last_draft_match_count = 1
+        return "https://baijiahao.baidu.com/builder/rc/edit?type=news&article_id=123"
+
+    platform._find_unique_exact_draft = AsyncMock(side_effect=find_bound_draft)
     platform._verify_persisted_draft = AsyncMock()
 
     with patch("platforms.baijiahao.asyncio.sleep", new=AsyncMock()):

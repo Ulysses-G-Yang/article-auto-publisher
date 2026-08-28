@@ -1746,10 +1746,18 @@ class XiaoheihePlatform(BasePlatform):
             if self._exception_means_browser_closed(e):
                 if clicked:
                     raise DraftResultUnknownError(
-                        "DRAFT_RESULT_UNKNOWN: 小黑盒保存后页面已关闭"
+                        "DRAFT_RESULT_UNKNOWN: 小黑盒保存后页面已关闭",
+                        evidence=evidence.finalize(
+                            error_code="DRAFT_RESULT_UNKNOWN"
+                        ),
                     ) from e
                 raise BrowserLifecycleError(
                     "BROWSER_CONTEXT_CLOSED: 小黑盒点击保存草稿前页面已关闭"
+                ) from e
+            if clicked:
+                raise DraftResultUnknownError(
+                    "DRAFT_RESULT_UNKNOWN: 小黑盒保存动作可能已触发，结果未知",
+                    evidence=evidence.finalize(error_code="DRAFT_RESULT_UNKNOWN"),
                 ) from e
             logger.error("小黑盒点击保存草稿按钮失败: {}", e)
             return ""

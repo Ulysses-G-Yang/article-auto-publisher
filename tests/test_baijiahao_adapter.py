@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+from html.parser import HTMLParser
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
@@ -9,6 +11,28 @@ import pytest
 from platforms.baijiahao import BaijiahaoPlatform
 from platforms.base import DraftResultUnknownError
 from platforms.content_validation import ContentValidationError
+
+REAL_DRAFT_FIXTURE = (
+    Path(__file__).parent / "fixtures" / "baijiahao" / "draft_card.html"
+)
+
+
+class _LinkCollector(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__()
+        self.hrefs: list[str] = []
+
+    def handle_starttag(
+        self,
+        tag: str,
+        attrs: list[tuple[str, str | None]],
+    ) -> None:
+        if tag != "a":
+            return
+        attributes = dict(attrs)
+        href = attributes.get("href")
+        if href:
+            self.hrefs.append(href)
 
 
 class _Item:
@@ -233,6 +257,11 @@ def test_matching_draft_rows_are_scoped_to_article_item_containers() -> None:
     assert 'div[class*="articleItem"]' in script
     assert "actions.includes('修改')" in script
     assert "preview_href" in script
+    assert "['http:', 'https:'].includes(parsed.protocol)" in script
+    assert "parsed.hostname === 'baijiahao.baidu.com'" in script
+    assert "parsed.port === ''" in script
+    assert "values.length === 1" in script
+    assert "preview.getAttribute('href')" in script
 
 
 def test_unique_draft_uses_preview_id_instead_of_clicking_react_action() -> None:
@@ -257,13 +286,16 @@ def test_unique_draft_uses_preview_id_instead_of_clicking_react_action() -> None
         "https://baijiahao.baidu.com/builder/rc/edit?"
         "type=news&article_id=123456789&is_pay_training_camp="
     )
+    assert platform._last_draft_entity_bound is True
+    assert platform._last_draft_match_count == 1
     platform._open_works_page.assert_awaited_once()
     platform._search_works.assert_awaited_once_with("唯一标题")
 
 
-def test_unique_draft_uses_scoped_modify_when_preview_link_is_absent() -> None:
+def test_unique_draft_without_stable_preview_id_is_result_unknown() -> None:
     platform = BaijiahaoPlatform()
-    platform.page = SimpleNamespace()
+    platform.page = SimpleNamespace(reload=AsyncMock())
+    platform.simulator.random_delay = AsyncMock()
     platform._open_works_page = AsyncMock()
     platform._search_works = AsyncMock()
     platform._matching_work_rows = AsyncMock(
@@ -276,13 +308,12 @@ def test_unique_draft_uses_scoped_modify_when_preview_link_is_absent() -> None:
         )
     )
 
-    result = asyncio.run(platform._find_unique_exact_draft("唯一标题"))
+    with pytest.raises(DraftResultUnknownError, match="唯一识别本次新增实体"):
+        asyncio.run(platform._find_unique_exact_draft("唯一标题"))
 
-    assert "article_id=react-draft" in result
-    platform._open_exact_draft_via_modify.assert_awaited_once_with(
-        "唯一标题",
-        row_index=0,
-    )
+    assert platform._last_draft_entity_bound is False
+    assert platform._last_draft_match_count == 1
+    platform._open_exact_draft_via_modify.assert_not_awaited()
 
 
 def test_same_title_verification_selects_only_new_draft_id() -> None:
@@ -312,11 +343,14 @@ def test_same_title_verification_selects_only_new_draft_id() -> None:
     result = asyncio.run(platform._find_unique_exact_draft("允许同名"))
 
     assert "article_id=new-draft" in result
+    assert platform._last_draft_entity_bound is True
+    assert platform._last_draft_match_count == 2
 
 
-def test_same_title_without_preview_id_opens_newest_row_once() -> None:
+def test_same_title_without_complete_preview_ids_is_result_unknown() -> None:
     platform = BaijiahaoPlatform()
     platform.page = SimpleNamespace(reload=AsyncMock())
+    platform.simulator.random_delay = AsyncMock()
     platform._preflight_matching_draft_count = 1
     platform._preflight_draft_ids = frozenset()
     platform._open_works_page = AsyncMock()
@@ -334,14 +368,58 @@ def test_same_title_without_preview_id_opens_newest_row_once() -> None:
         )
     )
 
-    result = asyncio.run(platform._find_unique_exact_draft("允许同名"))
+    with pytest.raises(DraftResultUnknownError, match="唯一识别本次新增实体"):
+        asyncio.run(platform._find_unique_exact_draft("允许同名"))
 
-    assert "article_id=newest-react-draft" in result
-    platform._search_works.assert_awaited_once_with("允许同名")
-    platform.page.reload.assert_not_awaited()
-    platform._open_exact_draft_via_modify.assert_awaited_once_with(
-        "允许同名",
-        row_index=0,
+    assert platform._last_draft_entity_bound is False
+    assert platform._last_draft_match_count == 2
+    assert platform._search_works.await_count == 6
+    assert platform.page.reload.await_count == 5
+    platform._open_exact_draft_via_modify.assert_not_awaited()
+
+
+def test_real_draft_fixture_http_preview_id_canonicalizes_to_https() -> None:
+    html = REAL_DRAFT_FIXTURE.read_text(encoding="utf-8")
+    collector = _LinkCollector()
+    collector.feed(html)
+    preview_hrefs = sorted(
+        {
+            href
+            for href in collector.hrefs
+            if "/builder/preview/s" in href
+        }
+    )
+
+    assert 'data-node-key="draft"' in html
+    assert 'placeholder="输入标题关键字"' in html
+    assert "client_pages_content_v2_components_articleItem" in html
+    assert ">修改<" in html
+    assert preview_hrefs == [
+        "http://baijiahao.baidu.com/builder/preview/s?"
+        "id=1874667986177421311"
+    ]
+    assert (
+        BaijiahaoPlatform._preview_article_id(preview_hrefs[0])
+        == "1874667986177421311"
+    )
+    assert BaijiahaoPlatform._edit_url_from_preview_href(preview_hrefs[0]) == (
+        "https://baijiahao.baidu.com/builder/rc/edit?"
+        "type=news&article_id=1874667986177421311&is_pay_training_camp="
+    )
+
+
+@pytest.mark.parametrize("scheme", ["http", "https"])
+def test_preview_href_accepts_only_supported_transport_and_canonicalizes(
+    scheme: str,
+) -> None:
+    preview = (
+        f"{scheme}://baijiahao.baidu.com/builder/preview/s?"
+        "id=safe-draft_123"
+    )
+
+    assert BaijiahaoPlatform._preview_article_id(preview) == "safe-draft_123"
+    assert BaijiahaoPlatform._edit_url_from_preview_href(preview).startswith(
+        "https://baijiahao.baidu.com/builder/rc/edit?"
     )
 
 
@@ -382,7 +460,13 @@ def test_scoped_modify_accepts_only_one_new_same_origin_editor_page() -> None:
 @pytest.mark.parametrize(
     "value",
     [
+        "ftp://baijiahao.baidu.com/builder/preview/s?id=1",
+        "http://evil.example/builder/preview/s?id=1",
         "https://evil.example/builder/preview/s?id=1",
+        "http://baijiahao.baidu.com:80/builder/preview/s?id=1",
+        "https://baijiahao.baidu.com:443/builder/preview/s?id=1",
+        "https://user@baijiahao.baidu.com/builder/preview/s?id=1",
+        "https://user:pass@baijiahao.baidu.com/builder/preview/s?id=1",
         "https://baijiahao.baidu.com/builder/preview/s",
         "https://baijiahao.baidu.com/builder/preview/s?id=1&id=2",
         "https://baijiahao.baidu.com/builder/preview/s?id=1&foo=bar",
@@ -575,6 +659,81 @@ def test_preflight_records_existing_exact_title_ids_without_blocking() -> None:
     assert platform._preflight_title == "唯一标题"
     assert platform._preflight_matching_draft_count == 1
     assert platform._preflight_draft_ids == frozenset({"old-draft"})
+
+
+class _DraftSavePage:
+    def __init__(self) -> None:
+        self.button = _Item()
+        self.response_callback = None
+
+    def is_closed(self) -> bool:
+        return False
+
+    def on(self, event: str, callback) -> None:
+        assert event == "response"
+        self.response_callback = callback
+
+    def remove_listener(self, event: str, callback) -> None:
+        assert event == "response"
+        assert callback is self.response_callback
+        self.response_callback = None
+
+    def get_by_text(self, text: str, *, exact: bool) -> _Collection:
+        assert (text, exact) == ("存草稿", True)
+        return _Collection([self.button])
+
+    async def evaluate(self, _script: str) -> list:
+        return []
+
+
+def _draft_save_platform(*, bound: bool, match_count: int) -> BaijiahaoPlatform:
+    platform = BaijiahaoPlatform()
+    platform.page = _DraftSavePage()
+    platform._preflight_title = "同名草稿"
+    platform._expected_persisted_blocks = [{"type": "text", "text": "正文"}]
+
+    async def find_draft(_title: str) -> str:
+        platform._last_draft_entity_bound = bound
+        platform._last_draft_entity_source = (
+            "baseline_new_id" if bound else "title_match_without_baseline"
+        )
+        platform._last_draft_match_count = match_count
+        return (
+            "https://baijiahao.baidu.com/builder/rc/edit?"
+            "type=news&article_id=current-draft"
+        )
+
+    platform._find_unique_exact_draft = AsyncMock(side_effect=find_draft)
+    platform._verify_persisted_draft = AsyncMock()
+    return platform
+
+
+def test_save_records_actual_same_title_match_count() -> None:
+    platform = _draft_save_platform(bound=True, match_count=3)
+
+    with patch("platforms.baijiahao.asyncio.sleep", new=AsyncMock()):
+        result = asyncio.run(platform.save_draft("同名草稿"))
+
+    evidence = platform._last_draft_evidence.to_dict()
+    assert "article_id=current-draft" in result
+    assert evidence["draft_list_match_count"] == 3
+    assert evidence["draft_list_title_unique"] is False
+    assert evidence["draft_entity_bound"] is True
+    platform._verify_persisted_draft.assert_awaited_once()
+
+
+def test_save_cannot_succeed_without_stable_entity_binding() -> None:
+    platform = _draft_save_platform(bound=False, match_count=2)
+
+    with patch("platforms.baijiahao.asyncio.sleep", new=AsyncMock()):
+        with pytest.raises(DraftResultUnknownError, match="稳定 ID 绑定") as caught:
+            asyncio.run(platform.save_draft("同名草稿"))
+
+    evidence = caught.value.evidence.to_dict()
+    assert evidence["draft_list_match_count"] == 2
+    assert evidence["draft_entity_bound"] is False
+    assert evidence["unknown"] is True
+    platform._verify_persisted_draft.assert_not_awaited()
 
 
 @pytest.mark.parametrize(

@@ -14,7 +14,7 @@
 
     function draftSourceSummary(draft) {
         const sourceType = draft?.source_type || '';
-        const source = sourceLabels[sourceType] || sourceType || '草稿';
+        const source = sourceLabels[sourceType] || (sourceType ? '其他来源' : '草稿');
         if (sourceType !== 'DOCX' || !draft?.source_ref) return source;
         const sourceRef = String(draft.source_ref).split(/[\\/]+/).filter(Boolean).pop() || '';
         return sourceRef ? `${source} · 文件/来源：${sourceRef}` : source;
@@ -23,12 +23,25 @@
         READY: '待执行', CREATING: '正在创建执行单', QUEUED: '已排队', RUNNING: '执行中', SUCCESS: '全部成功',
         PARTIAL_FAIL: '部分成功 / 部分失败', FATAL: '全部失败', CONFIRMATION_REQUIRED: '待公开确认',
         DRAFT_SAVED: '平台草稿已保存', PUBLISHED: '已公开发布', BLOCKED: '已拦截', FAILED: '失败',
-        DRAFT_SAVED_WITH_WARNINGS: '草稿已保存（有警告）',
-        PUBLISHED_WITH_WARNINGS: '已发布（有警告）',
+        DRAFT_SAVED_WITH_WARNINGS: '草稿已保存（需核对）',
+        PUBLISHED_WITH_WARNINGS: '已发布（需核对）',
         RESULT_UNKNOWN: '结果未知，需人工核对', FORMAT_REVIEW_REQUIRED: '待格式复核',
         DELIVERY_INCOMPLETE: '投递未完成',
         AWAITING_CONFIRMATION: '等待公开确认', EXECUTING: '执行中',
     };
+    const sharedUiText = window.ArticleOpsUi || {};
+
+    function localizedStatus(value) {
+        return planStatusLabels[value]
+            || sharedUiText.statusLabel?.(value)
+            || (value ? '状态待确认' : '状态未知');
+    }
+
+    function localizedErrorMessage(code, message, fallback) {
+        return sharedUiText.userFacingErrorMessage?.(code, message, fallback)
+            || fallback
+            || '操作未完成，请查看执行记录。';
+    }
     const reLoginErrorCodes = new Set([
         'LOGIN_REQUIRED', 'SESSION_EXPIRED', 'ACCOUNT_SESSION_EXPIRED',
     ]);
@@ -630,7 +643,8 @@
 
     function updateDraftMeta() {
         if (!state.draft) return;
-        const source = sourceLabels[state.draft.source_type] || state.draft.source_type || '草稿';
+        const source = sourceLabels[state.draft.source_type]
+            || (state.draft.source_type ? '其他来源' : '草稿');
         const indicatorText = byId('save-indicator-text');
         if (indicatorText) {
              const sourceBadge = byId('draft-source-badge');
@@ -1341,7 +1355,7 @@
         const progress = byId('account-load-progress');
         if (progress) {
             progress.textContent = enabledIds.length === 0
-                ? '请先选择平台，再批量选择 VALID 账户'
+                ? '请先选择平台，再批量选择登录状态有效的账户'
                 : state.bulkAccountSelecting
                     ? `正在加载账号 ${loadedCount}/${enabledIds.length}`
                     : `账号已加载 ${loadedCount}/${enabledIds.length}`;
@@ -1514,10 +1528,12 @@
                     BUSY: '账号正忙',
                 };
                 const states = Array.from(new Set(unavailable.map(account =>
-                    labels[account.session_status] || account.session_status || '状态未知')));
+                    labels[account.session_status]
+                        || sharedUiText.statusLabel?.(account.session_status)
+                        || '状态未知')));
                 empty.textContent = `检测到 ${unavailable.length} 个账号，但当前状态为“${states.join('、')}”，尚不能投递。`;
             } else {
-                empty.textContent = '该平台暂无可用账号（需要 VALID 登录态）。';
+                empty.textContent = '该平台暂无可用账号（需要有效登录状态）。';
             }
             const refresh = document.createElement('button');
             refresh.type = 'button';
@@ -1561,7 +1577,7 @@
         if (invalidIds.length && apply) {
             setMessage(
                 'target-builder-error',
-                `${platformLabel(platformId)}有 ${invalidIds.length} 个历史目标账号当前不是 VALID，已从本次选择中移除；历史投递记录不受影响。`,
+                `${platformLabel(platformId)}有 ${invalidIds.length} 个历史目标账号当前登录状态无效，已从本次选择中移除；历史投递记录不受影响。`,
             );
         }
         return invalidIds;
@@ -1574,7 +1590,7 @@
         const label = platformLabel(platformId);
         const isAccountLoadError = text.startsWith(`加载${label}账号失败：`);
         const isInvalidSelectionError = text.startsWith(`${label}有 `)
-            && text.includes('当前不是 VALID');
+            && text.includes('当前登录状态无效');
         if (isAccountLoadError || isInvalidSelectionError) {
             setMessage('target-builder-error', '');
         }
@@ -2001,7 +2017,7 @@
         const features = Array.isArray(target?.required_features) && target.required_features.length
             ? `需要能力：${target.required_features.join('、')}` : '';
         const detail = typeof target?.error_message === 'string' && target.error_message
-            ? target.error_message : '';
+            ? localizedErrorMessage(target?.error_code, target.error_message, '') : '';
         return `${label}，此目标暂不执行。${features}${detail ? `（${detail}）` : ''}`;
     }
 
@@ -2093,16 +2109,16 @@
     function targetStatusLabel(target) {
         if (targetNeedsRelogin(target)) return '需要重新登录';
         if (target?.error_code === 'XHS_CLOUD_DRAFT_UNAVAILABLE') return '网页端无云端草稿';
-        if (target.status === 'DRAFT_SAVED_WITH_WARNINGS') return '草稿已保存（有警告）';
+        if (target.status === 'DRAFT_SAVED_WITH_WARNINGS') return '草稿已保存（需核对）';
         if (target?.degraded && target.status === 'DRAFT_SAVED') return '草稿已保存（完整性待核对）';
-        return planStatusLabels[target.status] || target.status;
+        return localizedStatus(target.status);
     }
 
     function platformDraftBoxUrl(platform) {
         // 各平台草稿箱直达地址（2026-08 盘点确认）
         return {
             xiaoheihe: 'https://www.xiaoheihe.cn/app/bbs/draft',
-            zhihu: 'https://www.zhihu.com/creator/manage/creation/drafts',
+            zhihu: 'https://www.zhihu.com/creator/manage/creation/draft?type=article',
             weibo: 'https://card.weibo.com/article/v5/editor#/draft',
             smzdm: 'https://post.smzdm.com/tougao/',
             baijiahao: 'https://baijiahao.baidu.com/builder/rc/content',
@@ -2119,16 +2135,25 @@
             return '小红书网页长文只保存在隔离浏览器本地，不能作为账号云端草稿；该目标未执行。';
         }
         if (target.error_code === 'DRAFT_BASELINE_UNAVAILABLE') {
-            return target.error_message || '保存前无法建立可靠草稿基线；平台写入已停止。';
+            return localizedErrorMessage(
+                target.error_code,
+                target.error_message,
+                '保存前无法建立可靠草稿基线；平台写入已停止。',
+            );
         }
         const warningStatus = ['DRAFT_SAVED_WITH_WARNINGS', 'PUBLISHED_WITH_WARNINGS'].includes(target.status);
-        if (warningStatus && target.error_message) return target.error_message;
+        if (warningStatus && target.error_message) {
+            return localizedErrorMessage(target.error_code, target.error_message, '草稿已保存，但内容需要核对。');
+        }
         if (target?.degraded && ['DRAFT_SAVED', 'DRAFT_SAVED_WITH_WARNINGS'].includes(target.status)) {
-            return target.error_message
-                || '平台草稿箱已出现本次草稿，保存结果待核对正文和图片完整性。';
+            return localizedErrorMessage(
+                target.error_code,
+                target.error_message,
+                '平台草稿箱已出现本次草稿，保存结果待核对正文和图片完整性。',
+            );
         }
         if (target.status === 'DELIVERY_INCOMPLETE' && target.error_message) {
-            return target.error_message;
+            return localizedErrorMessage(target.error_code, target.error_message, '投递未完成，请人工核对草稿箱。');
         }
         // 草稿保存证据链：即使整体失败/未知，也展示平台侧可核验证据
         if (target.verification_evidence) {
@@ -2142,17 +2167,23 @@
             return '结果未知，请先到平台人工核对；系统不会自动重试。';
         }
         if (target.status === 'DELIVERY_INCOMPLETE') {
-            return target.error_message || '投递未完成：平台侧未确认草稿保存结果，请使用只读核验或到平台草稿箱人工核对。';
+            return localizedErrorMessage(
+                target.error_code,
+                target.error_message,
+                '投递未完成：平台侧未确认草稿保存结果，请使用只读核验或到平台草稿箱人工核对。',
+            );
         }
         if (target.status === 'PARTIAL_FAIL') {
-            return target.error_message || '部分内容未完整处理，请核对图片和平台结果。';
+            return localizedErrorMessage(target.error_code, target.error_message, '部分内容未完整处理，请核对图片和平台结果。');
         }
         if (target.status === 'CREATING') {
             return '正在创建独立执行单，请稍候。';
         }
-        return target.error_message || (target.operation_id
-            ? `执行单 ${target.operation_id}`
-            : target.mode === 'PUBLISH' ? '公开发布' : '平台草稿');
+        return target.error_message
+            ? localizedErrorMessage(target.error_code, target.error_message)
+            : (target.operation_id
+                ? `执行单 ${target.operation_id}`
+                : target.mode === 'PUBLISH' ? '公开发布' : '平台草稿');
     }
 
     function planDisplayStatus(plan) {
@@ -2183,7 +2214,7 @@
         byId('plan-id').textContent = `投递计划 ${state.plan.plan_id.slice(0, 8)}…`;
         const displayStatus = planDisplayStatus(state.plan);
         byId('plan-status').className = `badge ${planBadge(displayStatus)}`;
-        byId('plan-status').textContent = planStatusLabels[displayStatus] || displayStatus;
+        byId('plan-status').textContent = localizedStatus(displayStatus);
         byId('plan-targets').replaceChildren(...state.plan.targets.map(target => {
             const row = document.createElement('article'); row.className = `plan-target${isFormatBlockedTarget(target) ? ' is-format-review' : ''}`;
             const copy = document.createElement('div'); copy.className = 'plan-target-copy'; const strong = document.createElement('strong'); strong.textContent = `${platformLabel(target.platform)} · ${target.account_display_name || '平台账号'}`; const small = document.createElement('small'); small.textContent = planTargetDetail(target); copy.append(strong, small);
@@ -2252,7 +2283,11 @@
                 const code = payload.error || 'PROBE_FAILED';
                 const hint = code === 'PROBE_UNSUPPORTED_PLATFORM'
                     ? '该平台尚未实现只读核验，请打开平台草稿箱人工核对。'
-                    : (payload.message || `核验失败（${code}）`);
+                    : localizedErrorMessage(
+                        code,
+                        payload.message,
+                        '核验失败，请到平台草稿箱人工核对。',
+                    );
                 setResult(hint, 'warning');
                 return;
             }
@@ -2261,9 +2296,9 @@
             } else if (payload.error_code === 'PROBE_NOT_FOUND') {
                 setResult('只读核验：平台草稿箱未找到该标题草稿。', 'danger');
             } else if (payload.error_code === 'PROBE_TITLE_AMBIGUOUS') {
-                setResult(payload.error_message || '草稿箱存在多个同名草稿，需人工区分。', 'warning');
+                setResult(localizedErrorMessage(payload.error_code, payload.error_message, '草稿箱存在多个同名草稿，需人工区分。'), 'warning');
             } else {
-                setResult(payload.error_message || '只读核验完成，请查看平台草稿箱。', 'info');
+                setResult(localizedErrorMessage(payload.error_code, payload.error_message, '只读核验完成，请查看平台草稿箱。'), 'info');
             }
         } catch (err) {
             setResult('只读核验请求失败，请稍后重试；系统不会自动重试平台操作。', 'danger');
@@ -2388,7 +2423,7 @@
             const dates = document.createElement('small');
             dates.textContent = `创建：${formatDate(draft.created_at)} · 更新：${formatDate(draft.updated_at)}`;
             const status = document.createElement('small');
-            status.textContent = `状态：${draftStatusLabels[draft.status] || draft.status || '未知'}`;
+            status.textContent = `状态：${draftStatusLabels[draft.status] || sharedUiText.statusLabel?.(draft.status) || '状态未知'}`;
             copy.append(title, meta, dates, status);
             const button = document.createElement('button');
             button.type = 'button';

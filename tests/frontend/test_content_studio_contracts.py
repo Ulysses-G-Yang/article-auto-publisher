@@ -201,7 +201,7 @@ def test_existing_targets_survive_account_metadata_loading() -> None:
     assert "function reconcileLoadedAccountSelection" in script
     assert "selected.filter(accountId => !validIds.has(accountId))" in script
     assert "if (render && reconcile && invalidIds.length) rebuildTargets();" in script
-    assert "当前不是 VALID" in script
+    assert "当前登录状态无效" in script
     assert "switcherAccountLoadFailed: {}" in script
     assert "部分平台账号加载失败，本次全选未保存" in script
 
@@ -345,7 +345,7 @@ def test_delivery_statuses_are_explicit_and_never_auto_retry_publish() -> None:
     assert "DELIVERY_INCOMPLETE: '投递未完成'" in script
     assert "XHS_CLOUD_DRAFT_UNAVAILABLE" in script
     assert "网页端无云端草稿" in script
-    assert "DRAFT_SAVED_WITH_WARNINGS: '草稿已保存（有警告）'" in script
+    assert "DRAFT_SAVED_WITH_WARNINGS: '草稿已保存（需核对）'" in script
     assert "function targetNeedsRelogin(target)" in script
     assert "return '需要重新登录'" in script
     assert "const MAX_PLAN_POLLS = 240" in script
@@ -636,14 +636,14 @@ def test_empty_valid_account_state_links_to_platform_account_management() -> Non
         "return accounts.map", 1
     )[0]
     assert "accounts?platform=" in empty_branch
-    assert "VALID 登录态" in empty_branch
+    assert "需要有效登录状态" in empty_branch
 
 
 def test_target_accounts_refresh_after_login_and_explain_non_valid_state() -> None:
     template = read("web/templates/upload.html")
     script = read("web/static/js/content-studio.js")
 
-    assert "20260827-account-refresh" in template
+    assert "20260828-zh-status-i18n" in template
     assert "switcherAccountDiagnostics: {}" in script
     assert "cache: 'no-store'" in script
     assert "async function refreshEnabledSwitcherAccounts" in script

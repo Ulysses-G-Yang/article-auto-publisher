@@ -63,7 +63,6 @@ def test_original_article_link_is_safe_and_accessible() -> None:
 
 def test_read_only_legacy_pages_keep_their_compatible_contracts() -> None:
     index = read("web/templates/index.html")
-    accounts = read("web/templates/accounts.html")
     task = read("web/templates/task_detail.html")
 
     assert "fetch('/api/tasks')" in index
@@ -108,3 +107,32 @@ def test_shared_shell_has_navigation_and_mobile_controls() -> None:
     assert 'id="sidebar-backdrop"' in base
     assert "sidebar-mobile-open" in script
     assert "event.key === 'Escape'" in script
+
+
+def test_user_facing_operation_states_are_localized_to_chinese() -> None:
+    app = read("web/static/js/app.js")
+    index = read("web/templates/index.html")
+    upload = read("web/templates/upload.html")
+    studio = read("web/static/js/content-studio.js")
+    accounts = read("web/static/js/account-sessions.js")
+    task = read("web/templates/task_detail.html")
+    dashboard = read("src/article_mvp/web/static/dashboard.js")
+
+    assert "DRAFT_SAVED_WITH_WARNINGS: '草稿已保存（需核对）'" in app
+    assert "DRAFT_SAVED_WITH_WARNINGS: '草稿已保存（需核对）'" in studio
+    assert 'x-text="op.error_code"' not in index
+    assert 'data-ui-error-code' in task
+    assert '>READY</span>' not in upload
+    assert '核验失败（${code}）' not in studio
+    assert "VALID 登录态" not in studio
+    assert "当前不是 VALID" not in studio
+    assert "event.event_type || event.action || '账号事件'" not in accounts
+    assert "[{{ log.level }}]" not in task
+    assert "HTTPX ENABLED" not in dashboard
+    assert "COLLECTOR BLOCKED" not in dashboard
+    assert "DATA UNAVAILABLE" not in dashboard
+    assert "PARTIAL_FAIL: '部分成功 / 部分失败'" in app
+    assert 'PARTIAL_FAIL: "部分成功 / 部分失败"' in dashboard
+    assert 'DELETED: "已删除"' in dashboard
+    assert "payload.message || payload.error" not in dashboard
+    assert "20260828-zh-status-i18n" in upload

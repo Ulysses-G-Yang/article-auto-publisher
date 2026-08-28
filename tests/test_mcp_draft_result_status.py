@@ -204,7 +204,7 @@ const hooks = context.__articleOpsHooks;
 const assert = (condition, message) => {{ if (!condition) throw new Error(message); }};
 assert(hooks.targetStatusLabel({{ status: 'DRAFT_SAVED' }}) === '平台草稿已保存', 'normal label');
 assert(hooks.targetStatusLabel({{ status: 'DRAFT_SAVED', degraded: 'draft_list_confirmed' }}) === '草稿已保存（完整性待核对）', 'degraded label');
-assert(hooks.targetStatusLabel({{ status: 'DRAFT_SAVED_WITH_WARNINGS' }}) === '草稿已保存（有警告）', 'warning label');
+assert(hooks.targetStatusLabel({{ status: 'DRAFT_SAVED_WITH_WARNINGS' }}) === '草稿已保存（需核对）', 'warning label');
 
 hooks.state.platforms = [];
 hooks.state.plan = {{ plan_id: 'plan-verify', status: 'FATAL', targets: [

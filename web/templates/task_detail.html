@@ -12,7 +12,7 @@
 
     <header class="page-heading task-heading">
         <div>
-            <span class="page-kicker">TASK DETAILS</span>
+            <span class="page-kicker">任务详情</span>
             <h1>任务详情</h1>
             <p>查看投递参数、文章内容和按时间排列的执行日志。</p>
         </div>
@@ -31,17 +31,17 @@
     <section class="card task-summary-card" aria-labelledby="task-summary-title">
         <header class="task-summary-header">
             <div>
-                <span class="section-kicker">WORK ITEM #{{ task.id }}</span>
+                <span class="section-kicker">任务 #{{ task.id }}</span>
                 <h2 id="task-summary-title">任务概览</h2>
                 <p>创建于 {{ task.created_at or '时间未知' }}</p>
             </div>
-            <span class="status-label {{ status_style }}">{{ {'queued':'排队中','processing':'处理中','completed':'已完成','completed_with_warnings':'草稿已保存（有警告）','failed':'失败','retrying':'重试中','paused':'已暂停','needs_selection':'待选择','cancelled':'已取消'}.get(task.status, task.status) }}</span>
+            <span class="status-label {{ status_style }}">{{ {'queued':'排队中','processing':'处理中','completed':'已完成','completed_with_warnings':'草稿已保存（需核对）','failed':'失败','retrying':'重试中','paused':'已暂停','needs_selection':'待选择','cancelled':'已取消'}.get(task.status, '状态待确认') }}</span>
         </header>
         <div class="task-summary-body">
             <dl class="task-facts">
                 <div class="task-fact">
                     <dt>平台</dt>
-                    <dd>{{ {'zol':'中关村在线','xiaoheihe':'小黑盒'}.get(task.platform, task.platform or '—') }}</dd>
+                    <dd>{{ {'zol':'中关村在线','xiaoheihe':'小黑盒','zhihu':'知乎','weibo':'微博','smzdm':'什么值得买','baijiahao':'百家号','xiaohongshu':'小红书'}.get(task.platform, '未知平台' if task.platform else '—') }}</dd>
                 </div>
                 <div class="task-fact task-fact-wide">
                     <dt>来源文章</dt>
@@ -74,14 +74,14 @@
                 {% if task.expected_images or task.uploaded_images or task.media_status not in (None, 'not_checked') %}
                 <div class="task-fact">
                     <dt>图片处理</dt>
-                    <dd>{{ task.uploaded_images or 0 }}/{{ task.expected_images or 0 }} 张 · {% if task.media_status == 'completed' %}已完成{% elif task.media_status in ('failed', 'partial') %}{{ task.media_status }}{% else %}{{ task.media_status or '未检查' }}{% endif %}</dd>
+                    <dd>{{ task.uploaded_images or 0 }}/{{ task.expected_images or 0 }} 张 · {{ {'completed':'已完成','failed':'失败','partial':'部分完成','not_checked':'未检查'}.get(task.media_status, '状态待确认' if task.media_status else '未检查') }}</dd>
                 </div>
                 {% endif %}
             </dl>
 
             {% if task.error_message %}
             <div class="alert task-alert {% if task.status == 'completed_with_warnings' %}alert-warning{% else %}alert-danger{% endif %}" role="alert">
-                {% if task.error_code %}<strong>错误码：</strong>{{ task.error_code }}<br>{% endif %}<strong>错误信息：</strong>{{ task.error_message }}
+                {% if task.error_code %}<strong>问题类型：</strong><span data-ui-error-code="{{ task.error_code | e }}">处理异常</span><br>{% endif %}<strong>问题说明：</strong><span data-ui-error-message data-ui-message-code="{{ task.error_code | default('', true) | e }}">{{ task.error_message }}</span>
             </div>
             {% endif %}
 
@@ -112,7 +112,7 @@
 
     {% if article %}
     <section class="card task-content-card" aria-labelledby="article-preview-title">
-        <header class="task-section-header"><div><span class="section-kicker">CONTENT PREVIEW</span><h2 id="article-preview-title">文章内容预览</h2></div><span class="task-section-meta">字数 {{ article.char_count or 0 }} · 图片 {{ article.image_count or 0 }}</span></header>
+        <header class="task-section-header"><div><span class="section-kicker">内容预览</span><h2 id="article-preview-title">文章内容预览</h2></div><span class="task-section-meta">字数 {{ article.char_count or 0 }} · 图片 {{ article.image_count or 0 }}</span></header>
         <div class="article-preview">
             {% if article.content_text %}<pre>{{ article.content_text[:2000] }}{% if article.content_text|length > 2000 %}
 …（更多内容已省略）{% endif %}</pre>{% else %}<div class="empty-state compact-empty"><i class="cil-notes" aria-hidden="true"></i><strong>暂无文章正文</strong><span>该任务未返回可预览的正文内容。</span></div>{% endif %}
@@ -121,10 +121,10 @@
     {% endif %}
 
     <section class="card task-log-card" aria-labelledby="task-log-title">
-        <header class="task-section-header"><div><span class="section-kicker">EXECUTION LOG</span><h2 id="task-log-title">执行日志</h2></div><span class="task-section-meta">按时间顺序记录</span></header>
+        <header class="task-section-header"><div><span class="section-kicker">执行日志</span><h2 id="task-log-title">执行日志</h2></div><span class="task-section-meta">按时间顺序记录</span></header>
         <div class="log-container" role="log" aria-live="polite">
             {% if logs %}
-                {% for log in logs %}<div class="log-line"><time class="log-time">{{ log.created_at }}</time><span class="log-level {% if log.level == 'ERROR' %}text-danger{% elif log.level == 'WARN' %}text-warning{% else %}text-info{% endif %}">[{{ log.level }}]</span><span class="log-message">{{ log.message }}</span></div>{% endfor %}
+                {% for log in logs %}<div class="log-line"><time class="log-time">{{ log.created_at }}</time><span class="log-level {% if log.level == 'ERROR' %}text-danger{% elif log.level == 'WARN' %}text-warning{% else %}text-info{% endif %}">[{{ {'ERROR':'错误','WARN':'警告','WARNING':'警告','INFO':'信息','DEBUG':'调试'}.get(log.level, '记录') }}]</span><span class="log-message">{{ log.message }}</span></div>{% endfor %}
             {% else %}<div class="log-empty">暂无日志</div>{% endif %}
         </div>
     </section>
@@ -155,11 +155,19 @@ document.addEventListener('alpine:init', () => {
                     body: JSON.stringify({community: this.community, topic: this.topic}),
                 });
                 const data = await response.json().catch(() => ({}));
-                if (!response.ok) throw new Error(data.message || data.error_code || `HTTP ${response.status}`);
+                if (!response.ok) {
+                    const requestError = new Error(data.message || `请求失败（状态码 ${response.status}）`);
+                    requestError.code = data.error_code || '';
+                    throw requestError;
+                }
                 this.message = '已恢复，任务进入队列';
                 setTimeout(() => location.reload(), 800);
             } catch (error) {
-                this.message = error.message;
+                this.message = window.ArticleOpsUi?.userFacingErrorMessage(
+                    error.code,
+                    error.message,
+                    '任务恢复失败，请稍后重试。',
+                ) || '任务恢复失败，请稍后重试。';
             } finally {
                 this.submitting = false;
             }

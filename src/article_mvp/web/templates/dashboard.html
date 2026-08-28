@@ -83,7 +83,7 @@
 
         <div class="page-heading">
           <div>
-            <span class="page-kicker">OPERATIONS DATA</span>
+            <span class="page-kicker">运营数据</span>
             <h1>发布与采集数据中心</h1>
             <p>现役发布任务与小黑盒单链路数据，在同一服务内统一查看。</p>
           </div>
@@ -171,7 +171,7 @@
                   <div class="contract-icon blocked"><i class="cil-ban" aria-hidden="true"></i></div>
                   <div><span>采集接口</span><strong id="collector-evidence">—</strong><small id="collector-source">—</small></div>
                 </article>
-                <div class="contract-note"><i class="cil-shield-alt" aria-hidden="true"></i><span>仅 verified 契约允许启动 HTTPX 真实采集。</span></div>
+                <div class="contract-note"><i class="cil-shield-alt" aria-hidden="true"></i><span>仅已验证的接口契约允许启动真实采集。</span></div>
               </div>
             </div>
           </section>
@@ -203,7 +203,7 @@
                   <thead><tr><th>运行</th><th>状态</th><th>数量</th><th>开始时间</th></tr></thead>
                   <tbody id="runs-body"></tbody>
                 </table>
-                <div id="runs-empty" class="empty-state d-none"><i class="cil-storage"></i><strong>尚无采集运行</strong><span>接口契约 verified 后才能开始真实采集。</span></div>
+                <div id="runs-empty" class="empty-state d-none"><i class="cil-storage"></i><strong>尚无采集运行</strong><span>接口契约完成验证后才能开始真实采集。</span></div>
               </div>
             </div>
           </section>
@@ -215,7 +215,7 @@
 
   <aside class="offcanvas offcanvas-end" tabindex="-1" id="module-settings" aria-labelledby="module-settings-title">
     <div class="offcanvas-header border-bottom">
-      <div><span class="module-eyebrow">DASHBOARD MODULES</span><h2 id="module-settings-title" class="offcanvas-title">模块设置</h2></div>
+      <div><span class="module-eyebrow">看板模块</span><h2 id="module-settings-title" class="offcanvas-title">模块设置</h2></div>
       <button type="button" class="btn-close" data-coreui-dismiss="offcanvas" aria-label="关闭"></button>
     </div>
     <div class="offcanvas-body">
@@ -239,6 +239,6 @@
   <script src="{{ url_for('article_mvp_dashboard.static', filename='vendor/coreui/coreui.bundle.min.js') }}" defer></script>
   <script src="{{ url_for('article_mvp_dashboard.static', filename='vendor/simplebar/simplebar.min.js') }}" defer></script>
   <script src="{{ url_for('article_mvp_dashboard.static', filename='vendor/gridstack/gridstack-all.js') }}" defer></script>
-  <script src="{{ url_for('article_mvp_dashboard.static', filename='dashboard.js') }}" defer></script>
+  <script src="{{ url_for('article_mvp_dashboard.static', filename='dashboard.js', v='20260828-zh-status-i18n') }}" defer></script>
 </body>
 </html>

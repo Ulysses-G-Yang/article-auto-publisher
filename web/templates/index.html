@@ -11,7 +11,7 @@
 
     <header class="page-heading dashboard-heading">
         <div>
-            <span class="page-kicker">WORKSPACE OVERVIEW</span>
+            <span class="page-kicker">工作台概览</span>
             <h1>发布概览</h1>
             <p>在一个列表里掌握内容、投递和任务处理状态。</p>
         </div>
@@ -47,7 +47,7 @@
     <section class="content-section" aria-labelledby="delivery-title">
         <div class="section-heading">
             <div>
-                <span class="section-kicker">DELIVERY ACTIVITY</span>
+                <span class="section-kicker">投递动态</span>
                 <h2 id="delivery-title">最近投递</h2>
                 <p>每个账号的结果独立展示，结果未知不会被伪装成成功。</p>
             </div>
@@ -73,7 +73,7 @@
                                 <td><span class="mode-pill" x-text="op.mode === 'PUBLISH' ? '公开发布' : '平台草稿'"></span></td>
                                 <td>
                                     <span class="status-label" :class="deliveryClass(op.status, op)" x-text="deliveryLabel(op.status, op)"></span>
-                                    <small class="table-detail table-detail-danger" x-show="op.error_code" x-text="op.error_code"></small>
+                                    <small class="table-detail table-detail-danger" x-show="deliveryErrorLabel(op)" x-text="deliveryErrorLabel(op)"></small>
                                     <small class="table-detail table-detail-warning" x-show="deliveryDetail(op)" x-text="deliveryDetail(op)"></small>
                                 </td>
                                 <td><time class="table-time" x-text="formatTime(op.created_at)"></time></td>
@@ -92,7 +92,7 @@
     <section class="content-section" aria-labelledby="task-title">
         <div class="section-heading">
             <div>
-                <span class="section-kicker">LEGACY WORKFLOW</span>
+                <span class="section-kicker">历史任务流程</span>
                 <h2 id="task-title">任务列表</h2>
                 <p>保留历史队列入口，点击任务编号查看完整日志和文章预览。</p>
             </div>
@@ -188,13 +188,17 @@ document.addEventListener('alpine:init', () => {
         deliveryLabel(s, operation = null) {
             const m = {
                 QUEUED: '已排队', RUNNING: '执行中', DRAFT_SAVED: '草稿已保存',
-                DRAFT_SAVED_WITH_WARNINGS: '草稿已保存（有警告）', PUBLISHED: '已发布',
+                DRAFT_SAVED_WITH_WARNINGS: '草稿已保存（需核对）', PUBLISHED: '已发布',
                 PUBLISHED_WITH_WARNINGS: '已发布（图片未完整）', FAILED: '失败',
                 RESULT_UNKNOWN: '结果未知', DELIVERY_INCOMPLETE: '投递未完成',
                 CONFIRMATION_REQUIRED: '待公开确认', BLOCKED: '已拦截',
             };
             if (s === 'DRAFT_SAVED' && operation?.degraded) return '草稿已保存（待核对）';
-            return m[s] || s;
+            return m[s] || window.ArticleOpsUi?.statusLabel(s) || '状态待确认';
+        },
+
+        deliveryErrorLabel(operation) {
+            return window.ArticleOpsUi?.errorCodeLabel(operation?.error_code) || '';
         },
 
         deliveryClass(s, operation = null) {
@@ -211,15 +215,24 @@ document.addEventListener('alpine:init', () => {
             if (!operation) return '';
             const warningStatus = ['DRAFT_SAVED_WITH_WARNINGS', 'PUBLISHED_WITH_WARNINGS'].includes(operation.status);
             if (warningStatus || operation.degraded || operation.status === 'DELIVERY_INCOMPLETE') {
-                return operation.error_message || operation.verification_evidence?.summary || '草稿已保存，完整性待核对。';
+                return window.ArticleOpsUi?.userFacingErrorMessage(
+                    operation.error_code,
+                    operation.error_message || operation.verification_evidence?.summary,
+                    '草稿已保存，完整性待核对。',
+                ) || '草稿已保存，完整性待核对。';
             }
-            return operation.error_message || '';
+            return operation.error_message
+                ? window.ArticleOpsUi?.userFacingErrorMessage(
+                    operation.error_code,
+                    operation.error_message,
+                ) || ''
+                : '';
         },
 
         platformDraftBoxUrl(platform) {
             return {
                 xiaoheihe: 'https://www.xiaoheihe.cn/app/bbs/draft',
-                zhihu: 'https://www.zhihu.com/creator/manage/creation/drafts',
+                zhihu: 'https://www.zhihu.com/creator/manage/creation/draft?type=article',
                 weibo: 'https://card.weibo.com/article/v5/editor#/draft',
                 smzdm: 'https://post.smzdm.com/tougao/',
                 baijiahao: 'https://baijiahao.baidu.com/builder/rc/content',
@@ -244,8 +257,8 @@ document.addEventListener('alpine:init', () => {
         },
 
         statusLabel(s) {
-            const m = { queued: '排队中', processing: '处理中', completed: '已完成', completed_with_warnings: '草稿已保存（有警告）', failed: '失败', retrying: '重试中', cancelled: '已取消', paused: '已暂停', needs_selection: '待选择话题' };
-            return m[s] || s;
+            const m = { queued: '排队中', processing: '处理中', completed: '已完成', completed_with_warnings: '草稿已保存（需核对）', failed: '失败', retrying: '重试中', cancelled: '已取消', paused: '已暂停', needs_selection: '待选择话题' };
+            return m[s] || window.ArticleOpsUi?.statusLabel(s) || '状态待确认';
         },
 
         statusClass(s) {

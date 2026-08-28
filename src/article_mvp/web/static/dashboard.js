@@ -34,9 +34,25 @@ function formatTime(value) {
 }
 
 function platformLabel(platform) {
-  if (platform === "xiaoheihe") return "小黑盒";
-  if (platform === "zol") return "中关村在线";
-  return platform || "—";
+  return {
+    xiaoheihe: "小黑盒", zol: "中关村在线", zhihu: "知乎", weibo: "微博",
+    smzdm: "什么值得买", baijiahao: "百家号", xiaohongshu: "小红书",
+  }[platform] || (platform ? "未知平台" : "—");
+}
+
+const STATUS_LABELS = {
+  UNMAPPED: "草稿待映射", MAPPED: "已映射", queued: "排队中",
+  processing: "处理中", completed: "已完成",
+  completed_with_warnings: "草稿已保存（需核对）", failed: "失败",
+  retrying: "重试中", cancelled: "已取消", paused: "已暂停",
+  needs_selection: "待选择话题", SUCCESS: "成功", PARTIAL_FAIL: "部分成功 / 部分失败",
+  FATAL: "失败", DELETED: "已删除", DRAFT_SAVED: "草稿已保存",
+  DRAFT_SAVED_WITH_WARNINGS: "草稿已保存（需核对）",
+  RESULT_UNKNOWN: "结果未知，需人工核对", DELIVERY_INCOMPLETE: "投递未完成",
+};
+
+function statusLabel(value) {
+  return STATUS_LABELS[value] || (value ? "状态待确认" : "—");
 }
 
 function displayMetric(value) {
@@ -211,26 +227,8 @@ function setMetricMode(mode) {
 
 function statusNode(value) {
   const span = document.createElement("span");
-  const labels = {
-    // 平台文章映射
-    UNMAPPED: "草稿待映射",
-    MAPPED: "已映射",
-    // 发布任务（legacy queue）
-    queued: "排队中",
-    processing: "处理中",
-    completed: "已完成",
-    completed_with_warnings: "草稿已保存（有警告）",
-    failed: "失败",
-    retrying: "重试中",
-    cancelled: "已取消",
-    paused: "已暂停",
-    needs_selection: "待选择话题",
-    // 采集运行
-    SUCCESS: "成功",
-    FATAL: "失败",
-  };
   span.className = `status-label ${value || ""}`;
-  span.textContent = labels[value] || value || "—";
+  span.textContent = statusLabel(value);
   return span;
 }
 
@@ -374,17 +372,21 @@ function renderLegacySummaryFailure() {
 }
 
 function renderContract(contract) {
-  setText("publish-evidence", contract.publish_evidence);
+  const evidenceLabels = {
+    verified: "已验证", observed: "已观察", assumed: "待验证假设",
+    legacy_unverified: "旧系统未验证",
+  };
+  setText("publish-evidence", evidenceLabels[contract.publish_evidence] || "状态待确认");
   setText("publish-source", contract.publish_source);
-  setText("collector-evidence", contract.collector_evidence);
+  setText("collector-evidence", evidenceLabels[contract.collector_evidence] || "状态待确认");
   setText("collector-source", contract.collector_source);
 
   const gate = byId("collector-gate");
   if (contract.collector_enabled) {
-    gate.textContent = "HTTPX ENABLED";
+    gate.textContent = "采集已启用";
     gate.className = "badge text-bg-success-subtle text-success-emphasis";
   } else {
-    gate.textContent = "COLLECTOR BLOCKED";
+    gate.textContent = "采集已阻止";
     gate.className = "badge text-bg-warning-subtle text-warning-emphasis";
   }
 }
@@ -396,7 +398,9 @@ async function fetchJson(url) {
   });
   const payload = await response.json().catch(() => ({}));
   if (!response.ok) {
-    throw new Error(payload.message || payload.error || `HTTP ${response.status}`);
+    const message = typeof payload.message === "string" ? payload.message.trim() : "";
+    const safeMessage = /[\u3400-\u9fff]/u.test(message) ? message : "";
+    throw new Error(safeMessage || `请求失败（状态码 ${response.status}）`);
   }
   return payload;
 }
@@ -408,7 +412,8 @@ function renderDashboardPayload(payload) {
   setText("total-articles", payload.summary?.total_articles);
   setText("mapped-articles", payload.summary?.mapped_articles);
   setText("total-snapshots", payload.summary?.total_snapshots);
-  setText("latest-run", payload.summary?.latest_run_status, "暂无运行");
+  setText("latest-run", payload.summary?.latest_run_status
+    ? statusLabel(payload.summary.latest_run_status) : "暂无运行");
   renderContract(payload.contract || {});
   renderArticles(payload.articles || []);
   renderRuns(payload.runs || []);
@@ -428,7 +433,7 @@ function renderDashboardFailure(error) {
   setText("latest-run", "暂不可用");
   renderContract({});
   const gate = byId("collector-gate");
-  gate.textContent = "DATA UNAVAILABLE";
+  gate.textContent = "数据暂不可用";
   gate.className = "badge text-bg-danger-subtle text-danger-emphasis";
   renderArticles([]);
   renderRuns([]);

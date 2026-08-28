@@ -3,6 +3,7 @@
 
     const root = document.getElementById('multi-account-sessions');
     if (!root) return;
+    const sharedUiText = window.ArticleOpsUi || {};
 
     const MAX_TARGETED_POLLS = 12;
     const POLL_INTERVAL_MS = 2500;
@@ -46,6 +47,18 @@
         LOGIN_WINDOW_STILL_OPEN: '原生 Chrome 登录窗口仍未关闭。请完成登录后关闭整个 Chrome 窗口，本页会继续查询本机账号状态。',
         SMZDM_PROFILE_NOT_RELEASED: '该账号的浏览器 Profile 仍被 Chrome 占用。请关闭该账号的整个 Chrome 窗口，等待几秒后再验证，不要重复点击登录。',
         SMZDM_NATIVE_LOGIN_FAILED: '原生 Chrome 登录窗口启动失败。请确认 Chrome 可以正常打开、该账号旧窗口已经关闭，然后重试一次。',
+    };
+    const activityLabels = {
+        ACCOUNT_ARCHIVED: '账号已归档', ACCOUNT_RESTORED: '账号已恢复',
+        LOGIN_STATE_CLEARED: '登录状态已清除', SESSION_LOGGED_OUT: '账号已退出',
+        SESSION_POLICY_UPDATED: '登录保持策略已更新', SESSION_VERIFIED: '登录状态验证成功',
+        SESSION_VERIFY_FAILED: '登录状态验证失败', DELIVERY_QUEUED: '投递已排队',
+        DELIVERY_STARTED: '投递已开始', DELIVERY_COMPLETED_WITH_WARNINGS: '草稿已保存（需核对）',
+        DELIVERY_INCOMPLETE: '投递未完成', DELIVERY_RESULT_UNKNOWN: '投递结果未知',
+        DELIVERY_FAILED: '投递失败', DRAFT_SAVED: '草稿已保存',
+        DRAFT_SAVED_WITH_WARNINGS: '草稿已保存（需核对）',
+        PUBLISH_CONFIRMATION_REQUESTED: '等待公开发布确认', PLATFORM_LOG: '平台执行记录',
+        HEARTBEAT_SUCCEEDED: '登录状态检查完成',
     };
 
     function endpoint(template, key, value) {
@@ -108,7 +121,9 @@
     }
 
     function loginErrorMessage(code) {
-        return loginErrorMessages[code] || (code ? `登录失败（${code}）。` : '登录状态未完成。');
+        return loginErrorMessages[code]
+            || sharedUiText.errorCodeLabel?.(code)
+            || (code ? '登录状态异常，请查看活动日志。' : '登录状态未完成。');
     }
 
     function setLoginInFlight(value, accountId = null) {
@@ -195,7 +210,9 @@
     function badge(value) {
         const element = document.createElement('span');
         element.className = `badge ${statusClasses[value] || 'text-bg-secondary'}`;
-        element.textContent = sessionLabels[value] || value || '状态未知';
+        element.textContent = sessionLabels[value]
+            || sharedUiText.statusLabel?.(value)
+            || '状态未知';
         return element;
     }
 
@@ -281,7 +298,7 @@
     }
 
     function platformLabel(platformId) {
-        return state.platforms.find(item => item.id === platformId)?.display_name || platformId;
+        return state.platforms.find(item => item.id === platformId)?.display_name || '未知平台';
     }
 
     function safeLogoUrl(value) {
@@ -639,8 +656,16 @@
         const item = document.createElement('li'); item.className = 'activity-item';
         const dot = document.createElement('span'); dot.className = 'activity-dot'; dot.setAttribute('aria-hidden', 'true');
         const copy = document.createElement('div'); copy.className = 'activity-copy';
-        const title = document.createElement('strong'); title.textContent = event.event_type || event.action || '账号事件';
-        const message = document.createElement('p'); message.textContent = event.message || event.status || '状态已更新';
+        const title = document.createElement('strong');
+        const eventCode = event.event_type || event.action || '';
+        title.textContent = activityLabels[eventCode]
+            || sharedUiText.statusLabel?.(eventCode)
+            || '账号事件';
+        const message = document.createElement('p');
+        const rawMessage = typeof event.message === 'string' ? event.message.trim() : '';
+        message.textContent = /[\u3400-\u9fff]/u.test(rawMessage)
+            ? rawMessage
+            : (sharedUiText.statusLabel?.(event.status) || '状态已更新');
         const time = document.createElement('time'); time.textContent = event.created_at || event.timestamp || '时间未知';
         copy.append(title, message, time); item.append(dot, copy); return item;
     }

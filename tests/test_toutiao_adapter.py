@@ -242,11 +242,27 @@ def test_save_id_extraction_rejects_generic_id_fields() -> None:
         {
             "id": "111111",
             "item_id": "222222",
-            "nested": {"id": "333333", "pgc_id": valid},
+            "nested": {"id": "333333", "gid": valid},
         }
     )
 
     assert extracted == frozenset({valid})
+
+
+def test_draft_item_extraction_accepts_verified_creator_center_gid() -> None:
+    valid = "7673817215686230543"
+
+    assert ToutiaoPlatform._extract_draft_items(
+        {
+            "draft_list": [
+                {
+                    "title": "头条草稿测试",
+                    "gid": valid,
+                    "draft_type": 2,
+                }
+            ]
+        }
+    ) == [("头条草稿测试", valid)]
 
 
 def test_preflight_freezes_normalized_title_and_draft_baseline() -> None:

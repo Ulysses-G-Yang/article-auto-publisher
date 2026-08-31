@@ -356,7 +356,13 @@ class ToutiaoPlatform(BasePlatform):
                 draft_id = next(
                     (
                         cls._safe_pgc_id(value.get(key))
-                        for key in ("pgc_id", "pgcId", "group_id", "item_id")
+                        for key in (
+                            "pgc_id",
+                            "pgcId",
+                            "group_id",
+                            "gid",
+                            "item_id",
+                        )
                         if cls._safe_pgc_id(value.get(key))
                     ),
                     None,
@@ -383,7 +389,7 @@ class ToutiaoPlatform(BasePlatform):
                 return
             if isinstance(value, dict):
                 for key, nested in value.items():
-                    if key in {"pgc_id", "pgcId", "group_id"}:
+                    if key in {"pgc_id", "pgcId", "group_id", "gid"}:
                         safe_id = cls._safe_pgc_id(nested)
                         if safe_id:
                             found.add(safe_id)

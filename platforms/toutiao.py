@@ -70,6 +70,12 @@ BODY_IMAGE_INPUT_SELECTOR = (
     ".upload-image-panel [data-e2e='image-upload'] "
     "input[type='file'][accept*='image']"
 )
+IMAGE_DRAWER_SELECTOR = (
+    ".byte-drawer-wrapper:has(" f"{BODY_IMAGE_INPUT_SELECTOR}" ")"
+)
+IMAGE_DRAWER_CLOSE_SELECTOR = (
+    f"{IMAGE_DRAWER_SELECTOR} .byte-drawer-close-icon"
+)
 DRAFT_CARD_SELECTOR = ".article-draft-item.draft-item"
 AUTOSAVE_PATH = "/mp/agw/article/publish"
 IDENTITY_NAME_KEYS = {"nickname", "user_name", "screen_name", "name"}
@@ -943,6 +949,22 @@ class ToutiaoPlatform(BasePlatform):
                     added.append(fingerprint)
             if len(added) != 1 or not added[0]:
                 return {"success": False, "error": "无法绑定本次上传图片指纹"}
+            # 头条上传成功后不会自动收起图片抽屉；抽屉会覆盖编辑器并拦截
+            # 下一块的点击。只使用真实探测到的抽屉关闭按钮，不点击全局 X。
+            drawer = self.page.locator(IMAGE_DRAWER_SELECTOR)
+            if await drawer.count() != 1:
+                return {"success": False, "error": "头条号正文图片抽屉不存在或不唯一"}
+            close_button = self.page.locator(IMAGE_DRAWER_CLOSE_SELECTOR)
+            if await close_button.count() != 1:
+                return {"success": False, "error": "头条号图片抽屉关闭按钮不存在或不唯一"}
+            await close_button.click(timeout=8000)
+            try:
+                await drawer.wait_for(
+                    state="hidden",
+                    timeout=8000,
+                )
+            except Exception:
+                return {"success": False, "error": "头条号图片抽屉关闭后仍遮挡编辑器"}
             return {"success": True, "error": "", "fingerprint": added[0]}
         except Exception as exc:
             if self._exception_means_browser_closed(exc):

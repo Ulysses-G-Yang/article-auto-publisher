@@ -21,6 +21,8 @@ from platforms.toutiao import (
     BODY_SELECTOR,
     HEADING_BUTTON_SELECTOR,
     IMAGE_BUTTON_SELECTOR,
+    IMAGE_DRAWER_CLOSE_SELECTOR,
+    IMAGE_DRAWER_SELECTOR,
     PUBLISH_URL,
     TITLE_SELECTOR,
     ToutiaoDraftSaveRejectedError,
@@ -483,13 +485,25 @@ class _UploadLocator:
         self.selector = selector
 
     async def count(self) -> int:
+        if self.selector == IMAGE_DRAWER_SELECTOR:
+            return self.page.drawer_count
+        if self.selector == IMAGE_DRAWER_CLOSE_SELECTOR:
+            return self.page.close_count
         return 1
 
     async def wait_for(self, **_kwargs) -> None:
         self.page.waited_selectors.append(self.selector)
+        if self.selector == IMAGE_DRAWER_SELECTOR:
+            assert _kwargs.get("state") == "hidden"
+            if not self.page.drawer_hides:
+                raise TimeoutError("drawer remained visible")
+            assert self.page.image_panel_open is False
 
     async def click(self, **_kwargs) -> None:
-        self.page.image_panel_open = True
+        if self.selector == IMAGE_BUTTON_SELECTOR:
+            self.page.image_panel_open = True
+        elif self.selector == IMAGE_DRAWER_CLOSE_SELECTOR:
+            self.page.image_panel_open = False
 
     async def set_input_files(self, path: str, **_kwargs) -> None:
         assert self.selector == BODY_IMAGE_INPUT_SELECTOR
@@ -502,6 +516,9 @@ class _UploadPage:
     def __init__(self) -> None:
         self.fingerprints: list[str] = []
         self.image_panel_open = False
+        self.drawer_count = 1
+        self.close_count = 1
+        self.drawer_hides = True
         self.upload_paths: list[str] = []
         self.locator_calls: list[str] = []
         self.waited_selectors: list[str] = []
@@ -511,7 +528,12 @@ class _UploadPage:
 
     def locator(self, selector: str):
         self.locator_calls.append(selector)
-        if selector in {IMAGE_BUTTON_SELECTOR, BODY_IMAGE_INPUT_SELECTOR}:
+        if selector in {
+            IMAGE_BUTTON_SELECTOR,
+            BODY_IMAGE_INPUT_SELECTOR,
+            IMAGE_DRAWER_CLOSE_SELECTOR,
+            IMAGE_DRAWER_SELECTOR,
+        }:
             return _UploadLocator(self, selector)
         raise AssertionError(f"unexpected selector: {selector}")
 
@@ -535,12 +557,52 @@ def test_upload_image_uses_only_exact_body_image_input(monkeypatch) -> None:
         "fingerprint": "p3-sign.example/article-image.png",
     }
     assert page.upload_paths == ["D:/controlled/article-image.png"]
-    assert page.locator_calls == [IMAGE_BUTTON_SELECTOR, BODY_IMAGE_INPUT_SELECTOR]
-    assert page.waited_selectors == [BODY_IMAGE_INPUT_SELECTOR]
+    assert page.locator_calls == [
+        IMAGE_BUTTON_SELECTOR,
+        BODY_IMAGE_INPUT_SELECTOR,
+        IMAGE_DRAWER_SELECTOR,
+        IMAGE_DRAWER_CLOSE_SELECTOR,
+    ]
+    assert page.waited_selectors == [BODY_IMAGE_INPUT_SELECTOR, IMAGE_DRAWER_SELECTOR]
     assert BODY_IMAGE_INPUT_SELECTOR == (
         ".upload-image-panel [data-e2e='image-upload'] "
         "input[type='file'][accept*='image']"
     )
+    assert IMAGE_DRAWER_SELECTOR == (
+        ".byte-drawer-wrapper:has("
+        ".upload-image-panel [data-e2e='image-upload'] "
+        "input[type='file'][accept*='image'])"
+    )
+
+
+@pytest.mark.parametrize(
+    ("drawer_count", "close_count", "drawer_hides", "error"),
+    [
+        (0, 1, True, "头条号正文图片抽屉不存在或不唯一"),
+        (2, 1, True, "头条号正文图片抽屉不存在或不唯一"),
+        (1, 0, True, "头条号图片抽屉关闭按钮不存在或不唯一"),
+        (1, 2, True, "头条号图片抽屉关闭按钮不存在或不唯一"),
+        (1, 1, False, "头条号图片抽屉关闭后仍遮挡编辑器"),
+    ],
+)
+def test_upload_image_fails_closed_when_exact_drawer_cannot_close(
+    monkeypatch,
+    drawer_count: int,
+    close_count: int,
+    drawer_hides: bool,
+    error: str,
+) -> None:
+    _real, fake_sleep = _real_sleep_and_fake()
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+    page = _UploadPage()
+    page.drawer_count = drawer_count
+    page.close_count = close_count
+    page.drawer_hides = drawer_hides
+    platform = _make_platform(page)
+
+    result = run(platform._upload_image("D:/controlled/article-image.png"))
+
+    assert result == {"success": False, "error": error}
 
 
 class _BlurLocator:

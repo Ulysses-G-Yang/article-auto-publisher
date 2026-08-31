@@ -176,7 +176,7 @@ if ((Test-Path -LiteralPath $envFile) -and -not $ForceConfig) {
         "`$env:MCP_ALLOWED_HOSTS = $(ConvertTo-PowerShellLiteral ($allowedHosts -join ','))",
         "`$env:MCP_FILE_SERVICE_ALLOWED_HOSTS = $(ConvertTo-PowerShellLiteral $FileServiceHost)",
         "`$env:ARTICLEOPS_MCP_INTERNAL_TOKEN = $(ConvertTo-PowerShellLiteral $mcpInternalToken)",
-        "`$env:ARTICLEOPS_MCP_ALLOWED_ACCOUNT_IDS = $(ConvertTo-PowerShellLiteral '')",
+        "`$env:ARTICLEOPS_MCP_ALLOWED_ACCOUNT_IDS = $(ConvertTo-PowerShellLiteral '00000000-0000-0000-0000-000000000000')",
         "`$env:ARTICLEOPS_MCP_DRAFT_DELIVERY_ENABLED = $(ConvertTo-PowerShellLiteral 'false')",
         "`$env:PUBLISH_AFTER_DRAFT = $(ConvertTo-PowerShellLiteral 'false')",
         "`$env:LEGACY_UPLOAD_QUEUE_ENABLED = $(ConvertTo-PowerShellLiteral 'false')",
@@ -204,6 +204,7 @@ if ($SkipTests) {
 }
 
 Write-Host "初始化完成。" -ForegroundColor Green
-Write-Host "下一步启动：.\scripts\start_production_windows.ps1" -ForegroundColor Cyan
+Write-Host "下一步 1/2：. .\data\production_env.ps1" -ForegroundColor Cyan
+Write-Host "下一步 2/2：.\scripts\start_production_windows.ps1" -ForegroundColor Cyan
 Write-Host "管理页（生产机本机）：http://127.0.0.1:5000" -ForegroundColor Cyan
 Write-Host "MCP：http://$($env:MCP_BIND_HOST):$($env:MCP_PORT)/mcp" -ForegroundColor Cyan

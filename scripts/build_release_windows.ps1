@@ -21,7 +21,7 @@ param(
     [string]$OutputDirectory = ".\build\release",
 
     [ValidatePattern('^[0-9]+\.[0-9]+\.[0-9]+(?:-[A-Za-z0-9.-]+)?$')]
-    [string]$Version = "0.4.4"
+    [string]$Version = "0.4.5"
 )
 
 $ErrorActionPreference = "Stop"
@@ -154,12 +154,17 @@ try {
         "docs\releases\v0.4.2-hotfix.md",
         "docs\releases\v0.4.3-weibo-mcp.md",
         "docs\releases\v0.4.4-draft-result-upgrade.md",
+        "docs\releases\v0.4.5-draft-evidence-stability.md",
         "docs\deployment\UPGRADE_v0.4.4.md",
+        "docs\deployment\UPGRADE_v0.4.5.md",
         "docs\deployment\PRODUCTION_WINDOWS.md"
     )
     foreach ($relativePath in $releaseDocuments) {
         Copy-TrackedFile -RelativePath $relativePath -DestinationRelativePath $relativePath
     }
+
+    Copy-TrackedFile -RelativePath "docs\releases\v0.4.5-draft-evidence-stability.md" `
+        -DestinationRelativePath "RELEASE_NOTES_v0.4.5.md"
 
     Copy-LicenseFile -RelativePath "frontend\coreui-free-bootstrap-admin-template\LICENSE" -Name "COREUI_TEMPLATE_LICENSE"
     Copy-LicenseFile -RelativePath "web\static\vendor\coreui-template\LICENSE" -Name "COREUI_VENDOR_LICENSE"
@@ -228,8 +233,8 @@ try {
     }
     Copy-Item -LiteralPath (Join-Path $SourceRoot "scripts\apply_upgrade_windows.ps1") `
         -Destination (Join-Path $UpgradeRoot "apply_upgrade_windows.ps1") -Force
-    Copy-Item -LiteralPath (Join-Path $SourceRoot "docs\deployment\UPGRADE_v0.4.4.md") `
-        -Destination (Join-Path $UpgradeRoot "UPGRADE_v0.4.4.md") -Force
+    Copy-Item -LiteralPath (Join-Path $SourceRoot "docs\deployment\UPGRADE_v0.4.5.md") `
+        -Destination (Join-Path $UpgradeRoot "UPGRADE_v0.4.5.md") -Force
 
     $upgradeFiles = @(Get-ChildItem -LiteralPath $upgradePayloadRoot -Recurse -File | ForEach-Object {
         [ordered]@{

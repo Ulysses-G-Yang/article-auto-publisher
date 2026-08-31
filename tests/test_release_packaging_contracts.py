@@ -49,11 +49,21 @@ def test_windows_setup_keeps_all_mutating_paths_closed_by_default() -> None:
         assert expected in script
         assert f"$env:{variable} = 'false'" in example
 
+    deny_all_account_id = "00000000-0000-0000-0000-000000000000"
+    assert (
+        "`$env:ARTICLEOPS_MCP_ALLOWED_ACCOUNT_IDS = "
+        f"$(ConvertTo-PowerShellLiteral '{deny_all_account_id}')"
+    ) in script
+    assert (
+        "$env:ARTICLEOPS_MCP_ALLOWED_ACCOUNT_IDS = "
+        f"'{deny_all_account_id}'"
+    ) in example
+
 
 def test_release_whitelist_excludes_development_and_machine_state_files() -> None:
     script = read("scripts/build_release_windows.ps1")
 
-    assert '[string]$Version = "0.4.4"' in script
+    assert '[string]$Version = "0.4.5"' in script
     assert '"requirements-dev.txt"' not in script
     assert '"tests"' not in script
     assert '"human"' in script
@@ -65,6 +75,9 @@ def test_release_whitelist_excludes_development_and_machine_state_files() -> Non
     assert '"scripts\\apply_upgrade_windows.ps1"' in script
     assert '"MCP_API_REFERENCE.md"' in script
     assert '"docs\\releases\\v0.4.3-weibo-mcp.md"' in script
+    assert '"docs\\releases\\v0.4.5-draft-evidence-stability.md"' in script
+    assert '"docs\\deployment\\UPGRADE_v0.4.5.md"' in script
+    assert '-DestinationRelativePath "RELEASE_NOTES_v0.4.5.md"' in script
 
 
 def test_upgrade_payload_preserves_customer_deployment_scripts() -> None:
@@ -80,8 +93,29 @@ def test_upgrade_payload_preserves_customer_deployment_scripts() -> None:
         assert f'"{relative_path}"' in script
     assert "Remove-Item -LiteralPath $excludedPath -Force" in script
     assert "excluded_payload_files" in script
-    assert '"UPGRADE_v0.4.4.md"' in script
-    assert '"docs\\deployment\\UPGRADE_v0.4.4.md"' in script
+    assert '(Join-Path $SourceRoot "docs\\deployment\\UPGRADE_v0.4.5.md")' in script
+    assert '(Join-Path $UpgradeRoot "UPGRADE_v0.4.5.md")' in script
+
+
+def test_windows_setup_prints_explicit_production_start_sequence() -> None:
+    script = read("scripts/setup_windows.ps1")
+
+    load_environment = 'Write-Host "下一步 1/2：. .\\data\\production_env.ps1"'
+    start_production = 'Write-Host "下一步 2/2：.\\scripts\\start_production_windows.ps1"'
+
+    assert load_environment in script
+    assert start_production in script
+    assert script.index(load_environment) < script.index(start_production)
+
+
+def test_v045_product_version_does_not_change_mcp_component_version() -> None:
+    project = read("pyproject.toml")
+    article_mvp = read("src/article_mvp/__init__.py")
+    mcp_component = read("mcp_server/__init__.py")
+
+    assert 'version = "0.4.5"' in project
+    assert '__version__ = "0.4.5"' in article_mvp
+    assert 'SERVER_VERSION = "1.1.0"' in mcp_component
 
 
 def test_v044_upgrade_guide_requires_validate_only_and_rejects_replacement_setup() -> None:
@@ -121,13 +155,13 @@ def test_windows_start_script_exposes_bundled_src_modules_to_mcp() -> None:
     assert '"$srcRoot;$($env:PYTHONPATH)"' in script
 
 
-def test_release_docs_describe_runtime_only_test_behavior() -> None:
+def test_v045_release_docs_describe_runtime_only_test_behavior() -> None:
     docs = read("docs/deployment/PRODUCTION_WINDOWS.md")
     release = read("docs/releases/v0.4.3-weibo-mcp.md")
 
     assert "仍会执行 `compileall`" in docs
     assert "跳过不存在的 `pytest`" in docs
     assert "排除 `.git`、`data`、数据库、Cookie" in release
-    assert "ArticleOps-upgrade-v0.4.3" in docs
+    assert "ArticleOps-upgrade-v0.4.5" in docs
     assert "data\\upgrade_backups" in docs
     assert "start_article_draft_delivery" in docs

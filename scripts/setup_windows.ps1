@@ -60,7 +60,7 @@ $gitRepository = Test-Path -LiteralPath (Join-Path $ProjectRoot ".git")
 if ($gitRepository) {
     $GitCommand = Get-CommandPath "git"
 } else {
-    Write-Warning "当前是源码压缩包模式，未检测到 .git；跳过 Git commit 校验。"
+    Write-Warning "当前是源码压缩包模式，未检测到 .git；改用 RELEASE_MANIFEST.txt 校验发行 commit。"
 }
 $CondaCommand = Get-CommandPath "conda"
 
@@ -73,7 +73,23 @@ if ($gitRepository) {
         throw "当前代码不是已验证发行 commit。期望 $ExpectedCommit，实际 $currentCommit。请先 checkout 正确版本，或显式传入 -ExpectedCommit。"
     }
 } else {
-    $currentCommit = "source-package"
+    $manifestPath = Join-Path $ProjectRoot "RELEASE_MANIFEST.txt"
+    if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
+        throw "源码压缩包缺少 RELEASE_MANIFEST.txt，无法验证发行 commit。"
+    }
+    $manifestCommitLines = @(Get-Content -LiteralPath $manifestPath -Encoding UTF8 |
+        Where-Object { $_ -match '^source_commit=' })
+    if ($manifestCommitLines.Count -ne 1) {
+        throw "RELEASE_MANIFEST.txt 必须且只能包含一个 source_commit。"
+    }
+    $manifestCommitLine = $manifestCommitLines[0]
+    $currentCommit = ($manifestCommitLine -replace '^source_commit=', '').Trim().ToLowerInvariant()
+    if ($currentCommit -notmatch '^[0-9a-f]{40}$') {
+        throw "RELEASE_MANIFEST.txt 的 source_commit 不是有效的 40 位 Git SHA。"
+    }
+    if ($ExpectedCommit -and $currentCommit -ne $ExpectedCommit.ToLowerInvariant()) {
+        throw "当前发布包不是已验证发行 commit。期望 $ExpectedCommit，实际 $currentCommit。"
+    }
 }
 Write-Host "代码版本: $currentCommit" -ForegroundColor Green
 

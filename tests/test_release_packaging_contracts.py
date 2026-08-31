@@ -1,4 +1,8 @@
+import shutil
+import subprocess
 from pathlib import Path
+
+import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -34,6 +38,26 @@ def test_windows_setup_selects_runtime_dependencies_for_source_packages() -> Non
     assert "requirements.txt" in docs
 
 
+def test_runtime_environment_check_does_not_require_dev_only_pytest() -> None:
+    checker = read("scripts/check_environment.py")
+
+    required_modules = checker.split("REQUIRED_MODULES = (", 1)[1].split(")", 1)[0]
+    assert '"pytest"' not in required_modules
+
+
+def test_source_package_expected_commit_is_checked_from_release_manifest() -> None:
+    script = read("scripts/setup_windows.ps1")
+    docs = read("docs/deployment/PRODUCTION_WINDOWS.md")
+
+    assert 'Join-Path $ProjectRoot "RELEASE_MANIFEST.txt"' in script
+    assert "'^source_commit='" in script
+    assert "$manifestCommitLines.Count -ne 1" in script
+    assert "'^[0-9a-f]{40}$'" in script
+    assert "$ExpectedCommit.ToLowerInvariant()" in script
+    assert "RELEASE_MANIFEST.txt" in docs
+    assert "-ExpectedCommit" in docs
+
+
 def test_windows_setup_keeps_all_mutating_paths_closed_by_default() -> None:
     script = read("scripts/setup_windows.ps1")
     example = read("scripts/production_env.example.ps1")
@@ -63,7 +87,7 @@ def test_windows_setup_keeps_all_mutating_paths_closed_by_default() -> None:
 def test_release_whitelist_excludes_development_and_machine_state_files() -> None:
     script = read("scripts/build_release_windows.ps1")
 
-    assert '[string]$Version = "0.4.5"' in script
+    assert '[string]$Version = "0.4.6"' in script
     assert '"requirements-dev.txt"' not in script
     assert '"tests"' not in script
     assert '"human"' in script
@@ -76,8 +100,95 @@ def test_release_whitelist_excludes_development_and_machine_state_files() -> Non
     assert '"MCP_API_REFERENCE.md"' in script
     assert '"docs\\releases\\v0.4.3-weibo-mcp.md"' in script
     assert '"docs\\releases\\v0.4.5-draft-evidence-stability.md"' in script
-    assert '"docs\\deployment\\UPGRADE_v0.4.5.md"' in script
-    assert '-DestinationRelativePath "RELEASE_NOTES_v0.4.5.md"' in script
+    assert '"docs\\releases\\v0.4.6-installer-integrity.md"' in script
+    assert '"docs\\deployment\\UPGRADE_v0.4.6.md"' in script
+    assert '-DestinationRelativePath "RELEASE_NOTES_v0.4.6.md"' in script
+
+
+def test_release_builder_rejects_version_drift() -> None:
+    script = read("scripts/build_release_windows.ps1")
+
+    assert 'Join-Path $SourceRoot "pyproject.toml"' in script
+    assert "if ($projectVersion -ne $Version)" in script
+    assert 'Join-Path $SourceRoot "src\\article_mvp\\__init__.py"' in script
+    assert "$projectSectionMatch.Groups['body'].Value" in script
+    assert "$projectVersionMatches.Count -ne 1" in script
+    assert "$packageVersionMatches.Count -ne 1" in script
+    assert "$packageVersionMatches[0].Groups[1].Value -ne $Version" in script
+
+
+def test_release_builder_version_drift_fails_without_artifacts(tmp_path: Path) -> None:
+    powershell = shutil.which("powershell.exe") or shutil.which("powershell")
+    if not powershell:
+        pytest.skip("PowerShell is unavailable")
+
+    commit = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    result = subprocess.run(
+        [
+            powershell,
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(ROOT / "scripts" / "build_release_windows.ps1"),
+            "-CommitSha",
+            commit,
+            "-Version",
+            "9.9.9",
+            "-OutputDirectory",
+            str(tmp_path),
+        ],
+        cwd=ROOT,
+        capture_output=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+
+    assert result.returncode != 0
+    assert not list(tmp_path.glob("*.zip"))
+    assert not list(tmp_path.glob("*.sha256"))
+
+
+def test_source_package_rejects_duplicate_manifest_commits(tmp_path: Path) -> None:
+    powershell = shutil.which("powershell.exe") or shutil.which("powershell")
+    conda = shutil.which("conda.exe") or shutil.which("conda")
+    if not powershell or not conda:
+        pytest.skip("PowerShell or Conda is unavailable")
+
+    scripts_dir = tmp_path / "scripts"
+    scripts_dir.mkdir()
+    shutil.copy2(ROOT / "scripts" / "setup_windows.ps1", scripts_dir)
+    expected_commit = "0" * 40
+    (tmp_path / "RELEASE_MANIFEST.txt").write_text(
+        f"source_commit={expected_commit}\nsource_commit={'1' * 40}\n",
+        encoding="utf-8",
+    )
+    result = subprocess.run(
+        [
+            powershell,
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(scripts_dir / "setup_windows.ps1"),
+            "-ExpectedCommit",
+            expected_commit,
+        ],
+        cwd=tmp_path,
+        capture_output=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+
+    assert result.returncode != 0
+    assert "source_commit" in (result.stdout + result.stderr)
+    assert not (tmp_path / "data").exists()
 
 
 def test_upgrade_payload_preserves_customer_deployment_scripts() -> None:
@@ -93,8 +204,8 @@ def test_upgrade_payload_preserves_customer_deployment_scripts() -> None:
         assert f'"{relative_path}"' in script
     assert "Remove-Item -LiteralPath $excludedPath -Force" in script
     assert "excluded_payload_files" in script
-    assert '(Join-Path $SourceRoot "docs\\deployment\\UPGRADE_v0.4.5.md")' in script
-    assert '(Join-Path $UpgradeRoot "UPGRADE_v0.4.5.md")' in script
+    assert '(Join-Path $SourceRoot "docs\\deployment\\UPGRADE_v0.4.6.md")' in script
+    assert '(Join-Path $UpgradeRoot "UPGRADE_v0.4.6.md")' in script
 
 
 def test_windows_setup_prints_explicit_production_start_sequence() -> None:
@@ -108,13 +219,13 @@ def test_windows_setup_prints_explicit_production_start_sequence() -> None:
     assert script.index(load_environment) < script.index(start_production)
 
 
-def test_v045_product_version_does_not_change_mcp_component_version() -> None:
+def test_v046_product_version_does_not_change_mcp_component_version() -> None:
     project = read("pyproject.toml")
     article_mvp = read("src/article_mvp/__init__.py")
     mcp_component = read("mcp_server/__init__.py")
 
-    assert 'version = "0.4.5"' in project
-    assert '__version__ = "0.4.5"' in article_mvp
+    assert 'version = "0.4.6"' in project
+    assert '__version__ = "0.4.6"' in article_mvp
     assert 'SERVER_VERSION = "1.1.0"' in mcp_component
 
 
@@ -155,13 +266,13 @@ def test_windows_start_script_exposes_bundled_src_modules_to_mcp() -> None:
     assert '"$srcRoot;$($env:PYTHONPATH)"' in script
 
 
-def test_v045_release_docs_describe_runtime_only_test_behavior() -> None:
+def test_v046_release_docs_describe_runtime_only_test_behavior() -> None:
     docs = read("docs/deployment/PRODUCTION_WINDOWS.md")
     release = read("docs/releases/v0.4.3-weibo-mcp.md")
 
     assert "仍会执行 `compileall`" in docs
     assert "跳过不存在的 `pytest`" in docs
     assert "排除 `.git`、`data`、数据库、Cookie" in release
-    assert "ArticleOps-upgrade-v0.4.5" in docs
+    assert "ArticleOps-upgrade-v0.4.6" in docs
     assert "data\\upgrade_backups" in docs
     assert "start_article_draft_delivery" in docs

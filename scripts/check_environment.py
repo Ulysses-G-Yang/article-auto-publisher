@@ -23,7 +23,6 @@ REQUIRED_MODULES = (
     "loguru",
     "mcp",
     "httpx",
-    "pytest",
     "waitress",
 )
 
@@ -114,7 +113,10 @@ def main() -> int:
         if _port_available(host, port):
             print(f"PASS {label} port {host}:{port} available")
         else:
-            print(f"WARN {label} port {host}:{port} already in use; identify the owner before startup")
+            print(
+                f"WARN {label} port {host}:{port} already in use; "
+                "identify the owner before startup"
+            )
 
     for problem in _production_checks():
         print(f"FAIL production config: {problem}")

@@ -1,8 +1,8 @@
-# ArticleOps v0.4.5 Windows 部署与升级说明
+# ArticleOps v0.4.6 Windows 部署与升级说明
 
 ## 安全边界
 
-- v0.4.5 面向 Content Studio 草稿工作流；`PUBLISH_AFTER_DRAFT=false` 和公开发布权限
+- v0.4.6 面向 Content Studio 草稿工作流；`PUBLISH_AFTER_DRAFT=false` 和公开发布权限
   必须保持关闭。草稿授权不等于公开发布授权。
 - 平台结果为 `RESULT_UNKNOWN` 时不得自动重试。先人工查看草稿箱或执行只读核验，避免
   已保存成功后重复创建草稿。
@@ -28,10 +28,10 @@
 
 脚本只从该 SHA 的 Git archive 按白名单复制运行代码，并生成：
 
-- `ArticleOps-v0.4.5-<commit-sha>.zip`：全新安装包。
-- `ArticleOps-v0.4.5-<commit-sha>.zip.sha256`：完整包校验值。
-- `ArticleOps-upgrade-v0.4.5-<commit-sha>.zip`：已有 v0.4.4 业务电脑升级包。
-- `ArticleOps-upgrade-v0.4.5-<commit-sha>.zip.sha256`：升级包校验值。
+- `ArticleOps-v0.4.6-<commit-sha>.zip`：全新安装包。
+- `ArticleOps-v0.4.6-<commit-sha>.zip.sha256`：完整包校验值。
+- `ArticleOps-upgrade-v0.4.6-<commit-sha>.zip`：已有 v0.4.4/v0.4.5 业务电脑升级包。
+- `ArticleOps-upgrade-v0.4.6-<commit-sha>.zip.sha256`：升级包校验值。
 
 交付前核对两个压缩包的 SHA-256。完整包以 `RELEASE_MANIFEST.txt`、升级包以
 `UPGRADE_MANIFEST.json` 中的 `source_commit` 作为代码身份。构建脚本本身不创建 tag；
@@ -40,8 +40,8 @@
 ## 已有业务电脑原地升级
 
 不要用完整包覆盖旧目录。把
-`ArticleOps-upgrade-v0.4.5-<commit-sha>.zip` 解压到独立临时目录，并严格按
-`UPGRADE_v0.4.5.md` 操作：
+`ArticleOps-upgrade-v0.4.6-<commit-sha>.zip` 解压到独立临时目录，并严格按
+`UPGRADE_v0.4.6.md` 操作：
 
 1. 停止业务服务，把整个 `data/` 备份到目标目录之外。
 2. 核对压缩包 SHA-256 和 `UPGRADE_MANIFEST.json` 的 `source_commit`。
@@ -79,9 +79,10 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass `
 ## 全新 Windows 运行目录
 
 1. 安装 Python 3.12、Conda、Google Chrome Stable；不要复用开发机 Profile。
-2. 把 `ArticleOps-v0.4.5-<commit-sha>.zip` 解压到新的独立目录。
-3. 在包根目录运行初始化脚本。初始化脚本会创建空运行目录和 Python 环境；首次新装时可
-   生成本机 `data\production_env.ps1`。确认 `APP_SECRET_KEY` 与 MCP 内部令牌分别为长度
+2. 把 `ArticleOps-v0.4.6-<commit-sha>.zip` 解压到新的独立目录。
+3. 在包根目录运行初始化脚本。初始化脚本会读取 `RELEASE_MANIFEST.txt` 并校验
+   `-ExpectedCommit`，随后创建空运行目录和 Python 环境；首次新装时可生成本机
+   `data\production_env.ps1`。确认 `APP_SECRET_KEY` 与 MCP 内部令牌分别为长度
    不少于 32 的随机密钥，并按实际网络填写 Host 白名单。初始账号白名单使用无法命中真实
    账号的全零 UUID，确保服务可以启动但 MCP 不能访问任何真实账号；完成登录后再替换为
    明确获准的真实 `account_id`。
@@ -106,8 +107,8 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass `
 ```
 
 停止脚本不结束 Chrome，也不删除 Profile。完整包是运行时白名单包，不包含
-`requirements-dev.txt` 或 `tests/`；初始化时根据 `requirements.txt` 安装运行依赖，仍会执行 `compileall`，
-并明确跳过不存在的 `pytest` 测试目录。
+`requirements-dev.txt`、`tests/` 或 `pytest`；初始化时根据 `requirements.txt` 安装运行依赖，
+环境检查只验证生产运行模块，仍会执行 `compileall`，并明确跳过不存在的 `pytest` 测试目录。
 
 ## 生产配置与 MCP 白名单
 

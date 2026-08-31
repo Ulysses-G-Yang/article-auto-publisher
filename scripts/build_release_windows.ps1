@@ -21,7 +21,7 @@ param(
     [string]$OutputDirectory = ".\build\release",
 
     [ValidatePattern('^[0-9]+\.[0-9]+\.[0-9]+(?:-[A-Za-z0-9.-]+)?$')]
-    [string]$Version = "0.4.5"
+    [string]$Version = "0.4.6"
 )
 
 $ErrorActionPreference = "Stop"
@@ -119,6 +119,32 @@ try {
         throw "Git archive 解压后缺少 source 根目录。"
     }
 
+    $projectMetadata = Get-Content -LiteralPath (Join-Path $SourceRoot "pyproject.toml") -Encoding UTF8 -Raw
+    $projectSectionMatch = [regex]::Match(
+        $projectMetadata,
+        '(?ms)^\[project\]\s*$\r?\n(?<body>.*?)(?=^\[|\z)'
+    )
+    if (-not $projectSectionMatch.Success) {
+        throw "目标 commit 的 pyproject.toml 缺少 [project] 段。"
+    }
+    $projectVersionMatches = [regex]::Matches(
+        $projectSectionMatch.Groups['body'].Value,
+        '(?m)^version\s*=\s*"([^"]+)"\s*$'
+    )
+    if ($projectVersionMatches.Count -ne 1) {
+        throw "目标 commit 的 pyproject.toml [project] 段必须且只能包含一个 version。"
+    }
+    $projectVersion = $projectVersionMatches[0].Groups[1].Value
+    if ($projectVersion -ne $Version) {
+        throw "发布版本与目标 commit 不一致：参数 Version=$Version，项目版本=$projectVersion。"
+    }
+
+    $packageVersionSource = Get-Content -LiteralPath (Join-Path $SourceRoot "src\article_mvp\__init__.py") -Encoding UTF8 -Raw
+    $packageVersionMatches = [regex]::Matches($packageVersionSource, '__version__\s*=\s*"([^"]+)"')
+    if ($packageVersionMatches.Count -ne 1 -or $packageVersionMatches[0].Groups[1].Value -ne $Version) {
+        throw "发布版本与 src/article_mvp/__init__.py 不一致。"
+    }
+
     $rootFiles = @(
         "app.py",
         "config.py",
@@ -155,16 +181,18 @@ try {
         "docs\releases\v0.4.3-weibo-mcp.md",
         "docs\releases\v0.4.4-draft-result-upgrade.md",
         "docs\releases\v0.4.5-draft-evidence-stability.md",
+        "docs\releases\v0.4.6-installer-integrity.md",
         "docs\deployment\UPGRADE_v0.4.4.md",
         "docs\deployment\UPGRADE_v0.4.5.md",
+        "docs\deployment\UPGRADE_v0.4.6.md",
         "docs\deployment\PRODUCTION_WINDOWS.md"
     )
     foreach ($relativePath in $releaseDocuments) {
         Copy-TrackedFile -RelativePath $relativePath -DestinationRelativePath $relativePath
     }
 
-    Copy-TrackedFile -RelativePath "docs\releases\v0.4.5-draft-evidence-stability.md" `
-        -DestinationRelativePath "RELEASE_NOTES_v0.4.5.md"
+    Copy-TrackedFile -RelativePath "docs\releases\v0.4.6-installer-integrity.md" `
+        -DestinationRelativePath "RELEASE_NOTES_v0.4.6.md"
 
     Copy-LicenseFile -RelativePath "frontend\coreui-free-bootstrap-admin-template\LICENSE" -Name "COREUI_TEMPLATE_LICENSE"
     Copy-LicenseFile -RelativePath "web\static\vendor\coreui-template\LICENSE" -Name "COREUI_VENDOR_LICENSE"
@@ -233,8 +261,8 @@ try {
     }
     Copy-Item -LiteralPath (Join-Path $SourceRoot "scripts\apply_upgrade_windows.ps1") `
         -Destination (Join-Path $UpgradeRoot "apply_upgrade_windows.ps1") -Force
-    Copy-Item -LiteralPath (Join-Path $SourceRoot "docs\deployment\UPGRADE_v0.4.5.md") `
-        -Destination (Join-Path $UpgradeRoot "UPGRADE_v0.4.5.md") -Force
+    Copy-Item -LiteralPath (Join-Path $SourceRoot "docs\deployment\UPGRADE_v0.4.6.md") `
+        -Destination (Join-Path $UpgradeRoot "UPGRADE_v0.4.6.md") -Force
 
     $upgradeFiles = @(Get-ChildItem -LiteralPath $upgradePayloadRoot -Recurse -File | ForEach-Object {
         [ordered]@{

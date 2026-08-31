@@ -76,6 +76,12 @@ from platforms.base import BasePlatform, DraftResultUnknownError, DraftVerificat
             {},
             "1122",
         ),
+        (
+            "toutiao",
+            "https://mp.toutiao.com/profile_v4/graphic/publish?pgc_id=7665272216262623790",
+            {"draft_id": "7665272216262623790"},
+            "7665272216262623790",
+        ),
     ],
 )
 def test_readonly_probe_extracts_only_stable_platform_entity_ids(
@@ -107,6 +113,22 @@ def test_readonly_probe_rejects_structure_and_url_id_conflict() -> None:
         )
         is None
     )
+
+
+@pytest.mark.parametrize(
+    "draft_url",
+    [
+        "http://mp.toutiao.com/profile_v4/graphic/publish?pgc_id=7665272216262623790",
+        "https://example.invalid/profile_v4/graphic/publish?pgc_id=7665272216262623790",
+        "https://mp.toutiao.com/profile_v4/graphic/publish?pgc_id=not-a-number",
+        (
+            "https://mp.toutiao.com/profile_v4/graphic/publish"
+            "?pgc_id=7665272216262623790&pgc_id=7665272216262623791"
+        ),
+    ],
+)
+def test_readonly_probe_rejects_unsafe_toutiao_entity_url(draft_url: str) -> None:
+    assert _readonly_probe_entity_id("toutiao", draft_url, {}) is None
 
 
 def account_url(tmp_path: Path) -> str:

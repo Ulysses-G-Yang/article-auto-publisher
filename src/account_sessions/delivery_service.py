@@ -1310,6 +1310,7 @@ def _readonly_probe_entity_id(
         "zhihu": {"www.zhihu.com", "zhihu.com", "zhuanlan.zhihu.com"},
         "weibo": {"card.weibo.com", "me.weibo.com", "weibo.com"},
         "smzdm": {"zhiyou.smzdm.com"},
+        "toutiao": {"mp.toutiao.com"},
         "baijiahao": {"baijiahao.baidu.com"},
     }
     if host not in allowed_hosts.get(str(platform or ""), set()):
@@ -1317,7 +1318,7 @@ def _readonly_probe_entity_id(
 
     structure_id: str | None = None
     if isinstance(structure, dict):
-        for key in ("draft_id", "article_id"):
+        for key in ("draft_id", "article_id", "pgc_id"):
             value = structure.get(key)
             if isinstance(value, bool) or not isinstance(value, (str, int)):
                 continue
@@ -1326,9 +1327,20 @@ def _readonly_probe_entity_id(
                 structure_id = normalized
                 break
 
-    query = {key.lower(): value for key, value in parse_qsl(parsed.query)}
+    query_pairs = [(key.lower(), value) for key, value in parse_qsl(parsed.query)]
+    if str(platform or "") == "toutiao":
+        pgc_values = [value for key, value in query_pairs if key == "pgc_id"]
+        if (
+            parsed.scheme.lower() != "https"
+            or parsed.path != "/profile_v4/graphic/publish"
+            or parsed.fragment
+            or len(pgc_values) != 1
+            or re.fullmatch(r"\d{6,32}", pgc_values[0]) is None
+        ):
+            return None
+    query = {key: value for key, value in query_pairs}
     url_id: str | None = None
-    for key in ("draftid", "draft_id", "article_id"):
+    for key in ("draftid", "draft_id", "article_id", "pgc_id"):
         value = str(query.get(key) or "").strip()
         if value and len(value) <= 255:
             url_id = value

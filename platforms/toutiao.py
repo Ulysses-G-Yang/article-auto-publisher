@@ -814,8 +814,37 @@ class ToutiaoPlatform(BasePlatform):
         try:
             await editor.click(timeout=8000)
             await editor.press("Control+End")
-            # Enter 产生的新段落需要经过一次 ProseMirror 事务和浏览器绘制；
-            # 未稳定就打开抽屉时，平台会吞掉 editor.insert 异常并照常关窗。
+            # Enter 产生的新段落要先经过 ProseMirror 事务和浏览器绘制，
+            # 否则 last-child 仍可能是上一段或图片节点。
+            await self.page.evaluate(
+                """() => new Promise((resolve) => {
+                    requestAnimationFrame(() => requestAnimationFrame(resolve));
+                })"""
+            )
+            tail = editor.locator(":scope > p:last-child")
+            if await tail.count() != 1:
+                return False
+            tail_is_empty = await tail.evaluate(
+                """(node) => {
+                    const isEmptyText = child => child.nodeType === Node.TEXT_NODE &&
+                        (child.nodeValue || '')
+                            .replace(/[\u200B-\u200D\uFEFF]/g, '')
+                            .trim() === '';
+                    const isTrailingBreak = child =>
+                        child.nodeType === Node.ELEMENT_NODE &&
+                        child.tagName === 'BR' &&
+                        child.classList.contains('ProseMirror-trailingBreak');
+                    return Array.from(node.childNodes).every(
+                        child => isEmptyText(child) || isTrailingBreak(child),
+                    );
+                }"""
+            )
+            if not tail_is_empty:
+                return False
+            # 必须使用真实点击让 ProseMirror 同步内部 TextSelection；直接用
+            # DOM Range 看似有光标，但平台 editor.insert() 仍可能读到旧选区。
+            await tail.click(timeout=8000, position={"x": 4, "y": 4})
+            await editor.press("End")
             await self.page.evaluate(
                 """() => new Promise((resolve) => {
                     requestAnimationFrame(() => requestAnimationFrame(resolve));
@@ -825,15 +854,33 @@ class ToutiaoPlatform(BasePlatform):
                 await self.page.evaluate(
                     """() => {
                         const root = document.querySelector('.ProseMirror');
+                        const tail = root?.lastElementChild;
                         const selection = window.getSelection();
-                        if (!root || !selection || selection.rangeCount !== 1) {
+                        if (!root || !tail || tail.tagName !== 'P' ||
+                            !selection || selection.rangeCount !== 1 ||
+                            document.activeElement !== root) {
                             return false;
                         }
                         const anchor = selection.anchorNode;
                         const focus = selection.focusNode;
-                        return Boolean(
+                        if (!(
                             selection.isCollapsed && anchor && focus &&
-                            root.contains(anchor) && root.contains(focus)
+                            (anchor === tail || tail.contains(anchor)) &&
+                            (focus === tail || tail.contains(focus))
+                        )) {
+                            return false;
+                        }
+                        const isEmptyText = child =>
+                            child.nodeType === Node.TEXT_NODE &&
+                            (child.nodeValue || '')
+                                .replace(/[\u200B-\u200D\uFEFF]/g, '')
+                                .trim() === '';
+                        const isTrailingBreak = child =>
+                            child.nodeType === Node.ELEMENT_NODE &&
+                            child.tagName === 'BR' &&
+                            child.classList.contains('ProseMirror-trailingBreak');
+                        return Array.from(tail.childNodes).every(
+                            child => isEmptyText(child) || isTrailingBreak(child),
                         );
                     }"""
                 )

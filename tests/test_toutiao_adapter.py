@@ -399,6 +399,30 @@ class _ModelEditorLocator:
             token["text"] for token in self.page.tokens if token["kind"] != "I"
         )
 
+    def locator(self, selector: str):
+        assert selector == ":scope > p:last-child"
+        return _ModelTailLocator(self.page)
+
+
+class _ModelTailLocator:
+    def __init__(self, page: _ModelPage) -> None:
+        self.page = page
+
+    async def count(self) -> int:
+        return 1
+
+    async def evaluate(self, _script: str) -> bool:
+        self.page.tail_checks += 1
+        tail_is_empty = not self.page.tokens or (
+            self.page.tokens[-1]["kind"] == "P"
+            and not self.page.tokens[-1]["text"]
+        )
+        return self.page.tail_is_safe and tail_is_empty
+
+    async def click(self, **_kwargs) -> None:
+        if not self.page.tokens:
+            self.page.tokens.append({"kind": "P", "text": ""})
+
 
 class _ModelHeadingLocator:
     def __init__(self, page: _ModelPage) -> None:
@@ -438,6 +462,8 @@ class _ModelPage:
         self.keyboard = _ModelKeyboard(self)
         self.selection_ready = True
         self.selection_checks = 0
+        self.tail_checks = 0
+        self.tail_is_safe = True
 
     def is_closed(self) -> bool:
         return False
@@ -510,6 +536,7 @@ def test_fill_content_preserves_text_h2_and_image_token_order() -> None:
     assert platform._expected_persisted_tokens == expected
     assert result["media_status"] == "completed"
     assert result["uploaded_images"] == 2
+    assert page.tail_checks == 2
     assert page.selection_checks == 2
 
 
@@ -543,7 +570,37 @@ def test_fill_content_stops_before_upload_when_image_selection_is_unstable() -> 
         "failed_image_count": 1,
         "media_status": "failed",
     }
+    assert page.tail_checks == 1
     assert page.selection_checks == 1
+    assert upload_calls == []
+
+
+def test_fill_content_stops_before_upload_when_tail_paragraph_is_not_safe() -> None:
+    page = _ModelPage()
+    page.tail_is_safe = False
+    platform = _make_platform(page)
+    upload_calls: list[str] = []
+
+    async def upload_once(path: str) -> dict:
+        upload_calls.append(path)
+        return {"success": True, "error": "", "fingerprint": "example/image.png"}
+
+    platform._upload_image = upload_once
+
+    with pytest.raises(DraftResultUnknownError) as raised:
+        run(
+            platform.fill_content(
+                [
+                    {"type": "text", "text": "第一段"},
+                    {"type": "image", "position": 1},
+                ],
+                [{"position_index": 1, "local_path": "D:/controlled/one.png"}],
+            )
+        )
+
+    assert "图片插入位置未稳定" in str(raised.value)
+    assert page.tail_checks == 1
+    assert page.selection_checks == 0
     assert upload_calls == []
 
 

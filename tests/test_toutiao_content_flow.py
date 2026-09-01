@@ -132,6 +132,24 @@ class _FakeEditor:
             token["text"] for token in self.page.tokens if token["kind"] != "I"
         )
 
+    def locator(self, selector: str):
+        assert selector == ":scope > p:last-child"
+        return _FakeTail(self.page)
+
+
+class _FakeTail:
+    def __init__(self, page: _FakePage) -> None:
+        self.page = page
+
+    async def count(self) -> int:
+        return 1
+
+    async def evaluate(self, _script: str) -> bool:
+        return self.page.pending_block
+
+    async def click(self, **_kwargs) -> None:
+        return None
+
 
 class _FakeTitleInput:
     def __init__(self, page: _FakePage) -> None:

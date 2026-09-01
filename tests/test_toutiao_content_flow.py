@@ -144,7 +144,9 @@ class _FakeTail:
     async def count(self) -> int:
         return 1
 
-    async def evaluate(self, _script: str) -> bool:
+    async def evaluate(self, script: str) -> bool:
+        assert "breaks.length <= 1" in script
+        assert "ProseMirror-trailingBreak" not in script
         return self.page.pending_block
 
     async def click(self, **_kwargs) -> None:
@@ -197,6 +199,8 @@ class _FakePage:
         if "requestAnimationFrame" in script:
             return None
         if "selection.rangeCount" in script:
+            assert "breaks.length <= 1" in script
+            assert "ProseMirror-trailingBreak" not in script
             return True
         raise AssertionError("未预期的页面脚本")
 

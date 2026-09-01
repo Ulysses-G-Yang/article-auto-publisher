@@ -411,7 +411,9 @@ class _ModelTailLocator:
     async def count(self) -> int:
         return 1
 
-    async def evaluate(self, _script: str) -> bool:
+    async def evaluate(self, script: str) -> bool:
+        assert "breaks.length <= 1" in script
+        assert "ProseMirror-trailingBreak" not in script
         self.page.tail_checks += 1
         tail_is_empty = not self.page.tokens or (
             self.page.tokens[-1]["kind"] == "P"
@@ -479,6 +481,8 @@ class _ModelPage:
         if "requestAnimationFrame" in script:
             return None
         if "selection.rangeCount" in script:
+            assert "breaks.length <= 1" in script
+            assert "ProseMirror-trailingBreak" not in script
             self.selection_checks += 1
             return self.selection_ready
         if "lastElementChild" in script:

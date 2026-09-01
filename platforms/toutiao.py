@@ -830,12 +830,13 @@ class ToutiaoPlatform(BasePlatform):
                         (child.nodeValue || '')
                             .replace(/[\u200B-\u200D\uFEFF]/g, '')
                             .trim() === '';
-                    const isTrailingBreak = child =>
+                    const isPlaceholderBreak = child =>
                         child.nodeType === Node.ELEMENT_NODE &&
-                        child.tagName === 'BR' &&
-                        child.classList.contains('ProseMirror-trailingBreak');
-                    return Array.from(node.childNodes).every(
-                        child => isEmptyText(child) || isTrailingBreak(child),
+                        child.tagName === 'BR';
+                    const children = Array.from(node.childNodes);
+                    const breaks = children.filter(isPlaceholderBreak);
+                    return breaks.length <= 1 && children.every(
+                        child => isEmptyText(child) || isPlaceholderBreak(child),
                     );
                 }"""
             )
@@ -875,12 +876,13 @@ class ToutiaoPlatform(BasePlatform):
                             (child.nodeValue || '')
                                 .replace(/[\u200B-\u200D\uFEFF]/g, '')
                                 .trim() === '';
-                        const isTrailingBreak = child =>
+                        const isPlaceholderBreak = child =>
                             child.nodeType === Node.ELEMENT_NODE &&
-                            child.tagName === 'BR' &&
-                            child.classList.contains('ProseMirror-trailingBreak');
-                        return Array.from(tail.childNodes).every(
-                            child => isEmptyText(child) || isTrailingBreak(child),
+                            child.tagName === 'BR';
+                        const children = Array.from(tail.childNodes);
+                        const breaks = children.filter(isPlaceholderBreak);
+                        return breaks.length <= 1 && children.every(
+                            child => isEmptyText(child) || isPlaceholderBreak(child),
                         );
                     }"""
                 )

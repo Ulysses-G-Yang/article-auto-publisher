@@ -47,12 +47,28 @@ class _InstantSimulator:
         return None
 
 
+class _FakeRequest:
+    def __init__(self, method: str, content_type: str) -> None:
+        self.method = method
+        self._content_type = content_type
+
+    async def header_value(self, name: str) -> str:
+        return self._content_type if name.lower() == "content-type" else ""
+
+
 class FakeResponse:
-    def __init__(self, url: str, body: dict, method: str = "POST", status: int = 200):
+    def __init__(
+        self,
+        url: str,
+        body: dict,
+        method: str = "POST",
+        status: int = 200,
+        content_type: str = "multipart/form-data; boundary=test",
+    ):
         self.url = url
         self._body = body
         self.status = status
-        self.request = type("R", (), {"method": method})()
+        self.request = _FakeRequest(method, content_type)
 
     async def json(self) -> dict:
         return self._body
@@ -612,6 +628,8 @@ class _UploadLocator:
         assert self.selector == BODY_IMAGE_INPUT_SELECTOR
         assert self.page.image_panel_open is True
         self.page.upload_paths.append(path)
+        if self.page.set_input_error is not None:
+            raise self.page.set_input_error
         if self.page.upload_response is not None:
             for handler in list(self.page.response_handlers):
                 await handler(self.page.upload_response)
@@ -642,6 +660,7 @@ class _UploadPage:
         self.wait_errors: dict[tuple[str, str | None], Exception] = {}
         self.upload_error_texts: list[str] = []
         self.upload_response: FakeResponse | None = None
+        self.set_input_error: Exception | None = None
         self.response_handlers: list = []
         self.removed_response_handlers: list = []
 
@@ -766,8 +785,18 @@ def test_body_image_upload_response_match_is_exact(
 ) -> None:
     response = FakeResponse(url, {"code": 0}, method=method)
 
-    assert ToutiaoPlatform._is_body_image_upload_response(response) is matches
+    assert run(ToutiaoPlatform._is_body_image_upload_response(response)) is matches
     assert IMAGE_UPLOAD_PATH == "/spice/image"
+
+
+def test_body_image_upload_response_ignores_json_requests() -> None:
+    response = FakeResponse(
+        "https://mp.toutiao.com/spice/image?upload_source=article&aid=1231&device_platform=web",
+        {"code": 0},
+        content_type="application/json",
+    )
+
+    assert run(ToutiaoPlatform._is_body_image_upload_response(response)) is False
 
 
 @pytest.mark.parametrize(
@@ -801,7 +830,7 @@ def test_body_image_upload_response_match_is_exact(
                 {"code": 0, "data": {}},
             ),
             "",
-            "头条号图片上传响应缺少图片地址",
+            "头条号图片上传返回成功码，但未形成可确认的图片",
         ),
     ],
     ids=[
@@ -851,6 +880,28 @@ def test_upload_image_distinguishes_success_response_from_disabled_confirm(
         "success": False,
         "error": "头条号图片上传接口已成功，但确认按钮仍不可用",
     }
+
+
+def test_upload_image_redacts_playwright_exception_and_removes_listener(
+    monkeypatch,
+) -> None:
+    _real, fake_sleep = _real_sleep_and_fake()
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+    page = _UploadPage()
+    page.set_input_error = RuntimeError(
+        "set_input_files C:\\private\\article.png "
+        "https://mp.toutiao.com/spice/image?token=secret-value"
+    )
+    platform = _make_platform(page)
+
+    result = run(platform._upload_image("D:/controlled/article-image.png"))
+
+    assert result["success"] is False
+    assert "C:\\private" not in result["error"]
+    assert "secret-value" not in result["error"]
+    assert "[路径]" in result["error"]
+    assert page.response_handlers == []
+    assert len(page.removed_response_handlers) == 1
 
 
 @pytest.mark.parametrize(

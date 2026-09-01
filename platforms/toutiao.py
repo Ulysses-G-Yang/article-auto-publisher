@@ -969,13 +969,22 @@ class ToutiaoPlatform(BasePlatform):
                     raise BrowserLifecycleError(
                         "BROWSER_CONTEXT_CLOSED: 头条号清理图片抽屉时页面已关闭"
                     ) from close_exception
-                close_error = str(close_exception)
+                close_error = safe_media_error(
+                    str(close_exception),
+                    fallback="头条号图片抽屉清理失败",
+                )
             if primary_exception is not None:
                 if self._exception_means_browser_closed(primary_exception):
                     raise BrowserLifecycleError(
                         "BROWSER_CONTEXT_CLOSED: 头条号上传图片时页面已关闭"
                     ) from primary_exception
-                primary_result = {"success": False, "error": str(primary_exception)}
+                primary_result = {
+                    "success": False,
+                    "error": safe_media_error(
+                        str(primary_exception),
+                        fallback="头条号图片上传失败",
+                    ),
+                }
             if primary_result is None:
                 primary_result = {"success": False, "error": "头条号图片上传未返回结果"}
             if close_error:
@@ -992,7 +1001,13 @@ class ToutiaoPlatform(BasePlatform):
                 raise BrowserLifecycleError(
                     "BROWSER_CONTEXT_CLOSED: 头条号上传图片时页面已关闭"
                 ) from exc
-            return {"success": False, "error": str(exc)}
+            return {
+                "success": False,
+                "error": safe_media_error(
+                    str(exc),
+                    fallback="头条号图片上传失败",
+                ),
+            }
 
     async def _upload_image_from_open_drawer(
         self,
@@ -1005,7 +1020,7 @@ class ToutiaoPlatform(BasePlatform):
         upload_records: list[dict[str, str | int | bool]] = []
 
         async def on_upload_response(response) -> None:
-            if not self._is_body_image_upload_response(response):
+            if not await self._is_body_image_upload_response(response):
                 return
             record: dict[str, str | int | bool] = {
                 "status": int(getattr(response, "status", 0) or 0),
@@ -1140,7 +1155,13 @@ class ToutiaoPlatform(BasePlatform):
                 raise BrowserLifecycleError(
                     "BROWSER_CONTEXT_CLOSED: 头条号上传图片时页面已关闭"
                 ) from exc
-            return {"success": False, "error": str(exc)}
+            return {
+                "success": False,
+                "error": safe_media_error(
+                    str(exc),
+                    fallback="头条号图片上传失败",
+                ),
+            }
         finally:
             try:
                 self.page.remove_listener("response", on_upload_response)
@@ -1148,12 +1169,15 @@ class ToutiaoPlatform(BasePlatform):
                 pass
 
     @staticmethod
-    def _is_body_image_upload_response(response) -> bool:
-        """只匹配本地图片上传请求，不读取请求头、Cookie 或请求体。"""
+    async def _is_body_image_upload_response(response) -> bool:
+        """只匹配 multipart 本地上传；不读取 Cookie、请求体或完整请求头。"""
 
         try:
             parsed = urlparse(str(response.url or ""))
             query = parse_qs(parsed.query, keep_blank_values=False)
+            content_type = str(
+                await response.request.header_value("content-type") or ""
+            ).lower()
             return (
                 str(response.request.method or "").upper() == "POST"
                 and parsed.netloc == "mp.toutiao.com"
@@ -1162,6 +1186,7 @@ class ToutiaoPlatform(BasePlatform):
                 and query.get("device_platform") == ["web"]
                 and bool(query.get("upload_source"))
                 and "need_enhance" not in query
+                and content_type.startswith("multipart/form-data;")
             )
         except Exception:
             return False
@@ -1182,12 +1207,6 @@ class ToutiaoPlatform(BasePlatform):
             message = f"头条号图片上传请求失败（HTTP {status or '未知'}）"
         elif code and code != "0":
             message = f"头条号图片上传被拒绝（平台码 {code}）"
-        elif (
-            code == "0"
-            and record.get("payload_parsed") is True
-            and record.get("origin_present") is not True
-        ):
-            message = "头条号图片上传响应缺少图片地址"
         else:
             return ""
         return f"{message}：{reason}" if reason else message
@@ -1225,7 +1244,9 @@ class ToutiaoPlatform(BasePlatform):
         if conclusive_error:
             return conclusive_error
         if records and str(records[-1].get("code") or "") == "0":
-            return "头条号图片上传接口已成功，但确认按钮仍不可用"
+            if records[-1].get("origin_present") is True:
+                return "头条号图片上传接口已成功，但确认按钮仍不可用"
+            return "头条号图片上传返回成功码，但未形成可确认的图片"
         return fallback
 
     async def _close_exact_image_drawer(self, drawer) -> str | None:

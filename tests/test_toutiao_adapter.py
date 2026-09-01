@@ -387,6 +387,9 @@ class _ModelEditorLocator:
     async def click(self, **_kwargs) -> None:
         return None
 
+    async def count(self) -> int:
+        return 1
+
     async def press(self, key: str) -> None:
         if key == "Backspace":
             self.page.tokens.clear()
@@ -433,6 +436,8 @@ class _ModelPage:
     def __init__(self) -> None:
         self.tokens: list[dict[str, str]] = []
         self.keyboard = _ModelKeyboard(self)
+        self.selection_ready = True
+        self.selection_checks = 0
 
     def is_closed(self) -> bool:
         return False
@@ -445,6 +450,11 @@ class _ModelPage:
         raise AssertionError(f"unexpected selector: {selector}")
 
     async def evaluate(self, script: str, *_args):
+        if "requestAnimationFrame" in script:
+            return None
+        if "selection.rangeCount" in script:
+            self.selection_checks += 1
+            return self.selection_ready
         if "lastElementChild" in script:
             return bool(self.tokens and self.tokens[-1]["kind"] == "H2")
         if "const tokens = []" in script:
@@ -500,6 +510,41 @@ def test_fill_content_preserves_text_h2_and_image_token_order() -> None:
     assert platform._expected_persisted_tokens == expected
     assert result["media_status"] == "completed"
     assert result["uploaded_images"] == 2
+    assert page.selection_checks == 2
+
+
+def test_fill_content_stops_before_upload_when_image_selection_is_unstable() -> None:
+    page = _ModelPage()
+    page.selection_ready = False
+    platform = _make_platform(page)
+    upload_calls: list[str] = []
+
+    async def upload_once(path: str) -> dict:
+        upload_calls.append(path)
+        return {"success": True, "error": "", "fingerprint": "example/image.png"}
+
+    platform._upload_image = upload_once
+
+    with pytest.raises(DraftResultUnknownError) as raised:
+        run(
+            platform.fill_content(
+                [
+                    {"type": "text", "text": "第一段"},
+                    {"type": "image", "position": 1},
+                ],
+                [{"position_index": 1, "local_path": "D:/controlled/one.png"}],
+            )
+        )
+
+    assert "图片插入位置未稳定" in str(raised.value)
+    assert raised.value.media_progress == {
+        "expected_images": 1,
+        "uploaded_images": 0,
+        "failed_image_count": 1,
+        "media_status": "failed",
+    }
+    assert page.selection_checks == 1
+    assert upload_calls == []
 
 
 def test_publish_stops_after_first_image_failure_before_save_or_publish() -> None:
@@ -700,7 +745,7 @@ class _UploadPage:
             self.response_handlers.remove(handler)
 
     async def evaluate(self, script: str, *_args):
-        if ".ProseMirror img" in script:
+        if ".ProseMirror > .pgc-image img" in script:
             if self.fingerprint_reads is not None:
                 if len(self.fingerprint_reads) > 1:
                     return list(self.fingerprint_reads.pop(0))
@@ -889,6 +934,24 @@ def test_upload_image_distinguishes_success_response_from_disabled_confirm(
         "success": False,
         "error": "头条号图片上传接口已成功，但确认按钮仍不可用",
     }
+
+
+def test_upload_image_distinguishes_inserted_image_without_remote_fingerprint(
+    monkeypatch,
+) -> None:
+    _real, fake_sleep = _real_sleep_and_fake()
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+    page = _UploadPage()
+    page.fingerprint_reads = [[], [""]]
+    platform = _make_platform(page)
+
+    result = run(platform._upload_image("D:/controlled/article-image.png"))
+
+    assert result == {
+        "success": False,
+        "error": "图片已插入，但远程图片指纹尚未生成",
+    }
+    assert page.confirm_clicks == 1
 
 
 def test_upload_image_redacts_playwright_exception_and_removes_listener(

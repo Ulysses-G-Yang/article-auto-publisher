@@ -701,6 +701,13 @@ class ToutiaoPlatform(BasePlatform):
                     failed_images.append(
                         {"filename": "", "error": "文章图片块没有对应本地文件"}
                     )
+                elif not await self._stabilize_image_insertion_point():
+                    failed_images.append(
+                        {
+                            "filename": Path(img_path).name,
+                            "error": "头条号正文图片插入位置未稳定",
+                        }
+                    )
                 else:
                     upload_result = await self._upload_image(img_path)
                     if upload_result.get("success"):
@@ -797,6 +804,46 @@ class ToutiaoPlatform(BasePlatform):
             "media_status": media_status,
             "media_error": media_error,
         }
+
+    async def _stabilize_image_insertion_point(self) -> bool:
+        """在打开图片抽屉前确认 ProseMirror 选区已落到正文末尾。"""
+
+        editor = self.page.locator(BODY_SELECTOR)
+        if await editor.count() != 1:
+            return False
+        try:
+            await editor.click(timeout=8000)
+            await editor.press("Control+End")
+            # Enter 产生的新段落需要经过一次 ProseMirror 事务和浏览器绘制；
+            # 未稳定就打开抽屉时，平台会吞掉 editor.insert 异常并照常关窗。
+            await self.page.evaluate(
+                """() => new Promise((resolve) => {
+                    requestAnimationFrame(() => requestAnimationFrame(resolve));
+                })"""
+            )
+            return bool(
+                await self.page.evaluate(
+                    """() => {
+                        const root = document.querySelector('.ProseMirror');
+                        const selection = window.getSelection();
+                        if (!root || !selection || selection.rangeCount !== 1) {
+                            return false;
+                        }
+                        const anchor = selection.anchorNode;
+                        const focus = selection.focusNode;
+                        return Boolean(
+                            selection.isCollapsed && anchor && focus &&
+                            root.contains(anchor) && root.contains(focus)
+                        );
+                    }"""
+                )
+            )
+        except Exception as exc:
+            if self._exception_means_browser_closed(exc):
+                raise BrowserLifecycleError(
+                    "BROWSER_CONTEXT_CLOSED: 头条号稳定图片插入位置时页面已关闭"
+                ) from exc
+            return False
 
     @staticmethod
     def _media_progress_status(
@@ -922,7 +969,9 @@ class ToutiaoPlatform(BasePlatform):
 
     async def _read_editor_image_fingerprints(self) -> list[str]:
         value = await self.page.evaluate(
-            r"""() => Array.from(document.querySelectorAll('.ProseMirror img'))
+            r"""() => Array.from(document.querySelectorAll(
+                    '.ProseMirror > .pgc-image img, .ProseMirror > .pgc-img img'
+                ))
                 .map(image => {
                     const candidates = [
                         image.currentSrc,
@@ -1151,9 +1200,13 @@ class ToutiaoPlatform(BasePlatform):
                     break
             if (
                 len(after_fingerprints) != len(before_fingerprints) + 1
-                or not all(after_fingerprints)
             ):
                 return {"success": False, "error": "上传后编辑器图片数量未增加"}
+            if not all(after_fingerprints):
+                return {
+                    "success": False,
+                    "error": "图片已插入，但远程图片指纹尚未生成",
+                }
             stable = 0
             for _ in range(6):
                 await asyncio.sleep(0.5)

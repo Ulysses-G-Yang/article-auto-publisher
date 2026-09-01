@@ -119,6 +119,9 @@ class _FakeEditor:
     async def click(self, *, timeout: int) -> None:
         del timeout
 
+    async def count(self) -> int:
+        return 1
+
     async def press(self, key: str) -> None:
         if key == "Backspace":
             self.page.tokens.clear()
@@ -171,6 +174,13 @@ class _FakePage:
 
     def is_closed(self) -> bool:
         return False
+
+    async def evaluate(self, script: str):
+        if "requestAnimationFrame" in script:
+            return None
+        if "selection.rangeCount" in script:
+            return True
+        raise AssertionError("未预期的页面脚本")
 
     def locator(self, selector: str):
         if selector == TITLE_SELECTOR:

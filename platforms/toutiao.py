@@ -725,15 +725,21 @@ class ToutiaoPlatform(BasePlatform):
                             }
                         )
                 if failed_images:
+                    failure_reason = safe_media_error(
+                        failed_images[-1].get("error"),
+                        fallback="头条号正文图片未完成",
+                    )
                     error = DraftResultUnknownError(
-                        "DRAFT_RESULT_UNKNOWN: 头条号正文图片未完成，已停止后续写入"
+                        f"DRAFT_RESULT_UNKNOWN: {failure_reason}；已停止后续写入"
                     )
                     error.media_progress = {
                         "expected_images": expected_images,
                         "uploaded_images": uploaded_images,
-                        "failed_images": failed_images,
-                        "media_status": (
-                            "failed" if uploaded_images == 0 else "partial"
+                        "failed_image_count": len(failed_images),
+                        "media_status": self._media_progress_status(
+                            expected_images,
+                            uploaded_images,
+                            len(failed_images),
                         ),
                     }
                     raise error
@@ -755,9 +761,11 @@ class ToutiaoPlatform(BasePlatform):
             error.media_progress = {
                 "expected_images": expected_images,
                 "uploaded_images": uploaded_images,
-                "failed_images": failed_images,
-                "media_status": (
-                    "failed" if expected_images and uploaded_images == 0 else "partial"
+                "failed_image_count": len(failed_images),
+                "media_status": self._media_progress_status(
+                    expected_images,
+                    uploaded_images,
+                    len(failed_images),
                 ),
             }
             raise error
@@ -789,6 +797,24 @@ class ToutiaoPlatform(BasePlatform):
             "media_status": media_status,
             "media_error": media_error,
         }
+
+    @staticmethod
+    def _media_progress_status(
+        expected_images: int,
+        uploaded_images: int,
+        failed_image_count: int,
+    ) -> str:
+        """与安全进度投影使用同一状态推导，避免诊断字段被拒绝。"""
+
+        if expected_images == 0:
+            return "not_required"
+        if uploaded_images == expected_images and failed_image_count == 0:
+            return "completed"
+        if uploaded_images == 0 and failed_image_count == expected_images:
+            return "failed"
+        if uploaded_images + failed_image_count == expected_images:
+            return "partial"
+        return "in_progress"
 
     @staticmethod
     def _image_path_for_block(block: dict, images: list) -> str | None:

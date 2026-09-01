@@ -560,6 +560,15 @@ def test_publish_stops_after_first_image_failure_before_save_or_publish() -> Non
 
     assert result["success"] is False
     assert result["error_code"] == "DRAFT_RESULT_UNKNOWN"
+    assert result["error"] == (
+        "DRAFT_RESULT_UNKNOWN: 头条号图片确认失败；已停止后续写入"
+    )
+    assert result["media_progress"] == {
+        "expected_images": 1,
+        "uploaded_images": 0,
+        "failed_image_count": 1,
+        "media_status": "failed",
+    }
     assert upload_calls == ["D:/controlled/one.png"]
     assert save_calls == []
     assert publish_calls == []

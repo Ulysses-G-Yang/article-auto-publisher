@@ -15,12 +15,17 @@ SRC_ROOT = PROJECT_ROOT / "src"
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
-from platforms.base import DraftBaselineError, DraftResultUnknownError
+from platforms.base import (
+    BrowserLifecycleError,
+    DraftBaselineError,
+    DraftResultUnknownError,
+)
 from platforms.toutiao import (
     BODY_IMAGE_INPUT_SELECTOR,
     BODY_SELECTOR,
     HEADING_BUTTON_SELECTOR,
     IMAGE_BUTTON_SELECTOR,
+    IMAGE_CONFIRM_SELECTOR,
     IMAGE_DRAWER_CLOSE_SELECTOR,
     IMAGE_DRAWER_SELECTOR,
     PUBLISH_URL,
@@ -479,6 +484,69 @@ def test_fill_content_preserves_text_h2_and_image_token_order() -> None:
     assert result["uploaded_images"] == 2
 
 
+def test_publish_stops_after_first_image_failure_before_save_or_publish() -> None:
+    page = _ModelPage()
+    platform = _make_platform(page)
+    upload_calls: list[str] = []
+    save_calls: list[str] = []
+    publish_calls: list[str] = []
+
+    async def check_login() -> bool:
+        return True
+
+    async def no_op(*_args, **_kwargs) -> None:
+        return None
+
+    async def upload_once(path: str) -> dict:
+        upload_calls.append(path)
+        return {"success": False, "error": "头条号图片确认失败"}
+
+    async def save_draft(title: str = "") -> str:
+        save_calls.append(title)
+        return "https://mp.toutiao.com/profile_v4/manage/draft"
+
+    async def publish_now(title: str = "") -> str:
+        publish_calls.append(title)
+        return "https://example.invalid/published"
+
+    platform.check_login = check_login
+    platform.preflight_delivery = no_op
+    platform.navigate_to_editor = no_op
+    platform.fill_title = no_op
+    platform._upload_image = upload_once
+    platform.save_draft = save_draft
+    platform.publish_now = publish_now
+
+    class _Db:
+        @staticmethod
+        def add_task_log(*_args, **_kwargs) -> None:
+            return None
+
+    result = run(
+        platform.publish(
+            title="头条号失败停止测试",
+            content_blocks=[
+                {"type": "text", "text": "第一段"},
+                {"type": "image", "position": 1},
+                {"type": "image", "position": 2},
+            ],
+            images=[
+                {"position_index": 1, "local_path": "D:/controlled/one.png"},
+                {"position_index": 2, "local_path": "D:/controlled/two.png"},
+            ],
+            delivery_mode="DRAFT",
+            auto_login=False,
+            db=_Db(),
+        )
+    )
+
+    assert result["success"] is False
+    assert result["error_code"] == "DRAFT_RESULT_UNKNOWN"
+    assert upload_calls == ["D:/controlled/one.png"]
+    assert save_calls == []
+    assert publish_calls == []
+
+
 class _UploadLocator:
     def __init__(self, page: _UploadPage, selector: str) -> None:
         self.page = page
@@ -487,41 +555,80 @@ class _UploadLocator:
     async def count(self) -> int:
         if self.selector == IMAGE_DRAWER_SELECTOR:
             return self.page.drawer_count
+        if self.selector == IMAGE_CONFIRM_SELECTOR:
+            return self.page.confirm_count
         if self.selector == IMAGE_DRAWER_CLOSE_SELECTOR:
             return self.page.close_count
         return 1
 
     async def wait_for(self, **_kwargs) -> None:
         self.page.waited_selectors.append(self.selector)
+        state = _kwargs.get("state")
+        configured_error = self.page.wait_errors.get((self.selector, state))
+        if configured_error is not None:
+            raise configured_error
+        if self.selector == IMAGE_CONFIRM_SELECTOR:
+            assert state == "attached"
+            if not self.page.confirm_attaches:
+                raise TimeoutError("confirm did not attach")
+            return
         if self.selector == IMAGE_DRAWER_SELECTOR:
-            assert _kwargs.get("state") == "hidden"
+            if state == "attached":
+                assert self.page.image_panel_open is True
+                return
+            assert state == "hidden"
             if not self.page.drawer_hides:
                 raise TimeoutError("drawer remained visible")
             assert self.page.image_panel_open is False
 
+    async def is_enabled(self) -> bool:
+        assert self.selector == IMAGE_CONFIRM_SELECTOR
+        self.page.confirm_enabled_checks += 1
+        enabled_after = self.page.confirm_enabled_after
+        return enabled_after is not None and self.page.confirm_enabled_checks > enabled_after
+
+    async def is_visible(self) -> bool:
+        assert self.selector == IMAGE_DRAWER_SELECTOR
+        return self.page.image_panel_open
+
     async def click(self, **_kwargs) -> None:
         if self.selector == IMAGE_BUTTON_SELECTOR:
             self.page.image_panel_open = True
+        elif self.selector == IMAGE_CONFIRM_SELECTOR:
+            self.page.confirm_clicks += 1
+            if self.page.confirm_hides_drawer:
+                self.page.image_panel_open = False
+            if self.page.fingerprint_reads is None:
+                self.page.fingerprints.append("p3-sign.example/article-image.png")
         elif self.selector == IMAGE_DRAWER_CLOSE_SELECTOR:
+            self.page.close_clicks += 1
             self.page.image_panel_open = False
 
     async def set_input_files(self, path: str, **_kwargs) -> None:
         assert self.selector == BODY_IMAGE_INPUT_SELECTOR
         assert self.page.image_panel_open is True
         self.page.upload_paths.append(path)
-        self.page.fingerprints.append("p3-sign.example/article-image.png")
 
 
 class _UploadPage:
     def __init__(self) -> None:
         self.fingerprints: list[str] = []
+        self.fingerprint_reads: list[list[str]] | None = None
         self.image_panel_open = False
         self.drawer_count = 1
+        self.confirm_count = 1
         self.close_count = 1
+        self.confirm_attaches = True
+        self.confirm_enabled_after: int | None = 0
+        self.confirm_enabled_checks = 0
+        self.confirm_hides_drawer = True
+        self.confirm_clicks = 0
+        self.close_clicks = 0
         self.drawer_hides = True
         self.upload_paths: list[str] = []
         self.locator_calls: list[str] = []
         self.waited_selectors: list[str] = []
+        self.wait_errors: dict[tuple[str, str | None], Exception] = {}
 
     def is_closed(self) -> bool:
         return False
@@ -531,6 +638,7 @@ class _UploadPage:
         if selector in {
             IMAGE_BUTTON_SELECTOR,
             BODY_IMAGE_INPUT_SELECTOR,
+            IMAGE_CONFIRM_SELECTOR,
             IMAGE_DRAWER_CLOSE_SELECTOR,
             IMAGE_DRAWER_SELECTOR,
         }:
@@ -539,6 +647,10 @@ class _UploadPage:
 
     async def evaluate(self, script: str, *_args):
         if ".ProseMirror img" in script:
+            if self.fingerprint_reads is not None:
+                if len(self.fingerprint_reads) > 1:
+                    return list(self.fingerprint_reads.pop(0))
+                return list(self.fingerprint_reads[0])
             return list(self.fingerprints)
         return None
 
@@ -559,11 +671,18 @@ def test_upload_image_uses_only_exact_body_image_input(monkeypatch) -> None:
     assert page.upload_paths == ["D:/controlled/article-image.png"]
     assert page.locator_calls == [
         IMAGE_BUTTON_SELECTOR,
-        BODY_IMAGE_INPUT_SELECTOR,
         IMAGE_DRAWER_SELECTOR,
-        IMAGE_DRAWER_CLOSE_SELECTOR,
+        BODY_IMAGE_INPUT_SELECTOR,
+        IMAGE_CONFIRM_SELECTOR,
     ]
-    assert page.waited_selectors == [BODY_IMAGE_INPUT_SELECTOR, IMAGE_DRAWER_SELECTOR]
+    assert page.waited_selectors == [
+        IMAGE_DRAWER_SELECTOR,
+        BODY_IMAGE_INPUT_SELECTOR,
+        IMAGE_CONFIRM_SELECTOR,
+        IMAGE_DRAWER_SELECTOR,
+    ]
+    assert page.confirm_clicks == 1
+    assert page.close_clicks == 0
     assert BODY_IMAGE_INPUT_SELECTOR == (
         ".upload-image-panel [data-e2e='image-upload'] "
         "input[type='file'][accept*='image']"
@@ -576,13 +695,37 @@ def test_upload_image_uses_only_exact_body_image_input(monkeypatch) -> None:
 
 
 @pytest.mark.parametrize(
-    ("drawer_count", "close_count", "drawer_hides", "error"),
+    (
+        "drawer_count",
+        "close_count",
+        "drawer_hides",
+        "confirm_hides_drawer",
+        "error",
+    ),
     [
-        (0, 1, True, "头条号正文图片抽屉不存在或不唯一"),
-        (2, 1, True, "头条号正文图片抽屉不存在或不唯一"),
-        (1, 0, True, "头条号图片抽屉关闭按钮不存在或不唯一"),
-        (1, 2, True, "头条号图片抽屉关闭按钮不存在或不唯一"),
-        (1, 1, False, "头条号图片抽屉关闭后仍遮挡编辑器"),
+        (0, 1, True, True, "头条号正文图片抽屉不存在或不唯一"),
+        (2, 1, True, True, "头条号正文图片抽屉不存在或不唯一"),
+        (
+            1,
+            0,
+            True,
+            False,
+            "头条号确认图片后抽屉未关闭；头条号图片抽屉关闭按钮不存在或不唯一",
+        ),
+        (
+            1,
+            2,
+            True,
+            False,
+            "头条号确认图片后抽屉未关闭；头条号图片抽屉关闭按钮不存在或不唯一",
+        ),
+        (
+            1,
+            1,
+            False,
+            False,
+            "头条号确认图片后抽屉未关闭；头条号图片抽屉关闭后仍遮挡编辑器",
+        ),
     ],
 )
 def test_upload_image_fails_closed_when_exact_drawer_cannot_close(
@@ -590,6 +733,7 @@ def test_upload_image_fails_closed_when_exact_drawer_cannot_close(
     drawer_count: int,
     close_count: int,
     drawer_hides: bool,
+    confirm_hides_drawer: bool,
     error: str,
 ) -> None:
     _real, fake_sleep = _real_sleep_and_fake()
@@ -598,11 +742,214 @@ def test_upload_image_fails_closed_when_exact_drawer_cannot_close(
     page.drawer_count = drawer_count
     page.close_count = close_count
     page.drawer_hides = drawer_hides
+    page.confirm_hides_drawer = confirm_hides_drawer
     platform = _make_platform(page)
 
     result = run(platform._upload_image("D:/controlled/article-image.png"))
 
     assert result == {"success": False, "error": error}
+
+
+@pytest.mark.parametrize(
+    ("fingerprint_reads", "error"),
+    [
+        ([[], []], "上传后编辑器图片数量未增加"),
+        (
+            [
+                [],
+                ["p3-sign.example/new.png"],
+                ["p3-sign.example/new.png"],
+                ["p3-sign.example/changed.png"],
+                ["p3-sign.example/new.png"],
+                ["p3-sign.example/changed.png"],
+                ["p3-sign.example/new.png"],
+                ["p3-sign.example/changed.png"],
+            ],
+            "上传后编辑器图片顺序未稳定",
+        ),
+        (
+            [
+                ["p3-sign.example/old.png"],
+                ["p3-sign.example/new.png", "p3-sign.example/new.png"],
+                ["p3-sign.example/new.png", "p3-sign.example/new.png"],
+                ["p3-sign.example/new.png", "p3-sign.example/new.png"],
+            ],
+            "无法绑定本次上传图片指纹",
+        ),
+    ],
+    ids=["count-not-increased", "fingerprint-unstable", "binding-failed"],
+)
+def test_upload_image_does_not_click_close_after_confirm_auto_hides_drawer(
+    monkeypatch,
+    fingerprint_reads: list[list[str]],
+    error: str,
+) -> None:
+    _real, fake_sleep = _real_sleep_and_fake()
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+    page = _UploadPage()
+    page.fingerprint_reads = [list(items) for items in fingerprint_reads]
+    platform = _make_platform(page)
+
+    result = run(platform._upload_image("D:/controlled/article-image.png"))
+
+    assert result == {"success": False, "error": error}
+    assert page.image_panel_open is False
+    assert page.locator_calls == [
+        IMAGE_BUTTON_SELECTOR,
+        IMAGE_DRAWER_SELECTOR,
+        BODY_IMAGE_INPUT_SELECTOR,
+        IMAGE_CONFIRM_SELECTOR,
+    ]
+    assert page.confirm_clicks == 1
+    assert page.close_clicks == 0
+    assert IMAGE_DRAWER_CLOSE_SELECTOR not in page.locator_calls
+    assert page.waited_selectors[-1] == IMAGE_DRAWER_SELECTOR
+
+
+@pytest.mark.parametrize(
+    (
+        "confirm_attaches",
+        "confirm_count",
+        "confirm_enabled_after",
+        "confirm_hides_drawer",
+        "error",
+    ),
+    [
+        (False, 1, 0, True, "头条号图片上传后未出现确认按钮"),
+        (True, 0, 0, True, "头条号图片确认按钮不存在或不唯一"),
+        (True, 2, 0, True, "头条号图片确认按钮不存在或不唯一"),
+        (True, 1, None, True, "头条号图片上传未完成，确认按钮仍不可用"),
+        (True, 1, 0, False, "头条号确认图片后抽屉未关闭"),
+    ],
+    ids=[
+        "missing",
+        "count-zero",
+        "not-unique",
+        "disabled",
+        "drawer-still-visible",
+    ],
+)
+def test_upload_image_confirmation_failure_closes_only_exact_drawer(
+    monkeypatch,
+    confirm_attaches: bool,
+    confirm_count: int,
+    confirm_enabled_after: int | None,
+    confirm_hides_drawer: bool,
+    error: str,
+) -> None:
+    _real, fake_sleep = _real_sleep_and_fake()
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+    page = _UploadPage()
+    page.confirm_attaches = confirm_attaches
+    page.confirm_count = confirm_count
+    page.confirm_enabled_after = confirm_enabled_after
+    page.confirm_hides_drawer = confirm_hides_drawer
+    platform = _make_platform(page)
+
+    result = run(platform._upload_image("D:/controlled/article-image.png"))
+
+    assert result == {"success": False, "error": error}
+    assert page.image_panel_open is False
+    assert page.close_clicks == 1
+    assert page.locator_calls[-1] == IMAGE_DRAWER_CLOSE_SELECTOR
+
+
+def test_upload_image_preserves_original_failure_when_drawer_close_fails(
+    monkeypatch,
+) -> None:
+    _real, fake_sleep = _real_sleep_and_fake()
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+    page = _UploadPage()
+    page.confirm_attaches = False
+    page.drawer_hides = False
+    platform = _make_platform(page)
+
+    result = run(platform._upload_image("D:/controlled/article-image.png"))
+
+    assert result == {
+        "success": False,
+        "error": (
+            "头条号图片上传后未出现确认按钮；"
+            "头条号图片抽屉关闭后仍遮挡编辑器"
+        ),
+    }
+    assert IMAGE_DRAWER_CLOSE_SELECTOR in page.locator_calls
+
+
+def test_upload_image_propagates_browser_lifecycle_error_after_scoped_cleanup(
+    monkeypatch,
+) -> None:
+    _real, fake_sleep = _real_sleep_and_fake()
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+    page = _UploadPage()
+    platform = _make_platform(page)
+
+    async def raise_browser_closed(*_args, **_kwargs) -> dict:
+        raise BrowserLifecycleError(
+            "BROWSER_CONTEXT_CLOSED: 头条号上传图片时页面已关闭"
+        )
+
+    platform._upload_image_from_open_drawer = raise_browser_closed
+
+    with pytest.raises(BrowserLifecycleError, match="BROWSER_CONTEXT_CLOSED"):
+        run(platform._upload_image("D:/controlled/article-image.png"))
+
+    assert page.image_panel_open is False
+    assert page.close_clicks == 1
+    assert page.locator_calls[-1] == IMAGE_DRAWER_CLOSE_SELECTOR
+
+
+def test_upload_image_preserves_primary_browser_error_when_cleanup_also_fails(
+    monkeypatch,
+) -> None:
+    _real, fake_sleep = _real_sleep_and_fake()
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+    page = _UploadPage()
+    platform = _make_platform(page)
+
+    async def raise_browser_closed(*_args, **_kwargs) -> dict:
+        raise BrowserLifecycleError(
+            "BROWSER_CONTEXT_CLOSED: 头条号上传图片时页面已关闭"
+        )
+
+    async def raise_cleanup_error(_drawer) -> str | None:
+        raise RuntimeError("清理图片抽屉失败")
+
+    platform._upload_image_from_open_drawer = raise_browser_closed
+    platform._close_exact_image_drawer = raise_cleanup_error
+
+    with pytest.raises(
+        BrowserLifecycleError,
+        match="头条号上传图片时页面已关闭",
+    ):
+        run(platform._upload_image("D:/controlled/article-image.png"))
+
+
+@pytest.mark.parametrize(
+    ("selector", "state"),
+    [
+        (IMAGE_DRAWER_SELECTOR, "attached"),
+        (BODY_IMAGE_INPUT_SELECTOR, "attached"),
+        (IMAGE_CONFIRM_SELECTOR, "attached"),
+        (IMAGE_DRAWER_SELECTOR, "hidden"),
+    ],
+    ids=["drawer-open", "body-input", "confirm", "confirm-close"],
+)
+def test_upload_image_translates_closed_page_during_local_waits(
+    monkeypatch,
+    selector: str,
+    state: str,
+) -> None:
+    _real, fake_sleep = _real_sleep_and_fake()
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+    page = _UploadPage()
+    page.wait_errors[(selector, state)] = RuntimeError(
+        "Target page, context or browser has been closed"
+    )
+    platform = _make_platform(page)
+
+    with pytest.raises(BrowserLifecycleError, match="BROWSER_CONTEXT_CLOSED"):
+        run(platform._upload_image("D:/controlled/article-image.png"))
 
 
 class _BlurLocator:

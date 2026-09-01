@@ -76,6 +76,9 @@ IMAGE_DRAWER_SELECTOR = (
 IMAGE_DRAWER_CLOSE_SELECTOR = (
     f"{IMAGE_DRAWER_SELECTOR} .byte-drawer-close-icon"
 )
+IMAGE_CONFIRM_SELECTOR = (
+    f"{IMAGE_DRAWER_SELECTOR} button[data-e2e='imageUploadConfirm-btn']"
+)
 DRAFT_CARD_SELECTOR = ".article-draft-item.draft-item"
 AUTOSAVE_PATH = "/mp/agw/article/publish"
 IDENTITY_NAME_KEYS = {"nickname", "user_name", "screen_name", "name"}
@@ -714,6 +717,19 @@ class ToutiaoPlatform(BasePlatform):
                                 ),
                             }
                         )
+                if failed_images:
+                    error = DraftResultUnknownError(
+                        "DRAFT_RESULT_UNKNOWN: 头条号正文图片未完成，已停止后续写入"
+                    )
+                    error.media_progress = {
+                        "expected_images": expected_images,
+                        "uploaded_images": uploaded_images,
+                        "failed_images": failed_images,
+                        "media_status": (
+                            "failed" if uploaded_images == 0 else "partial"
+                        ),
+                    }
+                    raise error
             wrote_any = True
             await self.simulator.random_delay(0.2, 0.5)
 
@@ -907,15 +923,124 @@ class ToutiaoPlatform(BasePlatform):
             if await image_button.count() != 1:
                 return {"success": False, "error": "头条号正文图片按钮不存在或不唯一"}
             await image_button.click(timeout=8000)
+            drawer = self.page.locator(IMAGE_DRAWER_SELECTOR)
+            try:
+                await drawer.wait_for(state="attached", timeout=10000)
+            except Exception as exc:
+                if self._exception_means_browser_closed(exc):
+                    raise BrowserLifecycleError(
+                        "BROWSER_CONTEXT_CLOSED: 头条号打开图片抽屉时页面已关闭"
+                    ) from exc
+                return {"success": False, "error": "头条号正文图片上传面板未加载"}
+            if await drawer.count() != 1:
+                return {"success": False, "error": "头条号正文图片抽屉不存在或不唯一"}
+
+            primary_result: dict | None = None
+            primary_exception: Exception | None = None
+            try:
+                primary_result = await self._upload_image_from_open_drawer(
+                    image_path,
+                    before_fingerprints,
+                    drawer,
+                )
+            except Exception as exc:  # 关闭抽屉后再按明确优先级处理
+                primary_exception = exc
+
+            close_error: str | None = None
+            close_exception: Exception | None = None
+            try:
+                close_error = await self._close_exact_image_drawer(drawer)
+            except Exception as exc:  # 不允许清理异常覆盖主流程生命周期异常
+                close_exception = exc
+
+            if isinstance(primary_exception, BrowserLifecycleError):
+                raise primary_exception
+            if isinstance(close_exception, BrowserLifecycleError):
+                raise close_exception
+            if close_exception is not None:
+                if self._exception_means_browser_closed(close_exception):
+                    raise BrowserLifecycleError(
+                        "BROWSER_CONTEXT_CLOSED: 头条号清理图片抽屉时页面已关闭"
+                    ) from close_exception
+                close_error = str(close_exception)
+            if primary_exception is not None:
+                if self._exception_means_browser_closed(primary_exception):
+                    raise BrowserLifecycleError(
+                        "BROWSER_CONTEXT_CLOSED: 头条号上传图片时页面已关闭"
+                    ) from primary_exception
+                primary_result = {"success": False, "error": str(primary_exception)}
+            if primary_result is None:
+                primary_result = {"success": False, "error": "头条号图片上传未返回结果"}
+            if close_error:
+                primary_error = str(primary_result.get("error") or "").strip()
+                message = close_error
+                if primary_error:
+                    message = f"{primary_error}；{close_error}"
+                return {"success": False, "error": message}
+            return primary_result
+        except BrowserLifecycleError:
+            raise
+        except Exception as exc:
+            if self._exception_means_browser_closed(exc):
+                raise BrowserLifecycleError(
+                    "BROWSER_CONTEXT_CLOSED: 头条号上传图片时页面已关闭"
+                ) from exc
+            return {"success": False, "error": str(exc)}
+
+    async def _upload_image_from_open_drawer(
+        self,
+        image_path: str,
+        before_fingerprints: list[str],
+        drawer,
+    ) -> dict:
+        """上传后点击抽屉内唯一“确定”，再绑定正文新增图片指纹。"""
+
+        try:
             file_inputs = self.page.locator(BODY_IMAGE_INPUT_SELECTOR)
             try:
                 await file_inputs.wait_for(state="attached", timeout=10000)
-            except Exception:
+            except Exception as exc:
+                if self._exception_means_browser_closed(exc):
+                    raise BrowserLifecycleError(
+                        "BROWSER_CONTEXT_CLOSED: 头条号等待图片上传控件时页面已关闭"
+                    ) from exc
                 return {"success": False, "error": "头条号正文图片上传面板未加载"}
             if await file_inputs.count() != 1:
                 return {"success": False, "error": "头条号正文图片上传控件不存在或不唯一"}
             self._last_editor_mutation_at = time.monotonic()
             await file_inputs.set_input_files(str(image_path), timeout=15000)
+
+            # 头条本地上传只把文件放进图片抽屉；必须等待上传项全部成功，
+            # 再点击抽屉内的“确定”，图片才会真正插入 ProseMirror 正文。
+            confirm_button = self.page.locator(IMAGE_CONFIRM_SELECTOR)
+            try:
+                await confirm_button.wait_for(state="attached", timeout=20000)
+            except Exception as exc:
+                if self._exception_means_browser_closed(exc):
+                    raise BrowserLifecycleError(
+                        "BROWSER_CONTEXT_CLOSED: 头条号等待图片确认按钮时页面已关闭"
+                    ) from exc
+                return {"success": False, "error": "头条号图片上传后未出现确认按钮"}
+            if await confirm_button.count() != 1:
+                return {"success": False, "error": "头条号图片确认按钮不存在或不唯一"}
+            confirm_enabled = False
+            for _ in range(40):
+                if await confirm_button.is_enabled():
+                    confirm_enabled = True
+                    break
+                await asyncio.sleep(0.5)
+            if not confirm_enabled:
+                return {"success": False, "error": "头条号图片上传未完成，确认按钮仍不可用"}
+            await confirm_button.click(timeout=8000)
+            try:
+                await drawer.wait_for(state="hidden", timeout=10000)
+            except Exception as exc:
+                if self._exception_means_browser_closed(exc):
+                    raise BrowserLifecycleError(
+                        "BROWSER_CONTEXT_CLOSED: 头条号确认图片时页面已关闭"
+                    ) from exc
+                return {"success": False, "error": "头条号确认图片后抽屉未关闭"}
+
             after_fingerprints = before_fingerprints
             for _ in range(20):
                 await asyncio.sleep(1)
@@ -949,29 +1074,39 @@ class ToutiaoPlatform(BasePlatform):
                     added.append(fingerprint)
             if len(added) != 1 or not added[0]:
                 return {"success": False, "error": "无法绑定本次上传图片指纹"}
-            # 头条上传成功后不会自动收起图片抽屉；抽屉会覆盖编辑器并拦截
-            # 下一块的点击。只使用真实探测到的抽屉关闭按钮，不点击全局 X。
-            drawer = self.page.locator(IMAGE_DRAWER_SELECTOR)
-            if await drawer.count() != 1:
-                return {"success": False, "error": "头条号正文图片抽屉不存在或不唯一"}
-            close_button = self.page.locator(IMAGE_DRAWER_CLOSE_SELECTOR)
-            if await close_button.count() != 1:
-                return {"success": False, "error": "头条号图片抽屉关闭按钮不存在或不唯一"}
-            await close_button.click(timeout=8000)
-            try:
-                await drawer.wait_for(
-                    state="hidden",
-                    timeout=8000,
-                )
-            except Exception:
-                return {"success": False, "error": "头条号图片抽屉关闭后仍遮挡编辑器"}
             return {"success": True, "error": "", "fingerprint": added[0]}
+        except BrowserLifecycleError:
+            raise
         except Exception as exc:
             if self._exception_means_browser_closed(exc):
                 raise BrowserLifecycleError(
                     "BROWSER_CONTEXT_CLOSED: 头条号上传图片时页面已关闭"
                 ) from exc
             return {"success": False, "error": str(exc)}
+
+    async def _close_exact_image_drawer(self, drawer) -> str | None:
+        """只关闭包含正文图片 input 的唯一抽屉；绝不点击页面级通用关闭按钮。"""
+
+        drawer_count = await drawer.count()
+        if drawer_count == 0:
+            return None
+        if drawer_count != 1:
+            return "头条号正文图片抽屉不存在或不唯一"
+        if not await drawer.is_visible():
+            return None
+        close_button = self.page.locator(IMAGE_DRAWER_CLOSE_SELECTOR)
+        if await close_button.count() != 1:
+            return "头条号图片抽屉关闭按钮不存在或不唯一"
+        await close_button.click(timeout=8000)
+        try:
+            await drawer.wait_for(state="hidden", timeout=8000)
+        except Exception as exc:
+            if self._exception_means_browser_closed(exc):
+                raise BrowserLifecycleError(
+                    "BROWSER_CONTEXT_CLOSED: 头条号关闭图片抽屉时页面已关闭"
+                ) from exc
+            return "头条号图片抽屉关闭后仍遮挡编辑器"
+        return None
 
     async def select_topic(
         self,

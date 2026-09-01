@@ -79,6 +79,13 @@ IMAGE_DRAWER_CLOSE_SELECTOR = (
 IMAGE_CONFIRM_SELECTOR = (
     f"{IMAGE_DRAWER_SELECTOR} button[data-e2e='imageUploadConfirm-btn']"
 )
+IMAGE_UPLOAD_ERROR_SELECTOR = (
+    f"{IMAGE_DRAWER_SELECTOR} .upload-image-wrapper "
+    ".pic-select-image-item .error, "
+    f"{IMAGE_DRAWER_SELECTOR} .upload-image-wrapper "
+    ".pic-select-image-item .size-err"
+)
+IMAGE_UPLOAD_PATH = "/spice/image"
 DRAFT_CARD_SELECTOR = ".article-draft-item.draft-item"
 AUTOSAVE_PATH = "/mp/agw/article/publish"
 IDENTITY_NAME_KEYS = {"nickname", "user_name", "screen_name", "name"}
@@ -995,6 +1002,36 @@ class ToutiaoPlatform(BasePlatform):
     ) -> dict:
         """上传后点击抽屉内唯一“确定”，再绑定正文新增图片指纹。"""
 
+        upload_records: list[dict[str, str | int | bool]] = []
+
+        async def on_upload_response(response) -> None:
+            if not self._is_body_image_upload_response(response):
+                return
+            record: dict[str, str | int | bool] = {
+                "status": int(getattr(response, "status", 0) or 0),
+                "code": "",
+                "reason": "",
+                "payload_parsed": False,
+                "origin_present": False,
+            }
+            try:
+                payload = await response.json()
+            except Exception:  # 响应体不可解析时仅保留 HTTP 状态
+                payload = None
+            if isinstance(payload, dict):
+                record["payload_parsed"] = True
+                code = payload.get("code")
+                if isinstance(code, (str, int)) and not isinstance(code, bool):
+                    record["code"] = str(code)[:32]
+                reason = payload.get("message") or payload.get("msg")
+                record["reason"] = safe_media_error(reason, fallback="")
+                data = payload.get("data")
+                record["origin_present"] = bool(
+                    isinstance(data, dict) and data.get("origin_image_url")
+                )
+            upload_records.append(record)
+
+        self.page.on("response", on_upload_response)
         try:
             file_inputs = self.page.locator(BODY_IMAGE_INPUT_SELECTOR)
             try:
@@ -1020,7 +1057,13 @@ class ToutiaoPlatform(BasePlatform):
                     raise BrowserLifecycleError(
                         "BROWSER_CONTEXT_CLOSED: 头条号等待图片确认按钮时页面已关闭"
                     ) from exc
-                return {"success": False, "error": "头条号图片上传后未出现确认按钮"}
+                return {
+                    "success": False,
+                    "error": await self._describe_image_upload_failure(
+                        upload_records,
+                        fallback="头条号图片上传后未出现确认按钮",
+                    ),
+                }
             if await confirm_button.count() != 1:
                 return {"success": False, "error": "头条号图片确认按钮不存在或不唯一"}
             confirm_enabled = False
@@ -1028,9 +1071,24 @@ class ToutiaoPlatform(BasePlatform):
                 if await confirm_button.is_enabled():
                     confirm_enabled = True
                     break
+                drawer_error = await self._read_image_upload_error()
+                if drawer_error:
+                    return {
+                        "success": False,
+                        "error": f"头条号图片上传失败：{drawer_error}",
+                    }
+                conclusive_error = self._conclusive_image_upload_error(upload_records)
+                if conclusive_error:
+                    return {"success": False, "error": conclusive_error}
                 await asyncio.sleep(0.5)
             if not confirm_enabled:
-                return {"success": False, "error": "头条号图片上传未完成，确认按钮仍不可用"}
+                return {
+                    "success": False,
+                    "error": await self._describe_image_upload_failure(
+                        upload_records,
+                        fallback="头条号图片上传未完成，确认按钮仍不可用",
+                    ),
+                }
             await confirm_button.click(timeout=8000)
             try:
                 await drawer.wait_for(state="hidden", timeout=10000)
@@ -1083,6 +1141,92 @@ class ToutiaoPlatform(BasePlatform):
                     "BROWSER_CONTEXT_CLOSED: 头条号上传图片时页面已关闭"
                 ) from exc
             return {"success": False, "error": str(exc)}
+        finally:
+            try:
+                self.page.remove_listener("response", on_upload_response)
+            except Exception:  # 诊断监听清理不得覆盖主流程结果
+                pass
+
+    @staticmethod
+    def _is_body_image_upload_response(response) -> bool:
+        """只匹配本地图片上传请求，不读取请求头、Cookie 或请求体。"""
+
+        try:
+            parsed = urlparse(str(response.url or ""))
+            query = parse_qs(parsed.query, keep_blank_values=False)
+            return (
+                str(response.request.method or "").upper() == "POST"
+                and parsed.netloc == "mp.toutiao.com"
+                and parsed.path == IMAGE_UPLOAD_PATH
+                and query.get("aid") == ["1231"]
+                and query.get("device_platform") == ["web"]
+                and bool(query.get("upload_source"))
+                and "need_enhance" not in query
+            )
+        except Exception:
+            return False
+
+    @staticmethod
+    def _conclusive_image_upload_error(
+        records: list[dict[str, str | int | bool]],
+    ) -> str:
+        """把明确 HTTP/平台拒绝转换为不含响应正文的安全错误。"""
+
+        if not records:
+            return ""
+        record = records[-1]
+        status = int(record.get("status") or 0)
+        code = str(record.get("code") or "").strip()
+        reason = str(record.get("reason") or "").strip()
+        if status < 200 or status >= 300:
+            message = f"头条号图片上传请求失败（HTTP {status or '未知'}）"
+        elif code and code != "0":
+            message = f"头条号图片上传被拒绝（平台码 {code}）"
+        elif (
+            code == "0"
+            and record.get("payload_parsed") is True
+            and record.get("origin_present") is not True
+        ):
+            message = "头条号图片上传响应缺少图片地址"
+        else:
+            return ""
+        return f"{message}：{reason}" if reason else message
+
+    async def _read_image_upload_error(self) -> str:
+        """仅读取正文图片抽屉内当前上传项的可见错误文本。"""
+
+        try:
+            error_nodes = self.page.locator(IMAGE_UPLOAD_ERROR_SELECTOR)
+            if await error_nodes.count() == 0:
+                return ""
+            texts = await error_nodes.all_inner_texts()
+        except Exception as exc:
+            if self._exception_means_browser_closed(exc):
+                raise BrowserLifecycleError(
+                    "BROWSER_CONTEXT_CLOSED: 头条号读取图片上传错误时页面已关闭"
+                ) from exc
+            return ""
+        for text in texts:
+            safe_text = safe_media_error(text, fallback="")
+            if safe_text:
+                return safe_text
+        return ""
+
+    async def _describe_image_upload_failure(
+        self,
+        records: list[dict[str, str | int | bool]],
+        *,
+        fallback: str,
+    ) -> str:
+        drawer_error = await self._read_image_upload_error()
+        if drawer_error:
+            return f"头条号图片上传失败：{drawer_error}"
+        conclusive_error = self._conclusive_image_upload_error(records)
+        if conclusive_error:
+            return conclusive_error
+        if records and str(records[-1].get("code") or "") == "0":
+            return "头条号图片上传接口已成功，但确认按钮仍不可用"
+        return fallback
 
     async def _close_exact_image_drawer(self, drawer) -> str | None:
         """只关闭包含正文图片 input 的唯一抽屉；绝不点击页面级通用关闭按钮。"""

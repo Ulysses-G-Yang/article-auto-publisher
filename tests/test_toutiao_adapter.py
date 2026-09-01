@@ -28,6 +28,8 @@ from platforms.toutiao import (
     IMAGE_CONFIRM_SELECTOR,
     IMAGE_DRAWER_CLOSE_SELECTOR,
     IMAGE_DRAWER_SELECTOR,
+    IMAGE_UPLOAD_ERROR_SELECTOR,
+    IMAGE_UPLOAD_PATH,
     PUBLISH_URL,
     TITLE_SELECTOR,
     ToutiaoDraftSaveRejectedError,
@@ -559,6 +561,8 @@ class _UploadLocator:
             return self.page.confirm_count
         if self.selector == IMAGE_DRAWER_CLOSE_SELECTOR:
             return self.page.close_count
+        if self.selector == IMAGE_UPLOAD_ERROR_SELECTOR:
+            return len(self.page.upload_error_texts)
         return 1
 
     async def wait_for(self, **_kwargs) -> None:
@@ -608,6 +612,13 @@ class _UploadLocator:
         assert self.selector == BODY_IMAGE_INPUT_SELECTOR
         assert self.page.image_panel_open is True
         self.page.upload_paths.append(path)
+        if self.page.upload_response is not None:
+            for handler in list(self.page.response_handlers):
+                await handler(self.page.upload_response)
+
+    async def all_inner_texts(self) -> list[str]:
+        assert self.selector == IMAGE_UPLOAD_ERROR_SELECTOR
+        return list(self.page.upload_error_texts)
 
 
 class _UploadPage:
@@ -629,6 +640,10 @@ class _UploadPage:
         self.locator_calls: list[str] = []
         self.waited_selectors: list[str] = []
         self.wait_errors: dict[tuple[str, str | None], Exception] = {}
+        self.upload_error_texts: list[str] = []
+        self.upload_response: FakeResponse | None = None
+        self.response_handlers: list = []
+        self.removed_response_handlers: list = []
 
     def is_closed(self) -> bool:
         return False
@@ -641,9 +656,20 @@ class _UploadPage:
             IMAGE_CONFIRM_SELECTOR,
             IMAGE_DRAWER_CLOSE_SELECTOR,
             IMAGE_DRAWER_SELECTOR,
+            IMAGE_UPLOAD_ERROR_SELECTOR,
         }:
             return _UploadLocator(self, selector)
         raise AssertionError(f"unexpected selector: {selector}")
+
+    def on(self, event: str, handler) -> None:
+        assert event == "response"
+        self.response_handlers.append(handler)
+
+    def remove_listener(self, event: str, handler) -> None:
+        assert event == "response"
+        self.removed_response_handlers.append(handler)
+        if handler in self.response_handlers:
+            self.response_handlers.remove(handler)
 
     async def evaluate(self, script: str, *_args):
         if ".ProseMirror img" in script:
@@ -659,6 +685,13 @@ def test_upload_image_uses_only_exact_body_image_input(monkeypatch) -> None:
     _real, fake_sleep = _real_sleep_and_fake()
     monkeypatch.setattr(asyncio, "sleep", fake_sleep)
     page = _UploadPage()
+    page.upload_response = FakeResponse(
+        "https://mp.toutiao.com/spice/image?upload_source=article&aid=1231&device_platform=web",
+        {
+            "code": 0,
+            "data": {"origin_image_url": "https://image.example/article-image.png"},
+        },
+    )
     platform = _make_platform(page)
 
     result = run(platform._upload_image("D:/controlled/article-image.png"))
@@ -683,6 +716,8 @@ def test_upload_image_uses_only_exact_body_image_input(monkeypatch) -> None:
     ]
     assert page.confirm_clicks == 1
     assert page.close_clicks == 0
+    assert page.response_handlers == []
+    assert len(page.removed_response_handlers) == 1
     assert BODY_IMAGE_INPUT_SELECTOR == (
         ".upload-image-panel [data-e2e='image-upload'] "
         "input[type='file'][accept*='image']"
@@ -692,6 +727,130 @@ def test_upload_image_uses_only_exact_body_image_input(monkeypatch) -> None:
         ".upload-image-panel [data-e2e='image-upload'] "
         "input[type='file'][accept*='image'])"
     )
+
+
+@pytest.mark.parametrize(
+    ("url", "method", "matches"),
+    [
+        (
+            "https://mp.toutiao.com/spice/image?upload_source=article&aid=1231&device_platform=web",
+            "POST",
+            True,
+        ),
+        (
+            "https://mp.toutiao.com/spice/image?upload_source=article&aid=1231&device_platform=web",
+            "GET",
+            False,
+        ),
+        (
+            "https://mp.toutiao.com/spice/image?aid=1231",
+            "POST",
+            False,
+        ),
+        (
+            "https://evil.example/spice/image?upload_source=article&aid=1231&device_platform=web",
+            "POST",
+            False,
+        ),
+        (
+            "https://mp.toutiao.com/spice/image?upload_source=article&aid=1231&device_platform=web&need_enhance=true",
+            "POST",
+            False,
+        ),
+    ],
+)
+def test_body_image_upload_response_match_is_exact(
+    url: str,
+    method: str,
+    matches: bool,
+) -> None:
+    response = FakeResponse(url, {"code": 0}, method=method)
+
+    assert ToutiaoPlatform._is_body_image_upload_response(response) is matches
+    assert IMAGE_UPLOAD_PATH == "/spice/image"
+
+
+@pytest.mark.parametrize(
+    ("response", "drawer_error", "expected"),
+    [
+        (
+            FakeResponse(
+                "https://mp.toutiao.com/spice/image?upload_source=article&aid=1231&device_platform=web",
+                {"code": 4001, "message": "图片格式不支持"},
+            ),
+            "",
+            "头条号图片上传被拒绝（平台码 4001）：图片格式不支持",
+        ),
+        (
+            FakeResponse(
+                "https://mp.toutiao.com/spice/image?upload_source=article&aid=1231&device_platform=web",
+                {"code": 0},
+                status=429,
+            ),
+            "",
+            "头条号图片上传请求失败（HTTP 429）",
+        ),
+        (
+            None,
+            "上传失败，请重试",
+            "头条号图片上传失败：上传失败，请重试",
+        ),
+        (
+            FakeResponse(
+                "https://mp.toutiao.com/spice/image?upload_source=article&aid=1231&device_platform=web",
+                {"code": 0, "data": {}},
+            ),
+            "",
+            "头条号图片上传响应缺少图片地址",
+        ),
+    ],
+    ids=[
+        "platform-rejected",
+        "http-rejected",
+        "drawer-error",
+        "missing-origin",
+    ],
+)
+def test_upload_image_surfaces_sanitized_platform_evidence(
+    monkeypatch,
+    response: FakeResponse | None,
+    drawer_error: str,
+    expected: str,
+) -> None:
+    _real, fake_sleep = _real_sleep_and_fake()
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+    page = _UploadPage()
+    page.confirm_enabled_after = None
+    page.upload_response = response
+    page.upload_error_texts = [drawer_error] if drawer_error else []
+    platform = _make_platform(page)
+
+    result = run(platform._upload_image("D:/controlled/article-image.png"))
+
+    assert result == {"success": False, "error": expected}
+    assert page.response_handlers == []
+    assert len(page.removed_response_handlers) == 1
+
+
+def test_upload_image_distinguishes_success_response_from_disabled_confirm(
+    monkeypatch,
+) -> None:
+    _real, fake_sleep = _real_sleep_and_fake()
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+    page = _UploadPage()
+    page.confirm_enabled_after = None
+    page.upload_response = FakeResponse(
+        "https://mp.toutiao.com/spice/image?upload_source=article&aid=1231&device_platform=web",
+        {"code": 0, "data": {"origin_image_url": "https://image.example/x.png"}},
+    )
+    platform = _make_platform(page)
+
+    result = run(platform._upload_image("D:/controlled/article-image.png"))
+
+    assert result == {
+        "success": False,
+        "error": "头条号图片上传接口已成功，但确认按钮仍不可用",
+    }
 
 
 @pytest.mark.parametrize(

@@ -32,6 +32,7 @@ EXPECTED_PLATFORMS = (
     "zhihu",
     "weibo",
     "smzdm",
+    "toutiao",
     "baijiahao",
 )
 
@@ -214,6 +215,25 @@ def test_baijiahao_word_draft_is_promoted_after_persisted_reopen_evidence() -> N
     assert can_run_complete_word_draft("baijiahao")
 
 
+def test_toutiao_word_draft_is_promoted_after_exact_cloud_reopen() -> None:
+    record = readiness_by_platform()["toutiao"]
+    for facet_name in (
+        "account_session",
+        "editor_entry",
+        "text_draft",
+        "body_images",
+        "draft_verification",
+    ):
+        facet = record.facets[facet_name]
+        assert facet.status is ReadinessStatus.REAL_VERIFIED
+        assert facet.last_real_check.isoformat() == "2026-09-02"
+        assert "TOUTIAO_WORD_DRAFT_20260902.md" in " ".join(facet.evidence_refs)
+
+    assert record.facets["cover"].status is ReadinessStatus.NOT_APPLICABLE
+    assert can_run_stable_image_draft("toutiao")
+    assert can_run_complete_word_draft("toutiao")
+
+
 @pytest.mark.parametrize(
     ("platform", "expected"),
     [
@@ -222,6 +242,7 @@ def test_baijiahao_word_draft_is_promoted_after_persisted_reopen_evidence() -> N
         ("zol", True),
         ("weibo", True),
         ("smzdm", True),
+        ("toutiao", True),
         ("baijiahao", True),
         ("xiaohongshu", False),
         ("unknown", False),
@@ -237,10 +258,11 @@ def test_can_run_stable_image_draft_is_read_only_evidence_computation(
 def test_can_run_complete_word_draft_requires_real_cover_evidence() -> None:
     assert can_run_complete_word_draft("baijiahao")
     assert can_run_complete_word_draft("weibo")
+    assert can_run_complete_word_draft("toutiao")
     assert all(
         not can_run_complete_word_draft(platform)
         for platform in EXPECTED_PLATFORMS
-        if platform not in {"baijiahao", "weibo"}
+        if platform not in {"baijiahao", "weibo", "toutiao"}
     )
     # 知乎已通过稳定带图草稿，但封面没有真实验收，不能宣称完整 Word 闭环完成。
     assert readiness_by_platform()["zhihu"].facets["cover"].status is (

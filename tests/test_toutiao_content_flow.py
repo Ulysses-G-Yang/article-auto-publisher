@@ -12,6 +12,7 @@ import io
 import uuid
 from copy import deepcopy
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 from docx import Document
@@ -119,6 +120,9 @@ class _FakeEditor:
     async def click(self, *, timeout: int) -> None:
         del timeout
 
+    async def focus(self, *, timeout: int) -> None:
+        del timeout
+
     async def count(self) -> int:
         return 1
 
@@ -160,8 +164,12 @@ class _FakeTitleInput:
     async def click(self, *, timeout: int) -> None:
         del timeout
 
+    async def count(self) -> int:
+        return 1
+
     async def fill(self, value: str) -> None:
         self.page.title = value
+        self.page.events.append("title")
 
     async def input_value(self) -> str:
         return self.page.title
@@ -190,17 +198,20 @@ class _FakePage:
         self.title = ""
         self.tokens: list[dict[str, str]] = []
         self.pending_block = True
+        self.events: list[str] = []
         self.keyboard = _FakeKeyboard(self)
 
     def is_closed(self) -> bool:
         return False
 
     async def evaluate(self, script: str):
+        if "const reuseExistingTail = true" in script:
+            return self.pending_block
         if "requestAnimationFrame" in script:
             return None
         if "selection.rangeCount" in script:
-            assert "breaks.length <= 1" in script
-            assert "ProseMirror-trailingBreak" not in script
+            assert "syl-placeholder.ProseMirror-widget" in script
+            assert "placeholders.length <= 1" in script
             return True
         raise AssertionError("未预期的页面脚本")
 
@@ -220,15 +231,22 @@ class _CapturingToutiaoPlatform(ToutiaoPlatform):
         self.page = _FakePage()
         self.simulator.random_delay = AsyncMock()
         self.uploaded_paths: list[Path] = []
+        self.autosave_barrier_calls: list[dict[str, object]] = []
+        self.restarted_draft_titles: list[str] = []
+        self.initialization_snapshot_calls: list[dict[str, object]] = []
+        self.write_window_waits = 0
+        self.content_block_autosave_waits: list[int] = []
 
     async def _apply_h2_to_current_block(self) -> None:
         assert self.page.tokens
         self.page.tokens[-1]["kind"] = "H2"
 
     async def _upload_image(self, image_path: str) -> dict:
+        assert self.page.title == EXPECTED_PLATFORM_TITLE
         path = Path(image_path)
         assert path.is_file()
         self.uploaded_paths.append(path)
+        self.page.events.append("image")
         fingerprint = f"fixture.test/{hashlib.sha256(path.read_bytes()).hexdigest()}"
         self.page.tokens.append(
             {"kind": "I", "text": "", "fingerprint": fingerprint}
@@ -238,6 +256,40 @@ class _CapturingToutiaoPlatform(ToutiaoPlatform):
 
     async def _read_editor_tokens(self) -> list[dict[str, str]]:
         return deepcopy(self.page.tokens)
+
+    async def _wait_for_autosave_barrier(self, **_kwargs) -> dict[str, object]:
+        self.autosave_barrier_calls.append(dict(_kwargs))
+        self._active_draft_id = "7665272216262623790"
+        return {
+            "generation": self._mutation_generation,
+            "status": 200,
+            "code": 0,
+            "err_no": 0,
+            "draft_ids": frozenset({self._active_draft_id}),
+        }
+
+    async def _restart_browser_for_initialized_draft(
+        self,
+        expected_title: str,
+    ) -> None:
+        self.restarted_draft_titles.append(expected_title)
+
+    async def _wait_for_new_draft_write_window(self) -> None:
+        self.write_window_waits += 1
+
+    async def _wait_for_content_block_autosave(
+        self,
+        block_number: int,
+    ) -> None:
+        self.content_block_autosave_waits.append(block_number)
+
+    async def _fetch_draft_snapshot(self, **kwargs):
+        self.initialization_snapshot_calls.append(dict(kwargs))
+        return SimpleNamespace(
+            title_to_ids={
+                EXPECTED_PLATFORM_TITLE: frozenset({self._active_draft_id})
+            }
+        )
 
 
 def test_content_version_resolves_exact_toutiao_word_order(tmp_path: Path) -> None:
@@ -289,7 +341,10 @@ def test_content_version_resolves_exact_toutiao_word_order(tmp_path: Path) -> No
 
     async def deliver_to_adapter():
         await adapter.fill_title(title)
-        return await adapter.fill_content(blocks, images)
+        assert adapter.page.title == EXPECTED_PLATFORM_TITLE
+        content_result = await adapter.fill_content(blocks, images)
+        assert adapter.page.title == EXPECTED_PLATFORM_TITLE
+        return content_result
 
     result = asyncio.run(deliver_to_adapter())
 
@@ -304,6 +359,18 @@ def test_content_version_resolves_exact_toutiao_word_order(tmp_path: Path) -> No
     assert title == SOURCE_TITLE
     assert adapter.page.title == EXPECTED_PLATFORM_TITLE
     assert len(adapter.page.title) == 30
+    assert adapter.page.events == ["title"] + ["image"] * 7
+    assert adapter.autosave_barrier_calls == [
+        {
+            "generation": 1,
+            "stage": "标题初始化",
+            "require_draft_id": True,
+        }
+    ]
+    assert adapter.restarted_draft_titles == []
+    assert adapter.write_window_waits == 0
+    assert adapter.content_block_autosave_waits == list(range(1, 30))
+    assert adapter.initialization_snapshot_calls == []
     assert len(blocks) == 29
     assert sum(block["type"] == "text" for block in blocks) == 17
     assert sum(block["type"] == "heading" for block in blocks) == 5

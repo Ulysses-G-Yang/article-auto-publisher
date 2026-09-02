@@ -1,4 +1,4 @@
-"""六个平台真实投递就绪度的只读证据清单。
+"""已启用平台真实投递就绪度的只读证据清单。
 
 本模块只描述已发生的验收事实，不参与账号选择、投递编排或平台适配器执行。
 尤其要区分“代码存在”“单元测试通过”和“真实平台验收通过”：默认清单只把
@@ -70,6 +70,8 @@ _SMZDM_WORD_EVIDENCE = (
     "docs/acceptance/SMZDM_WORD_DRAFT_20260819.md",
     "codex_handoff_20260817.md",
 )
+_TOUTIAO_WORD_DATE = date(2026, 9, 2)
+_TOUTIAO_WORD_EVIDENCE = ("docs/acceptance/TOUTIAO_WORD_DRAFT_20260902.md",)
 _BAIJIAHAO_WORD_DATE = date(2026, 8, 19)
 _BAIJIAHAO_WORD_EVIDENCE = (
     "docs/acceptance/BAIJIAHAO_WORD_DRAFT_20260819.md",
@@ -437,6 +439,47 @@ PLATFORM_DELIVERY_READINESS: tuple[PlatformDeliveryReadiness, ...] = (
                 "unique_title_and_29_ordered_tokens_reopened",
                 _SMZDM_WORD_DATE,
                 _SMZDM_WORD_EVIDENCE,
+            ),
+        },
+    ),
+    _build_platform(
+        "toutiao",
+        facet_overrides={
+            "account_session": (
+                ReadinessStatus.REAL_VERIFIED,
+                "expected_account_identity_verified_before_native_entry",
+                _TOUTIAO_WORD_DATE,
+                _TOUTIAO_WORD_EVIDENCE,
+            ),
+            "editor_entry": (
+                ReadinessStatus.REAL_VERIFIED,
+                "native_creation_article_entry_used_without_direct_create_url",
+                _TOUTIAO_WORD_DATE,
+                _TOUTIAO_WORD_EVIDENCE,
+            ),
+            "text_draft": (
+                ReadinessStatus.REAL_VERIFIED,
+                "real_reopen_verified_22_text_and_heading_blocks",
+                _TOUTIAO_WORD_DATE,
+                _TOUTIAO_WORD_EVIDENCE,
+            ),
+            "body_images": (
+                ReadinessStatus.REAL_VERIFIED,
+                "real_reopen_verified_7_ordered_body_images",
+                _TOUTIAO_WORD_DATE,
+                _TOUTIAO_WORD_EVIDENCE,
+            ),
+            "cover": (
+                ReadinessStatus.NOT_APPLICABLE,
+                "draft_flow_uses_no_explicit_cover",
+                _TOUTIAO_WORD_DATE,
+                _TOUTIAO_WORD_EVIDENCE,
+            ),
+            "draft_verification": (
+                ReadinessStatus.REAL_VERIFIED,
+                "unique_cloud_draft_id_and_29_ordered_tokens_reopened",
+                _TOUTIAO_WORD_DATE,
+                _TOUTIAO_WORD_EVIDENCE,
             ),
         },
     ),

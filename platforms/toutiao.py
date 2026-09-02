@@ -27,17 +27,25 @@
   发布路径（点「预览并发布」同样 save=0 → 7050）。
 - 人工手动（真人浏览器）保存/发布正常——是**字节系风控判定
   Playwright 启动的 Chrome 为自动化环境**，带内容（高风险）保存被拒。
-- 当前适配器不绕过风控，只实现正常编辑器操作与严格证据链：保存前建立
+- 当前适配器不绕过平台接口，只实现正常编辑器操作与严格证据链：保存前建立
   ``pgc_id`` 基线，按 Word 顺序写入文字/H2/图片，等待自动保存，绑定唯一
-  新增实体并重开核对标题、图文和图片指纹。真实验收通过前投递仍保持关闭；
-  平台明确拒绝或证据不足时停止且不自动重试。
+  新增实体并重开核对标题、图文和图片指纹。平台明确拒绝或证据不足时停止
+  且不自动重试。
+
+2026-09-01 真实验收：改为启动普通系统 Chrome，再通过固定非零本地调试端口
+连接 CDP；同一七图 Word 已产生唯一新 ``pgc_id``，重开后标题、29 个图文块及
+7 张图片顺序一致。头条适配器因此必须使用本文件的原生 Chrome + CDP 初始化，
+不能退回 ``launch_persistent_context``，否则会重新触发 code 7050 假失败。
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
+import os
 import re
+import shutil
+import socket
 import time
 from collections import Counter
 from dataclasses import dataclass
@@ -45,6 +53,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 
 from loguru import logger
+from playwright.async_api import async_playwright
 
 from platforms.base import (
     BasePlatform,
@@ -64,20 +73,44 @@ PUBLISH_URL = "https://mp.toutiao.com/profile_v4/graphic/publish"
 DRAFT_BOX_URL = "https://mp.toutiao.com/profile_v4/manage/draft"
 TITLE_SELECTOR = "textarea[placeholder*='文章标题']"
 BODY_SELECTOR = "div.ProseMirror[contenteditable='true']"
-HEADING_BUTTON_SELECTOR = ".syl-toolbar-tool.header button"
-IMAGE_BUTTON_SELECTOR = ".syl-toolbar-tool.image button"
-BODY_IMAGE_INPUT_SELECTOR = (
+CREATE_ARTICLE_LINK_SELECTOR = "a[href='/profile_v4/graphic/publish']"
+EDITOR_EXIT_SELECTOR = (
+    "div.menu-tab-stick-header-fixer > svg:has("
+    "circle[cx='12'][cy='12'][r='11.5'])"
+)
+HEADING_BUTTON_SELECTOR = (
+    ".syl-editor-toolbar .syl-toolbar-tool.header.static "
+    "button.syl-toolbar-button"
+)
+IMAGE_BUTTON_SELECTOR = (
+    ".syl-editor-toolbar .syl-toolbar-tool.image.static "
+    "button.syl-toolbar-button"
+)
+IMAGE_DRAWER_SELECTOR = (
+    ".byte-drawer-wrapper:has(.byte-tabs-header-title):visible"
+)
+IMAGE_UPLOAD_TAB_IN_DRAWER_SELECTOR = ".byte-tabs-header-title"
+BODY_IMAGE_INPUT_IN_DRAWER_SELECTOR = (
     ".upload-image-panel [data-e2e='image-upload'] "
     "input[type='file'][accept*='image']"
 )
-IMAGE_DRAWER_SELECTOR = (
-    ".byte-drawer-wrapper:has(" f"{BODY_IMAGE_INPUT_SELECTOR}" ")"
+IMAGE_CONFIRM_IN_DRAWER_SELECTOR = "button[data-e2e='imageUploadConfirm-btn']"
+IMAGE_DRAWER_CLOSE_IN_DRAWER_SELECTOR = ".byte-drawer-close-icon"
+IMAGE_UPLOAD_ERROR_IN_DRAWER_SELECTOR = (
+    ".upload-image-wrapper .pic-select-image-item .error, "
+    ".upload-image-wrapper .pic-select-image-item .size-err"
+)
+IMAGE_UPLOAD_TAB_SELECTOR = (
+    f"{IMAGE_DRAWER_SELECTOR} {IMAGE_UPLOAD_TAB_IN_DRAWER_SELECTOR}"
+)
+BODY_IMAGE_INPUT_SELECTOR = (
+    f"{IMAGE_DRAWER_SELECTOR} {BODY_IMAGE_INPUT_IN_DRAWER_SELECTOR}"
 )
 IMAGE_DRAWER_CLOSE_SELECTOR = (
-    f"{IMAGE_DRAWER_SELECTOR} .byte-drawer-close-icon"
+    f"{IMAGE_DRAWER_SELECTOR} {IMAGE_DRAWER_CLOSE_IN_DRAWER_SELECTOR}"
 )
 IMAGE_CONFIRM_SELECTOR = (
-    f"{IMAGE_DRAWER_SELECTOR} button[data-e2e='imageUploadConfirm-btn']"
+    f"{IMAGE_DRAWER_SELECTOR} {IMAGE_CONFIRM_IN_DRAWER_SELECTOR}"
 )
 IMAGE_UPLOAD_ERROR_SELECTOR = (
     f"{IMAGE_DRAWER_SELECTOR} .upload-image-wrapper "
@@ -90,6 +123,29 @@ DRAFT_CARD_SELECTOR = ".article-draft-item.draft-item"
 AUTOSAVE_PATH = "/mp/agw/article/publish"
 IDENTITY_NAME_KEYS = {"nickname", "user_name", "screen_name", "name"}
 IDENTITY_UID_KEYS = {"user_id", "uid", "id"}
+CHROME_PROFILE_LOCK_NAMES = ("SingletonLock", "SingletonCookie", "SingletonSocket")
+CDP_READY_ATTEMPTS = 40
+CDP_READY_INTERVAL_SECONDS = 0.25
+
+
+def _find_system_chrome() -> Path | None:
+    """定位 Windows 系统 Chrome；不记录候选路径。"""
+
+    candidates: list[Path] = []
+    configured = os.environ.get("ARTICLEOPS_CHROMIUM_EXECUTABLE", "").strip()
+    if configured:
+        candidates.append(Path(configured))
+    for variable in ("PROGRAMFILES", "PROGRAMFILES(X86)", "LOCALAPPDATA"):
+        root = os.environ.get(variable, "").strip()
+        if root:
+            candidates.append(
+                Path(root) / "Google" / "Chrome" / "Application" / "chrome.exe"
+            )
+    for command in ("chrome.exe", "chrome"):
+        resolved = shutil.which(command)
+        if resolved:
+            candidates.append(Path(resolved))
+    return next((candidate for candidate in candidates if candidate.is_file()), None)
 
 
 @dataclass(frozen=True, slots=True)
@@ -143,17 +199,268 @@ class ToutiaoPlatform(BasePlatform):
         self._expected_persisted_tokens: list[dict[str, str]] | None = None
         self._autosave_records: list[dict[str, object]] = []
         self._autosave_handler = None
+        self._autosave_request_handler = None
+        self._autosave_request_generations: dict[int, int] = {}
+        self._mutation_generation = 0
         self._last_editor_mutation_at = 0.0
+        self._active_draft_id: str | None = None
+        self._cdp_browser = None
+        self._cdp_owner_verified = False
+        self._native_chrome_process: asyncio.subprocess.Process | None = None
+        self._lifecycle_stage = "未初始化"
+        self._lifecycle_events: list[dict[str, object]] = []
+        self._cleanup_started = False
+
+    def _record_lifecycle_event(self, event: str) -> None:
+        """记录不含账号和页面内容的浏览器生命周期证据。"""
+
+        process = self._native_chrome_process
+        record = {
+            "event": event,
+            "stage": self._lifecycle_stage,
+            "native_process_returncode": (
+                process.returncode if process is not None else None
+            ),
+            "expected_cleanup": self._cleanup_started,
+        }
+        self._lifecycle_events.append(record)
+        logger.warning(
+            "头条号浏览器生命周期事件: event={}, stage={}, process_returncode={}",
+            record["event"],
+            record["stage"],
+            record["native_process_returncode"],
+        )
+
+    def _require_page_alive(self, stage: str = ""):
+        """在基类检查前保存阶段，便于区分页面关闭来源。"""
+
+        if stage:
+            self._lifecycle_stage = stage
+        return super()._require_page_alive(stage)
 
     async def initialize(self):
-        await super().initialize()
+        """以普通系统 Chrome 启动，再经 CDP 驱动同一个账号 Profile。"""
+
+        os.environ.pop("NODE_OPTIONS", None)
+        chrome_profile_dir = self.profile_dir or Path(
+            self.cfg["paths"].get(
+                "data",
+                os.path.join(os.path.dirname(__file__), "..", "data"),
+            )
+        ) / "chrome_profiles" / self.platform_name
+        chrome_profile_dir = chrome_profile_dir.resolve()
+        if self.strict_profile_lock and not chrome_profile_dir.is_dir():
+            raise PlatformAutomationError(
+                "PROFILE_NOT_FOUND: 账号浏览器 Profile 不存在"
+            )
+        chrome_profile_dir.mkdir(parents=True, exist_ok=True)
+        self.profile_dir = chrome_profile_dir
+        if any(
+            (chrome_profile_dir / name).exists()
+            for name in CHROME_PROFILE_LOCK_NAMES
+        ):
+            raise PlatformAutomationError(
+                "PROFILE_IN_USE: 账号浏览器 Profile 正在被其他流程占用"
+            )
+
+        chrome = _find_system_chrome()
+        if chrome is None:
+            raise PlatformAutomationError(
+                "TOUTIAO_NATIVE_CHROME_NOT_FOUND: 未找到系统 Chrome"
+            )
+
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+            probe.bind(("127.0.0.1", 0))
+            debug_port = int(probe.getsockname()[1])
+
+        try:
+            self.playwright = await async_playwright().start()
+            self._native_chrome_process = await asyncio.create_subprocess_exec(
+                str(chrome),
+                f"--remote-debugging-port={debug_port}",
+                "--remote-debugging-address=127.0.0.1",
+                f"--user-data-dir={chrome_profile_dir}",
+                "--profile-directory=Default",
+                "--no-first-run",
+                "--no-default-browser-check",
+                "--no-proxy-server",
+                "--new-window",
+                "about:blank",
+                stdin=asyncio.subprocess.DEVNULL,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            endpoint = f"http://127.0.0.1:{debug_port}"
+            last_error: Exception | None = None
+            for _ in range(CDP_READY_ATTEMPTS):
+                if self._native_chrome_process.returncode is not None:
+                    raise RuntimeError("native Chrome exited before CDP became ready")
+                try:
+                    self._cdp_browser = (
+                        await self.playwright.chromium.connect_over_cdp(
+                            endpoint,
+                            timeout=2000,
+                        )
+                    )
+                    break
+                except Exception as exc:  # noqa: BLE001 - bounded local readiness
+                    last_error = exc
+                    await asyncio.sleep(CDP_READY_INTERVAL_SECONDS)
+            else:
+                raise RuntimeError("CDP endpoint was not ready") from last_error
+
+            listener_pid = await self._read_cdp_listener_pid(debug_port)
+            if listener_pid != self._native_chrome_process.pid:
+                raise RuntimeError("CDP listener does not belong to launched Chrome")
+            self._cdp_owner_verified = True
+            if len(self._cdp_browser.contexts) != 1:
+                raise RuntimeError("unexpected CDP browser context count")
+            self.context = self._cdp_browser.contexts[0]
+            if len(self.context.pages) != 1 or self.context.pages[0].url != "about:blank":
+                raise RuntimeError("unexpected restored Chrome pages")
+            self.page = self.context.pages[0]
+            self.page.on(
+                "close",
+                lambda *_: self._record_lifecycle_event("page_close"),
+            )
+            self.page.on(
+                "crash",
+                lambda *_: self._record_lifecycle_event("page_crash"),
+            )
+            self.context.on(
+                "close",
+                lambda *_: self._record_lifecycle_event("context_close"),
+            )
+            self._cdp_browser.on(
+                "disconnected",
+                lambda *_: self._record_lifecycle_event("browser_disconnected"),
+            )
+            if await self.page.evaluate("() => navigator.webdriver === true"):
+                raise RuntimeError("Chrome exposed navigator.webdriver")
+            self.browser = self._cdp_browser
+        except BaseException as exc:
+            await self.cleanup()
+            if not isinstance(exc, Exception):
+                raise
+            raise PlatformAutomationError(
+                "TOUTIAO_CDP_START_FAILED: 头条号普通 Chrome 启动失败"
+            ) from exc
+
         self._identity_payload = None
         self._preflight_title = None
         self._draft_baseline = None
         self._expected_persisted_tokens = None
         self._autosave_records = []
         self._autosave_handler = None
+        self._autosave_request_handler = None
+        self._autosave_request_generations = {}
+        self._mutation_generation = 0
         self._last_editor_mutation_at = 0.0
+        self._active_draft_id = None
+        self._lifecycle_stage = "初始化完成"
+        self._cleanup_started = False
+
+    async def _safe_simulate_scroll(
+        self,
+        scroll_times: int | None = None,
+        stage: str = "滚动",
+    ) -> None:
+        """头条草稿依赖退出自动保存；保存前不做无关滚动。"""
+
+        self._require_page_alive(stage)
+
+    async def _safe_random_mouse_movement(
+        self,
+        stage: str = "鼠标移动",
+    ) -> None:
+        """头条草稿依赖退出自动保存；保存前不做无关鼠标移动。"""
+
+        self._require_page_alive(stage)
+
+    @staticmethod
+    async def _read_cdp_listener_pid(port: int) -> int | None:
+        """只读核对本地调试端口归属，避免误连或误关其它 Chrome。"""
+
+        command = (
+            "$connection = Get-NetTCPConnection "
+            f"-LocalAddress 127.0.0.1 -LocalPort {port} -State Listen "
+            "-ErrorAction SilentlyContinue | Select-Object -First 1; "
+            "if ($connection) { $connection.OwningProcess }"
+        )
+        process = await asyncio.create_subprocess_exec(
+            "powershell.exe",
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            command,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        output, _ = await process.communicate()
+        value = output.decode("ascii", errors="ignore").strip()
+        return int(value) if process.returncode == 0 and value.isdigit() else None
+
+    async def _wait_for_profile_release(self) -> None:
+        """等待本次 Chrome 自然释放 Profile；绝不删除 Singleton 文件。"""
+
+        profile_dir = self.profile_dir
+        if profile_dir is None:
+            return
+        for _ in range(40):
+            if not any(
+                (profile_dir / name).exists()
+                for name in CHROME_PROFILE_LOCK_NAMES
+            ):
+                return
+            await asyncio.sleep(0.1)
+        raise PlatformAutomationError(
+            "TOUTIAO_PROFILE_NOT_RELEASED: 头条号 Chrome 未释放账号 Profile"
+        )
+
+    async def cleanup(self):
+        """关闭本次 CDP 会话和本次启动的 Chrome，不触碰其它进程。"""
+
+        self._cleanup_started = True
+        self._lifecycle_stage = "主动清理"
+        try:
+            if self._cdp_browser is not None and self._cdp_owner_verified:
+                await self._cdp_browser.close()
+        except Exception:  # noqa: BLE001 - cleanup steps must be independent
+            pass
+        try:
+            if self._native_chrome_process is not None:
+                try:
+                    await asyncio.wait_for(
+                        self._native_chrome_process.wait(),
+                        timeout=8,
+                    )
+                except TimeoutError:
+                    self._native_chrome_process.terminate()
+                    try:
+                        await asyncio.wait_for(
+                            self._native_chrome_process.wait(),
+                            timeout=8,
+                        )
+                    except TimeoutError:
+                        self._native_chrome_process.kill()
+                        await asyncio.wait_for(
+                            self._native_chrome_process.wait(),
+                            timeout=8,
+                        )
+                await self._wait_for_profile_release()
+        finally:
+            if self.playwright is not None:
+                try:
+                    await self.playwright.stop()
+                except Exception:  # noqa: BLE001 - owned Chrome already handled
+                    pass
+            self.browser = None
+            self.context = None
+            self.page = None
+            self.playwright = None
+            self._cdp_browser = None
+            self._cdp_owner_verified = False
+            self._native_chrome_process = None
 
     # ==================== 登录态与身份 ====================
 
@@ -177,19 +484,14 @@ class ToutiaoPlatform(BasePlatform):
         try:
             self.last_login_error = ""
             self._require_page_alive("头条号登录态检测")
-            await self.page.goto(
-                HOME_URL,
-                wait_until="domcontentloaded",
-                timeout=15000,
-            )
-            await asyncio.sleep(4)
-            if await self._has_session_cookie_signal():
-                identity = await self.fetch_identity_payload()
-                if identity.get("ok"):
-                    return True
-                self.last_login_error = "TOUTIAO_IDENTITY_MISSING: 会话存在但身份未确认"
+            if not await self._has_session_cookie_signal():
+                self.last_login_error = "LOGIN_REQUIRED: 头条号账号需要登录"
                 return False
-            self.last_login_error = "LOGIN_REQUIRED: 头条号账号需要登录"
+            # 身份捕获本身会打开一次工作台；这里不再提前重复导航 HOME。
+            identity = await self.fetch_identity_payload()
+            if identity.get("ok"):
+                return True
+            self.last_login_error = "TOUTIAO_IDENTITY_MISSING: 会话存在但身份未确认"
             return False
         except BrowserLifecycleError:
             raise
@@ -242,6 +544,8 @@ class ToutiaoPlatform(BasePlatform):
     async def fetch_identity_payload(self) -> dict:
         """捕获页面自身 /user/profile/auth/info/v2 响应（裸 fetch 会被签名拒绝）。"""
 
+        if self._identity_payload and self._identity_payload.get("ok") is True:
+            return self._identity_payload
         captured: list[dict] = []
 
         async def _on_response(response) -> None:
@@ -418,8 +722,13 @@ class ToutiaoPlatform(BasePlatform):
         walk(payload)
         return frozenset(found)
 
-    async def _fetch_draft_snapshot(self) -> _ToutiaoDraftSnapshot:
-        """只读加载草稿列表，建立标题计数和可见/接口草稿 ID 摘要。"""
+    async def _fetch_draft_snapshot(
+        self,
+        *,
+        exit_editor: bool = False,
+        expected_title: str | None = None,
+    ) -> _ToutiaoDraftSnapshot:
+        """加载草稿列表，只对本次目标标题要求完整 ID 证据。"""
 
         self._require_page_alive("头条号读取草稿基线")
         captured_items: list[tuple[str, str]] = []
@@ -447,11 +756,22 @@ class ToutiaoPlatform(BasePlatform):
 
         self.page.on("response", on_response)
         try:
-            await self.page.goto(
-                DRAFT_BOX_URL,
-                wait_until="domcontentloaded",
-                timeout=30000,
-            )
+            if exit_editor:
+                await self._exit_editor_via_native_control()
+                if urlparse(str(getattr(self.page, "url", ""))).path != urlparse(
+                    DRAFT_BOX_URL
+                ).path:
+                    await self.page.goto(
+                        DRAFT_BOX_URL,
+                        wait_until="domcontentloaded",
+                        timeout=30000,
+                    )
+            else:
+                await self.page.goto(
+                    DRAFT_BOX_URL,
+                    wait_until="domcontentloaded",
+                    timeout=30000,
+                )
             await self.page.wait_for_selector(
                 ".draft-page .list-count",
                 timeout=20000,
@@ -492,20 +812,78 @@ class ToutiaoPlatform(BasePlatform):
                 state["capturedItems"] = sorted(set(captured_items))
                 return state
 
-            # DOM 数量稳定并不代表草稿 ID 已经加载完整。把页面自身接口中
-            # 捕获到的标题/pgc_id 也纳入两次稳定性比较，避免漏掉旧 ID 后
-            # 将其误认成本次新增草稿。
-            first_state = await read_complete_state()
-            await asyncio.sleep(1)
-            state = await read_complete_state()
-            if first_state != state:
-                await asyncio.sleep(1)
-                stable_state = await read_complete_state()
-                if state != stable_state:
-                    raise DraftBaselineError(
-                        "DRAFT_BASELINE_UNAVAILABLE: 头条号草稿列表仍在变化"
+            if exit_editor and expected_title and self._draft_baseline is not None:
+                # 原生退出触发的云端落库与草稿列表更新存在延迟。最多等待
+                # 60 秒；只在第 10/30/50 秒刷新草稿页，绝不再次点击退出。
+                normalized_expected = self._normalize_platform_title(expected_title)
+                baseline_count = self._draft_baseline.title_counts.get(
+                    normalized_expected,
+                    0,
+                )
+                active_draft_id = self._active_draft_id
+                active_response_bound = bool(
+                    active_draft_id
+                    and any(
+                        active_draft_id in (record.get("draft_ids") or ())
+                        for record in self._autosave_records
                     )
-                state = stable_state
+                )
+
+                def expected_entity_ready(candidate: dict) -> bool:
+                    title_counts = candidate.get("titleCounts") or {}
+                    current_count = int(title_counts.get(normalized_expected) or 0)
+                    matching_ids: set[str] = set()
+                    for title, draft_id in candidate.get("capturedItems") or []:
+                        if title == normalized_expected and self._safe_pgc_id(draft_id):
+                            matching_ids.add(str(draft_id))
+                    for item in candidate.get("hrefItems") or []:
+                        if not isinstance(item, dict):
+                            continue
+                        if self._normalize_platform_title(item.get("title")) != normalized_expected:
+                            continue
+                        draft_id = self._pgc_id_from_url(item.get("href"))
+                        if draft_id:
+                            matching_ids.add(draft_id)
+                    count_advanced = current_count >= baseline_count + 1
+                    if active_draft_id:
+                        # 标题初始化已从平台自动保存响应绑定新 pgc_id 时，
+                        # 草稿列表可能延迟几十秒才渲染该卡片。此时立即结束
+                        # 列表轮询，后续仍必须按该 ID 重开并精确核对全部
+                        # 图文 token，不能仅凭响应 ID 宣告成功。
+                        return (
+                            count_advanced and active_draft_id in matching_ids
+                        ) or active_response_bound
+                    return count_advanced and len(matching_ids) == current_count
+
+                state = await read_complete_state()
+                for attempt in range(60):
+                    if expected_entity_ready(state):
+                        break
+                    if attempt in {9, 29, 49}:
+                        await self.page.goto(
+                            DRAFT_BOX_URL,
+                            wait_until="domcontentloaded",
+                            timeout=30000,
+                        )
+                        await self.page.wait_for_selector(
+                            ".draft-page .list-count",
+                            timeout=20000,
+                        )
+                    await asyncio.sleep(1)
+                    state = await read_complete_state()
+            else:
+                # 基线读取仍要求快速稳定，避免把正在变化的旧列表当作基线。
+                first_state = await read_complete_state()
+                await asyncio.sleep(1)
+                state = await read_complete_state()
+                if first_state != state:
+                    await asyncio.sleep(1)
+                    stable_state = await read_complete_state()
+                    if state != stable_state:
+                        raise DraftBaselineError(
+                            "DRAFT_BASELINE_UNAVAILABLE: 头条号草稿列表仍在变化"
+                        )
+                    state = stable_state
         finally:
             try:
                 self.page.remove_listener("response", on_response)
@@ -542,10 +920,29 @@ class ToutiaoPlatform(BasePlatform):
         all_draft_ids = frozenset(
             draft_id for ids in frozen_title_ids.values() for draft_id in ids
         )
-        if len(all_draft_ids) != total_count:
-            raise DraftBaselineError(
-                "DRAFT_BASELINE_UNAVAILABLE: 头条号草稿 ID 未完整稳定加载"
+        normalized_expected = self._normalize_platform_title(expected_title)
+        expected_count = title_counts.get(normalized_expected, 0)
+        expected_ids = frozen_title_ids.get(normalized_expected, frozenset())
+        if normalized_expected:
+            active_draft_id = self._active_draft_id
+            active_is_new = bool(
+                active_draft_id
+                and self._draft_baseline is not None
+                and active_draft_id not in self._draft_baseline.draft_ids
             )
+            if active_is_new:
+                active_response_bound = any(
+                    active_draft_id in (record.get("draft_ids") or ())
+                    for record in self._autosave_records
+                )
+                if active_draft_id not in expected_ids and not active_response_bound:
+                    raise DraftBaselineError(
+                        "DRAFT_BASELINE_UNAVAILABLE: 头条号本次新草稿 ID 未出现在草稿列表"
+                    )
+            elif len(expected_ids) != expected_count:
+                raise DraftBaselineError(
+                    "DRAFT_BASELINE_UNAVAILABLE: 头条号目标标题的草稿 ID 未完整稳定加载"
+                )
         return _ToutiaoDraftSnapshot(
             loaded=True,
             total_count=total_count,
@@ -563,7 +960,32 @@ class ToutiaoPlatform(BasePlatform):
                 "DRAFT_BASELINE_UNAVAILABLE: 头条号标题不足 2 个字"
             )
         self._preflight_title = expected_title
-        self._draft_baseline = await self._fetch_draft_snapshot()
+        self._draft_baseline = await self._fetch_draft_snapshot(
+            expected_title=expected_title
+        )
+
+    def _mark_editor_mutation(self) -> int:
+        """为下一次平台自动保存建立不可混淆的内容代次。"""
+
+        self._mutation_generation += 1
+        self._last_editor_mutation_at = time.monotonic()
+        return self._mutation_generation
+
+    def _capture_autosave_request(self, request) -> None:
+        """在请求发出时绑定内容代次，避免旧响应晚到污染新版本。"""
+
+        try:
+            parsed = urlparse(str(request.url or ""))
+            if (
+                str(request.method or "").upper() == "POST"
+                and parsed.netloc == "mp.toutiao.com"
+                and parsed.path == AUTOSAVE_PATH
+            ):
+                self._autosave_request_generations[id(request)] = (
+                    self._mutation_generation
+                )
+        except Exception:  # noqa: BLE001
+            return
 
     async def _capture_autosave_response(self, response) -> None:
         try:
@@ -584,11 +1006,22 @@ class ToutiaoPlatform(BasePlatform):
                 pass
             self._autosave_records.append(
                 {
+                    "generation": self._autosave_request_generations.pop(
+                        id(response.request),
+                        None,
+                    ),
                     "received_at": time.monotonic(),
                     "status": status,
                     "code": payload.get("code"),
                     "err_no": payload.get("err_no"),
-                    "reason": str(payload.get("reason") or "")[:120],
+                    "reason": safe_media_error(
+                        payload.get("reason")
+                        or payload.get("message")
+                        or payload.get("msg")
+                        or payload.get("err_msg")
+                        or payload.get("err_tips"),
+                        fallback="",
+                    )[:120],
                     "draft_ids": self._extract_save_ids(payload),
                 }
             )
@@ -598,19 +1031,162 @@ class ToutiaoPlatform(BasePlatform):
     def _ensure_autosave_listener(self) -> None:
         if self._autosave_handler is not None:
             return
+        self._autosave_request_handler = self._capture_autosave_request
         self._autosave_handler = self._capture_autosave_response
+        self.page.on("request", self._autosave_request_handler)
         self.page.on("response", self._autosave_handler)
 
+    async def _wait_for_autosave_barrier(
+        self,
+        *,
+        generation: int,
+        stage: str,
+        require_draft_id: bool = False,
+    ) -> dict[str, object]:
+        """等待本次变更后的平台自动保存稳定，失败即停止后续写入。"""
+
+        previous_count = -1
+        stable_rounds = 0
+        last_records: list[dict[str, object]] = []
+        for _ in range(80):
+            self._require_page_alive(f"头条号等待{stage}自动保存")
+            records = [
+                record
+                for record in self._autosave_records
+                if record.get("generation") == generation
+            ]
+            if records:
+                if len(records) == previous_count:
+                    stable_rounds += 1
+                else:
+                    previous_count = len(records)
+                    stable_rounds = 0
+                last_records = records
+                if stable_rounds >= 4:
+                    latest = records[-1]
+                    platform_code = self._autosave_platform_code(latest)
+                    if platform_code != "0":
+                        code = platform_code or "未知"
+                        reason = str(latest.get("reason") or "").strip()
+                        suffix = f"：{reason}" if reason else ""
+                        raise ToutiaoDraftSaveRejectedError(
+                            f"TOUTIAO_DRAFT_SAVE_REJECTED: 头条号{stage}自动保存失败"
+                            f"（平台码 {code}）{suffix}"
+                        )
+                    response_ids = frozenset(
+                        draft_id
+                        for record in records
+                        for draft_id in (record.get("draft_ids") or ())
+                    )
+                    if len(response_ids) > 1:
+                        raise DraftResultUnknownError(
+                            "DRAFT_RESULT_UNKNOWN: 头条号自动保存返回多个草稿 ID"
+                        )
+                    response_id = next(iter(response_ids)) if response_ids else None
+                    current_id = self._pgc_id_from_url(
+                        str(getattr(self.page, "url", "") or "")
+                    )
+                    candidate_id = response_id or current_id or self._active_draft_id
+                    if (
+                        response_id
+                        and current_id
+                        and response_id != current_id
+                    ):
+                        raise DraftResultUnknownError(
+                            "DRAFT_RESULT_UNKNOWN: 头条号页面与保存响应的草稿 ID 不一致"
+                        )
+                    if (
+                        candidate_id
+                        and self._active_draft_id
+                        and candidate_id != self._active_draft_id
+                    ):
+                        raise DraftResultUnknownError(
+                            "DRAFT_RESULT_UNKNOWN: 头条号自动保存切换到了另一草稿实体"
+                        )
+                    if require_draft_id and not candidate_id:
+                        await asyncio.sleep(0.25)
+                        continue
+                    if candidate_id:
+                        self._active_draft_id = candidate_id
+                    return latest
+            await asyncio.sleep(0.25)
+
+        if last_records and self._autosave_rejected(last_records[-1]):
+            raise ToutiaoDraftSaveRejectedError(
+                f"TOUTIAO_DRAFT_SAVE_REJECTED: 头条号{stage}自动保存失败"
+            )
+        raise DraftResultUnknownError(
+            f"DRAFT_RESULT_UNKNOWN: 头条号{stage}后未取得成功的自动保存证据"
+        )
+
+    async def _exit_editor_via_native_control(self) -> None:
+        """点击平台原生退出一次；禁止使用浏览器历史回退代替保存流程。"""
+
+        self._require_page_alive("头条号点击原生退出")
+        control = self.page.locator(EDITOR_EXIT_SELECTOR)
+        if await control.count() != 1 or not await control.is_visible():
+            raise SelectorError(
+                "SELECTOR_ERROR: 头条号编辑器原生退出控件不存在或不唯一"
+            )
+        await control.click(timeout=8000)
+        publish_path = urlparse(PUBLISH_URL).path
+        previous_count = -1
+        stable_rounds = 0
+        for _ in range(80):
+            self._require_page_alive("头条号等待原生退出")
+            current = urlparse(str(getattr(self.page, "url", "") or ""))
+            records = self._autosaves_after_last_mutation()
+            if len(records) == previous_count:
+                stable_rounds += 1
+            else:
+                previous_count = len(records)
+                stable_rounds = 0
+            same_origin = current.netloc == urlparse(PUBLISH_URL).netloc
+            left_editor = current.path != publish_path
+            login_redirect = "/login" in current.path or "/auth/" in current.path
+            if same_origin and left_editor and not login_redirect and stable_rounds >= 8:
+                return
+            await asyncio.sleep(0.25)
+        raise DraftResultUnknownError(
+            "DRAFT_RESULT_UNKNOWN: 头条号点击原生退出后仍停留在编辑器"
+        )
+
+    async def _wait_for_editor_settle_before_exit(self) -> None:
+        """完整图文静置 12 秒；期间结构漂移则禁止退出。"""
+
+        expected_tokens = self._expected_persisted_tokens
+        if expected_tokens is None:
+            raise DraftResultUnknownError(
+                "DRAFT_RESULT_UNKNOWN: 头条号缺少退出前图文核验快照"
+            )
+        for _ in range(12):
+            self._require_page_alive("头条号等待完整图文稳定")
+            await asyncio.sleep(1)
+            if await self._read_editor_tokens() != expected_tokens:
+                raise DraftResultUnknownError(
+                    "DRAFT_RESULT_UNKNOWN: 头条号等待退出期间图文结构发生变化"
+                )
+
     async def navigate_to_editor(self):
-        """直接打开头条号文章编辑器（graphic/publish）。"""
+        """从草稿页点击平台原生文章入口，避免恢复旧编辑会话。"""
 
         self._require_page_alive("头条号打开编辑器")
         self._ensure_autosave_listener()
-        await self.page.goto(
-            PUBLISH_URL,
-            wait_until="domcontentloaded",
-            timeout=30000,
-        )
+        current = urlparse(str(getattr(self.page, "url", "") or ""))
+        expected_draft = urlparse(DRAFT_BOX_URL)
+        if (
+            current.netloc != expected_draft.netloc
+            or current.path != expected_draft.path
+        ):
+            raise DraftBaselineError(
+                "DRAFT_BASELINE_UNAVAILABLE: 头条号创建新稿前未停留在草稿页"
+            )
+        create_link = self.page.locator(CREATE_ARTICLE_LINK_SELECTOR)
+        if await create_link.count() != 1 or not await create_link.is_visible():
+            raise SelectorError(
+                "SELECTOR_ERROR: 头条号草稿页的文章创作入口不存在或不唯一"
+            )
+        await create_link.click(timeout=8000)
         try:
             await self.page.wait_for_selector(
                 TITLE_SELECTOR,
@@ -624,27 +1200,57 @@ class ToutiaoPlatform(BasePlatform):
             raise SelectorError(
                 "SELECTOR_ERROR: 头条号编辑器标题输入框未出现"
             ) from exc
-        await self.simulator.random_delay(2, 4)
+        current_id = self._pgc_id_from_url(getattr(self.page, "url", ""))
+        if (
+            current_id
+            and self._draft_baseline is not None
+            and current_id in self._draft_baseline.draft_ids
+        ):
+            raise DraftBaselineError(
+                "DRAFT_BASELINE_UNAVAILABLE: 头条号文章入口恢复了已有草稿，已停止写入"
+            )
 
     async def fill_title(self, title: str):
+        """在原生新稿会话中写入标题，并等待平台绑定新草稿 ID。"""
+
         self._require_page_alive("头条号填写标题")
         expected = self._normalize_platform_title(title)
         if len(expected) < 2:
             raise SelectorError("SELECTOR_ERROR: 头条号标题不足 2 个字")
         title_input = self.page.locator(TITLE_SELECTOR)
-        try:
-            await title_input.click(timeout=8000)
-        except Exception:
-            pass
-        self._last_editor_mutation_at = time.monotonic()
+        if await title_input.count() != 1:
+            raise SelectorError("SELECTOR_ERROR: 头条号编辑器标题输入框不存在或不唯一")
+        generation = self._mark_editor_mutation()
         await title_input.fill(expected)
-        await self.simulator.random_delay(1, 2)
         actual = (await title_input.input_value()).strip()
         if actual != expected:
             raise SelectorError("SELECTOR_ERROR: 头条号标题回读不一致")
         if expected != " ".join(str(title or "").split()):
             logger.info("头条号标题已按平台 30 字上限安全截断")
-        logger.info("头条号标题已填写并回读验证: {} 字", len(actual))
+        # 原生“创作 → 文章”先通过标题自动保存创建 pgc_id。必须等这次
+        # 成功回执绑定到当前会话后再写正文，否则后续正文请求会在草稿实体
+        # 尚未稳定时被平台拒绝。这里只等待同页网络回执，禁止 blur、刷新、
+        # 跳转或退出，因此标题与正文仍属于同一个原生新稿会话。
+        await self._wait_for_autosave_barrier(
+            generation=generation,
+            stage="标题初始化",
+            require_draft_id=True,
+        )
+        if not self._active_draft_id:
+            raise DraftResultUnknownError(
+                "DRAFT_RESULT_UNKNOWN: 头条号标题初始化未绑定草稿 ID"
+            )
+        if (
+            self._draft_baseline is not None
+            and self._active_draft_id in self._draft_baseline.draft_ids
+        ):
+            raise DraftBaselineError(
+                "DRAFT_BASELINE_UNAVAILABLE: 头条号标题初始化绑定了已有草稿"
+            )
+        logger.info(
+            "头条号标题已填写并绑定新草稿实体: {} 字",
+            len(actual),
+        )
 
     async def fill_content(self, content_blocks: list, images: list):
         """按冻结块顺序写入文字、H2 与正文图片，并在保存前核对 DOM。"""
@@ -655,7 +1261,7 @@ class ToutiaoPlatform(BasePlatform):
             await editor.click(timeout=8000)
         except Exception:
             pass
-        self._last_editor_mutation_at = time.monotonic()
+        self._mark_editor_mutation()
         await editor.press("Control+A")
         await editor.press("Backspace")
 
@@ -664,22 +1270,52 @@ class ToutiaoPlatform(BasePlatform):
         uploaded_images = 0
         failed_images: list[dict[str, str]] = []
         wrote_any = False
-        for block in content_blocks:
+        previous_block_type: str | None = None
+        for block_number, block in enumerate(content_blocks, start=1):
             block_type = str(block.get("type") or "")
             text = str(block.get("text") or "").strip()
             if block_type not in {"text", "heading", "image"}:
                 continue
             if block_type != "image" and not text:
                 continue
-            # 工具栏和上传面板会移动焦点；每个块开始前都重新把选区固定到
-            # 正文末尾，避免后续段落误写进按钮、弹窗或上一张图片说明区。
-            await editor.click(timeout=8000)
-            await editor.press("Control+End")
-            if wrote_any:
-                self._last_editor_mutation_at = time.monotonic()
-                await self.page.keyboard.press("Enter")
+            first_plain_text = not wrote_any and block_type in {"text", "heading"}
+            native_text_continuation = (
+                wrote_any
+                and block_type in {"text", "heading"}
+                and previous_block_type in {"text", "heading", "image"}
+            )
+            native_image_continuation = (
+                wrote_any
+                and block_type == "image"
+                and previous_block_type in {"text", "heading"}
+            )
+            if (
+                first_plain_text
+                or native_text_continuation
+                or native_image_continuation
+            ):
+                # 清空后的原生选区已经位于正文。实测再次 focus、Control+End
+                # 和重建选区会让头条把首段自动保存判为失败；第一段必须沿用
+                # 清空动作留下的原生选区直接输入。连续文字块也只使用原生
+                # Enter 换段，避免再次重建选区触发保存失败。
+                if native_text_continuation or native_image_continuation:
+                    await self.page.keyboard.press("Enter")
+                self._mark_editor_mutation()
+            else:
+                # 工具栏和上传面板会移动焦点；后续块重新锚定正文末尾。
+                await editor.focus(timeout=8000)
+                await editor.press("Control+End")
+                self._mark_editor_mutation()
+                if wrote_any and not await self._can_reuse_existing_empty_tail():
+                    await self.page.keyboard.press("Enter")
             if block_type in {"text", "heading"}:
-                self._last_editor_mutation_at = time.monotonic()
+                if (
+                    not (first_plain_text or native_text_continuation)
+                    and not await self._stabilize_text_insertion_point()
+                ):
+                    raise SelectorError(
+                        "SELECTOR_ERROR: 头条号正文文字插入位置未稳定"
+                    )
                 lines = text.splitlines() or [text]
                 for index, line in enumerate(lines):
                     if line:
@@ -701,7 +1337,10 @@ class ToutiaoPlatform(BasePlatform):
                     failed_images.append(
                         {"filename": "", "error": "文章图片块没有对应本地文件"}
                     )
-                elif not await self._stabilize_image_insertion_point():
+                elif (
+                    not native_image_continuation
+                    and not await self._stabilize_image_insertion_point()
+                ):
                     failed_images.append(
                         {
                             "filename": Path(img_path).name,
@@ -721,6 +1360,13 @@ class ToutiaoPlatform(BasePlatform):
                                 ),
                             }
                         )
+                        if await self._read_editor_tokens() != expected_tokens:
+                            failed_images.append(
+                                {
+                                    "filename": Path(img_path).name,
+                                    "error": "头条号正文图片未插入到预期图文位置",
+                                }
+                            )
                     else:
                         failed_images.append(
                             {
@@ -751,6 +1397,8 @@ class ToutiaoPlatform(BasePlatform):
                     }
                     raise error
             wrote_any = True
+            previous_block_type = block_type
+            await self._wait_for_content_block_autosave(block_number)
             await self.simulator.random_delay(0.2, 0.5)
 
         actual_text = await editor.inner_text()
@@ -805,6 +1453,123 @@ class ToutiaoPlatform(BasePlatform):
             "media_error": media_error,
         }
 
+    async def _wait_for_content_block_autosave(self, block_number: int) -> None:
+        """等待当前块的自动保存窗口；中间拒绝交由最终退出核验裁决。"""
+
+        try:
+            await self._wait_for_autosave_barrier(
+                generation=self._mutation_generation,
+                stage=f"第 {block_number} 个图文块",
+            )
+        except ToutiaoDraftSaveRejectedError:
+            # 头条没有显式保存按钮，新稿编辑期间偶尔会对中间版本返回
+            # “保存失败”，但平台原生退出仍可能把完整编辑器状态写入草稿。
+            # 这里只结束当前防抖窗口，最终是否成功仍必须由唯一新增 ID
+            # 与精确重开后的完整图文结构共同证明。
+            logger.warning(
+                "头条号第 {} 个图文块的中间自动保存未通过；"
+                "继续写入并由原生退出后的云端重开结果裁决",
+                block_number,
+            )
+
+    async def _can_reuse_existing_empty_tail(self) -> bool:
+        """复用编辑器自动生成的末尾空段，避免每块之间多插一行。"""
+
+        try:
+            return bool(
+                await self.page.evaluate(
+                    """() => {
+                        const reuseExistingTail = true;
+                        const root = document.querySelector('.ProseMirror');
+                        const tail = root?.lastElementChild;
+                        if (!reuseExistingTail || !tail || tail.tagName !== 'P') {
+                            return false;
+                        }
+                        const isEmptyText = child =>
+                            child.nodeType === Node.TEXT_NODE &&
+                            (child.nodeValue || '')
+                                .replace(/[\u200B-\u200D\uFEFF]/g, '')
+                                .trim() === '';
+                        const isPlaceholderBreak = child =>
+                            child.nodeType === Node.ELEMENT_NODE &&
+                            child.tagName === 'BR';
+                        const isEditorPlaceholder = child =>
+                            child.nodeType === Node.ELEMENT_NODE &&
+                            child.matches(
+                                'span.syl-placeholder.ProseMirror-widget' +
+                                '[contenteditable="false"][ignoreel]'
+                            );
+                        const children = Array.from(tail.childNodes);
+                        const breaks = children.filter(isPlaceholderBreak);
+                        const placeholders = children.filter(isEditorPlaceholder);
+                        return breaks.length <= 1 && placeholders.length <= 1 &&
+                            children.every(
+                                child => isEmptyText(child) ||
+                                    isPlaceholderBreak(child) ||
+                                    isEditorPlaceholder(child)
+                            );
+                    }"""
+                )
+            )
+        except Exception as exc:
+            if self._exception_means_browser_closed(exc):
+                raise BrowserLifecycleError(
+                    "BROWSER_CONTEXT_CLOSED: 头条号检查末尾空段时页面已关闭"
+                ) from exc
+            return False
+
+    async def _stabilize_text_insertion_point(self) -> bool:
+        """确认键盘输入会落到唯一的末尾空文本段，而非图片组件前的旧选区。"""
+
+        editor = self.page.locator(BODY_SELECTOR)
+        if await editor.count() != 1:
+            return False
+        try:
+            await editor.focus(timeout=8000)
+            await editor.press("Control+End")
+            await self.page.evaluate(
+                """() => new Promise((resolve) => {
+                    requestAnimationFrame(() => requestAnimationFrame(resolve));
+                })"""
+            )
+            tail = editor.locator(":scope > p:last-child")
+            if await tail.count() != 1:
+                return False
+            tail_is_empty = await tail.evaluate(
+                """(node) => {
+                    const isEmptyText = child => child.nodeType === Node.TEXT_NODE &&
+                        (child.nodeValue || '')
+                            .replace(/[\u200B-\u200D\uFEFF]/g, '')
+                            .trim() === '';
+                    const isPlaceholderBreak = child =>
+                        child.nodeType === Node.ELEMENT_NODE &&
+                        child.tagName === 'BR';
+                    const isEditorPlaceholder = child =>
+                        child.nodeType === Node.ELEMENT_NODE &&
+                        child.matches(
+                            'span.syl-placeholder.ProseMirror-widget' +
+                            '[contenteditable="false"][ignoreel]'
+                        );
+                    const children = Array.from(node.childNodes);
+                    const breaks = children.filter(isPlaceholderBreak);
+                    const placeholders = children.filter(isEditorPlaceholder);
+                    return breaks.length <= 1 && placeholders.length <= 1 &&
+                        children.every(
+                        child => isEmptyText(child) || isPlaceholderBreak(child) ||
+                            isEditorPlaceholder(child),
+                    );
+                }"""
+            )
+            if not tail_is_empty:
+                return False
+            return await self._wait_for_stable_empty_tail_selection()
+        except Exception as exc:
+            if self._exception_means_browser_closed(exc):
+                raise BrowserLifecycleError(
+                    "BROWSER_CONTEXT_CLOSED: 头条号稳定文字插入位置时页面已关闭"
+                ) from exc
+            return False
+
     async def _stabilize_image_insertion_point(self) -> bool:
         """在打开图片抽屉前确认 ProseMirror 选区已落到正文末尾。"""
 
@@ -812,7 +1577,7 @@ class ToutiaoPlatform(BasePlatform):
         if await editor.count() != 1:
             return False
         try:
-            await editor.click(timeout=8000)
+            await editor.focus(timeout=8000)
             await editor.press("Control+End")
             # Enter 产生的新段落要先经过 ProseMirror 事务和浏览器绘制，
             # 否则 last-child 仍可能是上一段或图片节点。
@@ -833,24 +1598,37 @@ class ToutiaoPlatform(BasePlatform):
                     const isPlaceholderBreak = child =>
                         child.nodeType === Node.ELEMENT_NODE &&
                         child.tagName === 'BR';
+                    const isEditorPlaceholder = child =>
+                        child.nodeType === Node.ELEMENT_NODE &&
+                        child.matches(
+                            'span.syl-placeholder.ProseMirror-widget' +
+                            '[contenteditable="false"][ignoreel]'
+                        );
                     const children = Array.from(node.childNodes);
                     const breaks = children.filter(isPlaceholderBreak);
-                    return breaks.length <= 1 && children.every(
-                        child => isEmptyText(child) || isPlaceholderBreak(child),
+                    const placeholders = children.filter(isEditorPlaceholder);
+                    return breaks.length <= 1 && placeholders.length <= 1 &&
+                        children.every(
+                        child => isEmptyText(child) || isPlaceholderBreak(child) ||
+                            isEditorPlaceholder(child),
                     );
                 }"""
             )
             if not tail_is_empty:
                 return False
-            # 必须使用真实点击让 ProseMirror 同步内部 TextSelection；直接用
-            # DOM Range 看似有光标，但平台 editor.insert() 仍可能读到旧选区。
-            await tail.click(timeout=8000, position={"x": 4, "y": 4})
-            await editor.press("End")
-            await self.page.evaluate(
-                """() => new Promise((resolve) => {
-                    requestAnimationFrame(() => requestAnimationFrame(resolve));
-                })"""
-            )
+            return await self._wait_for_stable_empty_tail_selection()
+        except Exception as exc:
+            if self._exception_means_browser_closed(exc):
+                raise BrowserLifecycleError(
+                    "BROWSER_CONTEXT_CLOSED: 头条号稳定图片插入位置时页面已关闭"
+                ) from exc
+            return False
+
+    async def _wait_for_stable_empty_tail_selection(self) -> bool:
+        """等待上传后的 ProseMirror 重绘完成，并重新锚定末尾空段。"""
+
+        editor = self.page.locator(BODY_SELECTOR)
+        async def selection_is_stable() -> bool:
             return bool(
                 await self.page.evaluate(
                     """() => {
@@ -864,13 +1642,6 @@ class ToutiaoPlatform(BasePlatform):
                         }
                         const anchor = selection.anchorNode;
                         const focus = selection.focusNode;
-                        if (!(
-                            selection.isCollapsed && anchor && focus &&
-                            (anchor === tail || tail.contains(anchor)) &&
-                            (focus === tail || tail.contains(focus))
-                        )) {
-                            return false;
-                        }
                         const isEmptyText = child =>
                             child.nodeType === Node.TEXT_NODE &&
                             (child.nodeValue || '')
@@ -879,20 +1650,48 @@ class ToutiaoPlatform(BasePlatform):
                         const isPlaceholderBreak = child =>
                             child.nodeType === Node.ELEMENT_NODE &&
                             child.tagName === 'BR';
+                        const isEditorPlaceholder = child =>
+                            child.nodeType === Node.ELEMENT_NODE &&
+                            child.matches(
+                                'span.syl-placeholder.ProseMirror-widget' +
+                                '[contenteditable="false"][ignoreel]'
+                            );
                         const children = Array.from(tail.childNodes);
                         const breaks = children.filter(isPlaceholderBreak);
-                        return breaks.length <= 1 && children.every(
-                            child => isEmptyText(child) || isPlaceholderBreak(child),
+                        const placeholders = children.filter(isEditorPlaceholder);
+                        return Boolean(
+                            selection.isCollapsed && anchor && focus &&
+                            (anchor === tail || tail.contains(anchor)) &&
+                            (focus === tail || tail.contains(focus)) &&
+                            breaks.length <= 1 && placeholders.length <= 1 &&
+                            children.every(
+                                child => isEmptyText(child) ||
+                                    isPlaceholderBreak(child) ||
+                                    isEditorPlaceholder(child)
+                            )
                         );
                     }"""
                 )
             )
-        except Exception as exc:
-            if self._exception_means_browser_closed(exc):
-                raise BrowserLifecycleError(
-                    "BROWSER_CONTEXT_CLOSED: 头条号稳定图片插入位置时页面已关闭"
-                ) from exc
+
+        # Control+End 通常已经给出正确选区；先纯等待，禁止用正文根中心点击。
+        for _ in range(4):
+            if await selection_is_stable():
+                return True
+            await asyncio.sleep(0.25)
+
+        # 仅当 ProseMirror 重绘后仍未同步时，点击唯一的末尾空 P 一次兜底。
+        tail = editor.locator(":scope > p:last-child")
+        if await tail.count() != 1:
             return False
+        await tail.click(timeout=8000, position={"x": 4, "y": 4})
+        await editor.press("End")
+        for attempt in range(20):
+            if await selection_is_stable():
+                return True
+            if attempt < 19:
+                await asyncio.sleep(0.25)
+        return False
 
     @staticmethod
     def _media_progress_status(
@@ -928,21 +1727,116 @@ class ToutiaoPlatform(BasePlatform):
     async def _apply_h2_to_current_block(self) -> None:
         """只使用头条编辑器自己的标题按钮，将当前段落切换为 H2。"""
 
+        target = await self._capture_selected_block_signature()
+        if target is None:
+            raise SelectorError("SELECTOR_ERROR: 头条号无法绑定待转换的 H2 段落")
         button = self.page.locator(HEADING_BUTTON_SELECTOR)
         if await button.count() != 1:
             raise SelectorError("SELECTOR_ERROR: 头条号 H2 工具按钮不存在或不唯一")
-        self._last_editor_mutation_at = time.monotonic()
         await button.click(timeout=8000)
         await self.simulator.random_delay(0.2, 0.5)
-        is_h2 = await self.page.evaluate(
-            """() => {
-                const root = document.querySelector('.ProseMirror');
-                const block = root?.lastElementChild;
-                return Boolean(block && (block.matches('h2') || block.querySelector('h2')));
-            }"""
-        )
+        is_h2 = await self._block_signature_is_h2(target)
+        if not is_h2:
+            # 工具栏点击后可能夺走浏览器选区；先用真实点击重新锚定原文字块，
+            # 再使用编辑器标准 H2 快捷键一次，最后仍按同一块的 DOM 回读。
+            if not await self._restore_block_selection(target):
+                raise SelectorError("SELECTOR_ERROR: 头条号 H2 段落重新定位失败")
+            await self.page.keyboard.press("Control+Alt+2")
+            await self.simulator.random_delay(0.2, 0.5)
+            is_h2 = await self._block_signature_is_h2(target)
         if not is_h2:
             raise SelectorError("SELECTOR_ERROR: 头条号 H2 按钮点击后段落层级未生效")
+
+    async def _capture_selected_block_signature(self) -> dict[str, object] | None:
+        value = await self.page.evaluate(
+            r"""() => {
+                const root = document.querySelector('.ProseMirror');
+                const selection = window.getSelection();
+                let currentBlock = selection?.anchorNode || null;
+                if (currentBlock?.nodeType === Node.TEXT_NODE) {
+                    currentBlock = currentBlock.parentElement;
+                }
+                while (currentBlock && currentBlock.parentElement !== root) {
+                    currentBlock = currentBlock.parentElement;
+                }
+                if (!root || !currentBlock) return null;
+                const index = Array.from(root.children).indexOf(currentBlock);
+                const text = String(currentBlock.innerText || '')
+                    .replace(/\s+/g, ' ')
+                    .trim();
+                return index >= 0 && text ? {index, text} : null;
+            }"""
+        )
+        if not isinstance(value, dict):
+            return None
+        index = value.get("index")
+        text = str(value.get("text") or "").strip()
+        if isinstance(index, bool) or not isinstance(index, int) or index < 0 or not text:
+            return None
+        return {"index": index, "text": text}
+
+    async def _block_signature_is_h2(self, target: dict[str, object]) -> bool:
+        return bool(
+            await self.page.evaluate(
+                r"""expected => {
+                    const root = document.querySelector('.ProseMirror');
+                    const block = root?.children?.[expected.index];
+                    if (!block) return false;
+                    const text = String(block.innerText || '')
+                        .replace(/\s+/g, ' ')
+                        .trim();
+                    return text === expected.text && Boolean(
+                        block.matches('h1, h2') || block.querySelector('h1, h2')
+                    );
+                }""",
+                target,
+            )
+        )
+
+    async def _restore_block_selection(self, target: dict[str, object]) -> bool:
+        try:
+            editor = self.page.locator(BODY_SELECTOR)
+            block = editor.locator(
+                f":scope > :nth-child({int(target['index']) + 1})"
+            )
+            if await block.count() != 1:
+                return False
+            await block.click(timeout=8000, position={"x": 4, "y": 4})
+            await self.page.keyboard.press("End")
+            await self.page.evaluate(
+                """() => new Promise((resolve) => {
+                    requestAnimationFrame(() => requestAnimationFrame(resolve));
+                })"""
+            )
+            return bool(
+                await self.page.evaluate(
+                    r"""expected => {
+                        const root = document.querySelector('.ProseMirror');
+                        const block = root?.children?.[expected.index];
+                        const selection = window.getSelection();
+                        if (!root || !block || !selection ||
+                            selection.rangeCount !== 1 || !selection.isCollapsed ||
+                            document.activeElement !== root) {
+                            return false;
+                        }
+                        const text = String(block.innerText || '')
+                            .replace(/\s+/g, ' ')
+                            .trim();
+                        const anchor = selection.anchorNode;
+                        const focus = selection.focusNode;
+                        return text === expected.text && anchor && focus &&
+                            (anchor === block || block.contains(anchor)) &&
+                            (focus === block || block.contains(focus));
+                    }""",
+                    target,
+                )
+            )
+        except Exception as exc:
+            if self._exception_means_browser_closed(exc):
+                raise BrowserLifecycleError(
+                    "BROWSER_CONTEXT_CLOSED: 头条号重新定位 H2 段落时页面已关闭"
+                ) from exc
+            return False
 
     async def _read_editor_tokens(self) -> list[dict[str, str]]:
         value = await self.page.evaluate(
@@ -970,7 +1864,27 @@ class ToutiaoPlatform(BasePlatform):
                 };
                 const tokens = [];
                 for (const child of Array.from(root.children)) {
-                    const kind = child.matches('h2') || Boolean(child.querySelector('h2'))
+                    const observedImageNode =
+                        child.matches('[__syl_tag][contenteditable="false"]') &&
+                        Boolean(child.querySelector('templ img')) &&
+                        Boolean(child.querySelector('mask img'));
+                    const legacyImageNode = child.matches('.pgc-image, .pgc-img');
+                    if (observedImageNode || legacyImageNode) {
+                        const fingerprints = Array.from(child.querySelectorAll('img'))
+                            .map(imageFingerprint)
+                            .filter(Boolean);
+                        const unique = Array.from(new Set(fingerprints));
+                        tokens.push({
+                            kind: 'I',
+                            text: '',
+                            fingerprint: unique.length === 1 ? unique[0] : '',
+                        });
+                        continue;
+                    }
+                    // 头条编辑器只有一个“标题”按钮，真实 DOM 生成 H1；
+                    // 在统一内容契约中仍投影为正文 H2，避免与文章标题栏混淆。
+                    const kind = child.matches('h1, h2') ||
+                        Boolean(child.querySelector('h1, h2'))
                         ? 'H2' : 'P';
                     let textBuffer = '';
                     const flushText = () => {
@@ -1018,10 +1932,10 @@ class ToutiaoPlatform(BasePlatform):
 
     async def _read_editor_image_fingerprints(self) -> list[str]:
         value = await self.page.evaluate(
-            r"""() => Array.from(document.querySelectorAll(
-                    '.ProseMirror > .pgc-image img, .ProseMirror > .pgc-img img'
-                ))
-                .map(image => {
+            r"""() => {
+                const root = document.querySelector('.ProseMirror');
+                if (!root) return null;
+                const imageFingerprint = image => {
                     const candidates = [
                         image.currentSrc,
                         image.getAttribute('src'),
@@ -1036,9 +1950,26 @@ class ToutiaoPlatform(BasePlatform):
                                 return `${url.hostname}${url.pathname}`;
                             }
                         } catch (_error) {}
-                        }
+                    }
                     return '';
-                })"""
+                };
+                const fingerprintsForBlock = child => {
+                    const observedImageNode =
+                        child.matches('[__syl_tag][contenteditable="false"]') &&
+                        Boolean(child.querySelector('templ img')) &&
+                        Boolean(child.querySelector('mask img'));
+                    const legacyImageNode = child.matches('.pgc-image, .pgc-img');
+                    if (!observedImageNode && !legacyImageNode) return null;
+                    const fingerprints = Array.from(child.querySelectorAll('img'))
+                        .map(imageFingerprint)
+                        .filter(Boolean);
+                    const unique = Array.from(new Set(fingerprints));
+                    return unique.length === 1 ? unique[0] : '';
+                };
+                return Array.from(root.children)
+                    .map(fingerprintsForBlock)
+                    .filter(value => value !== null);
+            }"""
         )
         if not isinstance(value, list):
             return []
@@ -1056,7 +1987,7 @@ class ToutiaoPlatform(BasePlatform):
             await image_button.click(timeout=8000)
             drawer = self.page.locator(IMAGE_DRAWER_SELECTOR)
             try:
-                await drawer.wait_for(state="attached", timeout=10000)
+                await drawer.wait_for(state="visible", timeout=10000)
             except Exception as exc:
                 if self._exception_means_browser_closed(exc):
                     raise BrowserLifecycleError(
@@ -1065,6 +1996,16 @@ class ToutiaoPlatform(BasePlatform):
                 return {"success": False, "error": "头条号正文图片上传面板未加载"}
             if await drawer.count() != 1:
                 return {"success": False, "error": "头条号正文图片抽屉不存在或不唯一"}
+            if not await self._activate_local_image_upload_tab(drawer):
+                close_error = await self._close_exact_image_drawer(drawer)
+                suffix = f"；{close_error}" if close_error else ""
+                return {
+                    "success": False,
+                    "error": (
+                        "头条号图片面板未切换到本地上传，已停止本次图片写入"
+                        f"{suffix}"
+                    ),
+                }
 
             primary_result: dict | None = None
             primary_exception: Exception | None = None
@@ -1133,6 +2074,42 @@ class ToutiaoPlatform(BasePlatform):
                 ),
             }
 
+    async def _activate_local_image_upload_tab(self, drawer) -> bool:
+        """强制使用抽屉内“上传图片”，禁止沿用搜图/图库标签页。"""
+
+        try:
+            tabs = drawer.locator(IMAGE_UPLOAD_TAB_IN_DRAWER_SELECTOR)
+            texts = [str(value or "").strip() for value in await tabs.all_inner_texts()]
+            matches = [index for index, value in enumerate(texts) if value == "上传图片"]
+            if len(matches) != 1:
+                return False
+            upload_tab = tabs.nth(matches[0])
+            await upload_tab.click(timeout=8000)
+            active = False
+            for _ in range(20):
+                class_names = str(await upload_tab.get_attribute("class") or "")
+                aria_selected = str(
+                    await upload_tab.get_attribute("aria-selected") or ""
+                ).lower()
+                if "active" in class_names.split() or aria_selected == "true":
+                    active = True
+                    break
+                await asyncio.sleep(0.1)
+            if not active:
+                return False
+            panel = drawer.locator(".upload-image-panel")
+            if await panel.count() != 1 or not await panel.is_visible():
+                return False
+            file_input = drawer.locator(BODY_IMAGE_INPUT_IN_DRAWER_SELECTOR)
+            await file_input.wait_for(state="attached", timeout=8000)
+            return await file_input.count() == 1
+        except Exception as exc:
+            if self._exception_means_browser_closed(exc):
+                raise BrowserLifecycleError(
+                    "BROWSER_CONTEXT_CLOSED: 头条号切换本地图片上传时页面已关闭"
+                ) from exc
+            return False
+
     async def _upload_image_from_open_drawer(
         self,
         image_path: str,
@@ -1172,7 +2149,7 @@ class ToutiaoPlatform(BasePlatform):
 
         self.page.on("response", on_upload_response)
         try:
-            file_inputs = self.page.locator(BODY_IMAGE_INPUT_SELECTOR)
+            file_inputs = drawer.locator(BODY_IMAGE_INPUT_IN_DRAWER_SELECTOR)
             try:
                 await file_inputs.wait_for(state="attached", timeout=10000)
             except Exception as exc:
@@ -1183,12 +2160,11 @@ class ToutiaoPlatform(BasePlatform):
                 return {"success": False, "error": "头条号正文图片上传面板未加载"}
             if await file_inputs.count() != 1:
                 return {"success": False, "error": "头条号正文图片上传控件不存在或不唯一"}
-            self._last_editor_mutation_at = time.monotonic()
             await file_inputs.set_input_files(str(image_path), timeout=15000)
 
             # 头条本地上传只把文件放进图片抽屉；必须等待上传项全部成功，
             # 再点击抽屉内的“确定”，图片才会真正插入 ProseMirror 正文。
-            confirm_button = self.page.locator(IMAGE_CONFIRM_SELECTOR)
+            confirm_button = drawer.locator(IMAGE_CONFIRM_IN_DRAWER_SELECTOR)
             try:
                 await confirm_button.wait_for(state="attached", timeout=20000)
             except Exception as exc:
@@ -1200,6 +2176,7 @@ class ToutiaoPlatform(BasePlatform):
                     "success": False,
                     "error": await self._describe_image_upload_failure(
                         upload_records,
+                        drawer=drawer,
                         fallback="头条号图片上传后未出现确认按钮",
                     ),
                 }
@@ -1210,7 +2187,7 @@ class ToutiaoPlatform(BasePlatform):
                 if await confirm_button.is_enabled():
                     confirm_enabled = True
                     break
-                drawer_error = await self._read_image_upload_error()
+                drawer_error = await self._read_image_upload_error(drawer)
                 if drawer_error:
                     return {
                         "success": False,
@@ -1225,6 +2202,7 @@ class ToutiaoPlatform(BasePlatform):
                     "success": False,
                     "error": await self._describe_image_upload_failure(
                         upload_records,
+                        drawer=drawer,
                         fallback="头条号图片上传未完成，确认按钮仍不可用",
                     ),
                 }
@@ -1339,11 +2317,15 @@ class ToutiaoPlatform(BasePlatform):
             return ""
         return f"{message}：{reason}" if reason else message
 
-    async def _read_image_upload_error(self) -> str:
+    async def _read_image_upload_error(self, drawer=None) -> str:
         """仅读取正文图片抽屉内当前上传项的可见错误文本。"""
 
         try:
-            error_nodes = self.page.locator(IMAGE_UPLOAD_ERROR_SELECTOR)
+            error_nodes = (
+                drawer.locator(IMAGE_UPLOAD_ERROR_IN_DRAWER_SELECTOR)
+                if drawer is not None
+                else self.page.locator(IMAGE_UPLOAD_ERROR_SELECTOR)
+            )
             if await error_nodes.count() == 0:
                 return ""
             texts = await error_nodes.all_inner_texts()
@@ -1363,9 +2345,10 @@ class ToutiaoPlatform(BasePlatform):
         self,
         records: list[dict[str, str | int | bool]],
         *,
+        drawer=None,
         fallback: str,
     ) -> str:
-        drawer_error = await self._read_image_upload_error()
+        drawer_error = await self._read_image_upload_error(drawer)
         if drawer_error:
             return f"头条号图片上传失败：{drawer_error}"
         conclusive_error = self._conclusive_image_upload_error(records)
@@ -1387,7 +2370,7 @@ class ToutiaoPlatform(BasePlatform):
             return "头条号正文图片抽屉不存在或不唯一"
         if not await drawer.is_visible():
             return None
-        close_button = self.page.locator(IMAGE_DRAWER_CLOSE_SELECTOR)
+        close_button = drawer.locator(IMAGE_DRAWER_CLOSE_IN_DRAWER_SELECTOR)
         if await close_button.count() != 1:
             return "头条号图片抽屉关闭按钮不存在或不唯一"
         await close_button.click(timeout=8000)
@@ -1425,7 +2408,7 @@ class ToutiaoPlatform(BasePlatform):
         }
 
     async def save_draft(self, title: str = "") -> str:
-        """等待自动保存，绑定唯一新增 ``pgc_id``，重开并核对完整图文。"""
+        """点击原生退出一次，绑定新增 ``pgc_id`` 并重开核对完整图文。"""
 
         self._require_page_alive("头条号保存草稿")
         evidence = DraftVerificationEvidence()
@@ -1447,16 +2430,26 @@ class ToutiaoPlatform(BasePlatform):
 
         self._ensure_autosave_listener()
         try:
-            editor = self.page.locator(BODY_SELECTOR)
-            await editor.evaluate("element => element.blur()")
-            # 等一个完整防抖窗口，不在第一条中间自动保存响应出现时就离开。
-            for _ in range(12):
-                await asyncio.sleep(1)
+            # 完整图文已在本地编辑器逐块回读通过；头条没有显式“保存草稿”
+            # 按钮，平台约定由原生退出触发最终保存。禁止在这里先 blur 或
+            # 强制等待中间自动保存，否则平台的短暂“保存失败”会阻断真正的
+            # 退出保存流程。
+            actual_title = (
+                await self.page.locator(TITLE_SELECTOR).input_value()
+            ).strip()
+            if actual_title != expected_title:
+                raise DraftResultUnknownError(
+                    "DRAFT_RESULT_UNKNOWN: 头条号退出前标题回读不一致"
+                )
+
+            await self._wait_for_editor_settle_before_exit()
 
             # 离开编辑器既是头条的正常自动保存触发，也是草稿实体的只读核验入口。
             current_id = self._pgc_id_from_url(getattr(self.page, "url", ""))
-            latest = await self._fetch_draft_snapshot()
-            await asyncio.sleep(2)
+            latest = await self._fetch_draft_snapshot(
+                exit_editor=True,
+                expected_title=expected_title,
+            )
             records = self._autosaves_after_last_mutation()
             latest_record = records[-1] if records else None
             if latest_record is not None:
@@ -1488,33 +2481,57 @@ class ToutiaoPlatform(BasePlatform):
                     "DRAFT_RESULT_UNKNOWN: 头条号自动保存响应包含冲突的草稿 ID"
                 )
             response_id = next(iter(response_ids)) if response_ids else None
-            new_ids = latest.draft_ids - baseline.draft_ids
-
             title_ids = latest.title_to_ids.get(expected_title, frozenset())
+            baseline_title_ids = baseline.title_to_ids.get(
+                expected_title,
+                frozenset(),
+            )
+            new_ids = title_ids - baseline_title_ids
             candidate_id: str | None = None
             binding_source = "baseline_new_id"
             total_delta = latest.total_count - baseline.total_count
             unique_new_id = next(iter(new_ids)) if len(new_ids) == 1 else None
-            new_entity_proven = (
-                total_delta == 1
-                and title_delta == 1
-                and unique_new_id is not None
-                and unique_new_id in title_ids
-            )
-            if response_id is not None:
-                response_matches_new = (
-                    new_entity_proven and response_id == unique_new_id
+            active_draft_id = self._active_draft_id
+            active_entity_proven = bool(
+                active_draft_id
+                and active_draft_id not in baseline.draft_ids
+                and (
+                    (active_draft_id in title_ids and title_delta >= 1)
+                    or response_id == active_draft_id
                 )
-                if not response_matches_new:
+            )
+            if active_entity_proven:
+                if response_id is not None and response_id != active_draft_id:
                     raise DraftResultUnknownError(
-                        "DRAFT_RESULT_UNKNOWN: 头条号保存响应 ID 未绑定到唯一新增标题实体"
+                        "DRAFT_RESULT_UNKNOWN: 头条号保存响应 ID 与标题初始化 ID 冲突"
                     )
-                candidate_id = unique_new_id
-                binding_source = "save_response_id"
+                candidate_id = active_draft_id
+                binding_source = (
+                    "save_response_id"
+                    if response_id == active_draft_id
+                    else "baseline_new_id"
+                )
             else:
-                candidate_id = unique_new_id if new_entity_proven else None
-                if current_id and candidate_id != current_id:
-                    candidate_id = None
+                new_entity_proven = (
+                    total_delta == 1
+                    and title_delta == 1
+                    and unique_new_id is not None
+                    and unique_new_id in title_ids
+                )
+                if response_id is not None:
+                    response_matches_new = (
+                        new_entity_proven and response_id == unique_new_id
+                    )
+                    if not response_matches_new:
+                        raise DraftResultUnknownError(
+                            "DRAFT_RESULT_UNKNOWN: 头条号保存响应 ID 未绑定到唯一新增标题实体"
+                        )
+                    candidate_id = unique_new_id
+                    binding_source = "save_response_id"
+                else:
+                    candidate_id = unique_new_id if new_entity_proven else None
+                    if current_id and candidate_id != current_id:
+                        candidate_id = None
             if candidate_id is None or candidate_id in baseline.draft_ids:
                 evidence.mark_entity_binding(
                     bound=False,
@@ -1584,7 +2601,7 @@ class ToutiaoPlatform(BasePlatform):
         return [
             record
             for record in self._autosave_records
-            if float(record.get("received_at") or 0) >= self._last_editor_mutation_at
+            if record.get("generation") == self._mutation_generation
         ]
 
     @staticmethod
@@ -1614,17 +2631,19 @@ class ToutiaoPlatform(BasePlatform):
         await self.page.goto(edit_url, wait_until="domcontentloaded", timeout=30000)
         await self.page.wait_for_selector(TITLE_SELECTOR, timeout=20000)
         await self.page.wait_for_selector(BODY_SELECTOR, timeout=20000)
-        actual_title = (
-            await self.page.locator(TITLE_SELECTOR).input_value()
-        ).strip()
         expected_tokens = self._expected_persisted_tokens or []
         actual_tokens: list[dict[str, str]] = []
+        title_match = False
         for _ in range(20):
+            actual_title = (
+                await self.page.locator(TITLE_SELECTOR).input_value()
+            ).strip()
+            title_match = actual_title == expected_title
             actual_tokens = await self._read_editor_tokens()
-            if actual_tokens == expected_tokens:
+            if title_match and actual_tokens == expected_tokens:
                 break
             await asyncio.sleep(1)
-        return actual_title == expected_title, actual_tokens == expected_tokens
+        return title_match, actual_tokens == expected_tokens
 
     async def verify_draft_readonly(self, title: str) -> dict:
         """按精确标题只读查询；同名多条时不猜测、不写平台。"""
@@ -1637,7 +2656,7 @@ class ToutiaoPlatform(BasePlatform):
                 "draft_url": None,
                 "structure": {"draft_id": None},
             }
-        snapshot = await self._fetch_draft_snapshot()
+        snapshot = await self._fetch_draft_snapshot(expected_title=expected_title)
         match_count = snapshot.title_counts.get(expected_title, 0)
         ids = snapshot.title_to_ids.get(expected_title, frozenset())
         draft_id = next(iter(ids)) if match_count == 1 and len(ids) == 1 else None

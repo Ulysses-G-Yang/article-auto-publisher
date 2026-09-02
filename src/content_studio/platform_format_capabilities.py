@@ -19,6 +19,7 @@ DELIVERY_PLATFORMS = (
     "zhihu",
     "weibo",
     "smzdm",
+    "toutiao",
     "baijiahao",
 )
 
@@ -35,7 +36,7 @@ class PlatformFormatDeclaration:
 class PlatformFormatCapabilities:
     """可注入的平台格式能力表。
 
-    默认表显式包含六个平台，只声明真实草稿保存后重开已经证明的
+    默认表显式包含已启用平台，只声明真实草稿保存后重开已经证明的
     ``image_order`` 与标题层级；测试或未来真实验收可以通过构造函数注入
     已证明的其他能力，构造完成后表不可变。
     """
@@ -132,6 +133,11 @@ DEFAULT_PLATFORM_FORMAT_CAPABILITIES = PlatformFormatCapabilities(
         ),
         "smzdm": PlatformFormatDeclaration(
             "smzdm",
+            frozenset({"heading", "image_order"}),
+            frozenset({2}),
+        ),
+        "toutiao": PlatformFormatDeclaration(
+            "toutiao",
             frozenset({"heading", "image_order"}),
             frozenset({2}),
         ),

@@ -399,6 +399,11 @@ def test_default_capabilities_match_real_platform_evidence() -> None:
         "image_order",
     }
     assert DEFAULT_PLATFORM_FORMAT_CAPABILITIES.get("smzdm").heading_levels == {2}
+    assert DEFAULT_PLATFORM_FORMAT_CAPABILITIES.get("toutiao").supported == {
+        "heading",
+        "image_order",
+    }
+    assert DEFAULT_PLATFORM_FORMAT_CAPABILITIES.get("toutiao").heading_levels == {2}
     assert DEFAULT_PLATFORM_FORMAT_CAPABILITIES.get("baijiahao").supported == {
         "heading",
         "image_order",
@@ -412,6 +417,7 @@ def test_default_capabilities_match_real_platform_evidence() -> None:
             "zhihu",
             "weibo",
             "smzdm",
+            "toutiao",
             "baijiahao",
         }:
             assert not DEFAULT_PLATFORM_FORMAT_CAPABILITIES.get(platform).supported
@@ -543,7 +549,7 @@ def test_six_platform_plan_uses_normalized_h2_and_split_inline_blocks(
     plan, context = run(scenario())
 
     assert plan["status"] == "READY"
-    assert len(plan["targets"]) == len(DELIVERY_PLATFORMS) == 6
+    assert len(plan["targets"]) == len(DELIVERY_PLATFORMS) == 7
     assert {target["status"] for target in plan["targets"]} == {"READY"}
     assert delivery_features(context["delivery_document"]) == frozenset({"heading"})
     assert delivery_heading_levels(context["delivery_document"]) == frozenset({2})

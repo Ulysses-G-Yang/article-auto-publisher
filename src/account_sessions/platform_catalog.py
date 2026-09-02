@@ -52,7 +52,7 @@ PLATFORM_CATALOG: tuple[PlatformCatalogItem, ...] = (
     _item("zhihu", "知乎", 30, delivery_enabled=True, account_enabled=True),
     _item("weibo", "微博", 40, delivery_enabled=True, account_enabled=True),
     _item("smzdm", "什么值得买", 50, delivery_enabled=True, account_enabled=True),
-    _item("toutiao", "头条号", 60, account_enabled=True),
+    _item("toutiao", "头条号", 60, delivery_enabled=True, account_enabled=True),
     _item("baijiahao", "百家号", 70, delivery_enabled=True, account_enabled=True),
     # 网页端长文“草稿箱”经跨浏览器复核只存在于隔离 Profile 本地，
     # 不是账号云端草稿。保留登录/账号管理，关闭自动投递，避免假成功。

@@ -7,6 +7,7 @@ import asyncio
 import json
 import sys
 from pathlib import Path
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -21,14 +22,25 @@ from platforms.base import (
     DraftResultUnknownError,
 )
 from platforms.toutiao import (
+    AUTOSAVE_PATH,
+    BODY_IMAGE_INPUT_IN_DRAWER_SELECTOR,
     BODY_IMAGE_INPUT_SELECTOR,
     BODY_SELECTOR,
+    CREATE_ARTICLE_LINK_SELECTOR,
+    DRAFT_BOX_URL,
+    EDITOR_EXIT_SELECTOR,
     HEADING_BUTTON_SELECTOR,
+    HOME_URL,
     IMAGE_BUTTON_SELECTOR,
+    IMAGE_CONFIRM_IN_DRAWER_SELECTOR,
     IMAGE_CONFIRM_SELECTOR,
+    IMAGE_DRAWER_CLOSE_IN_DRAWER_SELECTOR,
     IMAGE_DRAWER_CLOSE_SELECTOR,
     IMAGE_DRAWER_SELECTOR,
+    IMAGE_UPLOAD_TAB_SELECTOR,
+    IMAGE_UPLOAD_ERROR_IN_DRAWER_SELECTOR,
     IMAGE_UPLOAD_ERROR_SELECTOR,
+    IMAGE_UPLOAD_TAB_IN_DRAWER_SELECTOR,
     IMAGE_UPLOAD_PATH,
     PUBLISH_URL,
     TITLE_SELECTOR,
@@ -96,6 +108,8 @@ class FakePage:
         return False
 
     def on(self, event: str, handler) -> None:
+        if event == "request":
+            return
         if event == "response":
             self._response_handlers.append(handler)
 
@@ -126,6 +140,7 @@ def _make_platform(
     platform.page = page
     platform.context = FakeContext(cookies)
     platform.simulator = _InstantSimulator()
+    platform._wait_for_content_block_autosave = AsyncMock()
     return platform
 
 
@@ -165,6 +180,71 @@ def _snapshot(
     )
 
 
+class _CreateArticleLink:
+    def __init__(self, page, destination: str) -> None:
+        self.page = page
+        self.destination = destination
+        self.click_calls = 0
+
+    async def count(self) -> int:
+        return 1
+
+    async def is_visible(self) -> bool:
+        return True
+
+    async def click(self, **_kwargs) -> None:
+        self.click_calls += 1
+        self.page.url = self.destination
+
+
+class _CreateArticlePage(FakePage):
+    def __init__(self, destination: str) -> None:
+        super().__init__()
+        self.url = DRAFT_BOX_URL
+        self.create_link = _CreateArticleLink(self, destination)
+
+    def locator(self, selector: str):
+        assert selector == CREATE_ARTICLE_LINK_SELECTOR
+        return self.create_link
+
+    async def wait_for_selector(self, selector: str, **_kwargs) -> None:
+        assert selector == TITLE_SELECTOR
+
+
+def test_navigate_to_editor_clicks_native_create_article_link() -> None:
+    page = _CreateArticlePage(PUBLISH_URL)
+    platform = _make_platform(page)
+    platform._draft_baseline = _snapshot(
+        total=1,
+        title="旧文章",
+        title_count=1,
+        ids={"7680498739710149160"},
+    )
+
+    run(platform.navigate_to_editor())
+
+    assert page.create_link.click_calls == 1
+    assert page.goto_calls == []
+    assert page.url == PUBLISH_URL
+
+
+def test_navigate_to_editor_rejects_recovered_existing_draft() -> None:
+    old_id = "7680498739710149160"
+    page = _CreateArticlePage(f"{PUBLISH_URL}?pgc_id={old_id}")
+    platform = _make_platform(page)
+    platform._draft_baseline = _snapshot(
+        total=1,
+        title="旧文章",
+        title_count=1,
+        ids={old_id},
+    )
+
+    with pytest.raises(DraftBaselineError, match="恢复了已有草稿"):
+        run(platform.navigate_to_editor())
+
+    assert page.create_link.click_calls == 1
+
+
 def test_fetch_identity_parses_same_origin_api(monkeypatch) -> None:
     _real, fake_sleep = _real_sleep_and_fake()
     monkeypatch.setattr(asyncio, "sleep", fake_sleep)
@@ -185,6 +265,8 @@ def test_fetch_identity_parses_same_origin_api(monkeypatch) -> None:
         "user_id": "2610667347771923",
         "display_name": "率真海风gy504gO",
     }
+    assert run(platform.fetch_identity_payload()) == payload
+    assert page.goto_calls == [HOME_URL]
 
 
 def test_fetch_identity_dom_nickname_is_display_only(monkeypatch) -> None:
@@ -229,15 +311,18 @@ def test_check_login_requires_cookie_and_stable_identity(monkeypatch) -> None:
 
     assert run(platform.check_login()) is True
     assert "secret-value" not in platform.last_login_error
+    assert page.goto_calls == [HOME_URL]
 
 
 def test_check_login_false_without_session_cookie(monkeypatch) -> None:
     _real, fake_sleep = _real_sleep_and_fake()
     monkeypatch.setattr(asyncio, "sleep", fake_sleep)
-    platform = _make_platform(FakePage())
+    page = FakePage()
+    platform = _make_platform(page)
 
     assert run(platform.check_login()) is False
     assert platform.last_login_error.startswith("LOGIN_REQUIRED:")
+    assert page.goto_calls == []
 
 
 def test_pgc_id_and_edit_url_use_strict_allowlist() -> None:
@@ -296,9 +381,11 @@ def test_preflight_freezes_normalized_title_and_draft_baseline() -> None:
     baseline = _snapshot(total=3, title=expected_title, title_count=1, ids={"111111"})
     platform = _make_platform(FakePage())
 
-    async def fetch_snapshot():
+    async def fetch_snapshot(*, expected_title: str | None = None):
+        assert expected_title == expected_title_value
         return baseline
 
+    expected_title_value = expected_title
     platform._fetch_draft_snapshot = fetch_snapshot
 
     run(platform.preflight_delivery(title))
@@ -347,7 +434,7 @@ def test_draft_snapshot_rejects_list_that_never_stabilizes(monkeypatch) -> None:
     platform = _make_platform(_UnstableDraftPage())
 
     with pytest.raises(DraftBaselineError) as raised:
-        run(platform._fetch_draft_snapshot())
+        run(platform._fetch_draft_snapshot(expected_title="旧草稿"))
 
     assert "草稿列表仍在变化" in str(raised.value)
 
@@ -375,9 +462,199 @@ def test_draft_snapshot_rejects_stable_list_with_missing_pgc_ids(
     platform = _make_platform(_StableIncompleteDraftPage())
 
     with pytest.raises(DraftBaselineError) as raised:
-        run(platform._fetch_draft_snapshot())
+        run(platform._fetch_draft_snapshot(expected_title="旧草稿"))
 
-    assert "草稿 ID 未完整稳定加载" in str(raised.value)
+    assert "目标标题的草稿 ID 未完整稳定加载" in str(raised.value)
+
+
+class _ActiveDraftVisiblePage(FakePage):
+    def __init__(self, *, title: str, draft_id: str) -> None:
+        super().__init__()
+        self.title = title
+        self.draft_id = draft_id
+
+    async def wait_for_selector(self, _selector: str, **_kwargs) -> None:
+        return None
+
+    async def evaluate(self, script: str, *_args) -> object:
+        if "titleCounts" in script:
+            return {
+                "loaded": True,
+                "totalCount": 13,
+                "titleCounts": {self.title: 13},
+                "hrefItems": [
+                    {
+                        "title": self.title,
+                        "href": f"{PUBLISH_URL}?pgc_id={self.draft_id}",
+                    }
+                ],
+            }
+        return await super().evaluate(script)
+
+
+def test_draft_snapshot_accepts_bound_new_id_without_all_historical_ids(
+    monkeypatch,
+) -> None:
+    _real, fake_sleep = _real_sleep_and_fake()
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+    title = "测试标题"
+    new_id = "7680801349465899554"
+    platform = _make_platform(_ActiveDraftVisiblePage(title=title, draft_id=new_id))
+    platform._active_draft_id = new_id
+    platform._draft_baseline = _snapshot(
+        total=12,
+        title=title,
+        title_count=12,
+        ids={str(index) for index in range(100000, 100012)},
+    )
+
+    snapshot = run(platform._fetch_draft_snapshot(expected_title=title))
+
+    assert snapshot.title_counts[title] == 13
+    assert snapshot.title_to_ids[title] == frozenset({new_id})
+
+
+def test_draft_snapshot_allows_response_bound_id_while_card_is_delayed(
+    monkeypatch,
+) -> None:
+    _real, fake_sleep = _real_sleep_and_fake()
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+    old_id = "111111"
+    new_id = "7680806313923756578"
+    platform = _make_platform(_StableIncompleteDraftPage())
+    platform._active_draft_id = new_id
+    platform._draft_baseline = _snapshot(
+        total=1,
+        title="旧草稿",
+        title_count=1,
+        ids={old_id},
+    )
+    platform._autosave_records = [_record(code=0, draft_ids={new_id})]
+
+    snapshot = run(platform._fetch_draft_snapshot(expected_title="旧草稿"))
+
+    assert snapshot.title_counts["旧草稿"] == 1
+    assert snapshot.title_to_ids.get("旧草稿", frozenset()) == frozenset()
+
+
+class _NativeExitControl:
+    def __init__(self, page) -> None:
+        self.page = page
+
+    async def count(self) -> int:
+        return 1
+
+    async def is_visible(self) -> bool:
+        return True
+
+    async def click(self, **_kwargs) -> None:
+        self.page.exit_click_calls += 1
+        self.page.url = HOME_URL
+
+
+class _ExitToEmptyDraftPage(FakePage):
+    def __init__(self) -> None:
+        super().__init__()
+        self.url = PUBLISH_URL
+        self.back_calls = 0
+        self.exit_click_calls = 0
+
+    async def go_back(self, **_kwargs) -> None:
+        self.back_calls += 1
+        self.url = DRAFT_BOX_URL
+
+    async def goto(self, url: str, **_kwargs) -> None:
+        self.goto_calls.append(url)
+        self.url = url
+
+    def locator(self, selector: str):
+        assert selector == EDITOR_EXIT_SELECTOR
+        return _NativeExitControl(self)
+
+    async def wait_for_selector(self, _selector: str, **_kwargs) -> None:
+        return None
+
+    async def evaluate(self, script: str, *_args) -> object:
+        if "titleCounts" in script:
+            return {
+                "loaded": True,
+                "totalCount": 0,
+                "titleCounts": {},
+                "hrefItems": [],
+            }
+        return await super().evaluate(script)
+
+
+def test_draft_snapshot_exits_editor_with_native_control_once(monkeypatch) -> None:
+    _real, fake_sleep = _real_sleep_and_fake()
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+    page = _ExitToEmptyDraftPage()
+    platform = _make_platform(page)
+
+    snapshot = run(platform._fetch_draft_snapshot(exit_editor=True))
+
+    assert snapshot.loaded is True
+    assert snapshot.total_count == 0
+    assert page.exit_click_calls == 1
+    assert page.back_calls == 0
+    assert page.goto_calls == [DRAFT_BOX_URL]
+
+
+class _DelayedNewDraftPage(_ExitToEmptyDraftPage):
+    def __init__(self, title: str, draft_id: str) -> None:
+        super().__init__()
+        self.title = title
+        self.draft_id = draft_id
+        self.reads = 0
+
+    async def evaluate(self, script: str, *_args) -> object:
+        if "titleCounts" not in script:
+            return await super().evaluate(script)
+        self.reads += 1
+        if self.reads < 3:
+            return {
+                "loaded": True,
+                "totalCount": 0,
+                "titleCounts": {},
+                "hrefItems": [],
+            }
+        return {
+            "loaded": True,
+            "totalCount": 1,
+            "titleCounts": {self.title: 1},
+            "hrefItems": [
+                {
+                    "title": self.title,
+                    "href": f"{PUBLISH_URL}?pgc_id={self.draft_id}",
+                }
+            ],
+        }
+
+
+def test_draft_snapshot_waits_for_new_entity_after_native_exit(monkeypatch) -> None:
+    _real, fake_sleep = _real_sleep_and_fake()
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+    title = "测试标题"
+    draft_id = "7680498739710149160"
+    page = _DelayedNewDraftPage(title, draft_id)
+    platform = _make_platform(page)
+    platform._draft_baseline = _snapshot(
+        total=0,
+        title=title,
+        title_count=0,
+        ids=set(),
+    )
+
+    snapshot = run(
+        platform._fetch_draft_snapshot(
+            exit_editor=True,
+            expected_title=title,
+        )
+    )
+
+    assert snapshot.title_to_ids[title] == frozenset({draft_id})
+    assert page.exit_click_calls == 1
+    assert page.reads == 3
 
 
 class _ModelEditorLocator:
@@ -387,12 +664,18 @@ class _ModelEditorLocator:
     async def click(self, **_kwargs) -> None:
         return None
 
+    async def focus(self, **_kwargs) -> None:
+        return None
+
     async def count(self) -> int:
         return 1
 
     async def press(self, key: str) -> None:
         if key == "Backspace":
             self.page.tokens.clear()
+            self.page.selected_index = None
+        elif key == "Control+End" and self.page.tokens:
+            self.page.selected_index = len(self.page.tokens) - 1
 
     async def inner_text(self) -> str:
         return "\n".join(
@@ -400,8 +683,12 @@ class _ModelEditorLocator:
         )
 
     def locator(self, selector: str):
-        assert selector == ":scope > p:last-child"
-        return _ModelTailLocator(self.page)
+        if selector == ":scope > p:last-child":
+            return _ModelTailLocator(self.page)
+        if selector.startswith(":scope > :nth-child("):
+            index = int(selector.removeprefix(":scope > :nth-child(").removesuffix(")"))
+            return _ModelBlockLocator(self.page, index - 1)
+        raise AssertionError(f"unexpected editor selector: {selector}")
 
 
 class _ModelTailLocator:
@@ -414,16 +701,37 @@ class _ModelTailLocator:
     async def evaluate(self, script: str) -> bool:
         assert "breaks.length <= 1" in script
         assert "ProseMirror-trailingBreak" not in script
+        assert "syl-placeholder.ProseMirror-widget" in script
+        assert "placeholders.length <= 1" in script
         self.page.tail_checks += 1
         tail_is_empty = not self.page.tokens or (
             self.page.tokens[-1]["kind"] == "P"
             and not self.page.tokens[-1]["text"]
         )
-        return self.page.tail_is_safe and tail_is_empty
+        tail_is_safe = self.page.tail_is_safe
+        if self.page.tail_safety_reads is not None:
+            if len(self.page.tail_safety_reads) > 1:
+                tail_is_safe = self.page.tail_safety_reads.pop(0)
+            else:
+                tail_is_safe = self.page.tail_safety_reads[0]
+        return tail_is_safe and tail_is_empty
 
     async def click(self, **_kwargs) -> None:
         if not self.page.tokens:
             self.page.tokens.append({"kind": "P", "text": ""})
+        self.page.selected_index = len(self.page.tokens) - 1
+
+
+class _ModelBlockLocator:
+    def __init__(self, page: _ModelPage, index: int) -> None:
+        self.page = page
+        self.index = index
+
+    async def count(self) -> int:
+        return int(0 <= self.index < len(self.page.tokens))
+
+    async def click(self, **_kwargs) -> None:
+        self.page.selected_index = self.index
 
 
 class _ModelHeadingLocator:
@@ -434,10 +742,16 @@ class _ModelHeadingLocator:
         return 1
 
     async def click(self, **_kwargs) -> None:
+        if not self.page.heading_click_applies:
+            return
         if not self.page.tokens:
             self.page.tokens.append({"kind": "H2", "text": ""})
+            self.page.selected_index = 0
         else:
-            self.page.tokens[-1]["kind"] = "H2"
+            index = self.page.selected_index
+            if index is None:
+                index = len(self.page.tokens) - 1
+            self.page.tokens[index]["kind"] = "H2"
 
 
 class _ModelKeyboard:
@@ -447,15 +761,28 @@ class _ModelKeyboard:
     async def press(self, key: str) -> None:
         if key == "Enter":
             self.page.tokens.append({"kind": "P", "text": ""})
+            self.page.selected_index = len(self.page.tokens) - 1
         elif key == "Shift+Enter":
             if not self.page.tokens:
                 self.page.tokens.append({"kind": "P", "text": ""})
             self.page.tokens[-1]["text"] += "\n"
+        elif key == "Control+Alt+2":
+            assert self.page.tokens
+            self.page.h2_shortcut_calls += 1
+            index = self.page.selected_index
+            if index is None:
+                index = len(self.page.tokens) - 1
+            self.page.tokens[index]["kind"] = "H2"
 
     async def insert_text(self, text: str) -> None:
         if not self.page.tokens:
             self.page.tokens.append({"kind": "P", "text": ""})
-        self.page.tokens[-1]["text"] += text
+            self.page.selected_index = 0
+        index = self.page.selected_index
+        if index is None:
+            index = len(self.page.tokens) - 1
+            self.page.selected_index = index
+        self.page.tokens[index]["text"] += text
 
 
 class _ModelPage:
@@ -466,6 +793,11 @@ class _ModelPage:
         self.selection_checks = 0
         self.tail_checks = 0
         self.tail_is_safe = True
+        self.tail_safety_reads: list[bool] | None = None
+        self.selection_ready_reads: list[bool] | None = None
+        self.heading_click_applies = True
+        self.selected_index: int | None = None
+        self.h2_shortcut_calls = 0
 
     def is_closed(self) -> bool:
         return False
@@ -478,15 +810,48 @@ class _ModelPage:
         raise AssertionError(f"unexpected selector: {selector}")
 
     async def evaluate(self, script: str, *_args):
+        if "const reuseExistingTail = true" in script:
+            return bool(
+                self.tokens
+                and self.tokens[-1]["kind"] == "P"
+                and not self.tokens[-1]["text"]
+            )
         if "requestAnimationFrame" in script:
             return None
         if "selection.rangeCount" in script:
-            assert "breaks.length <= 1" in script
-            assert "ProseMirror-trailingBreak" not in script
+            if "placeholders.length" in script:
+                assert "syl-placeholder.ProseMirror-widget" in script
             self.selection_checks += 1
+            if _args and "expected.index" in script:
+                target = _args[0]
+                index = int(target["index"])
+                return bool(
+                    self.selection_ready
+                    and self.selected_index == index
+                    and 0 <= index < len(self.tokens)
+                    and self.tokens[index]["text"] == target["text"]
+                )
+            if self.selection_ready_reads is not None:
+                if len(self.selection_ready_reads) > 1:
+                    return self.selection_ready_reads.pop(0)
+                return self.selection_ready_reads[0]
             return self.selection_ready
-        if "lastElementChild" in script:
-            return bool(self.tokens and self.tokens[-1]["kind"] == "H2")
+        if "return index >= 0 && text ? {index, text} : null" in script:
+            if not self.tokens:
+                return None
+            index = self.selected_index
+            if index is None:
+                index = len(self.tokens) - 1
+            token = self.tokens[index]
+            return {"index": index, "text": token["text"]} if token["text"] else None
+        if "const block = root?.children?.[expected.index]" in script:
+            target = _args[0]
+            index = int(target["index"])
+            return bool(
+                0 <= index < len(self.tokens)
+                and self.tokens[index]["kind"] == "H2"
+                and self.tokens[index]["text"] == target["text"]
+            )
         if "const tokens = []" in script:
             return [
                 dict(token)
@@ -501,6 +866,48 @@ class _ModelPage:
             self.tokens[-1] = token
         else:
             self.tokens.append(token)
+        self.selected_index = len(self.tokens) - 1
+
+
+def test_heading_selector_targets_only_static_editor_toolbar() -> None:
+    assert HEADING_BUTTON_SELECTOR == (
+        ".syl-editor-toolbar .syl-toolbar-tool.header.static "
+        "button.syl-toolbar-button"
+    )
+
+
+def test_image_selector_targets_only_static_editor_toolbar() -> None:
+    assert IMAGE_BUTTON_SELECTOR == (
+        ".syl-editor-toolbar .syl-toolbar-tool.image.static "
+        "button.syl-toolbar-button"
+    )
+
+
+def test_apply_h2_uses_editor_shortcut_when_static_button_does_not_apply() -> None:
+    page = _ModelPage()
+    page.tokens = [{"kind": "P", "text": "二级标题"}]
+    page.selected_index = 0
+    page.heading_click_applies = False
+    platform = _make_platform(page)
+    platform.simulator.random_delay = AsyncMock()
+
+    run(platform._apply_h2_to_current_block())
+
+    assert page.tokens == [{"kind": "H2", "text": "二级标题"}]
+    assert page.h2_shortcut_calls == 1
+
+
+def test_apply_h2_does_not_use_shortcut_when_button_already_changed_target() -> None:
+    page = _ModelPage()
+    page.tokens = [{"kind": "P", "text": "二级标题"}]
+    page.selected_index = 0
+    platform = _make_platform(page)
+    platform.simulator.random_delay = AsyncMock()
+
+    run(platform._apply_h2_to_current_block())
+
+    assert page.tokens == [{"kind": "H2", "text": "二级标题"}]
+    assert page.h2_shortcut_calls == 0
 
 
 def test_fill_content_preserves_text_h2_and_image_token_order() -> None:
@@ -540,13 +947,13 @@ def test_fill_content_preserves_text_h2_and_image_token_order() -> None:
     assert platform._expected_persisted_tokens == expected
     assert result["media_status"] == "completed"
     assert result["uploaded_images"] == 2
-    assert page.tail_checks == 2
-    assert page.selection_checks == 2
+    assert page.tail_checks == 0
+    assert page.selection_checks == 0
 
 
 def test_fill_content_stops_before_upload_when_image_selection_is_unstable() -> None:
     page = _ModelPage()
-    page.selection_ready = False
+    page.selection_ready_reads = [False]
     platform = _make_platform(page)
     upload_calls: list[str] = []
 
@@ -560,7 +967,6 @@ def test_fill_content_stops_before_upload_when_image_selection_is_unstable() -> 
         run(
             platform.fill_content(
                 [
-                    {"type": "text", "text": "第一段"},
                     {"type": "image", "position": 1},
                 ],
                 [{"position_index": 1, "local_path": "D:/controlled/one.png"}],
@@ -575,13 +981,13 @@ def test_fill_content_stops_before_upload_when_image_selection_is_unstable() -> 
         "media_status": "failed",
     }
     assert page.tail_checks == 1
-    assert page.selection_checks == 1
+    assert page.selection_checks == 24
     assert upload_calls == []
 
 
 def test_fill_content_stops_before_upload_when_tail_paragraph_is_not_safe() -> None:
     page = _ModelPage()
-    page.tail_is_safe = False
+    page.tail_safety_reads = [False]
     platform = _make_platform(page)
     upload_calls: list[str] = []
 
@@ -595,7 +1001,6 @@ def test_fill_content_stops_before_upload_when_tail_paragraph_is_not_safe() -> N
         run(
             platform.fill_content(
                 [
-                    {"type": "text", "text": "第一段"},
                     {"type": "image", "position": 1},
                 ],
                 [{"position_index": 1, "local_path": "D:/controlled/one.png"}],
@@ -681,9 +1086,30 @@ def test_publish_stops_after_first_image_failure_before_save_or_publish() -> Non
 
 
 class _UploadLocator:
-    def __init__(self, page: _UploadPage, selector: str) -> None:
+    def __init__(
+        self,
+        page: _UploadPage,
+        selector: str,
+        *,
+        index: int | None = None,
+    ) -> None:
         self.page = page
         self.selector = selector
+        self.index = index
+
+    def locator(self, selector: str):
+        assert self.selector == IMAGE_DRAWER_SELECTOR
+        mapping = {
+            IMAGE_UPLOAD_TAB_IN_DRAWER_SELECTOR: IMAGE_UPLOAD_TAB_SELECTOR,
+            BODY_IMAGE_INPUT_IN_DRAWER_SELECTOR: BODY_IMAGE_INPUT_SELECTOR,
+            IMAGE_CONFIRM_IN_DRAWER_SELECTOR: IMAGE_CONFIRM_SELECTOR,
+            IMAGE_DRAWER_CLOSE_IN_DRAWER_SELECTOR: IMAGE_DRAWER_CLOSE_SELECTOR,
+            IMAGE_UPLOAD_ERROR_IN_DRAWER_SELECTOR: IMAGE_UPLOAD_ERROR_SELECTOR,
+            ".upload-image-panel": ".upload-image-panel",
+        }
+        canonical = mapping[selector]
+        self.page.locator_calls.append(canonical)
+        return _UploadLocator(self.page, canonical)
 
     async def count(self) -> int:
         if self.selector == IMAGE_DRAWER_SELECTOR:
@@ -694,6 +1120,10 @@ class _UploadLocator:
             return self.page.close_count
         if self.selector == IMAGE_UPLOAD_ERROR_SELECTOR:
             return len(self.page.upload_error_texts)
+        if self.selector == BODY_IMAGE_INPUT_SELECTOR:
+            return int(self.page.local_upload_mounted)
+        if self.selector == ".upload-image-panel":
+            return 1
         return 1
 
     async def wait_for(self, **_kwargs) -> None:
@@ -707,8 +1137,13 @@ class _UploadLocator:
             if not self.page.confirm_attaches:
                 raise TimeoutError("confirm did not attach")
             return
+        if self.selector == BODY_IMAGE_INPUT_SELECTOR:
+            assert state == "attached"
+            if not self.page.local_upload_mounted:
+                raise TimeoutError("local upload input did not attach")
+            return
         if self.selector == IMAGE_DRAWER_SELECTOR:
-            if state == "attached":
+            if state in {"attached", "visible"}:
                 assert self.page.image_panel_open is True
                 return
             assert state == "hidden"
@@ -723,12 +1158,45 @@ class _UploadLocator:
         return enabled_after is not None and self.page.confirm_enabled_checks > enabled_after
 
     async def is_visible(self) -> bool:
-        assert self.selector == IMAGE_DRAWER_SELECTOR
-        return self.page.image_panel_open
+        if self.selector == IMAGE_DRAWER_SELECTOR:
+            return self.page.image_panel_open
+        if self.selector == BODY_IMAGE_INPUT_SELECTOR:
+            return self.page.local_upload_visible
+        if self.selector == ".upload-image-panel":
+            return self.page.local_upload_visible
+        raise AssertionError(f"unexpected visible selector: {self.selector}")
+
+    def nth(self, index: int):
+        assert self.selector == IMAGE_UPLOAD_TAB_SELECTOR
+        return _UploadLocator(self.page, self.selector, index=index)
+
+    async def get_attribute(self, name: str) -> str | None:
+        assert self.selector == IMAGE_UPLOAD_TAB_SELECTOR
+        assert self.index is not None
+        text = self.page.tab_texts[self.index]
+        if name == "class":
+            return (
+                "byte-tabs-header-title active"
+                if text == self.page.active_tab_text
+                else "byte-tabs-header-title"
+            )
+        if name == "aria-selected":
+            return "true" if text == self.page.active_tab_text else "false"
+        return None
 
     async def click(self, **_kwargs) -> None:
         if self.selector == IMAGE_BUTTON_SELECTOR:
             self.page.image_panel_open = True
+        elif self.selector == IMAGE_UPLOAD_TAB_SELECTOR:
+            assert self.index is not None
+            text = self.page.tab_texts[self.index]
+            if text == "上传图片":
+                self.page.local_upload_tab_clicks += 1
+                self.page.active_tab_text = text
+                self.page.local_upload_visible = True
+                self.page.local_upload_mounted = True
+            else:
+                self.page.search_tab_clicks += 1
         elif self.selector == IMAGE_CONFIRM_SELECTOR:
             self.page.confirm_clicks += 1
             if self.page.confirm_hides_drawer:
@@ -750,8 +1218,11 @@ class _UploadLocator:
                 await handler(self.page.upload_response)
 
     async def all_inner_texts(self) -> list[str]:
-        assert self.selector == IMAGE_UPLOAD_ERROR_SELECTOR
-        return list(self.page.upload_error_texts)
+        if self.selector == IMAGE_UPLOAD_ERROR_SELECTOR:
+            return list(self.page.upload_error_texts)
+        if self.selector == IMAGE_UPLOAD_TAB_SELECTOR:
+            return list(self.page.tab_texts)
+        raise AssertionError(f"unexpected text selector: {self.selector}")
 
 
 class _UploadPage:
@@ -776,6 +1247,12 @@ class _UploadPage:
         self.upload_error_texts: list[str] = []
         self.upload_response: FakeResponse | None = None
         self.set_input_error: Exception | None = None
+        self.local_upload_visible = True
+        self.local_upload_mounted = True
+        self.local_upload_tab_clicks = 0
+        self.search_tab_clicks = 0
+        self.tab_texts = ["上传图片", "免费正版图片", "热点图库", "我的素材"]
+        self.active_tab_text = "上传图片"
         self.response_handlers: list = []
         self.removed_response_handlers: list = []
 
@@ -790,6 +1267,7 @@ class _UploadPage:
             IMAGE_CONFIRM_SELECTOR,
             IMAGE_DRAWER_CLOSE_SELECTOR,
             IMAGE_DRAWER_SELECTOR,
+            IMAGE_UPLOAD_TAB_SELECTOR,
             IMAGE_UPLOAD_ERROR_SELECTOR,
         }:
             return _UploadLocator(self, selector)
@@ -806,13 +1284,23 @@ class _UploadPage:
             self.response_handlers.remove(handler)
 
     async def evaluate(self, script: str, *_args):
-        if ".ProseMirror > .pgc-image img" in script:
+        if "fingerprintsForBlock" in script:
             if self.fingerprint_reads is not None:
                 if len(self.fingerprint_reads) > 1:
                     return list(self.fingerprint_reads.pop(0))
                 return list(self.fingerprint_reads[0])
             return list(self.fingerprints)
         return None
+
+
+def test_editor_image_fingerprints_scan_all_images_inside_editor() -> None:
+    page = _UploadPage()
+    page.fingerprints = ["p3-sign.example/nested-image.png"]
+    platform = _make_platform(page)
+
+    result = run(platform._read_editor_image_fingerprints())
+
+    assert result == ["p3-sign.example/nested-image.png"]
 
 
 def test_upload_image_uses_only_exact_body_image_input(monkeypatch) -> None:
@@ -839,11 +1327,15 @@ def test_upload_image_uses_only_exact_body_image_input(monkeypatch) -> None:
     assert page.locator_calls == [
         IMAGE_BUTTON_SELECTOR,
         IMAGE_DRAWER_SELECTOR,
+        IMAGE_UPLOAD_TAB_SELECTOR,
+        ".upload-image-panel",
+        BODY_IMAGE_INPUT_SELECTOR,
         BODY_IMAGE_INPUT_SELECTOR,
         IMAGE_CONFIRM_SELECTOR,
     ]
     assert page.waited_selectors == [
         IMAGE_DRAWER_SELECTOR,
+        BODY_IMAGE_INPUT_SELECTOR,
         BODY_IMAGE_INPUT_SELECTOR,
         IMAGE_CONFIRM_SELECTOR,
         IMAGE_DRAWER_SELECTOR,
@@ -853,13 +1345,38 @@ def test_upload_image_uses_only_exact_body_image_input(monkeypatch) -> None:
     assert page.response_handlers == []
     assert len(page.removed_response_handlers) == 1
     assert BODY_IMAGE_INPUT_SELECTOR == (
+        ".byte-drawer-wrapper:has(.byte-tabs-header-title):visible "
         ".upload-image-panel [data-e2e='image-upload'] "
         "input[type='file'][accept*='image']"
     )
+
+
+def test_upload_image_switches_from_search_to_local_upload_tab(monkeypatch) -> None:
+    _real, fake_sleep = _real_sleep_and_fake()
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+    page = _UploadPage()
+    page.local_upload_visible = False
+    page.local_upload_mounted = False
+    page.tab_texts = ["搜图", "上传图片", "免费正版图片", "热点图库"]
+    page.active_tab_text = "搜图"
+    page.upload_response = FakeResponse(
+        "https://mp.toutiao.com/spice/image?upload_source=article&aid=1231&device_platform=web",
+        {
+            "code": 0,
+            "data": {"origin_image_url": "https://image.example/article-image.png"},
+        },
+    )
+    platform = _make_platform(page)
+
+    result = run(platform._upload_image("D:/controlled/article-image.png"))
+
+    assert result["success"] is True
+    assert page.local_upload_tab_clicks == 1
+    assert page.search_tab_clicks == 0
+    assert page.active_tab_text == "上传图片"
+    assert page.upload_paths == ["D:/controlled/article-image.png"]
     assert IMAGE_DRAWER_SELECTOR == (
-        ".byte-drawer-wrapper:has("
-        ".upload-image-panel [data-e2e='image-upload'] "
-        "input[type='file'][accept*='image'])"
+        ".byte-drawer-wrapper:has(.byte-tabs-header-title):visible"
     )
 
 
@@ -1140,6 +1657,9 @@ def test_upload_image_does_not_click_close_after_confirm_auto_hides_drawer(
     assert page.locator_calls == [
         IMAGE_BUTTON_SELECTOR,
         IMAGE_DRAWER_SELECTOR,
+        IMAGE_UPLOAD_TAB_SELECTOR,
+        ".upload-image-panel",
+        BODY_IMAGE_INPUT_SELECTOR,
         BODY_IMAGE_INPUT_SELECTOR,
         IMAGE_CONFIRM_SELECTOR,
     ]
@@ -1271,7 +1791,7 @@ def test_upload_image_preserves_primary_browser_error_when_cleanup_also_fails(
 @pytest.mark.parametrize(
     ("selector", "state"),
     [
-        (IMAGE_DRAWER_SELECTOR, "attached"),
+        (IMAGE_DRAWER_SELECTOR, "visible"),
         (BODY_IMAGE_INPUT_SELECTOR, "attached"),
         (IMAGE_CONFIRM_SELECTOR, "attached"),
         (IMAGE_DRAWER_SELECTOR, "hidden"),
@@ -1296,46 +1816,178 @@ def test_upload_image_translates_closed_page_during_local_waits(
 
 
 class _BlurLocator:
+    def __init__(self, page) -> None:
+        self.page = page
+
     async def evaluate(self, _script: str) -> None:
-        return None
+        self.page.blur_calls += 1
+
+
+class _SaveTitleLocator:
+    def __init__(self, page) -> None:
+        self.page = page
+
+    async def count(self) -> int:
+        return 1
+
+    async def fill(self, value: str) -> None:
+        self.page.title = value
+        self.page.title_fill_calls += 1
+
+    async def input_value(self) -> str:
+        return self.page.title
 
 
 class _SavePage:
-    def __init__(self) -> None:
+    def __init__(self, title: str = "") -> None:
         self.url = PUBLISH_URL
         self.response_handlers: list = []
+        self.title = title
+        self.title_fill_calls = 0
+        self.blur_calls = 0
+        self.exit_click_calls = 0
+        self.goto_calls: list[str] = []
 
     def is_closed(self) -> bool:
         return False
 
     def locator(self, selector: str):
-        assert selector == BODY_SELECTOR
-        return _BlurLocator()
+        if selector == BODY_SELECTOR:
+            return _BlurLocator(self)
+        if selector == TITLE_SELECTOR:
+            return _SaveTitleLocator(self)
+        if selector == EDITOR_EXIT_SELECTOR:
+            return _NativeExitControl(self)
+        raise AssertionError(f"unexpected selector: {selector}")
 
     def on(self, event: str, handler) -> None:
-        assert event == "response"
-        self.response_handlers.append(handler)
+        assert event in {"request", "response"}
+        if event == "response":
+            self.response_handlers.append(handler)
+
+    async def goto(self, url: str, **_kwargs) -> None:
+        self.goto_calls.append(url)
+        self.url = url
+
+    async def wait_for_selector(self, selector: str, **_kwargs) -> None:
+        assert selector in {TITLE_SELECTOR, BODY_SELECTOR}
+
+
+def test_fill_title_binds_new_draft_without_leaving_editor() -> None:
+    page = _SavePage()
+    platform = _make_platform(page)
+    platform._draft_baseline = _snapshot(
+        total=0,
+        title="测试标题",
+        title_count=0,
+        ids=set(),
+    )
+
+    async def bind_new_draft(**_kwargs) -> dict[str, object]:
+        platform._active_draft_id = "7665272216262623790"
+        return {
+            "generation": 1,
+            "status": 200,
+            "code": 0,
+            "err_no": 0,
+            "draft_ids": frozenset({platform._active_draft_id}),
+        }
+
+    platform._wait_for_autosave_barrier = AsyncMock(side_effect=bind_new_draft)
+    platform._fetch_draft_snapshot = AsyncMock(
+        return_value=_snapshot(
+            total=1,
+            title="测试标题",
+            title_count=1,
+            ids={"7665272216262623790"},
+        )
+    )
+
+    run(platform.fill_title("测试标题"))
+
+    assert page.title == "测试标题"
+    assert page.title_fill_calls == 1
+    assert page.blur_calls == 0
+    assert page.goto_calls == []
+    platform._wait_for_autosave_barrier.assert_awaited_once_with(
+        generation=1,
+        stage="标题初始化",
+        require_draft_id=True,
+    )
+    platform._fetch_draft_snapshot.assert_not_awaited()
+
+
+def test_fill_title_rejects_binding_to_existing_draft() -> None:
+    existing_id = "7665272216262623790"
+    page = _SavePage()
+    platform = _make_platform(page)
+    platform._draft_baseline = _snapshot(
+        total=1,
+        title="测试标题",
+        title_count=1,
+        ids={existing_id},
+    )
+
+    async def bind_existing_draft(**_kwargs) -> dict[str, object]:
+        platform._active_draft_id = existing_id
+        return {
+            "generation": 1,
+            "status": 200,
+            "code": 0,
+            "err_no": 0,
+            "draft_ids": frozenset({existing_id}),
+        }
+
+    platform._wait_for_autosave_barrier = AsyncMock(
+        side_effect=bind_existing_draft
+    )
+
+    with pytest.raises(DraftBaselineError, match="绑定了已有草稿"):
+        run(platform.fill_title("测试标题"))
+
+    assert page.blur_calls == 0
+    assert page.goto_calls == []
 
 
 class _ReplayTitleLocator:
-    def __init__(self, value: str) -> None:
-        self.value = value
+    def __init__(self, page) -> None:
+        self.page = page
+
+    async def count(self) -> int:
+        return 1
+
+    async def fill(self, value: str) -> None:
+        self.page.persisted_title = value
+        self.page.title_fill_calls += 1
 
     async def input_value(self) -> str:
-        return self.value
+        if self.page.persisted_title_reads:
+            if len(self.page.persisted_title_reads) > 1:
+                return self.page.persisted_title_reads.pop(0)
+            return self.page.persisted_title_reads[0]
+        return self.page.persisted_title
 
 
 class _ReplayPage(_SavePage):
-    def __init__(self, *, title: str, tokens: list[dict[str, str]]) -> None:
+    def __init__(
+        self,
+        *,
+        title: str,
+        tokens: list[dict[str, str]],
+        title_reads: list[str] | None = None,
+    ) -> None:
         super().__init__()
         self.persisted_title = title
+        self.persisted_title_reads = list(title_reads or [])
         self.persisted_tokens = tokens
 
     def locator(self, selector: str):
         if selector == BODY_SELECTOR:
-            return _BlurLocator()
+            return _BlurLocator(self)
         if selector == TITLE_SELECTOR:
-            return _ReplayTitleLocator(self.persisted_title)
+            return _ReplayTitleLocator(self)
+        if selector == EDITOR_EXIT_SELECTOR:
+            return _NativeExitControl(self)
         raise AssertionError(f"unexpected selector: {selector}")
 
     async def goto(self, url: str, **_kwargs) -> None:
@@ -1350,19 +2002,54 @@ class _ReplayPage(_SavePage):
         return None
 
 
+def test_verify_persisted_draft_waits_for_title_and_tokens(monkeypatch) -> None:
+    _real, fake_sleep = _real_sleep_and_fake()
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+    title = "测试标题"
+    tokens = [{"kind": "P", "text": "正文"}]
+    platform = _make_platform(
+        _ReplayPage(
+            title=title,
+            tokens=tokens,
+            title_reads=["", title],
+        )
+    )
+    platform._expected_persisted_tokens = tokens
+
+    result = run(
+        platform._verify_persisted_draft(
+            title,
+            f"{PUBLISH_URL}?pgc_id=7665272216262623790",
+        )
+    )
+
+    assert result == (True, True)
+
+
 def _prepare_save_platform(
     *,
     baseline: _ToutiaoDraftSnapshot,
     latest: _ToutiaoDraftSnapshot,
     title: str = "测试标题",
 ) -> ToutiaoPlatform:
-    platform = _make_platform(_SavePage())
+    platform = _make_platform(_SavePage(title))
     platform._preflight_title = title
     platform._draft_baseline = baseline
     platform._expected_persisted_tokens = [{"kind": "P", "text": "正文"}]
     platform._last_editor_mutation_at = 0.0
+    platform._wait_for_editor_settle_before_exit = AsyncMock()
 
-    async def fetch_snapshot():
+    platform._test_fetch_snapshot_calls = 0
+    platform._test_exit_editor_values = []
+
+    async def fetch_snapshot(
+        *,
+        exit_editor: bool = False,
+        expected_title: str | None = None,
+    ):
+        assert expected_title == title
+        platform._test_fetch_snapshot_calls += 1
+        platform._test_exit_editor_values.append(exit_editor)
         return latest
 
     platform._fetch_draft_snapshot = fetch_snapshot
@@ -1371,13 +2058,109 @@ def _prepare_save_platform(
 
 def _record(*, code: int, draft_ids: set[str] | None = None) -> dict[str, object]:
     return {
-        "received_at": 1.0,
+        # 正文或图片完成后的自动保存响应才属于最终内容版本。
+        "generation": 0,
+        "received_at": float("inf"),
         "status": 200,
         "code": code,
         "err_no": code,
         "reason": "",
         "draft_ids": frozenset(draft_ids or set()),
     }
+
+
+class _AutosaveRequest:
+    def __init__(self) -> None:
+        self.url = f"https://mp.toutiao.com{AUTOSAVE_PATH}?type=article"
+        self.method = "POST"
+
+
+class _AutosaveResponse:
+    def __init__(self, request: _AutosaveRequest, *, code: int) -> None:
+        self.request = request
+        self.url = request.url
+        self.status = 200
+        self._code = code
+
+    async def json(self) -> dict[str, object]:
+        return {"code": self._code, "err_no": self._code}
+
+
+def test_autosave_response_keeps_request_mutation_generation() -> None:
+    platform = _make_platform(FakePage())
+    old_request = _AutosaveRequest()
+    new_request = _AutosaveRequest()
+    platform._mutation_generation = 1
+    platform._capture_autosave_request(old_request)
+    platform._mutation_generation = 2
+    platform._capture_autosave_request(new_request)
+
+    # 旧请求晚于新请求返回，也不能被归到最新正文版本。
+    run(platform._capture_autosave_response(_AutosaveResponse(new_request, code=0)))
+    run(platform._capture_autosave_response(_AutosaveResponse(old_request, code=0)))
+
+    assert [record["generation"] for record in platform._autosave_records] == [2, 1]
+
+
+def test_autosave_barrier_rejects_latest_generation_nonzero(monkeypatch) -> None:
+    _real, fake_sleep = _real_sleep_and_fake()
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+    platform = _make_platform(FakePage())
+    platform._mutation_generation = 2
+    old = _record(code=0, draft_ids={"111111"})
+    old["generation"] = 1
+    rejected = _record(code=7050, draft_ids={"222222"})
+    rejected["generation"] = 2
+    platform._autosave_records = [old, rejected]
+
+    with pytest.raises(ToutiaoDraftSaveRejectedError, match="平台码 nonzero"):
+        run(
+            platform._wait_for_autosave_barrier(
+                generation=2,
+                stage="第 1 张图片",
+            )
+        )
+
+
+def test_content_block_autosave_rejection_does_not_preempt_native_exit() -> None:
+    platform = ToutiaoPlatform()
+    platform.page = FakePage()
+    platform._mutation_generation = 4
+    platform._wait_for_autosave_barrier = AsyncMock(
+        side_effect=ToutiaoDraftSaveRejectedError(
+            "TOUTIAO_DRAFT_SAVE_REJECTED: 中间保存失败"
+        )
+    )
+
+    run(platform._wait_for_content_block_autosave(4))
+
+    platform._wait_for_autosave_barrier.assert_awaited_once_with(
+        generation=4,
+        stage="第 4 个图文块",
+    )
+
+
+def test_autosave_barrier_binds_title_draft_id(monkeypatch) -> None:
+    _real, fake_sleep = _real_sleep_and_fake()
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+    platform = _make_platform(FakePage())
+    platform._mutation_generation = 1
+    first = _record(code=0, draft_ids={"7665272216262623790"})
+    first["generation"] = 1
+    second = _record(code=0, draft_ids={"7665272216262623790"})
+    second["generation"] = 1
+    platform._autosave_records = [first, second]
+
+    result = run(
+        platform._wait_for_autosave_barrier(
+            generation=1,
+            stage="标题初始化",
+            require_draft_id=True,
+        )
+    )
+
+    assert result is second
+    assert platform._active_draft_id == "7665272216262623790"
 
 
 def test_save_draft_raises_on_explicit_autosave_rejection(monkeypatch) -> None:
@@ -1390,10 +2173,10 @@ def test_save_draft_raises_on_explicit_autosave_rejection(monkeypatch) -> None:
     with pytest.raises(ToutiaoDraftSaveRejectedError):
         run(platform.save_draft("测试标题"))
 
-    evidence = platform._last_draft_evidence
-    assert evidence.save_response_2xx is True
-    assert evidence.save_platform_code == "nonzero"
-    assert evidence.draft_entity_bound is False
+    assert platform.page.blur_calls == 0
+    platform._wait_for_editor_settle_before_exit.assert_awaited_once_with()
+    assert platform._test_fetch_snapshot_calls == 1
+    assert platform._test_exit_editor_values == [True]
 
 
 def test_save_draft_binds_unique_new_pgc_id_and_reopens(monkeypatch) -> None:
@@ -1419,9 +2202,115 @@ def test_save_draft_binds_unique_new_pgc_id_and_reopens(monkeypatch) -> None:
     expected_url = f"{PUBLISH_URL}?pgc_id={new_id}"
     assert result == expected_url
     assert verified == [(title, expected_url)]
+    assert platform.page.title_fill_calls == 0
+    assert platform.page.blur_calls == 0
+    platform._wait_for_editor_settle_before_exit.assert_awaited_once_with()
+    assert platform._test_fetch_snapshot_calls == 1
+    assert platform._test_exit_editor_values == [True]
     evidence = platform._last_draft_evidence
     assert evidence.draft_entity_bound is True
     assert evidence.draft_entity_source == "save_response_id"
+    assert evidence.reopen_title_match is True
+    assert evidence.reopen_dom_blocks_match is True
+
+
+def test_save_draft_prefers_bound_new_id_when_historical_ids_are_virtualized(
+    monkeypatch,
+) -> None:
+    _real, fake_sleep = _real_sleep_and_fake()
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+    title = "测试标题"
+    old_ids = {str(index) for index in range(100000, 100012)}
+    new_id = "7680801349465899554"
+    baseline = _snapshot(
+        total=12,
+        title=title,
+        title_count=12,
+        ids=old_ids,
+    )
+    latest = _ToutiaoDraftSnapshot(
+        loaded=True,
+        total_count=13,
+        title_counts={title: 13},
+        draft_ids=frozenset({new_id}),
+        title_to_ids={title: frozenset({new_id})},
+    )
+    platform = _prepare_save_platform(baseline=baseline, latest=latest, title=title)
+    platform._active_draft_id = new_id
+    platform._autosave_records = [_record(code=0, draft_ids={new_id})]
+    platform._verify_persisted_draft = AsyncMock(return_value=(True, True))
+
+    result = run(platform.save_draft(title))
+
+    assert result == f"{PUBLISH_URL}?pgc_id={new_id}"
+    assert platform._last_draft_evidence.draft_entity_bound is True
+    assert platform._last_draft_evidence.reopen_dom_blocks_match is True
+
+
+def test_save_draft_uses_bound_response_id_while_draft_card_is_delayed() -> None:
+    title = "测试标题"
+    old_id = "111111"
+    new_id = "7680806313923756578"
+    baseline = _snapshot(total=1, title=title, title_count=1, ids={old_id})
+    # 平台已返回新 pgc_id，但退出后的草稿列表尚未渲染新卡片。
+    latest = baseline
+    platform = _prepare_save_platform(baseline=baseline, latest=latest, title=title)
+    platform._active_draft_id = new_id
+    platform._autosave_records = [_record(code=0, draft_ids={new_id})]
+    platform._verify_persisted_draft = AsyncMock(return_value=(True, True))
+
+    result = run(platform.save_draft(title))
+
+    assert result == f"{PUBLISH_URL}?pgc_id={new_id}"
+    evidence = platform._last_draft_evidence
+    assert evidence.draft_list_match_count == 1
+    assert evidence.draft_entity_bound is True
+    assert evidence.draft_entity_source == "save_response_id"
+    assert evidence.reopen_title_match is True
+    assert evidence.reopen_dom_blocks_match is True
+
+
+def test_save_draft_uses_native_exit_without_intermediate_autosave_gate() -> None:
+    title = "测试标题"
+    new_id = "7665272216262623790"
+    baseline = _snapshot(total=0, title=title, title_count=0, ids=set())
+    latest = _snapshot(total=1, title=title, title_count=1, ids={new_id})
+    platform = _prepare_save_platform(baseline=baseline, latest=latest, title=title)
+    platform._verify_persisted_draft = AsyncMock(return_value=(True, True))
+    result = run(platform.save_draft(title))
+
+    assert result == f"{PUBLISH_URL}?pgc_id={new_id}"
+    assert platform.page.title_fill_calls == 0
+    assert platform.page.blur_calls == 0
+    platform._wait_for_editor_settle_before_exit.assert_awaited_once_with()
+    assert platform._test_fetch_snapshot_calls == 1
+    assert platform._test_exit_editor_values == [True]
+
+
+def test_save_draft_accepts_exact_reopen_after_nonzero_intermediate_autosave(
+    monkeypatch,
+) -> None:
+    _real, fake_sleep = _real_sleep_and_fake()
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+    title = "测试标题"
+    new_id = "7680498739710149160"
+    baseline = _snapshot(total=3, title=title, title_count=0, ids=set())
+    latest = _snapshot(total=4, title=title, title_count=1, ids={new_id})
+    platform = _prepare_save_platform(baseline=baseline, latest=latest, title=title)
+    platform._autosave_records = [_record(code=7050, draft_ids={new_id})]
+    platform._verify_persisted_draft = AsyncMock(return_value=(True, True))
+
+    result = run(platform.save_draft(title))
+
+    assert result == f"{PUBLISH_URL}?pgc_id={new_id}"
+    assert platform.page.blur_calls == 0
+    platform._wait_for_editor_settle_before_exit.assert_awaited_once_with()
+    assert platform._test_fetch_snapshot_calls == 1
+    assert platform._test_exit_editor_values == [True]
+    platform._verify_persisted_draft.assert_awaited_once()
+    evidence = platform._last_draft_evidence
+    assert evidence.save_platform_code == "nonzero"
+    assert evidence.draft_entity_bound is True
     assert evidence.reopen_title_match is True
     assert evidence.reopen_dom_blocks_match is True
 

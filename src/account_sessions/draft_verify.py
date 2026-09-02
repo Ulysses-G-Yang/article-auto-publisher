@@ -85,8 +85,8 @@ class DraftVerifyService:
 
         try:
             with self.accounts._lease(account, purpose="VERIFY"):
-                await platform.initialize()
                 try:
+                    await platform.initialize()
                     result = await platform.verify_draft_readonly(title)
                 finally:
                     try:

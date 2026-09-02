@@ -268,25 +268,36 @@ class DeliveryService:
                 images = []
                 cover = {"strategy": "NONE", "asset_id": None}
             with self.accounts._lease(account, purpose=operation.mode):
-                await platform.initialize()
-                # 即使账号页曾显示 VALID，也必须在同一 Profile 租约内
-                # 再次做只读登录态/身份确认；任何失败都在 publish 前终止，
-                # 避免把残留或错绑 Profile 的内容投递出去。
-                await self.accounts.assert_delivery_identity(
-                    account,
-                    platform,
-                    access,
-                )
-                result = await platform.publish(
-                    title=resolved_title,
-                    content_blocks=content_blocks,
-                    images=images,
-                    cover=cover,
-                    task_id=0,
-                    db=buffered_log,
-                    auto_login=False,
-                    delivery_mode=operation.mode,
-                )
+                try:
+                    await platform.initialize()
+                    # 即使账号页曾显示 VALID，也必须在同一 Profile 租约内
+                    # 再次做只读登录态/身份确认；任何失败都在 publish 前终止，
+                    # 避免把残留或错绑 Profile 的内容投递出去。
+                    await self.accounts.assert_delivery_identity(
+                        account,
+                        platform,
+                        access,
+                    )
+                    result = await platform.publish(
+                        title=resolved_title,
+                        content_blocks=content_blocks,
+                        images=images,
+                        cover=cover,
+                        task_id=0,
+                        db=buffered_log,
+                        auto_login=False,
+                        delivery_mode=operation.mode,
+                    )
+                finally:
+                    # CDP/持久 Profile 必须先关闭浏览器资源，再释放跨进程租约。
+                    # initialize() 即使只完成了一半也必须走同一清理路径。
+                    await self._cleanup_platform_after_operation(
+                        platform,
+                        account,
+                        operation,
+                        access,
+                        operation_id,
+                    )
             if not result.get("success"):
                 media_progress = safe_media_progress(result.get("media_progress"))
                 if media_progress is not None:
@@ -384,16 +395,24 @@ class DeliveryService:
                     buffered_log.entries,
                 )
             raise
-        finally:
-            if (
-                platform is not None
-                and not (
-                    account.persist_login
-                    if operation.persist_login_snapshot is None
-                    else operation.persist_login_snapshot
-                )
-                and platform.context is not None
-            ):
+
+    async def _cleanup_platform_after_operation(
+        self,
+        platform: Any,
+        account: PlatformAccount,
+        operation: DeliveryOperation,
+        access: AccessContext,
+        operation_id: str,
+    ) -> None:
+        """在 Profile 租约内清理会话和浏览器资源。"""
+
+        persist_login = (
+            account.persist_login
+            if operation.persist_login_snapshot is None
+            else operation.persist_login_snapshot
+        )
+        try:
+            if not persist_login and getattr(platform, "context", None) is not None:
                 try:
                     await platform.context.clear_cookies()
                     await self._record_session_cleanup(
@@ -412,17 +431,17 @@ class DeliveryService:
                     )
                 finally:
                     await self._mark_session_login_required(account.account_id)
-            if platform is not None:
-                try:
-                    await platform.cleanup()
-                except Exception as exc:
-                    await self._record_session_cleanup(
-                        account,
-                        access,
-                        operation_id,
-                        success=False,
-                        error=exc,
-                    )
+        finally:
+            try:
+                await platform.cleanup()
+            except Exception as exc:
+                await self._record_session_cleanup(
+                    account,
+                    access,
+                    operation_id,
+                    success=False,
+                    error=exc,
+                )
 
     async def get_operation(
         self,

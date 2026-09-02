@@ -1,23 +1,40 @@
 <!doctype html>
-<html lang="zh-CN" data-coreui-theme="light">
+<html lang="zh-CN" data-coreui-theme="light" data-theme="light">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light dark">
-  <title>发布与采集数据中心</title>
+  <meta name="theme-color" content="#101828">
+  <title>数据中心 · ArticleOps</title>
+  <script>
+    try {
+      const savedTheme = localStorage.getItem('articleops.theme.v2')
+        || localStorage.getItem('article-mvp.dashboard-theme.v1');
+      const theme = savedTheme === 'dark' ? 'dark' : 'light';
+      document.documentElement.dataset.coreuiTheme = theme;
+      document.documentElement.dataset.theme = theme;
+    } catch (_) {}
+  </script>
   <link rel="stylesheet" href="{{ url_for('article_mvp_dashboard.static', filename='vendor/coreui/coreui.min.css') }}">
   <link rel="stylesheet" href="{{ url_for('article_mvp_dashboard.static', filename='vendor/simplebar/simplebar.css') }}">
   <link rel="stylesheet" href="{{ url_for('article_mvp_dashboard.static', filename='vendor/coreui-icons/css/free.min.css') }}">
   <link rel="stylesheet" href="{{ url_for('article_mvp_dashboard.static', filename='vendor/gridstack/gridstack.min.css') }}">
-  <link rel="stylesheet" href="{{ url_for('article_mvp_dashboard.static', filename='dashboard.css') }}">
+  <link rel="stylesheet" href="{{ url_for('article_mvp_dashboard.static', filename='dashboard.css', v='20260902-ui-v2') }}">
 </head>
+{# 未接入权限上下文的旧路由保持兼容；一旦显式传入映射，缺失权限必须关闭。这里只做显示投影，不替代 API 鉴权。 #}
+{% set sidebar_access = sidebar_permissions if sidebar_permissions is defined and sidebar_permissions else {} %}
+{% set sidebar_default = false if sidebar_permissions is defined else true %}
+{% set can_overview = sidebar_access.get('overview', sidebar_default) %}
+{% set can_studio = sidebar_access.get('content_studio', sidebar_default) %}
+{% set can_accounts = sidebar_access.get('accounts', sidebar_default) %}
+{% set can_data = sidebar_access.get('data_center', sidebar_default) %}
 <body class="app-shell" data-dashboard-api="{{ url_for('article_mvp_dashboard.api_dashboard') }}" data-legacy-summary-api="/api/legacy-summary">
   <a class="skip-link" href="#main-content">跳到主要内容</a>
-  <aside id="app-sidebar" class="sidebar sidebar-dark sidebar-fixed border-end" aria-label="主导航">
-    <div class="sidebar-header border-bottom">
-      <a class="sidebar-brand" href="/" aria-label="文章自动发布首页">
-        <span class="brand-mark" aria-hidden="true">A</span>
-        <span class="brand-copy"><strong>ArticleOps</strong><small>CONTENT OPERATIONS</small></span>
+  <aside id="app-sidebar" class="sidebar sidebar-dark sidebar-fixed" aria-label="主导航">
+    <div class="sidebar-header">
+      <a class="sidebar-brand" href="/" aria-label="ArticleOps 内容运营中心首页">
+        <span class="brand-mark" aria-hidden="true"><span></span><span></span><span></span></span>
+        <span class="brand-copy"><strong>ArticleOps</strong><small>内容运营中心</small></span>
       </a>
       <button id="sidebar-close" class="btn sidebar-close d-lg-none" type="button" aria-label="关闭导航">
         <i class="cil-x" aria-hidden="true"></i>
@@ -25,33 +42,60 @@
     </div>
 
     <nav class="sidebar-nav" data-simplebar aria-label="业务导航">
-      <div class="nav-title">工作台</div>
-      <a class="nav-link {% if request.path == '/' or request.path.startswith('/task/') %}active{% endif %}" href="/" {% if request.path == '/' or request.path.startswith('/task/') %}aria-current="page"{% endif %}><i class="nav-icon cil-speedometer" aria-hidden="true"></i><span>发布概览</span></a>
-      <a class="nav-link {% if request.path == '/upload' %}active{% endif %}" href="/upload" {% if request.path == '/upload' %}aria-current="page"{% endif %}><i class="nav-icon cil-pencil" aria-hidden="true"></i><span>创作与投递</span></a>
-      <div class="nav-title">运营管理</div>
-      <a class="nav-link {% if request.path == '/accounts' %}active{% endif %}" href="/accounts" {% if request.path == '/accounts' %}aria-current="page"{% endif %}><i class="nav-icon cil-user" aria-hidden="true"></i><span>平台账号</span></a>
-      <a class="nav-link active" href="/data-center/" aria-current="page"><i class="nav-icon cil-chart" aria-hidden="true"></i><span>数据中心</span></a>
+      {# Visibility projection only. Backend routes and APIs must enforce authorization independently. #}
+      {% if can_overview or can_studio %}
+      <section class="sidebar-group" data-sidebar-group="workspace">
+        <button class="sidebar-group-toggle" type="button" aria-expanded="true" aria-controls="sidebar-workspace-links">
+          <span>工作台</span><i class="cil-chevron-bottom" aria-hidden="true"></i>
+        </button>
+        <div id="sidebar-workspace-links" class="sidebar-group-panel">
+          {% if can_overview %}
+          <a class="nav-link {% if request.path == '/' or request.path.startswith('/task/') %}active{% endif %}" href="/" data-permission="overview" {% if request.path == '/' or request.path.startswith('/task/') %}aria-current="page"{% endif %}><i class="nav-icon cil-speedometer" aria-hidden="true"></i><span>发布概览</span></a>
+          {% endif %}
+          {% if can_studio %}
+          <a class="nav-link {% if request.path == '/upload' %}active{% endif %}" href="/upload" data-permission="content_studio" {% if request.path == '/upload' %}aria-current="page"{% endif %}><i class="nav-icon cil-pencil" aria-hidden="true"></i><span>创作与投递</span></a>
+          {% endif %}
+        </div>
+      </section>
+      {% endif %}
+
+      {% if can_accounts or can_data %}
+      <section class="sidebar-group" data-sidebar-group="operations">
+        <button class="sidebar-group-toggle" type="button" aria-expanded="true" aria-controls="sidebar-operations-links">
+          <span>运营管理</span><i class="cil-chevron-bottom" aria-hidden="true"></i>
+        </button>
+        <div id="sidebar-operations-links" class="sidebar-group-panel">
+          {% if can_accounts %}
+          <a class="nav-link {% if request.path == '/accounts' %}active{% endif %}" href="/accounts" data-permission="accounts" {% if request.path == '/accounts' %}aria-current="page"{% endif %}><i class="nav-icon cil-user" aria-hidden="true"></i><span>平台账号</span></a>
+          {% endif %}
+          {% if can_data %}
+          <a class="nav-link {% if request.path.startswith('/data-center') %}active{% endif %}" href="/data-center/" data-permission="data_center" {% if request.path.startswith('/data-center') %}aria-current="page"{% endif %}><i class="nav-icon cil-chart" aria-hidden="true"></i><span>数据中心</span></a>
+          {% endif %}
+        </div>
+      </section>
+      {% endif %}
     </nav>
 
-    <div class="sidebar-footer border-top">
-      <div class="sidebar-status"><span class="status-dot"></span><span><strong>服务在线</strong><small>ArticleOps 本机服务</small></span></div>
+    <div class="sidebar-footer">
+      <div class="sidebar-status" title="当前页面使用同一个本机服务"><span class="status-dot completed" aria-hidden="true"></span><span><strong>本机服务在线</strong><small>账号与投递数据仅在本机处理</small></span></div>
     </div>
+    <div id="sidebar-resizer" class="sidebar-resizer" role="separator" aria-label="调整侧边栏宽度" aria-orientation="vertical" tabindex="0"></div>
   </aside>
-  <div id="sidebar-backdrop" class="sidebar-backdrop"></div>
+  <div id="sidebar-backdrop" class="sidebar-backdrop" aria-hidden="true"></div>
 
   <div class="wrapper d-flex flex-column min-vh-100">
-    <header class="header header-sticky p-0 border-bottom">
-      <div class="container-fluid px-4 header-main">
-        <button id="sidebar-toggle" class="header-toggler btn" type="button" aria-label="切换导航" aria-controls="app-sidebar" aria-expanded="false">
+    <header class="header header-sticky p-0">
+      <div class="container-fluid header-main">
+        <button id="sidebar-toggle" class="header-toggler btn" type="button" aria-label="展开或收起导航" aria-controls="app-sidebar" aria-expanded="true">
           <i class="cil-menu" aria-hidden="true"></i>
         </button>
 
-        <div class="header-context ms-2 ms-lg-3">
+        <div class="header-context">
           <span class="header-kicker">ARTICLEOPS</span>
           <strong>数据中心</strong>
         </div>
 
-        <div class="header-search ms-2 ms-lg-3">
+        <div class="header-search">
           <i class="cil-magnifying-glass" aria-hidden="true"></i>
           <label class="visually-hidden" for="task-search">搜索发布任务</label>
           <input id="task-search" class="form-control" type="search" placeholder="搜索任务、文章或平台" autocomplete="off">
@@ -59,21 +103,21 @@
 
         <div class="header-actions ms-auto">
           <span id="last-updated" class="updated d-none d-xl-inline">等待加载</span>
-          <button id="refresh" class="btn btn-ghost-secondary icon-button" type="button" title="刷新数据" aria-label="刷新数据">
+          <button id="refresh" class="btn btn-ghost-secondary icon-button header-icon-button" type="button" title="刷新数据" aria-label="刷新数据">
             <i class="cil-reload" aria-hidden="true"></i>
           </button>
-          <button id="theme-toggle" class="btn btn-ghost-secondary icon-button" type="button" title="切换明暗主题" aria-label="切换明暗主题">
+          <button id="theme-toggle" class="btn btn-ghost-secondary icon-button header-icon-button" type="button" title="切换为深色模式" aria-label="切换为深色模式" aria-pressed="false">
             <i id="theme-icon" class="cil-moon" aria-hidden="true"></i>
           </button>
-          <button id="edit-dashboard" class="btn btn-primary d-none d-sm-inline-flex align-items-center gap-2" type="button">
+          <button id="edit-dashboard" class="btn btn-primary d-none d-sm-inline-flex align-items-center gap-2" type="button" aria-pressed="false">
             <i class="cil-pencil" aria-hidden="true"></i><span>编辑看板</span>
           </button>
         </div>
       </div>
     </header>
 
-    <main id="main-content" class="body flex-grow-1" tabindex="-1">
-      <div class="container-fluid px-3 px-lg-4 py-4">
+    <main id="main-content" class="body flex-grow-1 app-main" tabindex="-1">
+      <div class="container-fluid app-content">
         <nav aria-label="面包屑导航">
           <ol class="breadcrumb mb-2">
             <li class="breadcrumb-item"><a href="/">首页</a></li>
@@ -87,8 +131,8 @@
             <h1>发布与采集数据中心</h1>
             <p>现役发布任务与小黑盒单链路数据，在同一服务内统一查看。</p>
           </div>
-          <div class="page-heading-meta">
-            <span class="badge rounded-pill text-bg-success-subtle text-success-emphasis"><span class="status-dot"></span>服务正常</span>
+          <div class="page-heading-actions page-heading-meta">
+            <span class="badge rounded-pill text-bg-success-subtle text-success-emphasis"><span class="status-dot completed" aria-hidden="true"></span>服务正常</span>
             <span class="badge rounded-pill text-bg-light border">15 秒自动刷新</span>
           </div>
         </div>
@@ -210,7 +254,7 @@
         </div>
       </div>
     </main>
-    <footer class="footer px-3 px-lg-4"><span>ArticleOps</span><span class="ms-auto">统一发布与数据工作台</span></footer>
+    <footer class="footer"><span>ArticleOps</span><span class="ms-auto">内容创作、账号与投递结果统一管理</span></footer>
   </div>
 
   <aside class="offcanvas offcanvas-end" tabindex="-1" id="module-settings" aria-labelledby="module-settings-title">
@@ -239,6 +283,6 @@
   <script src="{{ url_for('article_mvp_dashboard.static', filename='vendor/coreui/coreui.bundle.min.js') }}" defer></script>
   <script src="{{ url_for('article_mvp_dashboard.static', filename='vendor/simplebar/simplebar.min.js') }}" defer></script>
   <script src="{{ url_for('article_mvp_dashboard.static', filename='vendor/gridstack/gridstack-all.js') }}" defer></script>
-  <script src="{{ url_for('article_mvp_dashboard.static', filename='dashboard.js', v='20260828-zh-status-i18n') }}" defer></script>
+  <script src="{{ url_for('article_mvp_dashboard.static', filename='dashboard.js', v='20260902-sidebar-shell-v2') }}" defer></script>
 </body>
 </html>

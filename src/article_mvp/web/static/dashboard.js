@@ -1,9 +1,56 @@
 const byId = (id) => document.getElementById(id);
 
+const SHELL_STORAGE_KEYS = Object.freeze({
+  collapsed: "articleops.sidebar-collapsed.v1",
+  groups: "articleops.sidebar-groups.v2",
+  theme: "articleops.theme.v2",
+  width: "articleops.sidebar-width.v2",
+});
+const LEGACY_SHELL_STORAGE_KEYS = Object.freeze({
+  collapsed: "article-mvp.sidebar-collapsed.v1",
+  theme: "article-mvp.dashboard-theme.v1",
+});
+const SIDEBAR_WIDTH_MIN = 216;
+const SIDEBAR_WIDTH_MAX = 320;
 const LAYOUT_STORAGE_KEY = "article-mvp.dashboard-layout.v1";
-const THEME_STORAGE_KEY = "article-mvp.dashboard-theme.v1";
-const SIDEBAR_STORAGE_KEY = "article-mvp.sidebar-collapsed.v1";
 const METRIC_MODE_STORAGE_KEY = "article-mvp.metric-mode.v1";
+
+function readPreference(key) {
+  try {
+    return window.localStorage.getItem(key);
+  } catch (_error) {
+    return null;
+  }
+}
+
+function writePreference(key, value) {
+  try {
+    window.localStorage.setItem(key, value);
+  } catch (_error) {
+    // The shell remains usable when storage is unavailable or disabled.
+  }
+}
+
+function removePreference(key) {
+  try {
+    window.localStorage.removeItem(key);
+  } catch (_error) {
+    // Reset still applies to the current page when persistence is unavailable.
+  }
+}
+
+function readJsonPreference(key, fallback = {}) {
+  try {
+    const value = readPreference(key);
+    if (!value) return fallback;
+    const parsed = JSON.parse(value);
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? parsed
+      : fallback;
+  } catch (_error) {
+    return fallback;
+  }
+}
 
 const DEFAULT_LAYOUT = [
   { id: "summary", x: 0, y: 0, w: 12, h: 3 },
@@ -221,7 +268,7 @@ function renderMetricCards() {
 
 function setMetricMode(mode) {
   metricMode = mode === "article" ? "article" : "overview";
-  localStorage.setItem(METRIC_MODE_STORAGE_KEY, metricMode);
+  writePreference(METRIC_MODE_STORAGE_KEY, metricMode);
   renderMetricCards();
 }
 
@@ -577,6 +624,7 @@ function setEditMode(enabled) {
   dashboardGrid.enableResize(enabled);
 
   const button = byId("edit-dashboard");
+  button.setAttribute("aria-pressed", String(enabled));
   button.classList.toggle("btn-primary", !enabled);
   button.classList.toggle("btn-outline-primary", enabled);
   button.querySelector("i").className = enabled ? "cil-check-circle" : "cil-pencil";
@@ -585,13 +633,13 @@ function setEditMode(enabled) {
 
 function saveLayout() {
   savedLayoutState = serializeLayout();
-  localStorage.setItem(LAYOUT_STORAGE_KEY, JSON.stringify(savedLayoutState));
+  writePreference(LAYOUT_STORAGE_KEY, JSON.stringify(savedLayoutState));
   setEditMode(false);
   showToast("看板布局已保存");
 }
 
 function restoreDefaultLayout() {
-  localStorage.removeItem(LAYOUT_STORAGE_KEY);
+  removePreference(LAYOUT_STORAGE_KEY);
   for (const item of DEFAULT_LAYOUT) showModule(item.id);
   dashboardGrid.load(DEFAULT_LAYOUT, false);
   savedLayoutState = { widgets: DEFAULT_LAYOUT.map((item) => ({ ...item })), hidden: [] };
@@ -626,46 +674,174 @@ function initGrid() {
 
 function setTheme(theme) {
   const selected = theme === "dark" ? "dark" : "light";
-  document.documentElement.setAttribute("data-coreui-theme", selected);
-  byId("theme-icon").className = selected === "dark" ? "cil-sun" : "cil-moon";
-  localStorage.setItem(THEME_STORAGE_KEY, selected);
+  const isDark = selected === "dark";
+  document.documentElement.dataset.coreuiTheme = selected;
+  document.documentElement.dataset.theme = selected;
+  byId("theme-icon").className = isDark ? "cil-sun" : "cil-moon";
+  const toggle = byId("theme-toggle");
+  const actionLabel = isDark ? "切换为浅色模式" : "切换为深色模式";
+  toggle.setAttribute("aria-pressed", String(isDark));
+  toggle.setAttribute("aria-label", actionLabel);
+  toggle.title = actionLabel;
+  writePreference(SHELL_STORAGE_KEYS.theme, selected);
+  writePreference(LEGACY_SHELL_STORAGE_KEYS.theme, selected);
 }
 
 function initTheme() {
-  setTheme(localStorage.getItem(THEME_STORAGE_KEY) || "light");
+  const savedTheme = readPreference(SHELL_STORAGE_KEYS.theme)
+    ?? readPreference(LEGACY_SHELL_STORAGE_KEYS.theme);
+  setTheme(savedTheme || "light");
+}
+
+function updateSidebarToggleState() {
+  const toggle = byId("sidebar-toggle");
+  const expanded = window.innerWidth < 992
+    ? document.body.classList.contains("sidebar-mobile-open")
+    : !document.body.classList.contains("sidebar-collapsed");
+  toggle.setAttribute("aria-expanded", String(expanded));
+}
+
+function setSidebarOpen(open, { returnFocus = false } = {}) {
+  document.body.classList.toggle("sidebar-mobile-open", open);
+  const toggle = byId("sidebar-toggle");
+  updateSidebarToggleState();
+  if (!open && returnFocus) toggle.focus({ preventScroll: true });
 }
 
 function toggleSidebar() {
   if (window.innerWidth < 992) {
-    const open = document.body.classList.toggle("sidebar-mobile-open");
-    byId("sidebar-toggle").setAttribute("aria-expanded", String(open));
+    setSidebarOpen(!document.body.classList.contains("sidebar-mobile-open"));
     return;
   }
   const collapsed = document.body.classList.toggle("sidebar-collapsed");
-  localStorage.setItem(SIDEBAR_STORAGE_KEY, String(collapsed));
-  window.setTimeout(() => dashboardGrid?.onResize(), 220);
+  writePreference(SHELL_STORAGE_KEYS.collapsed, String(collapsed));
+  writePreference(LEGACY_SHELL_STORAGE_KEYS.collapsed, String(collapsed));
+  updateSidebarToggleState();
+  window.setTimeout(() => dashboardGrid?.onResize(), 320);
+}
+
+function applySidebarWidth(value) {
+  const parsed = Number.parseInt(value, 10);
+  const width = Number.isFinite(parsed)
+    ? Math.min(SIDEBAR_WIDTH_MAX, Math.max(SIDEBAR_WIDTH_MIN, parsed))
+    : 248;
+  document.documentElement.style.setProperty("--ao-sidebar-width-current", `${width}px`);
+  const separator = byId("sidebar-resizer");
+  separator.setAttribute("aria-valuemin", String(SIDEBAR_WIDTH_MIN));
+  separator.setAttribute("aria-valuemax", String(SIDEBAR_WIDTH_MAX));
+  separator.setAttribute("aria-valuenow", String(width));
+  return width;
+}
+
+function initSidebarGroups(sidebar) {
+  const saved = readJsonPreference(SHELL_STORAGE_KEYS.groups);
+  sidebar.querySelectorAll("[data-sidebar-group]").forEach((group) => {
+    const groupId = group.dataset.sidebarGroup;
+    const button = group.querySelector(".sidebar-group-toggle");
+    const panel = group.querySelector(".sidebar-group-panel");
+    if (!groupId || !button || !panel) return;
+
+    const activeInside = Boolean(panel.querySelector(".nav-link.active"));
+    const expanded = activeInside || saved[groupId] !== false;
+    group.classList.toggle("is-collapsed", !expanded);
+    button.setAttribute("aria-expanded", String(expanded));
+
+    button.addEventListener("click", () => {
+      const nextExpanded = group.classList.contains("is-collapsed");
+      group.classList.toggle("is-collapsed", !nextExpanded);
+      button.setAttribute("aria-expanded", String(nextExpanded));
+      const current = readJsonPreference(SHELL_STORAGE_KEYS.groups);
+      current[groupId] = nextExpanded;
+      writePreference(SHELL_STORAGE_KEYS.groups, JSON.stringify(current));
+    });
+  });
+}
+
+function notifyDashboardWidthChanged() {
+  window.setTimeout(() => dashboardGrid?.onResize(), 320);
+}
+
+function initSidebarResize() {
+  const separator = byId("sidebar-resizer");
+  let startX = 0;
+  let startWidth = 248;
+  applySidebarWidth(readPreference(SHELL_STORAGE_KEYS.width));
+
+  separator.addEventListener("pointerdown", (event) => {
+    if (window.innerWidth < 992 || document.body.classList.contains("sidebar-collapsed")) return;
+    startX = event.clientX;
+    startWidth = Number.parseInt(
+      getComputedStyle(document.documentElement).getPropertyValue("--ao-sidebar-width-current"),
+      10,
+    ) || 248;
+    separator.setPointerCapture(event.pointerId);
+    document.body.classList.add("sidebar-resizing");
+  });
+
+  separator.addEventListener("pointermove", (event) => {
+    if (!separator.hasPointerCapture(event.pointerId)) return;
+    applySidebarWidth(startWidth + event.clientX - startX);
+  });
+
+  const finishResize = (event) => {
+    if (!separator.hasPointerCapture(event.pointerId)) return;
+    separator.releasePointerCapture(event.pointerId);
+    document.body.classList.remove("sidebar-resizing");
+    const width = applySidebarWidth(
+      getComputedStyle(document.documentElement).getPropertyValue("--ao-sidebar-width-current"),
+    );
+    writePreference(SHELL_STORAGE_KEYS.width, String(width));
+    notifyDashboardWidthChanged();
+  };
+  separator.addEventListener("pointerup", finishResize);
+  separator.addEventListener("pointercancel", finishResize);
+
+  separator.addEventListener("keydown", (event) => {
+    if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+    event.preventDefault();
+    const current = Number.parseInt(
+      getComputedStyle(document.documentElement).getPropertyValue("--ao-sidebar-width-current"),
+      10,
+    ) || 248;
+    const next = event.key === "Home"
+      ? SIDEBAR_WIDTH_MIN
+      : event.key === "End"
+        ? SIDEBAR_WIDTH_MAX
+        : current + (event.key === "ArrowRight" ? 8 : -8);
+    const width = applySidebarWidth(next);
+    writePreference(SHELL_STORAGE_KEYS.width, String(width));
+    notifyDashboardWidthChanged();
+  });
 }
 
 function initSidebar() {
-  if (window.innerWidth >= 992 && localStorage.getItem(SIDEBAR_STORAGE_KEY) === "true") {
+  const sidebar = byId("app-sidebar");
+  const collapsedPreference = readPreference(SHELL_STORAGE_KEYS.collapsed)
+    ?? readPreference(LEGACY_SHELL_STORAGE_KEYS.collapsed);
+  if (window.innerWidth >= 992 && collapsedPreference === "true") {
     document.body.classList.add("sidebar-collapsed");
   }
+  initSidebarGroups(sidebar);
+  initSidebarResize();
   byId("sidebar-toggle").addEventListener("click", toggleSidebar);
-  byId("sidebar-close").addEventListener("click", () => {
-    document.body.classList.remove("sidebar-mobile-open");
-    byId("sidebar-toggle").setAttribute("aria-expanded", "false");
-  });
-  byId("sidebar-backdrop").addEventListener("click", () => {
-    document.body.classList.remove("sidebar-mobile-open");
-    byId("sidebar-toggle").setAttribute("aria-expanded", "false");
-  });
-  document.querySelectorAll(".sidebar a").forEach((link) => {
+  byId("sidebar-close").addEventListener("click", () => setSidebarOpen(false, { returnFocus: true }));
+  byId("sidebar-backdrop").addEventListener("click", () => setSidebarOpen(false, { returnFocus: true }));
+  document.querySelectorAll("#app-sidebar a").forEach((link) => {
     link.addEventListener("click", () => {
-      document.body.classList.remove("sidebar-mobile-open");
-      byId("sidebar-toggle").setAttribute("aria-expanded", "false");
+      if (window.innerWidth < 992) setSidebarOpen(false);
     });
   });
-  window.addEventListener("resize", updateResponsiveSummaryHeight);
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && document.body.classList.contains("sidebar-mobile-open")) {
+      setSidebarOpen(false, { returnFocus: true });
+    }
+  });
+  window.addEventListener("resize", () => {
+    if (window.innerWidth >= 992) document.body.classList.remove("sidebar-mobile-open");
+    updateSidebarToggleState();
+    updateResponsiveSummaryHeight();
+  });
+  updateSidebarToggleState();
 }
 
 function bindInteractions() {
@@ -693,7 +869,7 @@ function bindInteractions() {
 }
 
 function initializeDashboard() {
-  metricMode = localStorage.getItem(METRIC_MODE_STORAGE_KEY) === "article" ? "article" : "overview";
+  metricMode = readPreference(METRIC_MODE_STORAGE_KEY) === "article" ? "article" : "overview";
   initTheme();
   initGrid();
   initSidebar();

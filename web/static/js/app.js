@@ -1,4 +1,11 @@
-const SIDEBAR_STORAGE_KEY = 'articleops.sidebar-collapsed.v1';
+const SHELL_STORAGE_KEYS = Object.freeze({
+    collapsed: 'articleops.sidebar-collapsed.v1',
+    groups: 'articleops.sidebar-groups.v2',
+    theme: 'articleops.theme.v2',
+    width: 'articleops.sidebar-width.v2',
+});
+const SIDEBAR_WIDTH_MIN = 216;
+const SIDEBAR_WIDTH_MAX = 320;
 
 function readShellPreference(key) {
     try {
@@ -13,6 +20,19 @@ function writeShellPreference(key, value) {
         window.localStorage.setItem(key, value);
     } catch (_) {
         // 隐私模式或禁用存储时，导航仍应正常工作，只是不持久化偏好。
+    }
+}
+
+function readJsonPreference(key, fallback = {}) {
+    try {
+        const value = readShellPreference(key);
+        if (!value) return fallback;
+        const parsed = JSON.parse(value);
+        return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+            ? parsed
+            : fallback;
+    } catch (_) {
+        return fallback;
     }
 }
 // CoreUI's Bootstrap-compatible components are the sole runtime implementation.
@@ -69,11 +89,21 @@ function createToastContainer() {
     return container;
 }
 
-function setSidebarOpen(open) {
-    document.body.classList.toggle('sidebar-mobile-open', open);
+function updateSidebarToggleState() {
     const button = document.getElementById('sidebar-toggle');
-    if (button) button.setAttribute('aria-expanded', String(open));
-    if (!open) document.getElementById('sidebar-toggle')?.focus({ preventScroll: true });
+    if (!button) return;
+    const expanded = window.innerWidth < 992
+        ? document.body.classList.contains('sidebar-mobile-open')
+        : !document.body.classList.contains('sidebar-collapsed');
+    button.setAttribute('aria-expanded', String(expanded));
+}
+
+function setSidebarOpen(open, restoreFocus = false) {
+    document.body.classList.toggle('sidebar-mobile-open', open);
+    updateSidebarToggleState();
+    if (!open && restoreFocus) {
+        document.getElementById('sidebar-toggle')?.focus({ preventScroll: true });
+    }
 }
 
 function toggleSidebar() {
@@ -82,27 +112,151 @@ function toggleSidebar() {
         return;
     }
     const collapsed = document.body.classList.toggle('sidebar-collapsed');
-    writeShellPreference(SIDEBAR_STORAGE_KEY, String(collapsed));
+    writeShellPreference(SHELL_STORAGE_KEYS.collapsed, String(collapsed));
+    updateSidebarToggleState();
+}
+
+function applySidebarWidth(value) {
+    const parsed = Number.parseInt(value, 10);
+    const width = Number.isFinite(parsed)
+        ? Math.min(SIDEBAR_WIDTH_MAX, Math.max(SIDEBAR_WIDTH_MIN, parsed))
+        : 248;
+    document.documentElement?.style?.setProperty('--ao-sidebar-width-current', `${width}px`);
+    const separator = document.getElementById('sidebar-resizer');
+    separator?.setAttribute('aria-valuemin', String(SIDEBAR_WIDTH_MIN));
+    separator?.setAttribute('aria-valuemax', String(SIDEBAR_WIDTH_MAX));
+    separator?.setAttribute('aria-valuenow', String(width));
+    return width;
+}
+
+function initSidebarGroups(sidebar) {
+    const saved = readJsonPreference(SHELL_STORAGE_KEYS.groups);
+    sidebar.querySelectorAll('[data-sidebar-group]').forEach(group => {
+        const groupId = group.dataset.sidebarGroup;
+        const button = group.querySelector('.sidebar-group-toggle');
+        const panel = group.querySelector('.sidebar-group-panel');
+        if (!groupId || !button || !panel) return;
+
+        const activeInside = Boolean(panel.querySelector('.nav-link.active'));
+        const expanded = activeInside || saved[groupId] !== false;
+        group.classList.toggle('is-collapsed', !expanded);
+        button.setAttribute('aria-expanded', String(expanded));
+
+        button.addEventListener('click', () => {
+            const nextExpanded = group.classList.contains('is-collapsed');
+            group.classList.toggle('is-collapsed', !nextExpanded);
+            button.setAttribute('aria-expanded', String(nextExpanded));
+            const current = readJsonPreference(SHELL_STORAGE_KEYS.groups);
+            current[groupId] = nextExpanded;
+            writeShellPreference(SHELL_STORAGE_KEYS.groups, JSON.stringify(current));
+        });
+    });
+}
+
+function initSidebarResize() {
+    const separator = document.getElementById('sidebar-resizer');
+    if (!separator) return;
+
+    let startX = 0;
+    let startWidth = 248;
+    applySidebarWidth(readShellPreference(SHELL_STORAGE_KEYS.width));
+
+    separator.addEventListener('pointerdown', event => {
+        if (window.innerWidth < 992 || document.body.classList.contains('sidebar-collapsed')) return;
+        startX = event.clientX;
+        startWidth = Number.parseInt(
+            getComputedStyle(document.documentElement).getPropertyValue('--ao-sidebar-width-current'),
+            10,
+        ) || 248;
+        separator.setPointerCapture(event.pointerId);
+        document.body.classList.add('sidebar-resizing');
+    });
+
+    separator.addEventListener('pointermove', event => {
+        if (!separator.hasPointerCapture(event.pointerId)) return;
+        applySidebarWidth(startWidth + event.clientX - startX);
+    });
+
+    const finishResize = event => {
+        if (!separator.hasPointerCapture(event.pointerId)) return;
+        separator.releasePointerCapture(event.pointerId);
+        document.body.classList.remove('sidebar-resizing');
+        const width = applySidebarWidth(
+            getComputedStyle(document.documentElement).getPropertyValue('--ao-sidebar-width-current'),
+        );
+        writeShellPreference(SHELL_STORAGE_KEYS.width, String(width));
+    };
+    separator.addEventListener('pointerup', finishResize);
+    separator.addEventListener('pointercancel', finishResize);
+
+    separator.addEventListener('keydown', event => {
+        if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+        event.preventDefault();
+        const current = Number.parseInt(
+            getComputedStyle(document.documentElement).getPropertyValue('--ao-sidebar-width-current'),
+            10,
+        ) || 248;
+        const next = event.key === 'Home'
+            ? SIDEBAR_WIDTH_MIN
+            : event.key === 'End'
+                ? SIDEBAR_WIDTH_MAX
+                : current + (event.key === 'ArrowRight' ? 8 : -8);
+        const width = applySidebarWidth(next);
+        writeShellPreference(SHELL_STORAGE_KEYS.width, String(width));
+    });
 }
 
 function initSidebar() {
     const sidebar = document.getElementById('app-sidebar');
     if (!sidebar || sidebar.dataset.initialized === 'true') return;
     sidebar.dataset.initialized = 'true';
-    if (window.innerWidth >= 992 && readShellPreference(SIDEBAR_STORAGE_KEY) === 'true') {
+    if (window.innerWidth >= 992 && readShellPreference(SHELL_STORAGE_KEYS.collapsed) === 'true') {
         document.body.classList.add('sidebar-collapsed');
     }
+    initSidebarGroups(sidebar);
+    initSidebarResize();
     document.getElementById('sidebar-toggle')?.addEventListener('click', toggleSidebar);
-    document.getElementById('sidebar-close')?.addEventListener('click', () => setSidebarOpen(false));
-    document.getElementById('sidebar-backdrop')?.addEventListener('click', () => setSidebarOpen(false));
+    document.getElementById('sidebar-close')?.addEventListener('click', () => setSidebarOpen(false, true));
+    document.getElementById('sidebar-backdrop')?.addEventListener('click', () => setSidebarOpen(false, true));
     document.querySelectorAll('#app-sidebar a').forEach(link => link.addEventListener('click', () => {
         if (window.innerWidth < 992) setSidebarOpen(false);
     }));
     document.addEventListener('keydown', event => {
-        if (event.key === 'Escape') setSidebarOpen(false);
+        if (event.key === 'Escape' && document.body.classList.contains('sidebar-mobile-open')) {
+            setSidebarOpen(false, true);
+        }
     });
     window.addEventListener('resize', () => {
         if (window.innerWidth >= 992) document.body.classList.remove('sidebar-mobile-open');
+        updateSidebarToggleState();
+    });
+    updateSidebarToggleState();
+}
+
+function applyTheme(theme) {
+    const resolved = theme === 'dark' ? 'dark' : 'light';
+    const root = document.documentElement;
+    if (root?.dataset) {
+        root.dataset.coreuiTheme = resolved;
+        root.dataset.theme = resolved;
+    }
+    const button = document.getElementById('theme-toggle');
+    const icon = document.getElementById('theme-icon');
+    if (button) {
+        const nextLabel = resolved === 'dark' ? '切换为浅色模式' : '切换为深色模式';
+        button.setAttribute('aria-label', nextLabel);
+        button.setAttribute('title', nextLabel);
+    }
+    if (icon) icon.className = resolved === 'dark' ? 'cil-sun' : 'cil-moon';
+}
+
+function initTheme() {
+    const saved = readShellPreference(SHELL_STORAGE_KEYS.theme);
+    applyTheme(saved === 'dark' ? 'dark' : 'light');
+    document.getElementById('theme-toggle')?.addEventListener('click', () => {
+        const next = document.documentElement?.dataset?.coreuiTheme === 'dark' ? 'light' : 'dark';
+        applyTheme(next);
+        writeShellPreference(SHELL_STORAGE_KEYS.theme, next);
     });
 }
 
@@ -203,6 +357,7 @@ function localizeUiText() {
 }
 
 function initAppShell() {
+    initTheme();
     initSidebar();
     localizeUiText();
 }

@@ -1,6 +1,5 @@
-## [TASK] ArticleOps 多平台图文草稿验收
+## [TASK] ArticleOps AI guided publication phases 1-3
 
-- **Status**: 百家号完整 Word + 7 图 + 封面 + 持久化重开已通过 | **Next Action**: `只读审计小红书封面控件与草稿重开 DOM`
-- **Critical State**: 分支 `feat/zhihu-real-delivery`，HEAD `fb290126cc5b9103f38d4f1185e943c14a424633`；百家号操作单 `50fc0033-0e6f-4b1a-8029-ddd25431e12b` 为 `DRAFT_SAVED`，映射 `SUCCEEDED`；公开发布关闭；`uv.lock` 未跟踪且不得触碰。
-- **Verification**: `718 passed, 2 skipped`；Ruff、py_compile、`git diff --check` 通过；本地/远端 SHA 一致。
-- **Recovery Path**: `cd D:\Backup\Documents\article-auto-publisher && Get-Content .codex\hybrid-attention-context-guard\checkpoints\20260820-0212-baijiahao-cover.json`
+- **Status**: Worktree created | **Next Action**: Audit tests and implement baseline documentation, frozen platform selection contract, then the account-scoped read-only publish-options API.
+- **Critical State**: `feature/ai-guided-publication` at base `0091eda1dcc4170a90641c41de5ccc9e64bc2006`; no real platform actions; no public publishing; existing port 5000 service remains untouched.
+- **Recovery Path**: `cd D:\Backup\Documents\article-auto-publisher-worktrees\ai-guided-publication` and decrypt `.codex\hybrid-attention-context-guard\checkpoints\20260902T182122+0800.json` with Windows DPAPI for the current user.

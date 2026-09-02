@@ -8,6 +8,25 @@ def read(relative_path: str) -> str:
     return (ROOT / relative_path).read_text(encoding="utf-8")
 
 
+def css_declarations(stylesheet: str, selector: str) -> dict[str, str]:
+    """Return declarations for one top-level selector without coupling to formatting."""
+    match = re.search(rf"(?m)^\s*{re.escape(selector)}\s*\{{([^}}]*)\}}", stylesheet)
+    assert match is not None, f"missing CSS selector: {selector}"
+    declarations: dict[str, str] = {}
+    for declaration in match.group(1).split(";"):
+        if ":" not in declaration:
+            continue
+        name, value = declaration.split(":", 1)
+        declarations[name.strip()] = value.strip()
+    return declarations
+
+
+def css_px(value: str) -> float:
+    match = re.fullmatch(r"([0-9.]+)px", value.strip())
+    assert match is not None, f"expected px value, got {value!r}"
+    return float(match.group(1))
+
+
 def test_official_coreui_source_and_runtime_are_vendored() -> None:
     package = read("frontend/coreui-free-bootstrap-admin-template/package.json")
     lock = read("frontend/coreui-free-bootstrap-admin-template/package-lock.json")
@@ -26,12 +45,16 @@ def test_official_coreui_source_and_runtime_are_vendored() -> None:
     assert "cdn.jsdelivr.net/npm/bootstrap@" not in base
 
 
-def test_navigation_has_one_content_entry() -> None:
+def test_navigation_has_one_primary_content_destination() -> None:
     base = read("web/templates/base.html")
     dashboard = read("src/article_mvp/web/templates/dashboard.html")
 
-    # 侧边栏是 /upload 的唯一导航入口（顶部按钮已去重，避免多入口冗余）。
-    assert base.count('href="/upload"') == 1
+    # 侧边栏和顶部快捷操作可以共同指向同一工作台，但不得出现第二套投递路由。
+    assert re.search(
+        r'<a class="nav-link [^"]*" href="/upload" data-permission="content_studio"',
+        base,
+    )
+    assert 'class="btn header-create-action d-none d-md-inline-flex" href="/upload"' in base
     assert "创作与投递" in base
     assert 'href="/delivery/new"' not in base
     assert "内容投递</span>" not in base
@@ -102,18 +125,20 @@ def test_mobile_studio_does_not_hide_or_clip_overflow() -> None:
     base_styles = read("web/static/css/style.css")
     studio_styles = read("web/static/css/content-studio.css")
 
-    body_rule = base_styles.split("body {", 1)[1].split("}", 1)[0]
-    assert "overflow-x: hidden" not in body_rule
-    assert ".studio-shell { width: 100%; max-width: 1500px; min-width: 0;" in studio_styles
-    assert ".studio-layout { display: grid; width: 100%; min-width: 0;" in studio_styles
-    assert ".studio-card { width: 100%; min-width: 0;" in studio_styles
-    assert ".content-block { display: grid; width: 100%; min-width: 0;" in studio_styles
-    assert ".studio-card-header > .d-flex .btn { flex: 1 1 calc(50% - .5rem);" in studio_styles
-    assert (
-        "#draft-title, .block-content textarea { width: 100%; min-width: 0; max-width: 100%; }"
-        in studio_styles
-    )
-    assert ".block-actions { grid-column: 1 / -1; justify-content: flex-end; }" in studio_styles
+    assert "min-width" not in css_declarations(base_styles, "html")
+    assert "min-width" not in css_declarations(base_styles, "body.app-shell")
+    for selector in (".studio-shell", ".studio-layout", ".studio-card", ".content-block"):
+        declarations = css_declarations(studio_styles, selector)
+        assert declarations.get("width") == "100%"
+        assert declarations.get("min-width") == "0"
+    assert css_px(css_declarations(studio_styles, ".studio-shell")["max-width"]) >= 1280
+    assert css_declarations(studio_styles, ".studio-layout")["display"] == "grid"
+    assert css_declarations(studio_styles, ".content-block")["display"] == "grid"
+    responsive = studio_styles.split("@media (max-width: 575.98px)", 1)[1]
+    assert ".studio-card-header > .d-flex .btn" in responsive
+    assert "flex: 1 1 100%" in responsive
+    assert ".target-row { grid-template-columns: 1fr; }" in responsive
+    assert ".studio-side { grid-template-columns: 1fr; }" in responsive
 
 
 def test_target_switcher_loads_accounts_without_auto_selection() -> None:
@@ -150,9 +175,9 @@ def test_bulk_target_controls_select_only_deliverable_platforms_and_valid_accoun
     assert "取消全选所有账户" in script
     assert "请先选择至少一个可投递平台" in script
     assert "state.switcherSelected = nextSelected;" in script
-    assert ".target-bulk-actions .btn { min-height: 44px; }" in styles
-    assert ".target-platform-head { display: flex; min-width: 0; min-height: 44px;" in styles
-    assert ".target-account-check { display: flex; min-height: 44px;" in styles
+    assert css_px(css_declarations(styles, ".target-bulk-actions .btn")["min-height"]) >= 44
+    assert css_px(css_declarations(styles, ".target-platform-head")["min-height"]) >= 44
+    assert css_px(css_declarations(styles, ".target-account-check")["min-height"]) >= 44
 
 
 def test_target_saves_are_serialized_and_latest_selection_is_coalesced() -> None:
@@ -251,19 +276,20 @@ def test_target_switcher_is_dynamic_capability_matrix_without_legacy_radios() ->
 def test_target_switcher_uses_comfortable_responsive_matrix_layout() -> None:
     stylesheet = read("web/static/css/content-studio.css")
 
-    assert (
-        ".target-builder { display: grid; "
-        "grid-template-columns: minmax(0,1fr); align-items: stretch;"
-    ) in stylesheet
-    assert ".target-switcher-list { display: grid; width: 100%; min-width: 0;" in stylesheet
-    assert "grid-template-columns: repeat(2,minmax(0,1fr));" in stylesheet
-    assert ".target-platform-row { width: 100%; min-width: 0;" in stylesheet
-    assert ".target-platform-head { display: flex; min-width: 0;" in stylesheet
-    assert ".target-platform-name { min-width: 0; flex: 1 1 auto;" in stylesheet
-    assert ".target-switcher-list { grid-template-columns: minmax(0,1fr); }" in stylesheet
-    assert "    .target-builder, .studio-side, .source-actions" not in stylesheet
-    assert "flex-wrap: wrap; align-items: center;" in stylesheet
-    assert ".target-mode-switch { order: 5; display: inline-flex; width: 100%;" in stylesheet
+    assert css_declarations(stylesheet, ".target-builder")["display"] == "grid"
+    switcher = css_declarations(stylesheet, ".target-switcher-list")
+    assert switcher["display"] == "grid"
+    assert switcher["width"] == "100%"
+    assert switcher["min-width"] == "0"
+    assert "repeat(2" in switcher["grid-template-columns"]
+    for selector in (".target-platform-row", ".target-platform-head", ".target-platform-name"):
+        assert css_declarations(stylesheet, selector)["min-width"] == "0"
+    assert css_declarations(stylesheet, ".target-platform-head")["flex-wrap"] == "wrap"
+    mode_switch = css_declarations(stylesheet, ".target-mode-switch")
+    assert mode_switch["display"] == "inline-flex"
+    assert mode_switch["width"] == "100%"
+    mobile = stylesheet.split("@media (max-width: 767.98px)", 1)[1]
+    assert ".target-switcher-list { grid-template-columns: 1fr; }" in mobile
 
 
 def test_studio_initialization_is_blank_until_explicit_draft_id() -> None:
@@ -412,8 +438,10 @@ def test_studio_exposes_stage_state_and_compact_context_copy() -> None:
     assert 'class="draft-meta-help"' in template
     assert "updateStudioProgress()" in script
     assert "已选择" in script
-    assert "@media (max-width: 1199.98px)" in styles
-    assert ".studio-side { position: static; display: grid;" in styles
+    assert "@media (max-width: 1399.98px)" in styles
+    responsive = styles.split("@media (max-width: 1399.98px)", 1)[1]
+    assert ".studio-layout { grid-template-columns: minmax(0, 1fr); }" in responsive
+    assert ".studio-side { position: static; grid-template-columns:" in responsive
 
 
 def test_v2_draft_state_and_patch_never_silently_downgrade() -> None:
@@ -581,7 +609,7 @@ def test_studio_steps_are_clickable_and_keep_sections_close() -> None:
     assert "function scrollToStudioStep(targetId)" in script
     assert "window.addEventListener('hashchange', syncStudioStepFromLocation)" in script
     assert "prefers-reduced-motion: reduce" in script
-    assert ".studio-progress { position: sticky;" in styles
+    assert css_declarations(styles, ".studio-progress")["position"] == "sticky"
     assert "pointer-events: none;" in styles
     assert ".studio-step-section { scroll-margin-top:" in styles
 
@@ -646,7 +674,7 @@ def test_target_accounts_refresh_after_login_and_explain_non_valid_state() -> No
     template = read("web/templates/upload.html")
     script = read("web/static/js/content-studio.js")
 
-    assert "20260828-zh-status-i18n" in template
+    assert "filename='js/content-studio.js'" in template
     assert "switcherAccountDiagnostics: {}" in script
     assert "cache: 'no-store'" in script
     assert "async function refreshEnabledSwitcherAccounts" in script

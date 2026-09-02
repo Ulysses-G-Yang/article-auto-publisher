@@ -47,8 +47,8 @@ def test_account_platform_matrix_is_dynamic_and_capability_aware() -> None:
     assert "platform.delivery_enabled ? '账号与投递' : '仅账号管理'" in script
     assert "'即将接入'" in script
     assert "loadPlatforms();" in script
-    assert "grid-auto-flow: column" in styles
-    assert "overflow-x: auto" in styles
+    assert "grid-template-columns: repeat(auto-fit, minmax(152px, 1fr))" in styles
+    assert "grid-template-columns: repeat(2, minmax(0, 1fr))" in styles
     assert "session-platform-logo" in styles
 
 

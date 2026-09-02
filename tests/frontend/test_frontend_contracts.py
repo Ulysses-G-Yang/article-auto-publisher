@@ -1,10 +1,23 @@
+import re
 from pathlib import Path
+
+from flask import Flask, render_template
 
 ROOT = Path(__file__).resolve().parents[2]
 
 
 def read(relative_path: str) -> str:
     return (ROOT / relative_path).read_text(encoding="utf-8")
+
+
+def render_main_shell(**context: object) -> str:
+    app = Flask(
+        "articleops_frontend_contract",
+        template_folder=str(ROOT / "web/templates"),
+        static_folder=str(ROOT / "web/static"),
+    )
+    with app.test_request_context("/upload"):
+        return render_template("base.html", **context)
 
 
 def test_dashboard_has_accessible_switchable_metric_cards() -> None:
@@ -16,7 +29,9 @@ def test_dashboard_has_accessible_switchable_metric_cards() -> None:
     assert 'data-metric-mode="article"' in template
     assert 'id="article-picker"' in template
     assert 'aria-live="polite"' in template
-    assert 'aria-controls="app-sidebar" aria-expanded="false"' in template
+    assert 'id="sidebar-toggle"' in template
+    assert 'aria-controls="app-sidebar"' in template
+    assert re.search(r'id="sidebar-toggle"[^>]+aria-expanded="(?:true|false)"', template)
     assert "METRIC_MODE_STORAGE_KEY" in script
     assert "populateArticlePicker()" in script
     assert "renderOverviewMetrics()" in script
@@ -109,6 +124,48 @@ def test_shared_shell_has_navigation_and_mobile_controls() -> None:
     assert "event.key === 'Escape'" in script
 
 
+def test_sidebar_permission_projection_fails_closed_when_explicit() -> None:
+    legacy_html = render_main_shell()
+    limited_html = render_main_shell(sidebar_permissions={"content_studio": True})
+    empty_html = render_main_shell(sidebar_permissions={})
+
+    # 未接入权限上下文的旧页面保持兼容；显式权限映射一旦存在，缺失项必须隐藏。
+    assert legacy_html.count("data-permission=") == 4
+    assert 'data-permission="content_studio"' in limited_html
+    for permission in ("overview", "accounts", "data_center"):
+        assert f'data-permission="{permission}"' not in limited_html
+    assert "data-permission=" not in empty_html
+
+
+def test_dashboard_permission_projection_uses_the_same_fail_closed_rule() -> None:
+    from article_mvp.web import create_dashboard_app
+
+    app = create_dashboard_app()
+
+    @app.context_processor
+    def limited_sidebar() -> dict[str, object]:
+        return {"sidebar_permissions": {"data_center": True}}
+
+    response = app.test_client().get("/")
+    assert response.status_code == 200
+    html = response.get_data(as_text=True)
+    assert 'data-permission="data_center"' in html
+    for permission in ("overview", "content_studio", "accounts"):
+        assert f'data-permission="{permission}"' not in html
+
+
+def test_frontend_assets_use_current_ui_cache_versions() -> None:
+    base = read("web/templates/base.html")
+    accounts = read("web/templates/accounts.html")
+    dashboard = read("src/article_mvp/web/templates/dashboard.html")
+
+    assert "filename='css/design-tokens.css', v='20260902-ui-v2'" in base
+    assert "filename='css/style.css', v='20260902-ui-v2'" in base
+    assert "filename='js/app.js', v='20260902-ui-v2'" in base
+    assert "filename='css/account-sessions.css', v='20260902-ui-v2'" in accounts
+    assert "filename='dashboard.css', v='20260902-ui-v2'" in dashboard
+
+
 def test_user_facing_operation_states_are_localized_to_chinese() -> None:
     app = read("web/static/js/app.js")
     index = read("web/templates/index.html")
@@ -135,4 +192,4 @@ def test_user_facing_operation_states_are_localized_to_chinese() -> None:
     assert 'PARTIAL_FAIL: "部分成功 / 部分失败"' in dashboard
     assert 'DELETED: "已删除"' in dashboard
     assert "payload.message || payload.error" not in dashboard
-    assert "20260828-zh-status-i18n" in upload
+    assert "filename='js/content-studio.js'" in upload

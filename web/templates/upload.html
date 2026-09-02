@@ -1,11 +1,11 @@
 {% extends "base.html" %}
 {% block title %}创作与投递 - ArticleOps{% endblock %}
 {% block header_title %}创作与投递{% endblock %}
-{% block extra_head %}<link rel="stylesheet" href="{{ url_for('static', filename='css/content-studio.css') }}">{% endblock %}
+{% block extra_head %}<link rel="stylesheet" href="{{ url_for('static', filename='css/content-studio.css', v='20260902') }}">{% endblock %}
 
 {% block content %}
 <div id="content-studio"
-     class="studio-shell"
+     class="studio-shell app-page"
      data-drafts-url="/api/content-drafts"
      data-draft-url-template="/api/content-drafts/{draft_id}"
      data-docx-url="/api/content-drafts/import-docx"
@@ -20,7 +20,7 @@
     <nav class="studio-breadcrumb" aria-label="面包屑导航"><ol class="breadcrumb"><li class="breadcrumb-item"><a href="/">首页</a></li><li class="breadcrumb-item active" aria-current="page">创作与投递</li></ol></nav>
 
     <div class="page-heading studio-heading">
-        <div class="studio-heading-main"><span class="page-eyebrow">工作台</span><h1>创作与投递</h1><p>从内容草稿到多账号投递，全程使用同一份可恢复内容。</p></div>
+        <div class="studio-heading-main"><span class="page-eyebrow">内容工作台</span><h1>创作与投递</h1><p>导入 Word、检查图文、选择账号，然后一次保存到多个平台草稿箱。</p></div>
         <div class="studio-heading-actions"><span class="studio-scope-note"><i class="cil-shield-alt me-1" aria-hidden="true"></i>本机草稿 · 自动保存</span><div id="save-indicator" class="save-indicator is-loading" role="status" aria-live="polite">
             <span class="save-indicator-dot" aria-hidden="true"></span><span id="save-indicator-text">正在准备工作台</span>
         </div></div>
@@ -29,7 +29,7 @@
     <ol class="studio-progress" aria-label="创作与投递流程">
         <li class="is-current" data-studio-step="1"><a class="studio-step-link" href="#content-section" data-step-target="content-section" aria-current="step"><span class="studio-step-index">1</span><span class="studio-step-copy"><strong>内容</strong><small>草稿与图文块</small><em data-step-status>进行中</em></span></a></li>
         <li data-studio-step="2"><a class="studio-step-link" href="#targets-section" data-step-target="targets-section"><span class="studio-step-index">2</span><span class="studio-step-copy"><strong>投递目标</strong><small>平台与账号</small><em data-step-status>待开始</em></span></a></li>
-        <li data-studio-step="3"><a class="studio-step-link" href="#execution-section" data-step-target="execution-section"><span class="studio-step-index">3</span><span class="studio-step-copy"><strong>核对执行</strong><small>冻结版本后执行</small><em data-step-status>待开始</em></span></a></li>
+        <li data-studio-step="3"><a class="studio-step-link" href="#execution-section" data-step-target="execution-section"><span class="studio-step-index">3</span><span class="studio-step-copy"><strong>执行</strong><small>冻结版本并保存</small><em data-step-status>待开始</em></span></a></li>
     </ol>
 
     <div id="studio-loading" class="card studio-loading" role="status"><div class="card-body"><span class="spinner-border spinner-border-sm" aria-hidden="true"></span><span>正在准备空白工作台…</span></div></div>
@@ -40,10 +40,11 @@
             <section id="content-section" class="card studio-card studio-step-section" aria-labelledby="content-heading">
                 <header class="card-header studio-card-header">
                     <div class="studio-section-heading"><span class="studio-stage-index" aria-hidden="true">01</span><div><span class="section-kicker">内容编辑</span><h2 id="content-heading">编辑内容</h2></div></div>
-                    <div class="d-flex flex-wrap gap-2">
-                        <button id="save-draft-now" class="btn btn-outline-secondary btn-sm" type="button"><i class="cil-save me-1" aria-hidden="true"></i>保存</button>
+                    <div class="d-flex flex-wrap gap-2" aria-label="内容操作">
+                        <label class="btn btn-primary btn-sm mb-0" for="docx-import"><i class="cil-cloud-upload me-1" aria-hidden="true"></i>导入 Word</label>
                         <button id="open-source-library" class="btn btn-outline-secondary btn-sm" type="button" data-coreui-toggle="modal" data-coreui-target="#source-library-modal"><i class="cil-folder-open me-1" aria-hidden="true"></i>历史草稿</button>
                         <label id="asset-upload-trigger" class="btn btn-outline-primary btn-sm mb-0" for="asset-upload"><i class="cil-image-plus me-1" aria-hidden="true"></i>插入图片</label>
+                        <button id="save-draft-now" class="btn btn-outline-secondary btn-sm" type="button"><i class="cil-save me-1" aria-hidden="true"></i>立即保存</button>
                         <input id="asset-upload" class="visually-hidden" type="file" accept="image/png,image/jpeg,image/gif,image/webp" multiple>
                     </div>
                 </header>
@@ -83,8 +84,8 @@
                         <div id="cover-auto-note" class="alert alert-info d-none mt-3 mb-0" role="status">已自动使用正文首图，可改为无封面/指定图片。</div>
                     </section>
                     <div class="studio-step-actions">
-                        <span><strong>内容确认完成了吗？</strong><small>下一步只选择平台和账号，不会立即执行投递。</small></span>
-                        <a id="go-to-targets" class="btn btn-primary" href="#targets-section" data-step-target="targets-section"><i class="cil-arrow-right me-2" aria-hidden="true"></i>下一步：选择投递目标</a>
+                        <span><strong>内容准备完成</strong><small>下一步只选择平台和账号，不会立即写入平台。</small></span>
+                        <a id="go-to-targets" class="btn btn-primary" href="#targets-section" data-step-target="targets-section">继续选择平台<i class="cil-arrow-right ms-2" aria-hidden="true"></i></a>
                     </div>
                     <div id="blocks-empty" class="studio-empty d-none"><i class="cil-notes" aria-hidden="true"></i><strong>正文还是空的</strong><span>直接在上方输入文字，或拖入 <strong>Word 文档(.docx)</strong> / 图片导入。</span></div>
                     <div id="content-error" class="alert alert-danger d-none mt-3 mb-0" role="alert"></div>
@@ -94,7 +95,7 @@
             <section id="targets-section" class="card studio-card studio-step-section" aria-labelledby="targets-heading">
                 <header class="card-header studio-card-header"><div class="studio-section-heading"><span class="studio-stage-index" aria-hidden="true">02</span><div><span class="section-kicker">投递目标</span><h2 id="targets-heading">选择平台与账号</h2></div></div><div class="target-header-status"><span id="platform-capability-summary" class="small text-body-secondary" role="status"></span><span id="target-count" class="badge text-bg-primary">0 个目标</span></div></header>
                 <div class="card-body">
-                    <p class="section-intro">10 个平台统一展示；只有标记“可投递”的平台能开启。先打开平台，再勾选账号；系统不会自动选择账号。</p>
+                    <p class="section-intro">点击整张平台卡即可启用，再选择该平台的有效账号。系统不会自动选择账号。</p>
                     <div class="target-builder">
                         <div class="target-bulk-toolbar" aria-label="批量选择投递目标">
                             <div class="target-bulk-actions">
@@ -115,16 +116,16 @@
                     </div>
                     <div class="studio-step-actions studio-step-actions-split">
                         <a id="back-to-content" class="btn btn-outline-secondary" href="#content-section" data-step-target="content-section"><i class="cil-arrow-left me-2" aria-hidden="true"></i>返回检查内容</a>
-                        <a id="go-to-execution" class="btn btn-primary" href="#execution-section" data-step-target="execution-section">下一步：核对执行<i class="cil-arrow-right ms-2" aria-hidden="true"></i></a>
+                        <a id="go-to-execution" class="btn btn-primary" href="#execution-section" data-step-target="execution-section">继续执行<i class="cil-arrow-right ms-2" aria-hidden="true"></i></a>
                     </div>
                 </div>
             </section>
 
             <section id="execution-section" class="card studio-card studio-step-section" aria-labelledby="execution-heading">
-                <header class="card-header studio-card-header"><div class="studio-section-heading"><span class="studio-stage-index" aria-hidden="true">03</span><div><span class="section-kicker">核对执行</span><h2 id="execution-heading">确认投递计划</h2></div></div><span class="badge text-bg-light border"><i class="cil-lock-locked me-1" aria-hidden="true"></i>执行前冻结版本</span></header>
+                <header class="card-header studio-card-header"><div class="studio-section-heading"><span class="studio-stage-index" aria-hidden="true">03</span><div><span class="section-kicker">执行</span><h2 id="execution-heading">保存到平台草稿箱</h2></div></div><span class="badge text-bg-light border"><i class="cil-lock-locked me-1" aria-hidden="true"></i>执行前冻结版本</span></header>
                 <div class="card-body">
                     <div id="validation-summary" class="alert alert-warning d-none" role="alert" tabindex="-1"><strong>还需完成以下条件：</strong><ul id="validation-list" class="mb-0 mt-2"></ul></div>
-                    <div class="execute-bar"><div><strong>准备生成投递计划</strong><p>内容将固化为不可变版本；后续编辑不会静默改动已生成的计划。</p></div><button id="create-plan" class="btn btn-primary btn-lg" type="button"><i class="cil-clipboard me-2" aria-hidden="true"></i>检查并继续</button></div>
+                    <div class="execute-bar"><div><strong>准备保存草稿</strong><p>系统会冻结当前图文版本，再按所选平台逐个执行；公开发布仍需单独确认。</p></div><button id="create-plan" class="btn btn-primary btn-lg" type="button"><i class="cil-clipboard me-2" aria-hidden="true"></i>选择投递目标后继续</button></div>
                     <div id="execution-error" class="alert alert-danger d-none mt-3 mb-0" role="alert"></div>
                     <div id="plan-result" class="plan-result d-none mt-4" aria-live="polite"><div class="plan-result-head"><div><span class="section-kicker">投递计划</span><h3 id="plan-id">投递计划</h3></div><span id="plan-status" class="badge text-bg-info">待执行</span></div><div id="plan-targets" class="plan-targets"></div></div>
                 </div>
@@ -150,5 +151,5 @@
 </div>
 {% endblock %}
 
-{% block extra_scripts %}<script src="{{ url_for('static', filename='js/content-studio.js', v='20260828-zh-status-i18n') }}"></script>{% endblock %}
+{% block extra_scripts %}<script src="{{ url_for('static', filename='js/content-studio.js', v='20260902-ui-v2') }}"></script>{% endblock %}
 

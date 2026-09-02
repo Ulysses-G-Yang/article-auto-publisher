@@ -100,6 +100,13 @@ class DraftTarget(Base):
     account_display_name: Mapped[str] = mapped_column(String(255), nullable=False)
     mode: Mapped[str] = mapped_column(String(16), nullable=False)
     persist_login: Mapped[bool] = mapped_column(default=True, nullable=False)
+    # 平台选择属于目标而非内容版本；这些字段保持 nullable 以兼容旧草稿。
+    platform_selection: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    platform_selection_options: Mapped[dict | list | None] = mapped_column(
+        JSON, nullable=True
+    )
+    platform_selection_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    platform_selection_source: Mapped[str | None] = mapped_column(String(32), nullable=True)
     position: Mapped[int] = mapped_column(Integer, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utc_now, nullable=False
@@ -194,6 +201,13 @@ class DeliveryPlanTarget(Base):
     account_display_name: Mapped[str] = mapped_column(String(255), nullable=False)
     mode: Mapped[str] = mapped_column(String(16), nullable=False)
     persist_login: Mapped[bool] = mapped_column(nullable=False)
+    # 计划创建时复制的不可变目标选择；不写入 ContentVersion。
+    platform_selection: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    platform_selection_options: Mapped[dict | list | None] = mapped_column(
+        JSON, nullable=True
+    )
+    platform_selection_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    platform_selection_source: Mapped[str | None] = mapped_column(String(32), nullable=True)
     position: Mapped[int] = mapped_column(Integer, nullable=False)
     status: Mapped[str] = mapped_column(String(32), default="READY", nullable=False)
     operation_id: Mapped[str | None] = mapped_column(String(36))

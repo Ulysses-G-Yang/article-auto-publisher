@@ -186,6 +186,7 @@ class ContentStudioRuntimeState:
                 account_id=target["account_id"],
                 mode=target["mode"],
                 confirmation_token=confirmation,
+                platform_selection=target.get("platform_selection"),
             )
             try:
                 operation = await self.account_state.delivery.request_delivery(

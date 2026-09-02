@@ -53,6 +53,7 @@ class ContentDatabase:
             await connection.run_sync(self._upgrade_cover_schema)
             await connection.run_sync(self._upgrade_document_schema)
             await connection.run_sync(self._upgrade_delivery_document_schema)
+            await connection.run_sync(self._upgrade_draft_target_schema)
             await connection.run_sync(self._upgrade_plan_target_schema)
 
     @staticmethod
@@ -109,22 +110,76 @@ class ContentDatabase:
                 "PRAGMA table_info(delivery_plan_targets)"
             ).fetchall()
         }
-        if "execution_claim_id" not in columns:
-            connection.exec_driver_sql(
-                "ALTER TABLE delivery_plan_targets ADD COLUMN execution_claim_id VARCHAR(36)"
-            )
-        if "execution_claim_expires_at" not in columns:
-            connection.exec_driver_sql(
-                "ALTER TABLE delivery_plan_targets ADD COLUMN execution_claim_expires_at DATETIME"
-            )
-        if "degraded" not in columns:
-            connection.exec_driver_sql(
-                "ALTER TABLE delivery_plan_targets ADD COLUMN degraded VARCHAR(32)"
-            )
-        if "verification_evidence" not in columns:
-            connection.exec_driver_sql(
-                "ALTER TABLE delivery_plan_targets ADD COLUMN verification_evidence TEXT"
-            )
+        additions = (
+            (
+                "platform_selection",
+                "ALTER TABLE delivery_plan_targets ADD COLUMN platform_selection JSON",
+            ),
+            (
+                "platform_selection_options",
+                "ALTER TABLE delivery_plan_targets ADD COLUMN platform_selection_options JSON",
+            ),
+            (
+                "platform_selection_hash",
+                "ALTER TABLE delivery_plan_targets ADD COLUMN platform_selection_hash VARCHAR(64)",
+            ),
+            (
+                "platform_selection_source",
+                "ALTER TABLE delivery_plan_targets ADD COLUMN "
+                "platform_selection_source VARCHAR(32)",
+            ),
+            (
+                "execution_claim_id",
+                "ALTER TABLE delivery_plan_targets ADD COLUMN execution_claim_id VARCHAR(36)",
+            ),
+            (
+                "execution_claim_expires_at",
+                "ALTER TABLE delivery_plan_targets ADD COLUMN execution_claim_expires_at DATETIME",
+            ),
+            (
+                "degraded",
+                "ALTER TABLE delivery_plan_targets ADD COLUMN degraded VARCHAR(32)",
+            ),
+            (
+                "verification_evidence",
+                "ALTER TABLE delivery_plan_targets ADD COLUMN verification_evidence TEXT",
+            ),
+        )
+        for column_name, statement in additions:
+            if column_name not in columns:
+                connection.exec_driver_sql(statement)
+
+    @staticmethod
+    def _upgrade_draft_target_schema(connection) -> None:
+        """幂等补充草稿目标的平台选择快照字段。"""
+
+        columns = {
+            row[1]
+            for row in connection.exec_driver_sql(
+                "PRAGMA table_info(draft_targets)"
+            ).fetchall()
+        }
+        additions = (
+            (
+                "platform_selection",
+                "ALTER TABLE draft_targets ADD COLUMN platform_selection JSON",
+            ),
+            (
+                "platform_selection_options",
+                "ALTER TABLE draft_targets ADD COLUMN platform_selection_options JSON",
+            ),
+            (
+                "platform_selection_hash",
+                "ALTER TABLE draft_targets ADD COLUMN platform_selection_hash VARCHAR(64)",
+            ),
+            (
+                "platform_selection_source",
+                "ALTER TABLE draft_targets ADD COLUMN platform_selection_source VARCHAR(32)",
+            ),
+        )
+        for column_name, statement in additions:
+            if column_name not in columns:
+                connection.exec_driver_sql(statement)
 
     @staticmethod
     def _upgrade_delivery_document_schema(connection) -> None:

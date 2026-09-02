@@ -3,6 +3,7 @@
 from datetime import datetime, timezone
 
 from sqlalchemy import (
+    JSON,
     Boolean,
     DateTime,
     ForeignKey,
@@ -113,6 +114,14 @@ class DeliveryOperation(Base):
     body: Mapped[str] = mapped_column(Text, nullable=False)
     content_reference: Mapped[str | None] = mapped_column(String(128), nullable=True)
     persist_login_snapshot: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    # 平台选择是按执行单冻结的目标输入；结果字段只记录适配器返回的选择应用状态。
+    platform_selection_snapshot: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    platform_selection_result: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    platform_selection_status: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    platform_selection_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    platform_selection_error_code: Mapped[str | None] = mapped_column(
+        String(64), nullable=True
+    )
     content_version: Mapped[str] = mapped_column(String(64), nullable=False)
     account_display_name_snapshot: Mapped[str] = mapped_column(String(255), nullable=False)
     status: Mapped[str] = mapped_column(String(24), default="QUEUED", nullable=False)

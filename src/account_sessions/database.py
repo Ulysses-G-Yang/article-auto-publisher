@@ -138,6 +138,32 @@ class AccountDatabase:
             connection.exec_driver_sql(
                 "ALTER TABLE delivery_operations ADD COLUMN persist_login_snapshot BOOLEAN"
             )
+        additions = (
+            (
+                "platform_selection_snapshot",
+                "ALTER TABLE delivery_operations ADD COLUMN platform_selection_snapshot JSON",
+            ),
+            (
+                "platform_selection_result",
+                "ALTER TABLE delivery_operations ADD COLUMN platform_selection_result JSON",
+            ),
+            (
+                "platform_selection_status",
+                "ALTER TABLE delivery_operations ADD COLUMN platform_selection_status VARCHAR(32)",
+            ),
+            (
+                "platform_selection_error",
+                "ALTER TABLE delivery_operations ADD COLUMN platform_selection_error TEXT",
+            ),
+            (
+                "platform_selection_error_code",
+                "ALTER TABLE delivery_operations ADD COLUMN "
+                "platform_selection_error_code VARCHAR(64)",
+            ),
+        )
+        for column_name, statement in additions:
+            if column_name not in columns:
+                connection.exec_driver_sql(statement)
         if "article_mapping_status" not in columns:
             connection.exec_driver_sql(
                 "ALTER TABLE delivery_operations "

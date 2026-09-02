@@ -7,7 +7,12 @@
 from typing import Annotated, Any, Literal
 from uuid import uuid4
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+from account_sessions.contracts import (
+    PlatformSelection,
+    validate_platform_selection,
+)
 
 DraftSourceType = Literal["BLANK", "DOCX", "LEGACY_ARTICLE", "SYSTEM_SEED"]
 DraftStatus = Literal["ACTIVE", "ARCHIVED"]
@@ -77,6 +82,11 @@ class DraftTargetInput(StrictModel):
     account_id: str = Field(min_length=36, max_length=36)
     mode: DeliveryMode = "DRAFT"
     persist_login: bool | None = None
+    platform_selection: PlatformSelection | None = None
+
+    _validate_platform_selection = field_validator("platform_selection")(
+        validate_platform_selection
+    )
 
 
 class MCPDraftTargetInput(StrictModel):
@@ -85,6 +95,11 @@ class MCPDraftTargetInput(StrictModel):
     platform: PlatformName
     account_id: str = Field(min_length=36, max_length=36)
     persist_login: bool | None = None
+    platform_selection: PlatformSelection | None = None
+
+    _validate_platform_selection = field_validator("platform_selection")(
+        validate_platform_selection
+    )
 
 
 class MCPDraftDeliveryRequest(StrictModel):

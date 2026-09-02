@@ -12,7 +12,7 @@ import os
 import re
 import secrets
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from datetime import datetime, timedelta, timezone
 from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
@@ -41,8 +41,10 @@ from account_sessions.models import (
 )
 from account_sessions.permissions import AccessContext
 from account_sessions.security import (
+    canonical_platform_selection,
     content_version,
     delivery_fingerprint,
+    platform_selection_hash,
     safe_error_message,
 )
 from platforms.content_validation import safe_media_error
@@ -130,6 +132,7 @@ class DeliveryService:
                     access=access,
                     content_reference=content_reference,
                     persist_login_snapshot=persist_login_snapshot,
+                    platform_selection=request.platform_selection,
                 )
                 return operation_payload(operation, existing_account)
         if account.status != "ACTIVE" or account.session_status != "VALID":
@@ -170,6 +173,11 @@ class DeliveryService:
             ),
             content_reference=content_reference,
             persist_login_snapshot=persist_login_snapshot,
+            platform_selection_snapshot=(
+                dict(request.platform_selection)
+                if request.platform_selection is not None
+                else None
+            ),
             content_version=(
                 frozen_content_hash or content_version(request.article.title, request.article.body)
             ),
@@ -207,6 +215,7 @@ class DeliveryService:
                 access=access,
                 content_reference=content_reference,
                 persist_login_snapshot=persist_login_snapshot,
+                platform_selection=request.platform_selection,
             )
         return operation_payload(operation, account)
 
@@ -226,6 +235,7 @@ class DeliveryService:
             return operation_payload(current, current_account)
         buffered_log = BufferedPlatformLog()
         platform = None
+        selection_outcome: dict | None = None
         try:
             platform = self.platform_factory(account)
             if operation.content_reference:
@@ -287,7 +297,11 @@ class DeliveryService:
                         db=buffered_log,
                         auto_login=False,
                         delivery_mode=operation.mode,
+                        selection_override=getattr(
+                            operation, "platform_selection_snapshot", None
+                        ),
                     )
+                    selection_outcome = _selection_outcome(result)
                 finally:
                     # CDP/持久 Profile 必须先关闭浏览器资源，再释放跨进程租约。
                     # initialize() 即使只完成了一半也必须走同一清理路径。
@@ -363,6 +377,7 @@ class DeliveryService:
                     access,
                     result,
                     buffered_log.entries,
+                    selection_outcome=selection_outcome,
                 )
             if operation.mode == "PUBLISH" and not result.get("post_url"):
                 raise AccountUnavailableError(
@@ -375,6 +390,7 @@ class DeliveryService:
                 access,
                 result,
                 buffered_log.entries,
+                selection_outcome=selection_outcome,
             )
         except BaseException as exc:
             # 完成事务已经提交后，桥接取消/异常不能把真实成功降级为 FAILED；
@@ -393,6 +409,7 @@ class DeliveryService:
                     access,
                     exc,
                     buffered_log.entries,
+                    selection_outcome=selection_outcome,
                 )
             raise
 
@@ -805,7 +822,11 @@ class DeliveryService:
         access: AccessContext,
         content_reference: str | None,
         persist_login_snapshot: bool | None,
+        platform_selection: dict | None,
     ) -> None:
+        stored_platform_selection = getattr(
+            operation, "platform_selection_snapshot", None
+        )
         if (
             operation.account_id != request.account_id
             or operation.platform != request.platform
@@ -814,6 +835,10 @@ class DeliveryService:
             or operation.source != access.source
             or operation.content_reference != content_reference
             or operation.persist_login_snapshot != persist_login_snapshot
+            or platform_selection_hash(stored_platform_selection)
+            != platform_selection_hash(platform_selection)
+            or canonical_platform_selection(stored_platform_selection)
+            != canonical_platform_selection(platform_selection)
         ):
             raise AccountUnavailableError(
                 "投递幂等键与既有执行单不匹配",
@@ -856,6 +881,8 @@ class DeliveryService:
         access: AccessContext,
         result: dict,
         logs: list[tuple[str, str]],
+        *,
+        selection_outcome: dict | None = None,
     ) -> dict:
         now = datetime.now(timezone.utc)
         platform_article_id = _extract_platform_article_id(result)
@@ -868,6 +895,7 @@ class DeliveryService:
             operation.platform_url = result.get("post_url") or None
             operation.platform_article_id = platform_article_id
             operation.degraded = result.get("degraded")
+            _apply_selection_outcome(operation, selection_outcome)
             evidence = result.get("verification_evidence")
             if evidence is not None:
                 operation.verification_evidence = json.dumps(
@@ -908,6 +936,8 @@ class DeliveryService:
         access: AccessContext,
         result: dict,
         logs: list[tuple[str, str]],
+        *,
+        selection_outcome: dict | None = None,
     ) -> dict:
         """草稿已保存但正文媒体或封面未完整：保留链接并标记 WITH_WARNINGS。
 
@@ -926,6 +956,7 @@ class DeliveryService:
             operation.platform_url = result.get("post_url") or None
             operation.platform_article_id = platform_article_id
             operation.degraded = result.get("degraded")
+            _apply_selection_outcome(operation, selection_outcome)
             evidence = result.get("verification_evidence")
             if evidence is not None:
                 operation.verification_evidence = json.dumps(
@@ -1155,6 +1186,8 @@ class DeliveryService:
         access: AccessContext,
         exc: BaseException,
         logs: list[tuple[str, str]],
+        *,
+        selection_outcome: dict | None = None,
     ) -> None:
         async with self.database.session() as session:
             operation = await session.get(DeliveryOperation, operation_id)
@@ -1170,6 +1203,7 @@ class DeliveryService:
                 operation.status = "RESULT_UNKNOWN" if result_unknown else "FAILED"
             operation.error_code = error_code
             operation.error_message = safe_error_message(exc)
+            _apply_selection_outcome(operation, selection_outcome)
             evidence = getattr(exc, "evidence", None)
             if evidence is not None:
                 operation.verification_evidence = json.dumps(
@@ -1255,6 +1289,21 @@ def operation_payload(
         "draft_url": operation.draft_url,
         "platform_url": operation.platform_url,
         "platform_article_id": operation.platform_article_id,
+        "platform_selection_snapshot": getattr(
+            operation, "platform_selection_snapshot", None
+        ),
+        "platform_selection_result": getattr(
+            operation, "platform_selection_result", None
+        ),
+        "platform_selection_status": getattr(
+            operation, "platform_selection_status", None
+        ),
+        "platform_selection_error": getattr(
+            operation, "platform_selection_error", None
+        ),
+        "platform_selection_error_code": getattr(
+            operation, "platform_selection_error_code", None
+        ),
         "article_mapping_status": operation.article_mapping_status,
         "article_mapping_attempts": operation.article_mapping_attempts,
         "article_mapping_error_code": operation.article_mapping_error_code,
@@ -1271,6 +1320,84 @@ def operation_payload(
         "started_at": _iso(operation.started_at),
         "completed_at": _iso(operation.completed_at),
     }
+
+
+def _selection_outcome(result: object) -> dict | None:
+    """Extract the bounded selection result returned by a platform adapter."""
+
+    if not isinstance(result, Mapping):
+        return None
+    if not any(
+        key in result
+        for key in (
+            "selection",
+            "selection_status",
+            "selection_error",
+            "selection_error_code",
+        )
+    ):
+        return None
+
+    selection = result.get("selection")
+    bounded_selection: dict[str, str | int | float | bool | None] | None = None
+    if isinstance(selection, Mapping):
+        bounded_selection = {}
+        for key, value in selection.items():
+            if not isinstance(key, str) or not key.strip() or len(key) > 64:
+                continue
+            if value is None or isinstance(value, (str, int, float, bool)):
+                bounded_selection[key[:64]] = (
+                    value[:512] if isinstance(value, str) else value
+                )
+        if not bounded_selection:
+            bounded_selection = None
+
+    outcome: dict[str, object] = {"selection": bounded_selection}
+    for result_key, outcome_key, limit in (
+        ("selection_status", "status", 32),
+        ("selection_error", "error", 1000),
+        ("selection_error_code", "error_code", 64),
+    ):
+        value = result.get(result_key)
+        if value is None:
+            outcome[outcome_key] = None
+            continue
+        text = str(value).strip()[:limit]
+        outcome[outcome_key] = text or None
+    return outcome
+
+
+def _apply_selection_outcome(
+    operation: DeliveryOperation,
+    outcome: Mapping[str, object] | None,
+) -> None:
+    """Persist adapter selection application fields without changing delivery status."""
+
+    if outcome is None:
+        return
+    selection = outcome.get("selection")
+    operation.platform_selection_result = (
+        dict(selection) if isinstance(selection, Mapping) else None
+    )
+    operation.platform_selection_status = _bounded_text(outcome.get("status"), 32)
+    operation.platform_selection_error = _bounded_text(outcome.get("error"), 1000)
+    operation.platform_selection_error_code = _bounded_error_code(
+        outcome.get("error_code")
+    )
+
+
+def _bounded_text(value: object, limit: int) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()[:limit]
+    return text or None
+
+
+def _bounded_error_code(value: object) -> str | None:
+    text = _bounded_text(value, 64)
+    if text is None:
+        return None
+    return text.upper() if _STABLE_MAPPING_CODE.fullmatch(text.upper()) else None
 
 
 def _decode_evidence(raw: str | None) -> dict | None:
@@ -1489,6 +1616,7 @@ def _fingerprint(
             else request.article.body
         ),
         mode=request.mode,
+        platform_selection=request.platform_selection,
     )
 
 

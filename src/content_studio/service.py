@@ -11,6 +11,7 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import selectinload
 
+from account_sessions.security import canonical_platform_selection, platform_selection_hash
 from content_studio.assets import AssetStore, StoredAsset
 from content_studio.content_document import (
     DELIVERY_POLICY_VERSION,
@@ -36,6 +37,7 @@ from content_studio.database import ContentDatabase
 from content_studio.errors import (
     ContentAssetError,
     DeliveryPlanNotFoundError,
+    DeliveryPlanStaleError,
     DraftContentSchemaConflictError,
     DraftNotFoundError,
     DraftRevisionConflictError,
@@ -407,6 +409,11 @@ class ContentStudioService:
                     raise DraftRevisionConflictError(await self._draft_payload(session, draft))
                 await session.execute(delete(DraftTarget).where(DraftTarget.draft_id == draft_id))
                 for position, (item, account) in enumerate(resolved):
+                    selection = (
+                        dict(item.platform_selection)
+                        if item.platform_selection is not None
+                        else None
+                    )
                     session.add(
                         DraftTarget(
                             target_id=item.target_id or str(uuid.uuid4()),
@@ -416,6 +423,12 @@ class ContentStudioService:
                             account_display_name=account.display_name,
                             mode=item.mode,
                             persist_login=account.persist_login,
+                            platform_selection=selection,
+                            platform_selection_options=None,
+                            platform_selection_hash=platform_selection_hash(selection),
+                            platform_selection_source=(
+                                access.source if selection is not None else None
+                            ),
                             position=position,
                         )
                     )
@@ -571,6 +584,15 @@ class ContentStudioService:
                         account_display_name=target.account_display_name,
                         mode=target.mode,
                         persist_login=target.persist_login,
+                        platform_selection=(
+                            dict(target.platform_selection)
+                            if target.platform_selection is not None
+                            else None
+                        ),
+                        platform_selection_options=target.platform_selection_options,
+                        platform_selection_hash=target.platform_selection_hash
+                        or platform_selection_hash(target.platform_selection),
+                        platform_selection_source=target.platform_selection_source,
                         position=position,
                         status=target_status,
                         error_code=error_code,
@@ -595,8 +617,6 @@ class ContentStudioService:
             plan = await self._load_plan(session, plan_id)
             draft = await self._load_draft(session, plan.draft_id)
             if draft.revision != plan.draft_revision:
-                from content_studio.errors import DeliveryPlanStaleError
-
                 raise DeliveryPlanStaleError("草稿内容或投递目标已更新，请重新生成投递计划")
             version = await session.get(ContentVersion, plan.version_id)
             if version is None:
@@ -615,6 +635,20 @@ class ContentStudioService:
                     )
                 ).all()
             )
+            source_targets = {
+                target.target_id: target
+                for target in (
+                    await session.scalars(
+                        select(DraftTarget).where(DraftTarget.draft_id == plan.draft_id)
+                    )
+                ).all()
+            }
+            for target in targets:
+                source = source_targets.get(target.source_target_id)
+                if source is None or not _selection_snapshots_match(source, target):
+                    raise DeliveryPlanStaleError(
+                        "草稿内容或投递目标平台选择已更新，请重新生成投递计划"
+                    )
             self._assert_plan_owner(plan, access)
             for target in targets:
                 access.require(
@@ -1299,6 +1333,11 @@ def public_target(target: DraftTarget) -> dict:
         "account_display_name": target.account_display_name,
         "mode": target.mode,
         "persist_login": target.persist_login,
+        "platform_selection": target.platform_selection,
+        "platform_selection_options": target.platform_selection_options,
+        "platform_selection_hash": target.platform_selection_hash
+        or platform_selection_hash(target.platform_selection),
+        "platform_selection_source": target.platform_selection_source,
         "position": target.position,
     }
 
@@ -1330,6 +1369,11 @@ def public_plan_target(target: DeliveryPlanTarget) -> dict:
         "account_display_name": target.account_display_name,
         "mode": target.mode,
         "persist_login": target.persist_login,
+        "platform_selection": target.platform_selection,
+        "platform_selection_options": target.platform_selection_options,
+        "platform_selection_hash": target.platform_selection_hash
+        or platform_selection_hash(target.platform_selection),
+        "platform_selection_source": target.platform_selection_source,
         "status": target.status,
         "operation_id": target.operation_id,
         "confirmation_required": target.status == "CONFIRMATION_REQUIRED",
@@ -1342,6 +1386,28 @@ def public_plan_target(target: DeliveryPlanTarget) -> dict:
     }
 
 
+def _selection_snapshots_match(
+    source: DraftTarget,
+    frozen: DeliveryPlanTarget,
+) -> bool:
+    """Compare target selection material without relying on mutable dict order."""
+
+    source_hash = source.platform_selection_hash or platform_selection_hash(
+        source.platform_selection
+    )
+    frozen_hash = frozen.platform_selection_hash or platform_selection_hash(
+        frozen.platform_selection
+    )
+    return (
+        source_hash == frozen_hash
+        and canonical_platform_selection(source.platform_selection)
+        == canonical_platform_selection(frozen.platform_selection)
+        and _canonical_json(source.platform_selection_options)
+        == _canonical_json(frozen.platform_selection_options)
+        and source.platform_selection_source == frozen.platform_selection_source
+    )
+
+
 def _decode_target_evidence(raw: str | None) -> dict | None:
     """把计划目标上的证据 JSON 解码为字典；无效或缺失返回 None。"""
     if not raw:
@@ -1351,6 +1417,12 @@ def _decode_target_evidence(raw: str | None) -> dict | None:
     except (TypeError, ValueError):
         return None
     return value if isinstance(value, dict) else None
+
+
+def _canonical_json(value: object) -> str | None:
+    if value is None:
+        return None
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
 def _canonicalize_v2_document(

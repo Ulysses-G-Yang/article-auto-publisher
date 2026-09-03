@@ -1,0 +1,34 @@
+{
+  "mode": "CSA",
+  "task": "Archive retired branches and harden built-in data-center removal",
+  "objective": "Preserve retired branches remotely, remove their local refs, restore API compatibility, make Windows upgrades delete retired dashboard files safely, and avoid serving a bare 404 for the retired page.",
+  "branch": "refactor/dashboard-ai-model-picker",
+  "head_before_fixes": "343d3a292a5fd0ad8c28ff5e2297989ba5d23f07",
+  "constraints": [
+    "Do not touch data, profiles, cookies, tokens, or uv.lock",
+    "Do not start or retain a service from an older checkout",
+    "Use focused commits, SSH push, and verify remote 40-character SHA",
+    "Keep the built-in dashboard UI removed while retaining read-only compatibility APIs"
+  ],
+  "completed": [
+    "Pushed archive/agent-source-package-setup at 2200c5417af084f8712fddc19bd6fb31832dece5",
+    "Verified archive/delivery-tools-reference-20260825 at 393ae74fd3914bab640610c98747bcfbb0a04c44",
+    "Pushed archive/hermes-frontend-matrix-ui at 7e4fc2e7a6ae218139d072203aa6be3205801480",
+    "Deleted all three local archive branch refs after remote SHA verification",
+    "Recorded the archive status in the remote repository issue tracker",
+    "Restored the redacted read-only /api/legacy-summary compatibility endpoint",
+    "Redirected the retired /data-center/ page only in the integrated main Flask app",
+    "Added explicit removed_files upgrade tombstones with backup and rollback",
+    "Verified success and rollback against isolated seeded Windows installations",
+    "Passed the full test suite: 1236 passed, 7 skipped, with one pre-existing aiosqlite cleanup warning"
+  ],
+  "active_files": [
+    "web/routes.py",
+    "src/article_mvp/web/app.py",
+    "scripts/build_release_windows.ps1",
+    "scripts/apply_upgrade_windows.ps1",
+    "tests/test_regression.py",
+    "tests/test_release_packaging.py"
+  ],
+  "next_action": "Safely start or switch the ArticleOps service only after verifying the listener and exact current-worktree script path."
+}

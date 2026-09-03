@@ -26,6 +26,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
+Import-Module Microsoft.PowerShell.Utility -ErrorAction Stop
 
 $ProjectRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 Set-Location -LiteralPath $ProjectRoot
@@ -109,6 +110,28 @@ $upgradeExcludedRuntimeScripts = @(
     "scripts\start_production_windows.ps1",
     "scripts\stop_production_windows.ps1",
     "scripts\production_env.example.ps1"
+)
+$upgradeRemovedFiles = @(
+    "src\article_mvp\web\static\dashboard.css",
+    "src\article_mvp\web\static\dashboard.js",
+    "src\article_mvp\web\static\vendor\coreui-icons\LICENSE.txt",
+    "src\article_mvp\web\static\vendor\coreui-icons\css\free.min.css",
+    "src\article_mvp\web\static\vendor\coreui-icons\fonts\CoreUI-Icons-Free.eot",
+    "src\article_mvp\web\static\vendor\coreui-icons\fonts\CoreUI-Icons-Free.svg",
+    "src\article_mvp\web\static\vendor\coreui-icons\fonts\CoreUI-Icons-Free.ttf",
+    "src\article_mvp\web\static\vendor\coreui-icons\fonts\CoreUI-Icons-Free.woff",
+    "src\article_mvp\web\static\vendor\coreui-icons\fonts\CoreUI-Icons-Free.woff2",
+    "src\article_mvp\web\static\vendor\coreui\LICENSE-template.txt",
+    "src\article_mvp\web\static\vendor\coreui\LICENSE.txt",
+    "src\article_mvp\web\static\vendor\coreui\coreui.bundle.min.js",
+    "src\article_mvp\web\static\vendor\coreui\coreui.min.css",
+    "src\article_mvp\web\static\vendor\gridstack\LICENSE.txt",
+    "src\article_mvp\web\static\vendor\gridstack\gridstack-all.js",
+    "src\article_mvp\web\static\vendor\gridstack\gridstack-all.js.LICENSE.txt",
+    "src\article_mvp\web\static\vendor\gridstack\gridstack.min.css",
+    "src\article_mvp\web\static\vendor\simplebar\simplebar.css",
+    "src\article_mvp\web\static\vendor\simplebar\simplebar.min.js",
+    "src\article_mvp\web\templates\dashboard.html"
 )
 
 try {
@@ -274,6 +297,7 @@ try {
         built_at_utc = [DateTime]::UtcNow.ToString('o')
         preserves = @("data", "uploads", "images", "Cookie", "Chrome Profile", "production_env.ps1")
         excluded_payload_files = @($upgradeExcludedRuntimeScripts | ForEach-Object { $_.Replace('\', '/') })
+        removed_files = @($upgradeRemovedFiles | ForEach-Object { $_.Replace('\', '/') })
         files = $upgradeFiles
     }
     $upgradeManifest | ConvertTo-Json -Depth 5 | Set-Content `

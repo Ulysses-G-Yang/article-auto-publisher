@@ -18,6 +18,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
+Import-Module Microsoft.PowerShell.Utility -ErrorAction Stop
 
 $PatchRoot = $PSScriptRoot
 $PayloadRoot = Join-Path $PatchRoot "payload"
@@ -73,10 +74,20 @@ $manifest = Get-Content -LiteralPath $ManifestPath -Raw | ConvertFrom-Json
 if (-not $manifest.source_commit -or $manifest.source_commit -notmatch '^[0-9a-f]{40}$' -or -not $manifest.files) {
     throw "升级清单格式无效。"
 }
+$removedFiles = if ($manifest.PSObject.Properties.Name -contains "removed_files") {
+    @($manifest.removed_files)
+} else {
+    @()
+}
 
 $runtimePrefixes = @("data/", "uploads/", "images/")
+$payloadPathIndex = @{}
 foreach ($entry in $manifest.files) {
     $relativePath = ([string]$entry.path).Replace('\', '/')
+    if (-not $relativePath -or $payloadPathIndex.ContainsKey($relativePath)) {
+        throw "升级清单包含空路径或重复文件：$relativePath"
+    }
+    $payloadPathIndex[$relativePath] = $true
     if ($runtimePrefixes | Where-Object { $relativePath.StartsWith($_, [StringComparison]::OrdinalIgnoreCase) }) {
         throw "升级清单非法包含运行数据：$relativePath"
     }
@@ -88,6 +99,21 @@ foreach ($entry in $manifest.files) {
     if ($actualHash -ne ([string]$entry.sha256).ToLowerInvariant()) {
         throw "升级载荷校验失败：$relativePath"
     }
+}
+$removedPathIndex = @{}
+foreach ($removedEntry in $removedFiles) {
+    $relativePath = ([string]$removedEntry).Replace('\', '/')
+    if (-not $relativePath -or $removedPathIndex.ContainsKey($relativePath)) {
+        throw "升级清单包含空路径或重复删除项：$relativePath"
+    }
+    if ($payloadPathIndex.ContainsKey($relativePath)) {
+        throw "升级清单同一路径不能同时覆盖和删除：$relativePath"
+    }
+    if ($runtimePrefixes | Where-Object { $relativePath.StartsWith($_, [StringComparison]::OrdinalIgnoreCase) }) {
+        throw "升级删除清单非法包含运行数据：$relativePath"
+    }
+    [void](Get-SafeChildPath -Root $ResolvedTargetRoot -RelativePath $relativePath)
+    $removedPathIndex[$relativePath] = $true
 }
 
 if ($ValidateOnly) {
@@ -117,7 +143,21 @@ try {
             New-Item -ItemType Directory -Force -Path (Split-Path -Parent $backupPath) | Out-Null
             Copy-Item -LiteralPath $targetPath -Destination $backupPath -Force
         }
-        $state += [ordered]@{ path = $relativePath; existed = $existed }
+        $state += [ordered]@{ path = $relativePath; existed = $existed; operation = "replace" }
+    }
+    foreach ($removedEntry in $removedFiles) {
+        $relativePath = ([string]$removedEntry).Replace('/', '\')
+        $targetPath = Get-SafeChildPath -Root $ResolvedTargetRoot -RelativePath $relativePath
+        if (Test-Path -LiteralPath $targetPath -PathType Container) {
+            throw "升级删除项必须是文件，不能是目录：$relativePath"
+        }
+        $backupPath = Get-SafeChildPath -Root $backupRoot -RelativePath $relativePath
+        $existed = Test-Path -LiteralPath $targetPath -PathType Leaf
+        if ($existed) {
+            New-Item -ItemType Directory -Force -Path (Split-Path -Parent $backupPath) | Out-Null
+            Copy-Item -LiteralPath $targetPath -Destination $backupPath -Force
+        }
+        $state += [ordered]@{ path = $relativePath; existed = $existed; operation = "remove" }
     }
     $state | ConvertTo-Json -Depth 3 | Set-Content -LiteralPath (Join-Path $backupRoot "upgrade_state.json") -Encoding UTF8
 
@@ -127,6 +167,13 @@ try {
         $targetPath = Get-SafeChildPath -Root $ResolvedTargetRoot -RelativePath $relativePath
         New-Item -ItemType Directory -Force -Path (Split-Path -Parent $targetPath) | Out-Null
         Copy-Item -LiteralPath $payloadPath -Destination $targetPath -Force
+    }
+    foreach ($removedEntry in $removedFiles) {
+        $relativePath = ([string]$removedEntry).Replace('/', '\')
+        $targetPath = Get-SafeChildPath -Root $ResolvedTargetRoot -RelativePath $relativePath
+        if (Test-Path -LiteralPath $targetPath -PathType Leaf) {
+            Remove-Item -LiteralPath $targetPath -Force
+        }
     }
 
     $newRequirementsHash = (Get-FileHash -LiteralPath $requirementsTarget -Algorithm SHA256).Hash.ToLowerInvariant()

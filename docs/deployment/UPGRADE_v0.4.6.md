@@ -56,8 +56,10 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass `
 - 当前端口、Host 白名单、账号白名单和公开发布关闭配置；
 - 客户已有的 Windows 启停脚本和配置模板。
 
-被替换的程序文件会备份到 `data\upgrade_backups\<UTC时间>`，但该备份不能代替升级前的
-完整 `data/` 备份。
+被替换或按升级清单删除的程序文件会备份到 `data\upgrade_backups\<UTC时间>`；
+删除项只允许是清单内的程序文件，绝不会包含 `data`、`uploads` 或 `images`。
+升级失败时这些文件会随其他程序文件一起恢复，但该备份不能代替升级前的完整
+`data/` 备份。
 
 ## 升级后只读核对
 

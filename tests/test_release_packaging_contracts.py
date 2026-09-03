@@ -1,3 +1,5 @@
+import hashlib
+import json
 import shutil
 import subprocess
 from pathlib import Path
@@ -11,6 +13,57 @@ def read(relative_path: str) -> str:
     return (ROOT / relative_path).read_text(encoding="utf-8-sig")
 
 
+def _sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _prepare_upgrade_fixture(tmp_path: Path, *, failing_start: bool = False):
+    patch_root = tmp_path / "patch"
+    payload_root = patch_root / "payload"
+    target_root = tmp_path / "target"
+    target_scripts = target_root / "scripts"
+    payload_root.mkdir(parents=True)
+    target_scripts.mkdir(parents=True)
+    shutil.copy2(ROOT / "scripts" / "apply_upgrade_windows.ps1", patch_root)
+
+    (target_root / "app.py").write_text("old app\n", encoding="utf-8")
+    (target_root / "config.py").write_text("config\n", encoding="utf-8")
+    (target_root / "requirements.txt").write_text("same\n", encoding="utf-8")
+    for script_name in ("start_production_windows.ps1", "stop_production_windows.ps1"):
+        (target_scripts / script_name).write_text("exit 0\n", encoding="ascii")
+
+    retired_file = (
+        target_root / "src" / "article_mvp" / "web" / "static" / "dashboard.js"
+    )
+    retired_file.parent.mkdir(parents=True)
+    retired_file.write_text("retired dashboard\n", encoding="utf-8")
+
+    payload_files = {
+        "app.py": "new app\n",
+        "requirements.txt": "same\n",
+    }
+    if failing_start:
+        payload_files["scripts/start_production_windows.ps1"] = "exit 17\n"
+
+    manifest_files = []
+    for relative_path, content in payload_files.items():
+        payload_path = payload_root / Path(relative_path)
+        payload_path.parent.mkdir(parents=True, exist_ok=True)
+        payload_path.write_text(content, encoding="utf-8")
+        manifest_files.append({"path": relative_path, "sha256": _sha256(payload_path)})
+
+    manifest = {
+        "source_commit": "a" * 40,
+        "files": manifest_files,
+        "removed_files": ["src/article_mvp/web/static/dashboard.js"],
+    }
+    (patch_root / "UPGRADE_MANIFEST.json").write_text(
+        json.dumps(manifest),
+        encoding="utf-8",
+    )
+    return patch_root, target_root, retired_file
+
+
 def test_windows_powershell_scripts_have_utf8_bom_for_version_5_1() -> None:
     for relative_path in (
         "scripts/setup_windows.ps1",
@@ -21,6 +74,16 @@ def test_windows_powershell_scripts_have_utf8_bom_for_version_5_1() -> None:
         "scripts/apply_upgrade_windows.ps1",
     ):
         assert (ROOT / relative_path).read_bytes().startswith(b"\xef\xbb\xbf")
+
+
+def test_release_scripts_explicitly_load_hashing_module() -> None:
+    for relative_path in (
+        "scripts/build_release_windows.ps1",
+        "scripts/apply_upgrade_windows.ps1",
+    ):
+        assert "Import-Module Microsoft.PowerShell.Utility -ErrorAction Stop" in read(
+            relative_path
+        )
 
 
 def test_windows_setup_selects_runtime_dependencies_for_source_packages() -> None:
@@ -208,6 +271,15 @@ def test_upgrade_payload_preserves_customer_deployment_scripts() -> None:
     assert '(Join-Path $UpgradeRoot "UPGRADE_v0.4.6.md")' in script
 
 
+def test_upgrade_manifest_lists_retired_dashboard_files() -> None:
+    script = read("scripts/build_release_windows.ps1")
+
+    assert "$upgradeRemovedFiles = @(" in script
+    assert '"src\\article_mvp\\web\\static\\dashboard.js"' in script
+    assert '"src\\article_mvp\\web\\templates\\dashboard.html"' in script
+    assert "removed_files = @($upgradeRemovedFiles" in script
+
+
 def test_windows_setup_prints_explicit_production_start_sequence() -> None:
     script = read("scripts/setup_windows.ps1")
 
@@ -255,7 +327,76 @@ def test_windows_upgrade_preserves_runtime_state_and_rolls_back_code() -> None:
     assert "data\\upgrade_backups" in script
     assert 'Invoke-TargetScript -Name "stop_production_windows.ps1"' in script
     assert 'Invoke-TargetScript -Name "start_production_windows.ps1"' in script
+    assert 'operation = "remove"' in script
+    assert "Remove-Item -LiteralPath $targetPath -Force" in script
     assert "已尝试恢复旧代码" in script
+
+
+def test_windows_upgrade_removes_retired_files_after_backup(tmp_path: Path) -> None:
+    powershell = shutil.which("powershell.exe")
+    if not powershell:
+        pytest.skip("Windows PowerShell is unavailable")
+    patch_root, target_root, retired_file = _prepare_upgrade_fixture(tmp_path)
+
+    result = subprocess.run(
+        [
+            powershell,
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(patch_root / "apply_upgrade_windows.ps1"),
+            "-TargetRoot",
+            str(target_root),
+        ],
+        capture_output=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert not retired_file.exists()
+    assert (target_root / "app.py").read_text(encoding="utf-8-sig") == "new app\n"
+    backup_files = list(
+        (target_root / "data" / "upgrade_backups").glob(
+            "*/src/article_mvp/web/static/dashboard.js"
+        )
+    )
+    assert len(backup_files) == 1
+    assert backup_files[0].read_text(encoding="utf-8-sig") == "retired dashboard\n"
+
+
+def test_windows_upgrade_restores_removed_files_on_failure(tmp_path: Path) -> None:
+    powershell = shutil.which("powershell.exe")
+    if not powershell:
+        pytest.skip("Windows PowerShell is unavailable")
+    patch_root, target_root, retired_file = _prepare_upgrade_fixture(
+        tmp_path,
+        failing_start=True,
+    )
+
+    result = subprocess.run(
+        [
+            powershell,
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(patch_root / "apply_upgrade_windows.ps1"),
+            "-TargetRoot",
+            str(target_root),
+        ],
+        capture_output=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+
+    assert result.returncode != 0
+    assert (target_root / "app.py").read_text(encoding="utf-8-sig") == "old app\n"
+    assert retired_file.read_text(encoding="utf-8-sig") == "retired dashboard\n"
+    assert (
+        target_root / "scripts" / "start_production_windows.ps1"
+    ).read_text(encoding="utf-8-sig") == "exit 0\n"
 
 
 def test_windows_start_script_exposes_bundled_src_modules_to_mcp() -> None:

@@ -121,6 +121,25 @@ class PublicationAISettingsUpdate(BaseModel):
         return value
 
 
+class PublicationAIModelListRequest(BaseModel):
+    """仅用于读取兼容服务模型列表；请求不会修改运行期设置。"""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    base_url: StrictStr = Field(min_length=1, max_length=500)
+    api_key: SecretStr | None = Field(default=None, min_length=1, max_length=512)
+
+    @field_validator("api_key")
+    @classmethod
+    def _reject_whitespace_in_api_key(cls, value: SecretStr | None) -> SecretStr | None:
+        if value is None:
+            return None
+        raw = value.get_secret_value()
+        if not raw or any(character.isspace() for character in raw):
+            raise ValueError("API Key 格式无效")
+        return value
+
+
 def validate_for_platforms(
     response: PublicationGuidanceResponse,
     platforms: list[str] | tuple[str, ...],
@@ -139,6 +158,7 @@ def validate_for_platforms(
 
 __all__ = [
     "PublicationAdviceRequest",
+    "PublicationAIModelListRequest",
     "PublicationAISettingsUpdate",
     "PublicationGuidanceResponse",
     "PublicationPlatform",

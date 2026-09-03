@@ -14,6 +14,7 @@ from account_sessions.web import create_account_session_blueprint
 from content_studio.database import sqlite_url
 from content_studio.web import create_content_studio_blueprint
 from publication_ai.contracts import (
+    PublicationAIModelListRequest,
     PublicationAISettingsUpdate,
     PublicationGuidanceResponse,
 )
@@ -454,9 +455,140 @@ def test_connection_check_uses_models_endpoint_without_article() -> None:
     run(unavailable_client.aclose())
 
 
+def test_model_list_supports_custom_base_url_and_deduplicates_ids() -> None:
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(
+            200,
+            json={
+                "object": "list",
+                "data": [
+                    {"id": " model-a ", "object": "model"},
+                    {"id": "model-b", "object": "model"},
+                    {"id": "model-a", "object": "model"},
+                    {"id": "", "object": "model"},
+                    {"object": "model"},
+                ],
+            },
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    advisor = DeepSeekPublicationAdvisor(
+        settings(base_url="https://gateway.example/openai/v1", model="model-a"),
+        http_client=client,
+        api_key="catalog-secret",
+        api_key_env=None,
+    )
+    assert run(advisor.list_models()) == ["model-a", "model-b"]
+    assert seen[0].url == "https://gateway.example/openai/v1/models"
+    assert seen[0].headers["Authorization"] == "Bearer catalog-secret"
+    assert seen[0].content == b""
+    run(client.aclose())
+
+
+@pytest.mark.parametrize("status_code", [404, 405, 501])
+def test_model_list_has_explicit_manual_fallback_when_endpoint_is_unsupported(
+    status_code: int,
+) -> None:
+    client = httpx.AsyncClient(
+        transport=httpx.MockTransport(
+            lambda _request: httpx.Response(status_code, text="PRIVATE_UPSTREAM_BODY")
+        )
+    )
+    advisor = DeepSeekPublicationAdvisor(
+        settings(),
+        http_client=client,
+        api_key="catalog-secret",
+        api_key_env=None,
+    )
+    with pytest.raises(PublicationAIError) as captured:
+        run(advisor.list_models())
+    assert captured.value.error_code == "AI_MODEL_UNAVAILABLE"
+    assert captured.value.safe_message == "该服务未提供标准模型列表接口，请手动输入模型 ID"
+    assert "PRIVATE_UPSTREAM_BODY" not in repr(captured.value)
+    run(client.aclose())
+
+
+@pytest.mark.parametrize(
+    ("payload", "message"),
+    [
+        (
+            {"data": "not-a-list"},
+            "该服务返回的模型列表格式不兼容，请手动输入模型 ID",
+        ),
+        ({"data": []}, "该服务未返回可用模型，请手动输入模型 ID"),
+    ],
+)
+def test_model_list_invalid_or_empty_payload_keeps_manual_fallback(
+    payload: dict,
+    message: str,
+) -> None:
+    client = httpx.AsyncClient(
+        transport=httpx.MockTransport(
+            lambda _request: httpx.Response(200, json=payload)
+        )
+    )
+    advisor = DeepSeekPublicationAdvisor(
+        settings(),
+        http_client=client,
+        api_key="catalog-secret",
+        api_key_env=None,
+    )
+    with pytest.raises(PublicationAIError) as captured:
+        run(advisor.list_models())
+    assert captured.value.error_code == "AI_RESPONSE_INVALID"
+    assert captured.value.safe_message == message
+    run(client.aclose())
+
+
+def test_model_list_advisor_is_transient_and_reuses_or_overrides_effective_key() -> None:
+    seen_authorization: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen_authorization.append(request.headers["Authorization"])
+        return httpx.Response(200, json={"data": [{"id": "model-a"}]})
+
+    store = PublicationAISettingsStore(
+        settings(enabled=False).__dict__,
+        environ={"DEEPSEEK_API_KEY": "environment-secret"},
+    )
+    before = store.public_view()
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+    inherited = PublicationAIModelListRequest.model_validate(
+        {"base_url": "https://gateway.example/v1"}
+    )
+    advisor = store.create_model_list_advisor(inherited, http_client=client)
+    assert run(advisor.list_models()) == ["model-a"]
+
+    overridden = PublicationAIModelListRequest.model_validate(
+        {
+            "base_url": "https://other-gateway.example/v1",
+            "api_key": "one-time-secret",
+        }
+    )
+    advisor = store.create_model_list_advisor(overridden, http_client=client)
+    assert run(advisor.list_models()) == ["model-a"]
+
+    assert seen_authorization == [
+        "Bearer environment-secret",
+        "Bearer one-time-secret",
+    ]
+    assert store.public_view() == before
+    assert "one-time-secret" not in repr(store)
+    run(client.aclose())
+
+
 class FakeConnectionAdvisor:
     async def check_connection(self) -> dict:
         return {"model": "deepseek-v4-pro", "available_model_count": 2}
+
+
+class FakeModelListAdvisor:
+    async def list_models(self) -> list[str]:
+        return ["model-a", "model-b"]
 
 
 def test_runtime_settings_http_contract_requires_csrf_and_never_returns_key(
@@ -513,6 +645,41 @@ def test_runtime_settings_http_contract_requires_csrf_and_never_returns_key(
     with client.session_transaction() as session:
         session["articleops_ai_settings_csrf"] = "csrf-token"
     headers = {"X-ArticleOps-AI-Settings": "csrf-token"}
+
+    unauthorized_models = client.post(
+        "/api/settings/publication-ai/models",
+        json={"base_url": "https://gateway.example/v1"},
+    )
+    assert unauthorized_models.status_code == 403
+    assert unauthorized_models.get_json()["error"] == "AI_SETTINGS_UNAUTHORIZED"
+
+    captured_model_list_request: list[PublicationAIModelListRequest] = []
+
+    def create_model_list_advisor(payload: PublicationAIModelListRequest):
+        captured_model_list_request.append(payload)
+        return FakeModelListAdvisor()
+
+    monkeypatch.setattr(store, "create_model_list_advisor", create_model_list_advisor)
+    listed = client.post(
+        "/api/settings/publication-ai/models",
+        json={
+            "base_url": "https://gateway.example/v1",
+            "api_key": "one-time-http-secret",
+        },
+        headers=headers,
+    )
+    assert listed.status_code == 200
+    assert listed.headers["Cache-Control"] == "no-store"
+    assert listed.get_json()["models"] == ["model-a", "model-b"]
+    assert listed.get_json()["available_model_count"] == 2
+    assert "checked_at" in listed.get_json()
+    assert "one-time-http-secret" not in listed.get_data(as_text=True)
+    assert captured_model_list_request[0].base_url == "https://gateway.example/v1"
+    assert (
+        captured_model_list_request[0].api_key.get_secret_value()
+        == "one-time-http-secret"
+    )
+
     updated = client.put(
         "/api/settings/publication-ai",
         json=update_payload,

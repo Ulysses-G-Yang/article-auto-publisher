@@ -125,8 +125,8 @@ class DeepSeekPublicationAdvisor:
             return os.getenv(self._api_key_env, "").strip()
         return ""
 
-    async def check_connection(self) -> dict[str, Any]:
-        """读取官方模型列表验证地址、密钥和当前模型，不发送文章正文。"""
+    async def list_models(self) -> list[str]:
+        """读取 OpenAI 兼容模型列表；不发送正文，也不修改当前设置。"""
 
         api_key = self._load_api_key()
         if not api_key:
@@ -159,19 +159,43 @@ class DeepSeekPublicationAdvisor:
         except httpx.RequestError:
             raise PublicationAIError("AI_UPSTREAM_ERROR") from None
 
+        if response.status_code in {404, 405, 501}:
+            raise PublicationAIError(
+                "AI_MODEL_UNAVAILABLE",
+                message="该服务未提供标准模型列表接口，请手动输入模型 ID",
+            )
         self._raise_for_upstream_status(response)
         try:
             envelope = response.json()
             models = envelope["data"]
-            model_ids = [
-                item["id"]
-                for item in models
-                if isinstance(item, dict) and isinstance(item.get("id"), str)
-            ]
+            if not isinstance(models, list):
+                raise TypeError
         except (KeyError, TypeError, ValueError):
-            raise PublicationAIError("AI_RESPONSE_INVALID") from None
+            raise PublicationAIError(
+                "AI_RESPONSE_INVALID",
+                message="该服务返回的模型列表格式不兼容，请手动输入模型 ID",
+            ) from None
+
+        model_ids: list[str] = []
+        seen: set[str] = set()
+        for item in models:
+            if not isinstance(item, dict) or not isinstance(item.get("id"), str):
+                continue
+            model_id = item["id"].strip()
+            if model_id and model_id not in seen:
+                seen.add(model_id)
+                model_ids.append(model_id)
         if not model_ids:
-            raise PublicationAIError("AI_RESPONSE_INVALID")
+            raise PublicationAIError(
+                "AI_RESPONSE_INVALID",
+                message="该服务未返回可用模型，请手动输入模型 ID",
+            )
+        return model_ids
+
+    async def check_connection(self) -> dict[str, Any]:
+        """读取模型列表验证地址、密钥和当前模型，不发送文章正文。"""
+
+        model_ids = await self.list_models()
         if self.settings.model not in model_ids:
             raise PublicationAIError("AI_MODEL_UNAVAILABLE")
         return {"model": self.settings.model, "available_model_count": len(model_ids)}

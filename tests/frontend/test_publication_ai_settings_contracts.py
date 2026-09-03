@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -5,6 +6,17 @@ ROOT = Path(__file__).resolve().parents[2]
 
 def read(path: str) -> str:
     return (ROOT / path).read_text(encoding="utf-8")
+
+
+def function_body(script: str, name: str, next_name: str) -> str:
+    match = re.search(
+        rf"async function {name}\(.*?\) \{{(?P<body>.*?)\n    \}}\n\n"
+        rf"    (?:async )?function {next_name}\(",
+        script,
+        flags=re.DOTALL,
+    )
+    assert match, f"missing function {name}"
+    return match.group("body")
 
 
 def test_ai_settings_page_is_wired_without_key_persistence_or_echo() -> None:
@@ -16,10 +28,16 @@ def test_ai_settings_page_is_wired_without_key_persistence_or_echo() -> None:
     assert 'id="ai-api-key"' in template
     assert 'type="password"' in template
     assert 'autocomplete="new-password"' in template
+    assert 'data-models-url="/api/settings/publication-ai/models"' in template
     assert 'aria-describedby="ai-base-url-help ai-base-url-error"' in template
-    assert 'aria-describedby="ai-model-help ai-model-error"' in template
-    assert "现有 Key 永不回显" in template
-    assert "只保存在当前服务进程内" in template
+    assert "ai-model-help ai-model-error ai-model-status" in template
+    assert 'role="combobox"' in template
+    assert 'role="listbox"' in template
+    assert 'id="load-ai-models"' in template
+    assert "测试已保存连接" in template
+    assert "现有密钥永不回显" in template
+    assert "新密钥只有保存设置时才进入当前服务进程" in template
+    assert "任何时候都可以直接填写模型 ID" in template
     assert "localStorage" not in script
     assert "sessionStorage" not in script
     assert "byId('ai-api-key').value = '';" in script
@@ -30,6 +48,41 @@ def test_ai_settings_page_is_wired_without_key_persistence_or_echo() -> None:
     assert "X-ArticleOps-AI-Settings" in script
     assert "textContent" in script
     assert "innerHTML" not in script
+
+
+def test_model_catalog_is_optional_and_does_not_persist_temporary_credentials() -> None:
+    script = read("web/static/js/ai-settings.js")
+
+    load_models = function_body(script, "loadModels", "clearRuntimeKey")
+    save_settings = function_body(script, "saveSettings", "loadModels")
+    test_connection = function_body(script, "testConnection", "toggleKeyVisibility")
+
+    assert "root.dataset.modelsUrl" in load_models
+    assert "payload.api_key = apiKey" in load_models
+    assert "persistCurrentForm" not in load_models
+    assert "仍可手动填写模型 ID 并保存" in load_models
+    assert "await persistCurrentForm();" in save_settings
+    assert "root.dataset.modelsUrl" not in save_settings
+    assert "method: 'POST'" in test_connection
+    assert "persistCurrentForm" not in test_connection
+    assert "已保存设置不会被撤销" in test_connection
+
+
+def test_ai_settings_accessibility_and_responsive_contracts() -> None:
+    template = read("web/templates/ai_settings.html")
+    styles = read("web/static/css/ai-settings.css")
+
+    assert 'aria-live="polite"' in template
+    assert 'aria-busy="true"' in template
+    assert "root.setAttribute('aria-busy', String(busy));" in read(
+        "web/static/js/ai-settings.js"
+    )
+    assert "min-height: 44px" in styles
+    assert ".ai-model-option:focus-visible" in styles
+    assert "outline: 2px solid var(--ao-focus)" in styles
+    assert "@media (max-width: 639.98px)" in styles
+    assert "@media (prefers-reduced-motion: no-preference)" in styles
+    assert "var(--ao-" in styles
 
 
 def test_studio_requests_readonly_advice_for_current_revision_and_platforms() -> None:

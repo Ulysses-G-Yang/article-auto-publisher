@@ -46,6 +46,7 @@ from content_studio.service import (
 )
 from publication_ai.contracts import (
     PublicationAdviceRequest,
+    PublicationAIModelListRequest,
     PublicationAISettingsUpdate,
     PublicationGuidanceResponse,
     validate_for_platforms,
@@ -649,6 +650,29 @@ def create_content_studio_blueprint(
     @blueprint.get("/api/settings/publication-ai")
     def get_publication_ai_settings():
         response = jsonify(require_publication_settings_store().public_view())
+        response.headers["Cache-Control"] = "no-store"
+        return response
+
+    @blueprint.post("/api/settings/publication-ai/models")
+    def list_publication_ai_models():
+        """读取自定义 OpenAI 兼容地址的模型列表，不保存地址或密钥。"""
+
+        require_ai_settings_csrf()
+        payload = PublicationAIModelListRequest.model_validate(
+            request.get_json(silent=True) or {}
+        )
+        advisor = require_publication_settings_store().create_model_list_advisor(payload)
+        try:
+            model_ids = state.run(advisor.list_models(), timeout=130)
+        except TimeoutError:
+            raise PublicationAIError("AI_TIMEOUT") from None
+        response = jsonify(
+            {
+                "models": model_ids,
+                "available_model_count": len(model_ids),
+                "checked_at": _utc_iso_now(),
+            }
+        )
         response.headers["Cache-Control"] = "no-store"
         return response
 

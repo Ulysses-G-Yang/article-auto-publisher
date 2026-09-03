@@ -1,83 +1,213 @@
 {% extends "base.html" %}
-{% block title %}AI 发布设置 - ArticleOps{% endblock %}
-{% block header_title %}AI 发布设置{% endblock %}
-{% block extra_head %}<link rel="stylesheet" href="{{ url_for('static', filename='css/ai-settings.css', v='20260903') }}">{% endblock %}
+{% block title %}AI 服务设置 - ArticleOps{% endblock %}
+{% block header_title %}AI 服务设置{% endblock %}
+{% block extra_head %}<link rel="stylesheet" href="{{ url_for('static', filename='css/ai-settings.css', v='20260903-model-picker-v2') }}">{% endblock %}
 
 {% block content %}
-<div id="ai-settings" class="ai-settings-page app-page"
+<div id="ai-settings"
+     class="ai-settings-page app-page"
      data-settings-url="/api/settings/publication-ai"
+     data-models-url="/api/settings/publication-ai/models"
      data-test-url="/api/settings/publication-ai/test"
-     data-csrf-token="{{ ai_settings_csrf | e }}">
-    <nav class="studio-breadcrumb" aria-label="面包屑导航"><ol class="breadcrumb"><li class="breadcrumb-item"><a href="/">首页</a></li><li class="breadcrumb-item active" aria-current="page">AI 发布设置</li></ol></nav>
+     data-csrf-token="{{ ai_settings_csrf | e }}"
+     aria-busy="true">
+    <nav class="studio-breadcrumb" aria-label="面包屑导航">
+        <ol class="breadcrumb">
+            <li class="breadcrumb-item"><a href="/">首页</a></li>
+            <li class="breadcrumb-item active" aria-current="page">AI 服务设置</li>
+        </ol>
+    </nav>
 
     <div class="page-heading ai-settings-heading">
-        <div><span class="page-eyebrow">智能发布助手</span><h1>配置 DeepSeek</h1><p>让 AI 读取当前文章全文，为所选平台生成社区、话题与关键词建议。</p></div>
-        <a class="btn btn-outline-secondary" href="/upload"><i class="cil-arrow-left me-2" aria-hidden="true"></i>返回创作工作台</a>
+        <div>
+            <span class="page-eyebrow">智能发布助手</span>
+            <h1>连接你的 AI 服务</h1>
+            <p>支持 DeepSeek 官方服务、自建中转站及其他 OpenAI 兼容服务。模型可从服务读取，也可直接手动填写。</p>
+        </div>
+        <a class="btn btn-outline-secondary" href="/upload">
+            <i class="cil-arrow-left me-2" aria-hidden="true"></i>返回创作工作台
+        </a>
     </div>
 
-    <div id="ai-settings-loading" class="card ai-settings-loading" role="status"><div class="card-body"><span class="spinner-border spinner-border-sm" aria-hidden="true"></span><span>正在读取 AI 配置…</span></div></div>
+    <div id="ai-settings-loading" class="card ai-settings-loading" role="status">
+        <div class="card-body">
+            <span class="spinner-border spinner-border-sm" aria-hidden="true"></span>
+            <span>正在读取 AI 服务配置…</span>
+        </div>
+    </div>
     <div id="ai-settings-fatal" class="alert alert-danger d-none" role="alert"></div>
 
     <div id="ai-settings-workspace" class="ai-settings-layout d-none">
         <main class="card ai-settings-card">
             <div class="card-header ai-settings-card-header">
-                <div><span class="section-kicker">连接配置</span><h2>DeepSeek API</h2></div>
+                <div>
+                    <span class="section-kicker">连接配置</span>
+                    <h2>OpenAI 兼容服务</h2>
+                </div>
                 <span id="ai-config-badge" class="badge text-bg-secondary">尚未配置</span>
             </div>
+
             <div class="card-body">
                 <form id="ai-settings-form" novalidate>
-                    <div class="ai-enabled-row">
-                        <div><label class="form-label fw-semibold mb-1" for="ai-enabled">启用 AI 发布建议</label><p>关闭后不会向外部 AI 发送文章内容。</p></div>
-                        <div class="form-check form-switch"><input id="ai-enabled" class="form-check-input" type="checkbox" role="switch"></div>
-                    </div>
-
-                    <div class="mb-4">
-                        <label class="form-label fw-semibold" for="ai-base-url">API 地址</label>
-                        <input id="ai-base-url" class="form-control" type="url" maxlength="500" autocomplete="url" required placeholder="https://api.deepseek.com" aria-describedby="ai-base-url-help ai-base-url-error">
-                        <div id="ai-base-url-help" class="form-text">必须使用 HTTPS；不要把 API Key 拼进地址。</div>
-                        <div id="ai-base-url-error" class="invalid-feedback">请输入不含账号、密码、查询参数的 HTTPS 地址。</div>
-                    </div>
-
-                    <div class="mb-4">
-                        <label class="form-label fw-semibold" for="ai-model">模型</label>
-                        <input id="ai-model" class="form-control" type="text" maxlength="128" required list="deepseek-models" autocomplete="off" placeholder="deepseek-v4-flash" aria-describedby="ai-model-help ai-model-error">
-                        <datalist id="deepseek-models"><option value="deepseek-v4-flash"></option><option value="deepseek-v4-pro"></option></datalist>
-                        <div id="ai-model-help" class="form-text">可直接输入兼容服务提供的模型 ID。</div>
-                        <div id="ai-model-error" class="invalid-feedback">请输入模型 ID。</div>
-                    </div>
-
-                    <div class="mb-4">
-                        <label class="form-label fw-semibold" for="ai-api-key">API Key</label>
-                        <div class="input-group ai-key-group">
-                            <input id="ai-api-key" class="form-control" type="password" maxlength="512" autocomplete="new-password" placeholder="留空则保留当前 Key" aria-describedby="ai-api-key-help">
-                            <button id="toggle-ai-key" class="btn btn-outline-secondary" type="button" aria-label="显示本次输入的 API Key" aria-pressed="false"><i class="cil-low-vision" aria-hidden="true"></i></button>
+                    <section class="ai-enabled-row" aria-labelledby="ai-enabled-label">
+                        <div>
+                            <label id="ai-enabled-label" class="form-label fw-semibold mb-1" for="ai-enabled">启用 AI 发布建议</label>
+                            <p>关闭后不会向外部 AI 服务发送文章内容。</p>
                         </div>
-                        <div id="ai-api-key-help" class="form-text">现有 Key 永不回显；新 Key 只保存在当前服务进程内。</div>
+                        <div class="form-check form-switch">
+                            <input id="ai-enabled" class="form-check-input" type="checkbox" role="switch">
+                        </div>
+                    </section>
+
+                    <div class="ai-form-section">
+                        <div class="ai-form-section-heading">
+                            <span class="ai-step-number" aria-hidden="true">1</span>
+                            <div>
+                                <h3>填写服务连接</h3>
+                                <p>地址和密钥仅用于你指定的兼容服务。</p>
+                            </div>
+                        </div>
+
+                        <div class="mb-4">
+                            <label class="form-label fw-semibold" for="ai-base-url">服务地址</label>
+                            <input id="ai-base-url"
+                                   class="form-control"
+                                   type="url"
+                                   maxlength="500"
+                                   autocomplete="url"
+                                   required
+                                   placeholder="https://your-ai-service.example/v1"
+                                   aria-describedby="ai-base-url-help ai-base-url-error">
+                            <div id="ai-base-url-help" class="form-text">必须使用 HTTPS，地址中不能包含账号、密码、查询参数或密钥。</div>
+                            <div id="ai-base-url-error" class="invalid-feedback">请输入不含账号、密码、查询参数的 HTTPS 地址。</div>
+                        </div>
+
+                        <div class="mb-0">
+                            <label class="form-label fw-semibold" for="ai-api-key">访问密钥（API Key）</label>
+                            <div class="input-group ai-key-group">
+                                <input id="ai-api-key"
+                                       class="form-control"
+                                       type="password"
+                                       maxlength="512"
+                                       autocomplete="new-password"
+                                       placeholder="留空则使用当前已配置密钥"
+                                       aria-describedby="ai-api-key-help">
+                                <button id="toggle-ai-key"
+                                        class="btn btn-outline-secondary"
+                                        type="button"
+                                        aria-label="显示本次输入的访问密钥"
+                                        aria-pressed="false">
+                                    <i class="cil-low-vision" aria-hidden="true"></i>
+                                </button>
+                            </div>
+                            <div id="ai-api-key-help" class="form-text">现有密钥永不回显；新密钥只有保存设置时才进入当前服务进程。</div>
+                        </div>
+                    </div>
+
+                    <div class="ai-form-section ai-model-section">
+                        <div class="ai-form-section-heading ai-model-heading">
+                            <span class="ai-step-number" aria-hidden="true">2</span>
+                            <div>
+                                <h3>选择或填写模型</h3>
+                                <p>读取列表只是辅助功能，任何时候都可以直接填写模型 ID。</p>
+                            </div>
+                        </div>
+
+                        <div class="ai-model-control">
+                            <div class="ai-model-input-wrap">
+                                <label class="form-label fw-semibold" for="ai-model">模型 ID</label>
+                                <input id="ai-model"
+                                       class="form-control"
+                                       type="text"
+                                       maxlength="128"
+                                       required
+                                       autocomplete="off"
+                                       role="combobox"
+                                       aria-expanded="false"
+                                       placeholder="例如：deepseek-chat 或自建服务模型 ID"
+                                       aria-autocomplete="list"
+                                       aria-controls="ai-model-catalog"
+                                       aria-describedby="ai-model-help ai-model-error ai-model-status">
+                                <div id="ai-model-help" class="form-text">输入内容会筛选已读取的模型；没有列表时仍可手动填写并保存。</div>
+                                <div id="ai-model-error" class="invalid-feedback">请输入模型 ID。</div>
+                            </div>
+                            <button id="load-ai-models" class="btn btn-outline-primary ai-load-models" type="button">
+                                <i class="cil-cloud-download me-2" aria-hidden="true"></i>
+                                <span>读取模型列表</span>
+                            </button>
+                        </div>
+
+                        <div id="ai-model-status" class="ai-model-status" role="status" aria-live="polite"></div>
+                        <div id="ai-model-catalog-wrap" class="ai-model-catalog-wrap d-none">
+                            <div class="ai-model-catalog-header">
+                                <strong>服务返回的模型</strong>
+                                <span id="ai-model-count">0 个</span>
+                            </div>
+                            <div id="ai-model-catalog"
+                                 class="ai-model-catalog"
+                                 role="listbox"
+                                 aria-label="可用模型列表"
+                                 aria-busy="false"></div>
+                            <p id="ai-model-empty" class="ai-model-empty d-none">没有匹配的模型，可继续手动填写上方模型 ID。</p>
+                        </div>
                     </div>
 
                     <div id="ai-settings-message" class="alert d-none" role="status" aria-live="polite"></div>
                     <div class="ai-settings-actions">
-                        <button id="save-ai-settings" class="btn btn-primary" type="submit"><i class="cil-save me-2" aria-hidden="true"></i>保存设置</button>
-                        <button id="test-ai-connection" class="btn btn-outline-primary" type="button"><i class="cil-check-circle me-2" aria-hidden="true"></i>保存并测试连接</button>
-                        <button id="clear-ai-key" class="btn btn-outline-danger ms-sm-auto" type="button">清除页面 Key</button>
+                        <button id="save-ai-settings" class="btn btn-primary" type="submit">
+                            <i class="cil-save me-2" aria-hidden="true"></i>保存设置
+                        </button>
+                        <button id="test-ai-connection" class="btn btn-outline-primary" type="button">
+                            <i class="cil-check-circle me-2" aria-hidden="true"></i>测试已保存连接
+                        </button>
+                        <button id="clear-ai-key" class="btn btn-outline-danger ms-sm-auto" type="button">清除页面密钥</button>
                     </div>
                 </form>
             </div>
         </main>
 
         <aside class="ai-settings-side">
-            <section class="card ai-status-card"><div class="card-body">
-                <span class="section-kicker">当前状态</span><h2>配置是否可用</h2>
-                <dl class="ai-status-list"><div><dt>功能</dt><dd id="ai-enabled-status">—</dd></div><div><dt>密钥</dt><dd id="ai-key-status">—</dd></div><div><dt>来源</dt><dd id="ai-key-source">—</dd></div></dl>
-            </div></section>
-            <section class="card ai-security-card"><div class="card-body">
-                <div class="ai-security-icon" aria-hidden="true"><i class="cil-shield-alt"></i></div>
-                <span class="section-kicker">安全边界</span><h2>密钥不会落盘</h2>
-                <ul><li>API Key 不进入 Git、数据库和日志</li><li>接口只返回“已配置 / 未配置”</li><li>服务重启后，页面输入的 Key 会清空</li><li>长期配置仍可使用环境变量</li></ul>
-            </div></section>
+            <section class="card ai-status-card">
+                <div class="card-body">
+                    <span class="section-kicker">当前状态</span>
+                    <h2>服务配置</h2>
+                    <dl class="ai-status-list">
+                        <div><dt>功能</dt><dd id="ai-enabled-status">—</dd></div>
+                        <div><dt>密钥</dt><dd id="ai-key-status">—</dd></div>
+                        <div><dt>密钥来源</dt><dd id="ai-key-source">—</dd></div>
+                    </dl>
+                </div>
+            </section>
+
+            <section class="card ai-guide-card">
+                <div class="card-body">
+                    <div class="ai-guide-icon" aria-hidden="true"><i class="cil-list-rich"></i></div>
+                    <span class="section-kicker">使用顺序</span>
+                    <h2>三步完成配置</h2>
+                    <ol>
+                        <li>填写兼容服务地址和密钥</li>
+                        <li>读取列表选择模型，或直接填写模型 ID</li>
+                        <li>保存设置；需要时再测试已保存连接</li>
+                    </ol>
+                </div>
+            </section>
+
+            <section class="card ai-security-card">
+                <div class="card-body">
+                    <div class="ai-security-icon" aria-hidden="true"><i class="cil-shield-alt"></i></div>
+                    <span class="section-kicker">安全边界</span>
+                    <h2>密钥不会落盘</h2>
+                    <ul>
+                        <li>读取模型时可临时使用本次输入的密钥</li>
+                        <li>接口只返回“已配置 / 未配置”</li>
+                        <li>服务重启后，页面保存的密钥会清空</li>
+                        <li>长期配置仍可使用环境变量</li>
+                    </ul>
+                </div>
+            </section>
         </aside>
     </div>
 </div>
 {% endblock %}
 
-{% block extra_scripts %}<script src="{{ url_for('static', filename='js/ai-settings.js', v='20260903') }}"></script>{% endblock %}
+{% block extra_scripts %}<script src="{{ url_for('static', filename='js/ai-settings.js', v='20260903-model-picker-v2') }}"></script>{% endblock %}

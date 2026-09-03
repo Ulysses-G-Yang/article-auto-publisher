@@ -14,7 +14,10 @@ from typing import Any
 
 import httpx
 
-from publication_ai.contracts import PublicationAISettingsUpdate
+from publication_ai.contracts import (
+    PublicationAIModelListRequest,
+    PublicationAISettingsUpdate,
+)
 from publication_ai.deepseek import DeepSeekPublicationAdvisor, PublicationAISettings
 from publication_ai.errors import PublicationAIError
 
@@ -92,6 +95,39 @@ class PublicationAISettingsStore:
         with self._lock:
             settings = self._runtime_settings or self._fallback
             api_key, _source = self._effective_api_key_unlocked()
+        return DeepSeekPublicationAdvisor(
+            settings,
+            http_client=http_client,
+            api_key=api_key,
+            api_key_env=None,
+        )
+
+    def create_model_list_advisor(
+        self,
+        payload: PublicationAIModelListRequest,
+        *,
+        http_client: httpx.AsyncClient | None = None,
+    ) -> DeepSeekPublicationAdvisor:
+        """构造一次性模型列表客户端，不把地址或新密钥写入运行期设置。"""
+
+        with self._lock:
+            current = self._runtime_settings or self._fallback
+            effective_api_key, _source = self._effective_api_key_unlocked()
+        api_key = (
+            payload.api_key.get_secret_value().strip()
+            if payload.api_key is not None
+            else effective_api_key
+        )
+        settings = PublicationAISettings.from_mapping(
+            {
+                "enabled": current.enabled,
+                "base_url": payload.base_url,
+                "model": current.model,
+                "connect_timeout_seconds": current.connect_timeout_seconds,
+                "read_timeout_seconds": current.read_timeout_seconds,
+                "max_output_tokens": current.max_output_tokens,
+            }
+        )
         return DeepSeekPublicationAdvisor(
             settings,
             http_client=http_client,

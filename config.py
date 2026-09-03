@@ -6,6 +6,7 @@
 import copy
 import os
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import yaml
 
@@ -112,6 +113,18 @@ DEFAULT_CONFIG = {
         "top_keywords": 10,
         "title_max_length": 30,
     },
+    # 外部 AI 只读建议默认关闭；密钥永远只从 DEEPSEEK_API_KEY 环境变量读取，
+    # 不进入默认配置、YAML 合并结果或任何可序列化配置对象。
+    "ai": {
+        "publication_guidance": {
+            "enabled": False,
+            "base_url": "https://api.deepseek.com",
+            "model": "deepseek-v4-flash",
+            "connect_timeout_seconds": 10,
+            "read_timeout_seconds": 90,
+            "max_output_tokens": 2000,
+        },
+    },
 }
 
 _config = None
@@ -140,6 +153,101 @@ def _env_int(name: str, default: int) -> int:
     if not 1 <= value <= 65535:
         raise ValueError(f"{name} 必须在 1 到 65535 之间")
     return value
+
+
+def _env_bounded_int(name: str, default: int, *, minimum: int, maximum: int) -> int:
+    """读取有界整数配置，避免超长等待或异常大的模型输出。"""
+
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise ValueError(f"{name} 必须是整数") from exc
+    if not minimum <= value <= maximum:
+        raise ValueError(f"{name} 必须在 {minimum} 到 {maximum} 之间")
+    return value
+
+
+def _valid_https_url(value: object) -> str:
+    """校验 AI 服务根地址，拒绝凭据、查询参数和非 HTTPS 地址。"""
+
+    if not isinstance(value, str):
+        raise ValueError("DEEPSEEK_BASE_URL 必须是 HTTPS URL")
+    candidate = value.strip().rstrip("/")
+    parsed = urlsplit(candidate)
+    if (
+        parsed.scheme != "https"
+        or not parsed.netloc
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise ValueError("DEEPSEEK_BASE_URL 必须是无凭据的 HTTPS URL")
+    return candidate
+
+
+def _strip_ai_secrets(cfg: dict) -> None:
+    """从用户 YAML 合并结果移除误填的 AI 密钥字段。"""
+
+    ai_config = cfg.get("ai", {})
+    if not isinstance(ai_config, dict):
+        return
+    guidance = ai_config.get("publication_guidance", {})
+    if not isinstance(guidance, dict):
+        return
+    for key in tuple(guidance):
+        normalized = str(key).lower().replace("-", "_")
+        if normalized in {
+            "api_key",
+            "apikey",
+            "deepseek_api_key",
+            "access_key",
+            "authorization",
+            "credential",
+            "key",
+            "token",
+            "secret",
+            "password",
+        } or "api_key" in normalized:
+            del guidance[key]
+
+
+def _apply_ai_environment_overrides(cfg: dict) -> None:
+    guidance = cfg["ai"]["publication_guidance"]
+    guidance["enabled"] = _env_bool(
+        "ARTICLEOPS_AI_GUIDANCE_ENABLED", bool(guidance.get("enabled", False))
+    )
+    if os.getenv("DEEPSEEK_BASE_URL"):
+        guidance["base_url"] = os.environ["DEEPSEEK_BASE_URL"].strip()
+    if os.getenv("DEEPSEEK_MODEL"):
+        guidance["model"] = os.environ["DEEPSEEK_MODEL"].strip()
+    guidance["connect_timeout_seconds"] = _env_bounded_int(
+        "DEEPSEEK_CONNECT_TIMEOUT_SECONDS",
+        int(guidance.get("connect_timeout_seconds", 10)),
+        minimum=1,
+        maximum=120,
+    )
+    guidance["read_timeout_seconds"] = _env_bounded_int(
+        "DEEPSEEK_READ_TIMEOUT_SECONDS",
+        int(guidance.get("read_timeout_seconds", 90)),
+        minimum=1,
+        maximum=300,
+    )
+    guidance["max_output_tokens"] = _env_bounded_int(
+        "DEEPSEEK_MAX_OUTPUT_TOKENS",
+        int(guidance.get("max_output_tokens", 2000)),
+        minimum=1,
+        maximum=8192,
+    )
+    if guidance["enabled"]:
+        guidance["base_url"] = _valid_https_url(guidance.get("base_url"))
+        model = guidance.get("model")
+        if not isinstance(model, str) or not 1 <= len(model.strip()) <= 128:
+            raise ValueError("DEEPSEEK_MODEL 长度必须在 1 到 128 个字符之间")
+        guidance["model"] = model.strip()
 
 
 def _apply_environment_overrides(cfg: dict) -> None:
@@ -175,6 +283,8 @@ def _apply_environment_overrides(cfg: dict) -> None:
         cfg["paths"]["uploads"] = str(data_path / "uploads")
         cfg["paths"]["images"] = str(data_path / "images")
 
+    _apply_ai_environment_overrides(cfg)
+
 
 def _validate_config(cfg: dict) -> None:
     """阻止明显不安全的生产配置启动。"""
@@ -207,6 +317,7 @@ def load_config(config_path: str = None) -> dict:
             if user_config:
                 _deep_merge(cfg, user_config)
 
+    _strip_ai_secrets(cfg)
     _apply_environment_overrides(cfg)
     _validate_config(cfg)
 

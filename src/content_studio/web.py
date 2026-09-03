@@ -6,6 +6,7 @@ import json
 import logging
 import random
 from collections.abc import Coroutine
+from datetime import datetime, timezone
 from pathlib import Path
 from threading import Lock
 from typing import Any
@@ -42,8 +43,49 @@ from content_studio.service import (
     PLAN_OPERATION_SYNC_STATUSES,
     ContentStudioService,
 )
+from publication_ai.contracts import (
+    PublicationAdviceRequest,
+    PublicationGuidanceResponse,
+    validate_for_platforms,
+)
+from publication_ai.deepseek import DeepSeekPublicationAdvisor
+from publication_ai.errors import PublicationAIError
 
 LOGGER = logging.getLogger(__name__)
+
+
+def _utc_iso_now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _visible_text_for_publication_advice(blocks: object) -> str:
+    """从服务端公开投影按 position 提取正文文字，不携带图片或资产标识。"""
+
+    if not isinstance(blocks, list):
+        raise PublicationAIError("AI_RESPONSE_INVALID")
+    ordered: list[tuple[int, int, str]] = []
+    for index, block in enumerate(blocks):
+        if not isinstance(block, dict) or block.get("type") != "text":
+            continue
+        text = block.get("text")
+        if not isinstance(text, str):
+            raise PublicationAIError("AI_RESPONSE_INVALID")
+        position = block.get("position", index)
+        if not isinstance(position, int) or isinstance(position, bool):
+            raise PublicationAIError("AI_RESPONSE_INVALID")
+        ordered.append((position, index, text))
+    ordered.sort(key=lambda item: (item[0], item[1]))
+    return "\n".join(item[2] for item in ordered)
+
+
+class PublicationAdviceRevisionConflictError(ContentStudioError):
+    """建议接口的版本冲突响应，不回显草稿正文。"""
+
+    error_code = "DRAFT_REVISION_CONFLICT"
+    http_status = 409
+
+    def __init__(self) -> None:
+        super().__init__("草稿已更新，请刷新后重新请求 AI 建议")
 
 
 class ContentStudioRuntimeState:
@@ -58,6 +100,7 @@ class ContentStudioRuntimeState:
         runtime: AccountRuntime | None = None,
         platform_format_capabilities: PlatformFormatCapabilities | None = None,
         operation_delay_range: tuple[float, float] = (8.0, 20.0),
+        publication_advisor=None,
     ) -> None:
         self.account_state = account_state
         self.database = ContentDatabase(database_url)
@@ -71,6 +114,7 @@ class ContentStudioRuntimeState:
             platform_format_capabilities=platform_format_capabilities,
         )
         self.account_state.delivery.content_resolver = self.service.resolve_delivery_payload
+        self.publication_advisor = publication_advisor or DeepSeekPublicationAdvisor()
         self._runtime = runtime
         self._owns_runtime = False
         self._initialized = False
@@ -78,6 +122,55 @@ class ContentStudioRuntimeState:
         self._operation_delay_range = operation_delay_range
         self._operation_lock: asyncio.Lock | None = None
         self._has_executed_operation = False
+
+    async def get_publication_advice(
+        self,
+        draft_id: str,
+        payload: PublicationAdviceRequest,
+    ) -> dict[str, Any]:
+        """读取当前草稿并请求只读建议；本方法不写数据库或平台。"""
+
+        draft = await self.service.get_draft(draft_id)
+        current_revision = draft.get("revision")
+        if current_revision != payload.revision:
+            raise PublicationAdviceRevisionConflictError()
+
+        title = draft.get("title")
+        if not isinstance(title, str) or not title:
+            raise PublicationAIError("AI_RESPONSE_INVALID")
+        body = _visible_text_for_publication_advice(draft.get("blocks"))
+        if len(body) > 200_000:
+            raise PublicationAIError("AI_INPUT_TOO_LARGE")
+
+        recommendations = await self.publication_advisor.advise(
+            title,
+            body,
+            payload.platforms,
+        )
+        if isinstance(recommendations, PublicationGuidanceResponse):
+            model = getattr(self.publication_advisor, "model", "")
+            result = recommendations
+        else:
+            try:
+                result = PublicationGuidanceResponse.model_validate(recommendations)
+            except (TypeError, ValueError):
+                raise PublicationAIError("AI_RESPONSE_INVALID") from None
+            model = getattr(self.publication_advisor, "model", "")
+        try:
+            result = validate_for_platforms(result, payload.platforms)
+        except (TypeError, ValueError):
+            raise PublicationAIError("AI_RESPONSE_INVALID") from None
+        if not isinstance(model, str) or not model:
+            model = "unknown"
+        return {
+            "draft_id": draft_id,
+            "revision": payload.revision,
+            "model": model,
+            "recommendations": [
+                item.model_dump(mode="json") for item in result.recommendations
+            ],
+            "generated_at": _utc_iso_now(),
+        }
 
     def run(self, coroutine: Coroutine[Any, Any, Any], *, timeout: float = 60) -> Any:
         runtime = self._ensure_runtime()
@@ -468,6 +561,7 @@ def create_content_studio_blueprint(
     runtime: AccountRuntime | None = None,
     platform_format_capabilities: PlatformFormatCapabilities | None = None,
     mcp_access_resolver: MCPInternalAccessResolver | None = None,
+    publication_advisor=None,
 ) -> Blueprint:
     blueprint = Blueprint("content_studio", __name__)
     state = ContentStudioRuntimeState(
@@ -478,6 +572,7 @@ def create_content_studio_blueprint(
         legacy_source=legacy_source,
         runtime=runtime,
         platform_format_capabilities=platform_format_capabilities,
+        publication_advisor=publication_advisor,
     )
     mcp_resolver = mcp_access_resolver or MCPInternalAccessResolver()
 
@@ -500,6 +595,28 @@ def create_content_studio_blueprint(
     @blueprint.get("/api/content-drafts/<draft_id>")
     def get_draft(draft_id: str):
         return jsonify(state.run(state.service.get_draft(draft_id)))
+
+    @blueprint.post("/api/content-drafts/<draft_id>/publication-advice")
+    def publication_advice(draft_id: str):
+        """为当前草稿生成只读平台建议；不保存、不投递、不回显文章。"""
+
+        payload = PublicationAdviceRequest.model_validate(request.get_json(silent=True) or {})
+        result = state.run(
+            state.get_publication_advice(draft_id, payload),
+            # AI 读取超时上限为 300 秒，给事件循环和草稿读取留出余量。
+            timeout=360,
+        )
+        response = jsonify(result)
+        response.headers["Cache-Control"] = "no-store"
+        return response
+
+    @blueprint.after_request
+    def no_store_publication_advice(response):
+        """建议接口的成功与错误响应都不允许被代理或浏览器缓存。"""
+
+        if request.path.endswith("/publication-advice"):
+            response.headers["Cache-Control"] = "no-store"
+        return response
 
     @blueprint.patch("/api/content-drafts/<draft_id>")
     def patch_draft(draft_id: str):
@@ -692,6 +809,10 @@ def create_content_studio_blueprint(
     @blueprint.errorhandler(ContentStudioError)
     def content_error(exc: ContentStudioError):
         return jsonify({"error": exc.error_code, "message": str(exc)}), exc.http_status
+
+    @blueprint.errorhandler(PublicationAIError)
+    def publication_ai_error(exc: PublicationAIError):
+        return jsonify({"error": exc.error_code, "message": exc.safe_message}), exc.http_status
 
     @blueprint.errorhandler(AccountSessionError)
     def account_error(exc: AccountSessionError):

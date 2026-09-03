@@ -323,12 +323,9 @@ class DatabaseTestCase(unittest.TestCase):
 
 
 class RegressionTests(DatabaseTestCase):
-    def test_data_center_is_mounted_on_current_flask_service(self):
+    def test_data_center_page_is_removed_but_read_only_api_remains(self):
         from app import create_app
 
-        article_id = self.create_article()
-        task_id = self.db.create_task(article_id, "xiaoheihe")
-        self.db.update_task(task_id, status="completed", title_used="已保存草稿")
         mvp_database = Path(self.temp_dir.name) / "article_mvp.db"
         mvp_url = f"sqlite+aiosqlite:///{mvp_database.as_posix()}"
         with patch.dict("os.environ", {"ARTICLE_MVP_DATABASE_URL": mvp_url}):
@@ -336,24 +333,12 @@ class RegressionTests(DatabaseTestCase):
             try:
                 client = app.test_client()
                 page_response = client.get("/data-center/")
-                self.assertEqual(page_response.status_code, 200)
-                self.assertIn("数据看板", page_response.get_data(as_text=True))
+                self.assertEqual(page_response.status_code, 404)
                 asset_response = client.get("/data-center/assets/dashboard.js")
-                self.assertEqual(asset_response.status_code, 200)
-                asset_response.close()
-                coreui_response = client.get(
-                    "/data-center/assets/vendor/coreui/coreui.min.css"
-                )
-                self.assertEqual(coreui_response.status_code, 200)
-                coreui_response.close()
-                gridstack_response = client.get(
-                    "/data-center/assets/vendor/gridstack/gridstack-all.js"
-                )
-                self.assertEqual(gridstack_response.status_code, 200)
-                gridstack_response.close()
+                self.assertEqual(asset_response.status_code, 404)
                 home_response = client.get("/")
                 self.assertEqual(home_response.status_code, 200)
-                self.assertIn("/data-center/", home_response.get_data(as_text=True))
+                self.assertNotIn("/data-center/", home_response.get_data(as_text=True))
                 home_response.close()
 
                 dashboard_response = client.get("/data-center/api/dashboard")
@@ -361,15 +346,9 @@ class RegressionTests(DatabaseTestCase):
                 dashboard_payload = dashboard_response.get_json()
                 self.assertEqual(dashboard_payload["summary"]["total_articles"], 0)
                 self.assertNotIn("current_workflow", dashboard_payload)
+                self.assertEqual(client.get("/data-center/healthz").status_code, 200)
 
-                legacy_response = client.get("/api/legacy-summary")
-                self.assertEqual(legacy_response.status_code, 200)
-                legacy_payload = legacy_response.get_json()
-                self.assertEqual(legacy_payload["summary"]["total_articles"], 1)
-                self.assertEqual(legacy_payload["summary"]["total_tasks"], 1)
-                self.assertEqual(legacy_payload["summary"]["xiaoheihe_tasks"], 1)
-                self.assertEqual(legacy_payload["summary"]["saved_drafts"], 1)
-                self.assertNotIn("测试正文", legacy_response.get_data(as_text=True))
+                self.assertEqual(client.get("/api/legacy-summary").status_code, 404)
             finally:
                 app.extensions["article_mvp_dashboard"].close()
 

@@ -1,11 +1,10 @@
-"""可独立测试、也可挂载到现役 Flask 服务的只读数据看板。"""
+"""可独立测试、也可挂载到现役 Flask 服务的只读数据 API。"""
 
 import atexit
-from pathlib import Path
 from threading import Lock
 from typing import Any
 
-from flask import Blueprint, Flask, current_app, jsonify, render_template
+from flask import Blueprint, Flask, current_app, jsonify
 
 from article_mvp.db.database import init_db
 from article_mvp.web.query import DashboardQueryService
@@ -58,15 +57,11 @@ def create_dashboard_blueprint(
     database_url: str | None = None,
     runtime: AsyncRuntime | None = None,
 ) -> Blueprint:
-    """创建只读取 article_mvp 独立数据库的 Blueprint。"""
+    """创建只读取 article_mvp 独立数据库的 API Blueprint。"""
 
-    package_root = Path(__file__).resolve().parent
     blueprint = Blueprint(
         "article_mvp_dashboard",
         __name__,
-        template_folder=str(package_root / "templates"),
-        static_folder=str(package_root / "static"),
-        static_url_path="/assets",
     )
     state = DashboardRuntimeState(database_url, runtime)
 
@@ -75,10 +70,6 @@ def create_dashboard_blueprint(
         setup_state.app.extensions["article_mvp_dashboard"] = state
         if runtime is None:
             atexit.register(state.close)
-
-    @blueprint.get("/")
-    def dashboard():
-        return render_template("dashboard.html")
 
     @blueprint.get("/healthz")
     def healthz():
@@ -107,7 +98,7 @@ def create_dashboard_app(
     database_url: str | None = None,
     runtime: AsyncRuntime | None = None,
 ) -> Flask:
-    """仅供单元测试使用；正式页面由现役 5000 端口挂载 Blueprint。"""
+    """仅供 API 单元测试使用；正式服务挂载同一 Blueprint。"""
 
     app = Flask("article_mvp_dashboard", static_folder=None)
     app.register_blueprint(

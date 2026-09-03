@@ -2,7 +2,7 @@
 
 ## 目标
 
-`/`、`/upload`、`/accounts`、`/task/*`、`/data-center/`、`/settings/ai`
+`/`、`/upload`、`/accounts`、`/task/*`、`/settings/ai`
 必须呈现为同一套本地运营工作台。各页面保留自己的业务组件，但跨页时画布、侧边栏、页头、标题和卡片边界不得跳变。
 
 ## Design Tokens
@@ -35,7 +35,6 @@
 ## 页面边界
 
 - 共享壳层：`web/templates/base.html`、`design-tokens.css`、`style.css`、`app.js`。
-- 数据中心因独立 Blueprint 仍保留自己的模板和静态资源，但镜像同一组 Token 和相同的本地偏好键。
 - 创作、账号、AI 设置只覆盖业务组件，不重新定义壳层。
 - 所有现有 Jinja、Alpine、DOM ID、`data-*`、API URL 和请求字段保持不变。
 

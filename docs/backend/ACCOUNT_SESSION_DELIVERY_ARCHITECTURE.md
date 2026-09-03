@@ -67,7 +67,7 @@ ZOL 不桥接 Cookie；但 Chromium 本身仍可能更新缓存或时间戳。
 `account_activity`；不会使用 `task_id=0` 写入旧 `task_logs`。日志保存账号昵称
 快照、actor/source/action 和脱敏错误摘要，不保存凭据值。
 
-## 投递结果到数据中心的桥接
+## 投递结果到采集数据层的桥接
 
 账号域提交 `DeliveryOperation` 成功后，才调用注入的
 `DeliveryBridge.record`；桥接调用发生在账号库写事务之外。桥接失败只把

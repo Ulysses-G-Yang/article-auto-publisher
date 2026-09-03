@@ -1,7 +1,7 @@
 # 小黑盒单链路 MVP 架构
 
-新数据模块位于 `src/article_mvp`，由现役 Flask 服务以 Blueprint 方式挂载到
-`/data-center/`。依赖方向只能是现役入口调用新包；新包不得反向导入根目录的
+新数据模块位于 `src/article_mvp`。现役 Flask 服务只挂载其只读查询 API，
+不再提供内置数据中心页面。依赖方向只能是现役入口调用新包；新包不得反向导入根目录的
 `core`、`models`、`web`、MCP 或平台发布器。
 
 尚未交付的重型老项目以及 `D:\Backup\Documents\text-restored` 均不是运行时
@@ -32,14 +32,14 @@ PublishRequest
   `data/article_mvp/article_mvp.db`，运行时禁止交叉查询。
 - 小黑盒 Profile、探测记录和文件锁全部位于 `data/article_mvp/` 下。
 
-## 同端口组合与 API 边界
+## 只读 API 边界
 
-现役 Flask 服务仍使用 5000 端口，只负责组合两个独立数据来源：
+现役 Flask 服务仍使用 5000 端口，并保留以下只读接口供独立数据看板接入：
 
-- `/api/legacy-summary`：旧发布系统自行生成的脱敏任务摘要。
 - `/data-center/api/dashboard`：只查询 article_mvp 独立数据库。
+- `/data-center/healthz`：只读数据 API 健康检查。
 
-浏览器并行请求两个接口并分别处理失败状态。新模块不导入旧系统的
+内置 `/data-center/` 页面和 `/api/legacy-summary` 已下线。新模块不导入旧系统的
 `models`、`web`、`core` 或平台适配器，也不通过 bridge 读取 `app.db`。
 
 ## 一次性安全迁移
@@ -64,10 +64,8 @@ python -m article_mvp.tools.init_db
 python -m article_mvp.tools.probe_xhh
 ```
 
-看板不再启动第二个端口。启动现役服务后访问
-`http://127.0.0.1:5000/data-center/`。页面分别读取现役发布任务的脱敏摘要，
-以及新模块的映射、归一化指标、采集运行状态和接口证据等级，不返回原始平台
-响应、文章正文或登录材料。
+独立数据看板可以读取 `/data-center/api/dashboard` 中的映射、归一化指标、
+采集运行状态和接口证据等级。接口不返回原始平台响应、文章正文或登录材料。
 
 公开发布属于人工验收门，不能加入自动测试：
 

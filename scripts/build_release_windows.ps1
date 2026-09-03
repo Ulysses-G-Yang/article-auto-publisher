@@ -196,9 +196,7 @@ try {
 
     Copy-LicenseFile -RelativePath "frontend\coreui-free-bootstrap-admin-template\LICENSE" -Name "COREUI_TEMPLATE_LICENSE"
     Copy-LicenseFile -RelativePath "web\static\vendor\coreui-template\LICENSE" -Name "COREUI_VENDOR_LICENSE"
-    Copy-LicenseFile -RelativePath "src\article_mvp\web\static\vendor\coreui\LICENSE.txt" -Name "COREUI_LICENSE.txt"
-    Copy-LicenseFile -RelativePath "src\article_mvp\web\static\vendor\coreui-icons\LICENSE.txt" -Name "COREUI_ICONS_LICENSE.txt"
-    Copy-LicenseFile -RelativePath "src\article_mvp\web\static\vendor\gridstack\LICENSE.txt" -Name "GRIDSTACK_LICENSE.txt"
+    Copy-LicenseFile -RelativePath "web\static\vendor\coreui-icons\LICENSE.txt" -Name "COREUI_ICONS_LICENSE.txt"
 
     $manifest = @(
         "ArticleOps v$Version",

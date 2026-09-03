@@ -16,12 +16,8 @@ Python service does not require Node.js in production.
 ArticleOps templates and styles are derivative application work. Their changes
 are documented in `docs/frontend/COREUI_UPSTREAM.md`.
 
-## Existing dashboard libraries
+## CoreUI Icons Free
 
-- CoreUI Icons Free 3.1.0. Source:
-  `git@github.com:coreui/coreui-icons.git`. License details are retained in
-  `src/article_mvp/web/static/vendor/coreui-icons/LICENSE.txt` and
-  `web/static/vendor/coreui-icons/LICENSE.txt`.
-- GridStack 13.1.2. Source:
-  `git@github.com:gridstack/gridstack.js.git`. The MIT license is retained in
-  `src/article_mvp/web/static/vendor/gridstack/LICENSE.txt`.
+CoreUI Icons Free 3.1.0 is sourced from
+`git@github.com:coreui/coreui-icons.git`. License details are retained in
+`web/static/vendor/coreui-icons/LICENSE.txt`.

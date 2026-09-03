@@ -47,7 +47,6 @@ def test_official_coreui_source_and_runtime_are_vendored() -> None:
 
 def test_navigation_has_one_primary_content_destination() -> None:
     base = read("web/templates/base.html")
-    dashboard = read("src/article_mvp/web/templates/dashboard.html")
 
     # 侧边栏和顶部快捷操作可以共同指向同一工作台，但不得出现第二套投递路由。
     assert re.search(
@@ -58,8 +57,6 @@ def test_navigation_has_one_primary_content_destination() -> None:
     assert "创作与投递" in base
     assert 'href="/delivery/new"' not in base
     assert "内容投递</span>" not in base
-    assert "创作与投递" in dashboard
-    assert "创建文章" not in dashboard
 
 
 def test_upload_is_content_studio_not_legacy_queue_form() -> None:

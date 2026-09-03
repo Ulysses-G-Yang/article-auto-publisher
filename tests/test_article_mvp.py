@@ -700,7 +700,7 @@ async def test_legacy_table_migration_rejects_different_existing_row(tmp_path):
         source_connection.close()
 
 
-def test_dashboard_shows_safe_summary_without_raw_payloads(tmp_path):
+def test_dashboard_api_shows_safe_summary_without_raw_payloads(tmp_path):
     url = database_url(tmp_path)
     runtime = AsyncRuntime()
 
@@ -751,15 +751,8 @@ def test_dashboard_shows_safe_summary_without_raw_payloads(tmp_path):
     try:
         runtime.run(seed_dashboard())
         client = app.test_client()
-        page_response = client.get("/")
-        assert page_response.status_code == 200
-        page_html = page_response.get_data(as_text=True)
-        assert "数据看板" in page_html
-        assert "vendor/coreui/coreui.min.css" in page_html
-        assert "vendor/gridstack/gridstack-all.js" in page_html
-        assert 'data-module-toggle="summary"' in page_html
-        assert client.get("/assets/vendor/coreui/coreui.min.css").status_code == 200
-        assert client.get("/assets/vendor/gridstack/gridstack-all.js").status_code == 200
+        assert client.get("/").status_code == 404
+        assert client.get("/assets/dashboard.js").status_code == 404
         assert client.get("/healthz").status_code == 200
 
         api_response = client.get("/api/dashboard")

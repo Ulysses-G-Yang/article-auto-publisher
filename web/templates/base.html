@@ -28,7 +28,6 @@
 {% set can_overview = sidebar_access.get('overview', sidebar_default) %}
 {% set can_studio = sidebar_access.get('content_studio', sidebar_default) %}
 {% set can_accounts = sidebar_access.get('accounts', sidebar_default) %}
-{% set can_data = sidebar_access.get('data_center', sidebar_default) %}
 {% set can_ai_settings = sidebar_access.get('ai_settings', sidebar_default) %}
 <body class="app-shell">
     <a class="skip-link" href="#main-content">跳到主要内容</a>
@@ -65,7 +64,7 @@
             </section>
             {% endif %}
 
-            {% if can_accounts or can_data or can_ai_settings %}
+            {% if can_accounts or can_ai_settings %}
             <section class="sidebar-group" data-sidebar-group="operations">
                 <button class="sidebar-group-toggle" type="button" aria-expanded="true" aria-controls="sidebar-operations-links">
                     <span>运营管理</span><i class="cil-chevron-bottom" aria-hidden="true"></i>
@@ -74,11 +73,6 @@
                     {% if can_accounts %}
                     <a class="nav-link {% if request.path == '/accounts' %}active{% endif %}" href="/accounts" data-permission="accounts" {% if request.path == '/accounts' %}aria-current="page"{% endif %}>
                         <i class="nav-icon cil-user" aria-hidden="true"></i><span>平台账号</span>
-                    </a>
-                    {% endif %}
-                    {% if can_data %}
-                    <a class="nav-link {% if request.path.startswith('/data-center') %}active{% endif %}" href="/data-center/" data-permission="data_center" {% if request.path.startswith('/data-center') %}aria-current="page"{% endif %}>
-                        <i class="nav-icon cil-chart" aria-hidden="true"></i><span>数据中心</span>
                     </a>
                     {% endif %}
                     {% if can_ai_settings %}

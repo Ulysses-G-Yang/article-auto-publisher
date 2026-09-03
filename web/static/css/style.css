@@ -1,4 +1,4 @@
-/* ArticleOps UI v2: shared shell, components and legacy-page patterns. */
+/* ArticleOps UI v3: shared shell, components and application-page patterns. */
 
 *, *::before, *::after { box-sizing: border-box; }
 html { background: var(--ao-canvas); scroll-behavior: smooth; }
@@ -42,7 +42,7 @@ button, input, select, textarea { font: inherit; }
     border: 1px solid var(--ao-sidebar-border);
     border-radius: var(--ao-radius-xl);
     background: var(--ao-sidebar-bg);
-    box-shadow: var(--ao-shadow-lg);
+    box-shadow: 0 12px 40px rgb(17 24 39 / 0.08);
     transition: width var(--ao-transition-base), transform var(--ao-transition-base);
     z-index: 1040;
 }
@@ -62,7 +62,7 @@ button, input, select, textarea { font: inherit; }
     color: var(--ao-sidebar-text);
     text-decoration: none;
 }
-.sidebar-brand:hover { color: var(--ao-slate-0); }
+.sidebar-brand:hover { color: var(--ao-primary-700); }
 .brand-mark {
     display: grid;
     width: 40px;
@@ -110,7 +110,7 @@ button, input, select, textarea { font: inherit; }
 .sidebar-group-toggle {
     display: flex;
     width: 100%;
-    min-height: 36px;
+    min-height: 44px;
     align-items: center;
     justify-content: space-between;
     padding: var(--ao-space-2) var(--ao-space-3);
@@ -154,7 +154,7 @@ button, input, select, textarea { font: inherit; }
 .sidebar .nav-link.active {
     border-color: rgb(132 173 255 / 0.24);
     background: var(--ao-sidebar-active);
-    color: var(--ao-slate-0);
+    color: var(--ao-primary-700);
 }
 .sidebar .nav-link.active::before {
     position: absolute;
@@ -431,7 +431,7 @@ a:focus-visible,
 /* Page frame ------------------------------------------------------------- */
 .app-page, .studio-shell, .account-page-shell, .multi-account-sessions {
     width: 100%;
-    max-width: 1360px;
+    max-width: var(--ao-content-max);
     margin-inline: auto;
 }
 .breadcrumb { margin: 0 0 var(--ao-space-3); color: var(--ao-text-tertiary); font-size: var(--ao-text-xs); }
@@ -442,14 +442,14 @@ a:focus-visible,
     align-items: flex-end;
     justify-content: space-between;
     gap: var(--ao-space-6);
-    margin-bottom: var(--ao-space-6);
+    margin-bottom: var(--ao-space-4);
 }
 .page-heading h1, .app-main h1 {
     margin: 0;
     color: var(--ao-text);
-    font-size: clamp(var(--ao-text-2xl), 2.5vw, var(--ao-text-4xl));
-    font-weight: 740;
-    letter-spacing: -0.035em;
+    font-size: clamp(1.55rem, 2.4vw, 2.05rem);
+    font-weight: 750;
+    letter-spacing: -0.03em;
     line-height: 1.17;
 }
 .page-heading p, .page-subtitle { max-width: 48rem; margin: var(--ao-space-2) 0 0; color: var(--ao-text-secondary); font-size: var(--ao-text-sm); line-height: 1.6; }
@@ -489,30 +489,21 @@ a:focus-visible,
 .overview-stat {
     position: relative;
     display: grid;
-    min-height: 136px;
+    min-height: 124px;
     grid-template-columns: 48px minmax(0, 1fr);
     align-items: center;
     gap: var(--ao-space-4);
     padding: var(--ao-space-6);
     overflow: hidden;
     border: 1px solid var(--ao-border);
+    border-top: 2px solid var(--ao-primary-500);
     border-radius: var(--ao-radius-lg);
     background: var(--ao-surface-raised);
     box-shadow: var(--ao-shadow-sm);
 }
-.overview-stat::after {
-    position: absolute;
-    right: -28px;
-    bottom: -36px;
-    width: 96px;
-    height: 96px;
-    border-radius: 50%;
-    background: color-mix(in srgb, var(--ao-primary-400) 10%, transparent);
-    content: "";
-}
-.overview-stat-warning::after { background: color-mix(in srgb, var(--ao-warning) 12%, transparent); }
-.overview-stat-success::after { background: color-mix(in srgb, var(--ao-success) 12%, transparent); }
-.overview-stat-danger::after { background: color-mix(in srgb, var(--ao-danger) 10%, transparent); }
+.overview-stat-warning { border-top-color: var(--ao-warning); }
+.overview-stat-success { border-top-color: var(--ao-success); }
+.overview-stat-danger { border-top-color: var(--ao-danger); }
 .overview-stat-icon {
     display: grid;
     width: 48px;
@@ -593,7 +584,7 @@ a:focus-visible,
 @keyframes app-spin { to { transform: rotate(360deg); } }
 
 /* Task detail ------------------------------------------------------------ */
-.task-page { max-width: 1160px; }
+.task-page { max-width: var(--ao-content-max); }
 .task-heading { align-items: center; }
 .task-heading-actions { display: flex; align-items: center; gap: var(--ao-space-2); }
 .task-summary-card { overflow: hidden; }

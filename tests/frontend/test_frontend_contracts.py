@@ -177,14 +177,38 @@ def test_dashboard_permission_projection_uses_the_same_fail_closed_rule() -> Non
 def test_frontend_assets_use_current_ui_cache_versions() -> None:
     base = read("web/templates/base.html")
     accounts = read("web/templates/accounts.html")
+    upload = read("web/templates/upload.html")
+    ai_settings = read("web/templates/ai_settings.html")
     dashboard = read("src/article_mvp/web/templates/dashboard.html")
 
-    assert "filename='css/design-tokens.css', v='20260902-ui-v2'" in base
-    assert "filename='css/style.css', v='20260902-ui-v2'" in base
+    assert "filename='css/design-tokens.css', v='20260903-shell-v3'" in base
+    assert "filename='css/style.css', v='20260903-shell-v3'" in base
     assert "filename='js/app.js', v='20260902-ui-v2'" in base
-    assert "filename='css/account-sessions.css', v='20260902-ui-v2'" in accounts
+    assert "filename='css/account-sessions.css', v='20260903-shell-v3'" in accounts
+    assert "filename='css/content-studio.css', v='20260903-shell-v3'" in upload
+    assert "filename='js/content-studio.js', v='20260903-shell-v3'" in upload
+    assert "filename='css/ai-settings.css', v='20260903-shell-v3'" in ai_settings
     assert "filename='dashboard.css', v='20260903-dashboard-v3'" in dashboard
     assert "filename='dashboard.js', v='20260903-dashboard-v3'" in dashboard
+
+
+def test_shared_pages_match_dashboard_shell_tokens() -> None:
+    tokens = read("web/static/css/design-tokens.css")
+    style = read("web/static/css/style.css")
+    studio = read("web/static/css/content-studio.css")
+    ai_settings = read("web/static/css/ai-settings.css")
+
+    assert "--ao-canvas: #f3f5f9;" in tokens
+    assert "--ao-sidebar-bg: #ffffff;" in tokens
+    assert "--ao-sidebar-active: rgb(37 99 235 / 0.10);" in tokens
+    assert "--ao-content-max: 1600px;" in tokens
+    assert ".sidebar-brand:hover { color: var(--ao-primary-700); }" in style
+    assert "min-height: 44px;" in style
+    assert "color: var(--ao-primary-700);" in style
+    assert ".task-page { max-width: var(--ao-content-max); }" in style
+    assert ".studio-shell { width: 100%; max-width: var(--ao-content-max);" in studio
+    assert ".safety-card { border-color: var(--ao-border); background: var(--ao-surface);" in studio
+    assert "max-width: var(--ao-content-max);" in ai_settings
 
 
 def test_user_facing_operation_states_are_localized_to_chinese() -> None:

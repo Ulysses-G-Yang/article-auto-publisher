@@ -1,6 +1,6 @@
-/* AI 服务设置：只使用 ArticleOps v2 Design Token。 */
+/* AI 服务设置：只使用 ArticleOps v3 Design Token。 */
 .ai-settings-page {
-    max-width: 80rem;
+    max-width: var(--ao-content-max);
     margin: 0 auto;
 }
 

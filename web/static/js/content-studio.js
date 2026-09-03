@@ -2649,7 +2649,7 @@
             renderPublicationAdvice(advice);
         } catch (error) {
             const configureHint = ['AI_GUIDANCE_DISABLED', 'AI_CONFIGURATION_ERROR']
-                .includes(error.payload?.error) ? ' 请先打开“AI 发布设置”完成配置。' : '';
+                .includes(error.payload?.error) ? ' 请先打开“AI 服务设置”完成配置。' : '';
             byId('publication-advice-status').textContent = '本次未生成建议';
             setMessage('publication-advice-error', `${error.message || 'AI 分析失败'}${configureHint}`);
         } finally {

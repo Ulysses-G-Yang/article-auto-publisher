@@ -73,7 +73,7 @@
           <a class="nav-link {% if request.path.startswith('/data-center') %}active{% endif %}" href="/data-center/" data-permission="data_center" {% if request.path.startswith('/data-center') %}aria-current="page"{% endif %}><i class="nav-icon cil-chart" aria-hidden="true"></i><span>数据中心</span></a>
           {% endif %}
           {% if can_ai_settings %}
-          <a class="nav-link {% if request.path == '/settings/ai' %}active{% endif %}" href="/settings/ai" data-permission="ai_settings" {% if request.path == '/settings/ai' %}aria-current="page"{% endif %}><i class="nav-icon cil-settings" aria-hidden="true"></i><span>AI 发布设置</span></a>
+          <a class="nav-link {% if request.path == '/settings/ai' %}active{% endif %}" href="/settings/ai" data-permission="ai_settings" {% if request.path == '/settings/ai' %}aria-current="page"{% endif %}><i class="nav-icon cil-settings" aria-hidden="true"></i><span>AI 服务设置</span></a>
           {% endif %}
         </div>
       </section>

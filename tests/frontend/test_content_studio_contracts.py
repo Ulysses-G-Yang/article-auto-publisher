@@ -124,6 +124,7 @@ def test_rich_editor_has_continuous_editing_and_drag_import() -> None:
 def test_mobile_studio_does_not_hide_or_clip_overflow() -> None:
     base_styles = read("web/static/css/style.css")
     studio_styles = read("web/static/css/content-studio.css")
+    design_tokens = read("web/static/css/design-tokens.css")
 
     assert "min-width" not in css_declarations(base_styles, "html")
     assert "min-width" not in css_declarations(base_styles, "body.app-shell")
@@ -131,7 +132,11 @@ def test_mobile_studio_does_not_hide_or_clip_overflow() -> None:
         declarations = css_declarations(studio_styles, selector)
         assert declarations.get("width") == "100%"
         assert declarations.get("min-width") == "0"
-    assert css_px(css_declarations(studio_styles, ".studio-shell")["max-width"]) >= 1280
+    assert (
+        css_declarations(studio_styles, ".studio-shell")["max-width"]
+        == "var(--ao-content-max)"
+    )
+    assert css_px(css_declarations(design_tokens, ":root")["--ao-content-max"]) >= 1280
     assert css_declarations(studio_styles, ".studio-layout")["display"] == "grid"
     assert css_declarations(studio_styles, ".content-block")["display"] == "grid"
     responsive = studio_styles.split("@media (max-width: 575.98px)", 1)[1]

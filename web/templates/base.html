@@ -4,7 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta name="color-scheme" content="light dark">
-    <meta name="theme-color" content="#101828">
+    <meta name="theme-color" content="#f3f5f9">
     <title>{% block title %}ArticleOps 内容运营中心{% endblock %}</title>
     <script>
         try {
@@ -17,8 +17,8 @@
     <link rel="stylesheet" href="{{ url_for('static', filename='vendor/coreui-template/css/style.min.css') }}">
     <link rel="stylesheet" href="{{ url_for('static', filename='vendor/coreui-template/simplebar/simplebar.css') }}">
     <link rel="stylesheet" href="{{ url_for('static', filename='vendor/coreui-icons/css/free.min.css') }}">
-    <link rel="stylesheet" href="{{ url_for('static', filename='css/design-tokens.css', v='20260902-ui-v2') }}">
-    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css', v='20260902-ui-v2') }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/design-tokens.css', v='20260903-shell-v3') }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css', v='20260903-shell-v3') }}">
     {% block extra_head %}{% endblock %}
     <script src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js" defer></script>
 </head>
@@ -83,7 +83,7 @@
                     {% endif %}
                     {% if can_ai_settings %}
                     <a class="nav-link {% if request.path == '/settings/ai' %}active{% endif %}" href="/settings/ai" data-permission="ai_settings" {% if request.path == '/settings/ai' %}aria-current="page"{% endif %}>
-                        <i class="nav-icon cil-settings" aria-hidden="true"></i><span>AI 发布设置</span>
+                        <i class="nav-icon cil-settings" aria-hidden="true"></i><span>AI 服务设置</span>
                     </a>
                     {% endif %}
                 </div>

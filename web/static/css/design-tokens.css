@@ -1,4 +1,4 @@
-/* ArticleOps UI v2 design tokens. Components must consume these variables. */
+/* ArticleOps UI v3 design tokens. Components must consume these variables. */
 :root {
     color-scheme: light;
 
@@ -45,26 +45,26 @@
     --ao-info-border: #b2ddff;
 
     /* Surfaces */
-    --ao-canvas: #f4f7fb;
+    --ao-canvas: #f3f5f9;
     --ao-surface: var(--ao-slate-0);
     --ao-surface-subtle: var(--ao-slate-50);
     --ao-surface-raised: var(--ao-slate-0);
-    --ao-border: var(--ao-slate-200);
+    --ao-border: rgb(17 24 39 / 0.08);
     --ao-border-strong: var(--ao-slate-300);
     --ao-text: var(--ao-slate-900);
     --ao-text-secondary: #526075;
     --ao-text-tertiary: var(--ao-slate-500);
-    --ao-focus: #84adff;
+    --ao-focus: #1d4ed8;
     --ao-overlay: rgb(8 17 31 / 0.58);
 
     /* Sidebar */
-    --ao-sidebar-bg: #101828;
-    --ao-sidebar-surface: #182230;
-    --ao-sidebar-hover: #1d2939;
-    --ao-sidebar-active: #253b5c;
-    --ao-sidebar-border: rgb(255 255 255 / 0.10);
-    --ao-sidebar-text: #e4e7ec;
-    --ao-sidebar-muted: #98a2b3;
+    --ao-sidebar-bg: #ffffff;
+    --ao-sidebar-surface: #f8fafc;
+    --ao-sidebar-hover: #f1f5f9;
+    --ao-sidebar-active: rgb(37 99 235 / 0.10);
+    --ao-sidebar-border: rgb(17 24 39 / 0.08);
+    --ao-sidebar-text: #1f2937;
+    --ao-sidebar-muted: #6b7280;
 
     /* Typography */
     --ao-font-sans: Inter, "Microsoft YaHei", "PingFang SC", "Noto Sans CJK SC", system-ui, -apple-system, sans-serif;
@@ -108,7 +108,7 @@
     --ao-sidebar-width-current: var(--ao-sidebar-width);
     --ao-shell-gap: 12px;
     --ao-header-height: 72px;
-    --ao-content-max: 1480px;
+    --ao-content-max: 1600px;
 
     /* Compatibility aliases consumed by existing feature styles and CoreUI. */
     --app-primary: var(--ao-primary-600);
@@ -153,6 +153,7 @@ html[data-coreui-theme="dark"],
     --ao-text: #f8fafc;
     --ao-text-secondary: #c5cfdd;
     --ao-text-tertiary: #94a3b8;
+    --ao-focus: #93c5fd;
     --ao-primary-50: #172554;
     --ao-primary-100: #1e3a8a;
     --ao-primary-200: #1e40af;
@@ -175,6 +176,13 @@ html[data-coreui-theme="dark"],
     --ao-info: #84caff;
     --ao-info-bg: #102a56;
     --ao-info-border: #194185;
+    --ao-sidebar-bg: #111c2e;
+    --ao-sidebar-surface: #152238;
+    --ao-sidebar-hover: #1c2b43;
+    --ao-sidebar-active: rgb(96 165 250 / 0.16);
+    --ao-sidebar-border: rgb(255 255 255 / 0.10);
+    --ao-sidebar-text: #f8fafc;
+    --ao-sidebar-muted: #b8c3d4;
     --ao-shadow-sm: none;
     --ao-shadow-md: none;
     --ao-shadow-lg: none;

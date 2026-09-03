@@ -55,7 +55,7 @@ function ConvertTo-PowerShellLiteral {
     return "'" + (($Value -as [string]) -replace "'", "''") + "'"
 }
 
-Write-Host "[1/6] 检查项目版本和系统前置条件" -ForegroundColor Cyan
+Write-Host "[1/7] 检查项目版本和系统前置条件" -ForegroundColor Cyan
 $gitRepository = Test-Path -LiteralPath (Join-Path $ProjectRoot ".git")
 if ($gitRepository) {
     $GitCommand = Get-CommandPath "git"
@@ -123,7 +123,7 @@ if ($LASTEXITCODE -ne 0 -or -not $condaBase) {
 }
 $pythonPath = Join-Path $condaBase "envs\$EnvironmentName\python.exe"
 
-Write-Host "[2/6] 创建或检查 Python 3.12 环境" -ForegroundColor Cyan
+Write-Host "[2/7] 创建或检查 Python 3.12 环境" -ForegroundColor Cyan
 if (-not (Test-Path -LiteralPath $pythonPath)) {
     Invoke-Native $CondaCommand @("create", "-n", $EnvironmentName, "python=3.12", "-y")
 }
@@ -133,13 +133,13 @@ if ($pythonVersion -notmatch "^Python 3\.12\.") {
 }
 Write-Host $pythonVersion -ForegroundColor Green
 
-Write-Host "[3/6] 安装固定运行依赖" -ForegroundColor Cyan
+Write-Host "[3/7] 安装固定运行依赖" -ForegroundColor Cyan
 Invoke-Native $CondaCommand @(
     "run", "--no-capture-output", "-n", $EnvironmentName,
     "python", "-m", "pip", "install", "-r", $requirementsFile
 )
 
-Write-Host "[4/6] 创建全新的生产运行目录" -ForegroundColor Cyan
+Write-Host "[4/7] 创建全新的生产运行目录" -ForegroundColor Cyan
 foreach ($relativePath in @("data", "data\logs", "data\chrome_profiles", "uploads", "images")) {
     New-Item -ItemType Directory -Force -Path (Join-Path $ProjectRoot $relativePath) | Out-Null
 }
@@ -205,10 +205,10 @@ if ((Test-Path -LiteralPath $envFile) -and -not $ForceConfig) {
 
 . $envFile
 
-Write-Host "[5/6] 检查生产配置和目录" -ForegroundColor Cyan
+Write-Host "[5/7] 检查生产配置和目录" -ForegroundColor Cyan
 Invoke-Native $pythonPath @("scripts\check_environment.py", "--flask-port", "5000", "--mcp-port", "8765")
 
-Write-Host "[6/6] 执行安装后的运行时代码检查" -ForegroundColor Cyan
+Write-Host "[6/7] 执行安装后的运行时代码检查" -ForegroundColor Cyan
 Invoke-Native $pythonPath @("-m", "compileall", "-q", "app.py", "config.py", "core", "mcp_server", "platforms", "web", "scripts", "run_flask_production.py")
 if ($SkipTests) {
     Write-Host "已跳过 pytest（-SkipTests）；compileall 已完成。" -ForegroundColor Yellow
@@ -219,8 +219,15 @@ if ($SkipTests) {
     Write-Host "当前发布包未包含 tests；跳过 pytest，compileall 已完成。" -ForegroundColor Yellow
 }
 
+Write-Host "[7/7] 创建业务人员桌面快捷方式" -ForegroundColor Cyan
+$PowerShellCommand = Get-CommandPath "powershell.exe"
+$ShortcutInstaller = Join-Path $ProjectRoot "scripts\install_desktop_shortcut_windows.ps1"
+Invoke-Native $PowerShellCommand @(
+    "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $ShortcutInstaller
+)
+
 Write-Host "初始化完成。" -ForegroundColor Green
-Write-Host "下一步 1/2：. .\data\production_env.ps1" -ForegroundColor Cyan
-Write-Host "下一步 2/2：.\scripts\start_production_windows.ps1" -ForegroundColor Cyan
+Write-Host "业务人员下一步：双击桌面的『ArticleOps 创作与投递』。" -ForegroundColor Cyan
+Write-Host "该快捷方式会检查并按需恢复服务，然后打开创作页面。" -ForegroundColor Cyan
 Write-Host "管理页（生产机本机）：http://127.0.0.1:5000" -ForegroundColor Cyan
 Write-Host "MCP：http://$($env:MCP_BIND_HOST):$($env:MCP_PORT)/mcp" -ForegroundColor Cyan

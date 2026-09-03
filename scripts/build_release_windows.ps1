@@ -107,8 +107,6 @@ $upgradeOutput = Join-Path $outputRoot "$upgradeName.zip"
 $upgradeHashOutput = "$upgradeOutput.sha256"
 $upgradeExcludedRuntimeScripts = @(
     "scripts\setup_windows.ps1",
-    "scripts\start_production_windows.ps1",
-    "scripts\stop_production_windows.ps1",
     "scripts\production_env.example.ps1"
 )
 $upgradeRemovedFiles = @(
@@ -188,6 +186,8 @@ try {
 
     $runtimeScripts = @(
         "scripts\check_environment.py",
+        "scripts\install_desktop_shortcut_windows.ps1",
+        "scripts\launch_articleops_windows.ps1",
         "scripts\setup_windows.ps1",
         "scripts\start_production_windows.ps1",
         "scripts\stop_production_windows.ps1",

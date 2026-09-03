@@ -122,6 +122,40 @@ if ($ValidateOnly) {
     return
 }
 
+# 升级器会在当前 PowerShell 进程中启动新旧服务。若部署系统没有完整注入
+# 环境变量，则只读加载目标安装目录现有的生产配置；配置有误时在停服前失败。
+$requiredRuntimeEnvironment = @(
+    "APP_ENV",
+    "APP_SECRET_KEY",
+    "MCP_BIND_HOST",
+    "MCP_PORT",
+    "FLASK_BASE_URL",
+    "ARTICLEOPS_MCP_DRAFT_DELIVERY_ENABLED",
+    "ARTICLEOPS_MCP_INTERNAL_TOKEN",
+    "ARTICLEOPS_MCP_ALLOWED_ACCOUNT_IDS",
+    "MCP_ALLOWED_HOSTS"
+)
+$missingRuntimeEnvironment = @($requiredRuntimeEnvironment | Where-Object {
+    [string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($_, "Process"))
+})
+if ($missingRuntimeEnvironment.Count -gt 0) {
+    $targetEnvironmentFile = Join-Path $ResolvedTargetRoot "data\production_env.ps1"
+    if (-not (Test-Path -LiteralPath $targetEnvironmentFile -PathType Leaf)) {
+        throw "升级前缺少运行环境变量，且目标目录没有 data\production_env.ps1：$($missingRuntimeEnvironment -join ', ')"
+    }
+    try {
+        . $targetEnvironmentFile
+    } catch {
+        throw "目标生产配置无法读取；服务尚未停止。请检查 data\production_env.ps1。"
+    }
+    $missingRuntimeEnvironment = @($requiredRuntimeEnvironment | Where-Object {
+        [string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($_, "Process"))
+    })
+}
+if ($missingRuntimeEnvironment.Count -gt 0 -or $env:APP_ENV -ne "production") {
+    throw "生产运行配置不完整或 APP_ENV 非 production；服务尚未停止。缺少：$($missingRuntimeEnvironment -join ', ')"
+}
+
 $timestamp = [DateTime]::UtcNow.ToString("yyyyMMddTHHmmssZ")
 $backupRoot = Join-Path $ResolvedTargetRoot "data\upgrade_backups\$timestamp"
 New-Item -ItemType Directory -Force -Path $backupRoot | Out-Null
@@ -185,6 +219,10 @@ try {
     }
 
     Invoke-TargetScript -Name "start_production_windows.ps1"
+    $shortcutInstaller = Join-Path $ResolvedTargetRoot "scripts\install_desktop_shortcut_windows.ps1"
+    if (Test-Path -LiteralPath $shortcutInstaller -PathType Leaf) {
+        Invoke-TargetScript -Name "install_desktop_shortcut_windows.ps1"
+    }
     Write-Host "升级完成：source_commit=$($manifest.source_commit)" -ForegroundColor Green
     Write-Host "运行数据与账号 Profile 已保留；代码备份：$backupRoot" -ForegroundColor Cyan
 } catch {
@@ -200,6 +238,14 @@ try {
             Remove-Item -LiteralPath $targetPath -Force
         }
     }
-    try { Invoke-TargetScript -Name "start_production_windows.ps1" } catch { }
-    throw "升级失败，已尝试恢复旧代码。原始错误：$($failure.Exception.Message)"
+    $rollbackStartFailure = $null
+    try {
+        Invoke-TargetScript -Name "start_production_windows.ps1"
+    } catch {
+        $rollbackStartFailure = $_.Exception.Message
+    }
+    if ($rollbackStartFailure) {
+        throw "升级失败，旧代码已恢复，但旧服务重启失败：$rollbackStartFailure。原始错误：$($failure.Exception.Message)"
+    }
+    throw "升级失败，已恢复旧代码并重启旧服务。原始错误：$($failure.Exception.Message)"
 }

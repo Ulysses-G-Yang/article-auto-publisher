@@ -37,6 +37,8 @@
   且不得删除 `data`、`uploads`、`images` 或任何运行数据。
 - 启动前先核对监听 PID 与绝对入口；只允许当前 worktree 的最新提交运行，
   不保留旧 checkout 的 Flask/MCP 进程。
+- Windows 桌面快捷入口必须从自身安装目录读取现有生产配置，动态使用本机
+  `FLASK_PORT`，同时核对 Web/MCP 进程归属；不得硬编码开发机 IP 或误杀其他目录进程。
 
 出现账号/Profile、数据、Cookie、Token 或公开发布边界不明时立即停止；不得自动登录、
 创建/保存草稿、上传、发布、删除或重试不确定的副作用。

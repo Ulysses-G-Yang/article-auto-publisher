@@ -86,8 +86,11 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass `
    不少于 32 的随机密钥，并按实际网络填写 Host 白名单。初始账号白名单使用无法命中真实
    账号的全零 UUID，确保服务可以启动但 MCP 不能访问任何真实账号；完成登录后再替换为
    明确获准的真实 `account_id`。
-4. **启动前必须显式加载配置。** `start_production_windows.ps1` 不生成、不覆写、也不
-   自动读取 `data\production_env.ps1`。
+4. 初始化完成后，当前 Windows 用户桌面会出现 **ArticleOps 创作与投递**。业务人员
+   双击即可：快捷入口会读取当前安装目录的生产配置，核对 Flask/MCP 是否来自当前目录，
+   必要时安全恢复服务，然后打开本机 `http://127.0.0.1:<FLASK_PORT>/upload`。
+5. 管理员仍可使用下面的手工启动方式。`start_production_windows.ps1` 本身不生成、不
+   覆写、也不自动读取 `data\production_env.ps1`。
 
 ```powershell
 .\scripts\setup_windows.ps1 -ExpectedCommit <commit-sha>
@@ -95,6 +98,13 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass `
 . .\data\production_env.ps1
 .\scripts\start_production_windows.ps1
 ```
+
+服务中途退出或失去响应时，业务人员再次双击桌面快捷方式即可。快捷入口只会停止命令行
+明确属于当前安装目录的 ArticleOps 进程；若端口被其他程序或其他安装目录占用，它会拒绝
+误杀并显示中文错误及 `data\logs\articleops-launcher.log` 位置。
+
+快捷入口同时检查 Web 与 MCP，但健康检查只连接业务机本地监听地址；外部域名仅作为 Host
+白名单，不会绕公网隧道判断本机服务是否启动成功。
 
 如果生产配置由部署系统管理，可不使用本地配置文件，但必须把同等环境变量注入启动脚本
 所在的进程。启动脚本只校验并继承当前进程环境，然后启动 Waitress 和 MCP；缺少必需变量

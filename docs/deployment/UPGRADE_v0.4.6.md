@@ -47,6 +47,10 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass `
 如果由部署系统管理配置，必须把同等环境变量注入本次升级进程。公开发布相关开关必须继续
 保持关闭。
 
+升级成功后会为当前 Windows 用户创建或刷新桌面快捷方式 **ArticleOps 创作与投递**。
+业务人员以后只需双击该图标；服务健康时直接打开创作页，服务中断时先安全恢复 Flask/MCP
+再打开。快捷方式始终使用业务机本机环回地址和现有 `FLASK_PORT`，不会硬编码开发机 IP。
+
 ## 升级边界
 
 升级器更新程序、前端、文档和必要依赖；保留：
@@ -54,7 +58,8 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass `
 - `data/`、SQLite 数据库、Cookie、Chrome Profile、账号会话和生产配置；
 - `uploads/`、`images/`、上传内容和历史记录；
 - 当前端口、Host 白名单、账号白名单和公开发布关闭配置；
-- 客户已有的 Windows 启停脚本和配置模板。
+- 客户现有的生产环境配置；版本化的 Windows 启停脚本会随程序更新，以保证快捷方式始终
+  使用当前安装目录和本地健康检查。
 
 被替换或按升级清单删除的程序文件会备份到 `data\upgrade_backups\<UTC时间>`；
 删除项只允许是清单内的程序文件，绝不会包含 `data`、`uploads` 或 `images`。
@@ -67,5 +72,6 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass `
 2. 检查 Web `/api/status` 和 MCP `/healthz`。
 3. 打开账号页，确认原账号和登录状态仍在；不要为验收而重新登录或清理 Profile。
 4. 不保存平台草稿、不公开发布；真实平台验收应单独授权。
+5. 双击桌面 **ArticleOps 创作与投递**，确认只打开一个 `/upload` 页面且不产生重复进程。
 
 若服务或结果不确定，保留数据备份和程序回滚目录，先诊断，不要重复执行升级或平台操作。

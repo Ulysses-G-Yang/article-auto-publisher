@@ -145,14 +145,28 @@ try {
 
     Wait-HttpOk -Url "http://127.0.0.1:${flaskPort}/api/status"
 
-    $probeHost = $env:MCP_BIND_HOST
-    if ($probeHost -eq "0.0.0.0" -or $probeHost -eq "::") {
-        $probeHost = (($env:MCP_ALLOWED_HOSTS -split ",") | ForEach-Object { $_.Trim() } | Where-Object { $_ -and $_ -notmatch "^(localhost|127\.0\.0\.1)$" } | Select-Object -First 1)
+    $allowedMcpHosts = @(($env:MCP_ALLOWED_HOSTS -split ",") |
+        ForEach-Object { $_.Trim() } |
+        Where-Object { $_ })
+    $probeHostHeader = @($allowedMcpHosts |
+        Where-Object { $_ -in @("127.0.0.1", "localhost", "[::1]") } |
+        Select-Object -First 1)
+    if ($probeHostHeader.Count -eq 0) {
+        $probeHostHeader = @($allowedMcpHosts | Select-Object -First 1)
     }
-    if (-not $probeHost) {
-        throw "无法确定 MCP 健康检查 Host。"
+    if ($probeHostHeader.Count -eq 0) {
+        throw "无法确定 MCP 健康检查 Host Header。"
     }
-    Wait-HttpOk -Url "http://${probeHost}:${mcpPort}/healthz" -Headers @{ Host = $probeHost }
+    $probeConnectHost = switch ($env:MCP_BIND_HOST) {
+        "0.0.0.0" { "127.0.0.1" }
+        "::" { "[::1]" }
+        "localhost" { "127.0.0.1" }
+        default { $env:MCP_BIND_HOST }
+    }
+    if (-not $probeConnectHost) {
+        throw "无法确定 MCP 本地健康检查连接地址。"
+    }
+    Wait-HttpOk -Url "http://${probeConnectHost}:${mcpPort}/healthz" -Headers @{ Host = $probeHostHeader[0] }
 } catch {
     if ($flaskProcess -and -not $flaskProcess.HasExited) { Stop-Process -Id $flaskProcess.Id -Force -ErrorAction SilentlyContinue }
     if ($mcpProcess -and -not $mcpProcess.HasExited) { Stop-Process -Id $mcpProcess.Id -Force -ErrorAction SilentlyContinue }
@@ -161,5 +175,5 @@ try {
 
 Write-Host "生产服务已启动。" -ForegroundColor Green
 Write-Host "Flask PID=$($flaskProcess.Id): http://127.0.0.1:${flaskPort}" -ForegroundColor Cyan
-Write-Host "MCP PID=$($mcpProcess.Id): http://${probeHost}:${mcpPort}/mcp" -ForegroundColor Cyan
+Write-Host "MCP PID=$($mcpProcess.Id): http://$($env:MCP_BIND_HOST):${mcpPort}/mcp" -ForegroundColor Cyan
 Write-Host "日志目录: $logsDir" -ForegroundColor Cyan

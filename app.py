@@ -15,7 +15,7 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, BASE_DIR)
 sys.path.insert(0, os.path.join(BASE_DIR, "src"))
 
-from flask import Flask
+from flask import Flask, redirect
 from loguru import logger
 
 from account_sessions import create_account_session_blueprint
@@ -134,6 +134,12 @@ def create_app() -> Flask:
 
     # 注册路由
     register_routes(app)
+
+    @app.get("/data-center/")
+    def retired_data_center_page():
+        """旧数据中心书签回到主站，页面本身保持下线。"""
+
+        return redirect("/", code=302)
 
     # 只组合 HTTP 路由；article_mvp 自行管理独立数据库和运行目录。
     app.register_blueprint(

@@ -754,7 +754,7 @@ def test_dashboard_shows_safe_summary_without_raw_payloads(tmp_path):
         page_response = client.get("/")
         assert page_response.status_code == 200
         page_html = page_response.get_data(as_text=True)
-        assert "发布与采集数据中心" in page_html
+        assert "数据看板" in page_html
         assert "vendor/coreui/coreui.min.css" in page_html
         assert "vendor/gridstack/gridstack-all.js" in page_html
         assert 'data-module-toggle="summary"' in page_html

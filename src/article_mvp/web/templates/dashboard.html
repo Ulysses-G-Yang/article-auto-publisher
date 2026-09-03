@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light dark">
-  <meta name="theme-color" content="#101828">
+  <meta name="theme-color" content="#f3f5f9">
   <title>数据中心 · ArticleOps</title>
   <script>
     try {
@@ -19,7 +19,7 @@
   <link rel="stylesheet" href="{{ url_for('article_mvp_dashboard.static', filename='vendor/simplebar/simplebar.css') }}">
   <link rel="stylesheet" href="{{ url_for('article_mvp_dashboard.static', filename='vendor/coreui-icons/css/free.min.css') }}">
   <link rel="stylesheet" href="{{ url_for('article_mvp_dashboard.static', filename='vendor/gridstack/gridstack.min.css') }}">
-  <link rel="stylesheet" href="{{ url_for('article_mvp_dashboard.static', filename='dashboard.css', v='20260902-ui-v2') }}">
+  <link rel="stylesheet" href="{{ url_for('article_mvp_dashboard.static', filename='dashboard.css', v='20260903-dashboard-v3') }}">
 </head>
 {# 未接入权限上下文的旧路由保持兼容；一旦显式传入映射，缺失权限必须关闭。这里只做显示投影，不替代 API 鉴权。 #}
 {% set sidebar_access = sidebar_permissions if sidebar_permissions is defined and sidebar_permissions else {} %}
@@ -28,6 +28,7 @@
 {% set can_studio = sidebar_access.get('content_studio', sidebar_default) %}
 {% set can_accounts = sidebar_access.get('accounts', sidebar_default) %}
 {% set can_data = sidebar_access.get('data_center', sidebar_default) %}
+{% set can_ai_settings = sidebar_access.get('ai_settings', sidebar_default) %}
 <body class="app-shell" data-dashboard-api="{{ url_for('article_mvp_dashboard.api_dashboard') }}" data-legacy-summary-api="/api/legacy-summary">
   <a class="skip-link" href="#main-content">跳到主要内容</a>
   <aside id="app-sidebar" class="sidebar sidebar-dark sidebar-fixed" aria-label="主导航">
@@ -59,7 +60,7 @@
       </section>
       {% endif %}
 
-      {% if can_accounts or can_data %}
+      {% if can_accounts or can_data or can_ai_settings %}
       <section class="sidebar-group" data-sidebar-group="operations">
         <button class="sidebar-group-toggle" type="button" aria-expanded="true" aria-controls="sidebar-operations-links">
           <span>运营管理</span><i class="cil-chevron-bottom" aria-hidden="true"></i>
@@ -70,6 +71,9 @@
           {% endif %}
           {% if can_data %}
           <a class="nav-link {% if request.path.startswith('/data-center') %}active{% endif %}" href="/data-center/" data-permission="data_center" {% if request.path.startswith('/data-center') %}aria-current="page"{% endif %}><i class="nav-icon cil-chart" aria-hidden="true"></i><span>数据中心</span></a>
+          {% endif %}
+          {% if can_ai_settings %}
+          <a class="nav-link {% if request.path == '/settings/ai' %}active{% endif %}" href="/settings/ai" data-permission="ai_settings" {% if request.path == '/settings/ai' %}aria-current="page"{% endif %}><i class="nav-icon cil-settings" aria-hidden="true"></i><span>AI 发布设置</span></a>
           {% endif %}
         </div>
       </section>
@@ -92,13 +96,13 @@
 
         <div class="header-context">
           <span class="header-kicker">ARTICLEOPS</span>
-          <strong>数据中心</strong>
+          <strong>数据看板</strong>
         </div>
 
         <div class="header-search">
           <i class="cil-magnifying-glass" aria-hidden="true"></i>
           <label class="visually-hidden" for="task-search">搜索发布任务</label>
-          <input id="task-search" class="form-control" type="search" placeholder="搜索任务、文章或平台" autocomplete="off">
+          <input id="task-search" class="form-control" type="search" placeholder="搜索当前发布任务" autocomplete="off">
         </div>
 
         <div class="header-actions ms-auto">
@@ -110,7 +114,7 @@
             <i id="theme-icon" class="cil-moon" aria-hidden="true"></i>
           </button>
           <button id="edit-dashboard" class="btn btn-primary d-none d-sm-inline-flex align-items-center gap-2" type="button" aria-pressed="false">
-            <i class="cil-pencil" aria-hidden="true"></i><span>编辑看板</span>
+            <i class="cil-grid" aria-hidden="true"></i><span>自定义模块</span>
           </button>
         </div>
       </div>
@@ -128,8 +132,8 @@
         <div class="page-heading">
           <div>
             <span class="page-kicker">运营数据</span>
-            <h1>发布与采集数据中心</h1>
-            <p>现役发布任务与小黑盒单链路数据，在同一服务内统一查看。</p>
+            <h1>数据看板</h1>
+            <p>一眼查看文章规模、平台分布、投递记录和采集状态；所有空值均保持真实。</p>
           </div>
           <div class="page-heading-actions page-heading-meta">
             <span class="badge rounded-pill text-bg-success-subtle text-success-emphasis"><span class="status-dot completed" aria-hidden="true"></span>服务正常</span>
@@ -149,45 +153,72 @@
         <section id="alert" class="alert alert-danger d-none" role="alert"></section>
 
         <div id="dashboard-grid" class="grid-stack" aria-label="可配置数据看板">
-          <section id="module-summary" class="grid-stack-item" gs-id="summary" gs-x="0" gs-y="0" gs-w="12" gs-h="3" gs-min-h="3" data-module="summary">
+          <section id="module-summary" class="grid-stack-item" gs-id="summary" gs-x="0" gs-y="0" gs-w="12" gs-h="7" gs-min-h="6" data-module="summary">
             <div class="grid-stack-item-content dashboard-module summary-module">
-              <div class="summary-toolbar">
-                <div class="metric-mode-switch" role="group" aria-label="指标卡显示模式">
-                  <button class="metric-mode-button active" type="button" data-metric-mode="overview" aria-pressed="true">运营总览</button>
-                  <button class="metric-mode-button" type="button" data-metric-mode="article" aria-pressed="false">单篇文章</button>
+              <div class="analytics-layout">
+                <aside class="platform-panel" aria-labelledby="platform-filter-title">
+                  <div class="platform-panel-heading">
+                    <span class="module-eyebrow">平台范围</span>
+                    <h2 id="platform-filter-title">内容平台</h2>
+                  </div>
+                  <div id="platform-filter-list" class="platform-filter-list" role="group" aria-label="按平台筛选文章"></div>
+                </aside>
+
+                <div class="analytics-workspace">
+                  <div class="summary-toolbar">
+                    <div>
+                      <div class="metric-mode-switch" role="group" aria-label="指标卡显示模式">
+                        <button class="metric-mode-button active" type="button" data-metric-mode="overview" aria-pressed="true">运营总览</button>
+                        <button class="metric-mode-button" type="button" data-metric-mode="article" aria-pressed="false">单篇文章</button>
+                      </div>
+                      <p id="metric-mode-status" class="summary-status" aria-live="polite">正在加载真实数据…</p>
+                    </div>
+                    <div id="article-picker-wrap" class="article-picker d-none">
+                      <label for="article-picker">选择文章</label>
+                      <select id="article-picker" class="form-select form-select-sm" aria-describedby="article-picker-help"></select>
+                      <span id="article-picker-help" class="visually-hidden">默认选择最新发布文章</span>
+                    </div>
+                  </div>
+                  <div class="summary-grid">
+                    <article class="metric-card metric-primary">
+                      <div class="metric-card-top"><span>内容规模</span><i class="cil-notes" aria-hidden="true"></i></div>
+                      <div id="metric-basic" class="metric-card-content"></div>
+                    </article>
+                    <article class="metric-card metric-info">
+                      <div class="metric-card-top"><span>流量表现</span><i class="cil-chart" aria-hidden="true"></i></div>
+                      <div id="metric-traffic" class="metric-card-content"></div>
+                    </article>
+                    <article class="metric-card metric-warning">
+                      <div class="metric-card-top"><span>互动表现</span><i class="cil-thumb-up" aria-hidden="true"></i></div>
+                      <div id="metric-engagement" class="metric-card-content"></div>
+                    </article>
+                    <article class="metric-card metric-danger">
+                      <div class="metric-card-top"><span>传播与采集</span><i class="cil-share" aria-hidden="true"></i></div>
+                      <div id="metric-collection" class="metric-card-content"></div>
+                    </article>
+                  </div>
+                  <div id="overview-charts" class="insight-grid">
+                    <section class="insight-card" aria-labelledby="platform-chart-title">
+                      <div class="insight-card-heading"><div><span class="module-eyebrow">内容分布</span><h3 id="platform-chart-title">全平台文章分布</h3></div><span id="platform-chart-total" class="insight-value">—</span></div>
+                      <div id="platform-bars" class="platform-bars" role="img" aria-label="各平台文章数量"></div>
+                    </section>
+                    <section class="insight-card" aria-labelledby="mapping-chart-title">
+                      <div class="insight-card-heading"><div><span class="module-eyebrow">数据完整度</span><h3 id="mapping-chart-title">文章映射状态</h3></div></div>
+                      <div class="mapping-chart-wrap">
+                        <div id="mapping-ring" class="mapping-ring" role="img" aria-label="文章映射状态"><strong id="mapping-percent">—</strong><span>已映射</span></div>
+                        <dl class="mapping-legend"><div><dt><span class="legend-dot mapped"></span>已映射</dt><dd id="mapping-count">—</dd></div><div><dt><span class="legend-dot pending"></span>待映射</dt><dd id="unmapped-count">—</dd></div><div><dt><span class="legend-dot snapshot"></span>指标快照</dt><dd id="snapshot-count">—</dd></div></dl>
+                      </div>
+                    </section>
+                  </div>
                 </div>
-                <div id="article-picker-wrap" class="article-picker d-none">
-                  <label for="article-picker">选择文章</label>
-                  <select id="article-picker" class="form-select form-select-sm" aria-describedby="article-picker-help"></select>
-                  <span id="article-picker-help" class="visually-hidden">默认选择最新发布文章</span>
-                </div>
-                <p id="metric-mode-status" class="summary-status" aria-live="polite">正在加载真实数据…</p>
-              </div>
-              <div class="summary-grid">
-                <article class="metric-card metric-primary">
-                  <div class="metric-card-top"><span>基础信息</span><i class="cil-notes" aria-hidden="true"></i></div>
-                  <div id="metric-basic" class="metric-card-content"></div>
-                </article>
-                <article class="metric-card metric-info">
-                  <div class="metric-card-top"><span>流量表现</span><i class="cil-chart" aria-hidden="true"></i></div>
-                  <div id="metric-traffic" class="metric-card-content"></div>
-                </article>
-                <article class="metric-card metric-warning">
-                  <div class="metric-card-top"><span>互动表现</span><i class="cil-thumb-up" aria-hidden="true"></i></div>
-                  <div id="metric-engagement" class="metric-card-content"></div>
-                </article>
-                <article class="metric-card metric-danger">
-                  <div class="metric-card-top"><span>传播与采集</span><i class="cil-share" aria-hidden="true"></i></div>
-                  <div id="metric-collection" class="metric-card-content"></div>
-                </article>
               </div>
             </div>
           </section>
 
-          <section id="module-current-tasks" class="grid-stack-item" gs-id="current-tasks" gs-x="0" gs-y="3" gs-w="8" gs-h="5" gs-min-w="5" gs-min-h="4" data-module="current-tasks">
+          <section id="module-current-tasks" class="grid-stack-item" gs-id="current-tasks" gs-x="0" gs-y="7" gs-w="8" gs-h="5" gs-min-w="5" gs-min-h="4" data-module="current-tasks">
             <div class="grid-stack-item-content dashboard-module card">
               <header class="module-header widget-drag-handle">
-                <div><span class="module-eyebrow">CURRENT WORKFLOW</span><h2>当前发布任务</h2></div>
+                <div><span class="module-eyebrow">当前流程</span><h2>当前发布任务</h2></div>
                 <span id="current-workflow-state" class="badge text-bg-success-subtle text-success-emphasis">同库只读</span>
               </header>
               <div class="module-body table-responsive">
@@ -200,10 +231,10 @@
             </div>
           </section>
 
-          <section id="module-contract" class="grid-stack-item" gs-id="contract" gs-x="8" gs-y="3" gs-w="4" gs-h="5" gs-min-w="3" gs-min-h="4" data-module="contract">
+          <section id="module-contract" class="grid-stack-item" gs-id="contract" gs-x="8" gs-y="7" gs-w="4" gs-h="5" gs-min-w="3" gs-min-h="4" data-module="contract">
             <div class="grid-stack-item-content dashboard-module card">
               <header class="module-header widget-drag-handle">
-                <div><span class="module-eyebrow">INTERFACE CONTRACT</span><h2>接口证据状态</h2></div>
+                <div><span class="module-eyebrow">接口状态</span><h2>接口证据状态</h2></div>
                 <span id="collector-gate" class="badge text-bg-warning-subtle text-warning-emphasis">加载中</span>
               </header>
               <div class="module-body contract-list">
@@ -220,11 +251,11 @@
             </div>
           </section>
 
-          <section id="module-articles" class="grid-stack-item" gs-id="articles" gs-x="0" gs-y="8" gs-w="8" gs-h="5" gs-min-w="5" gs-min-h="4" data-module="articles">
+          <section id="module-articles" class="grid-stack-item" gs-id="articles" gs-x="0" gs-y="12" gs-w="8" gs-h="6" gs-min-w="5" gs-min-h="4" data-module="articles">
             <div class="grid-stack-item-content dashboard-module card">
               <header class="module-header widget-drag-handle">
-                <div><span class="module-eyebrow">CONTENT MAP</span><h2>平台文章与最新指标</h2></div>
-                <div class="module-stats"><span><strong id="total-articles">—</strong> 文章</span><span><strong id="mapped-articles">—</strong> 映射</span><span><strong id="total-snapshots">—</strong> 快照</span></div>
+                <div><span class="module-eyebrow">内容映射</span><h2>平台文章与最新指标</h2></div>
+                <div class="module-stats"><span><strong id="total-articles">—</strong> 全局文章</span><span><strong id="mapped-articles">—</strong> 全局映射</span><span><strong id="total-snapshots">—</strong> 全局快照</span></div>
               </header>
               <div class="module-body table-responsive">
                 <table class="table table-hover align-middle mb-0">
@@ -236,10 +267,10 @@
             </div>
           </section>
 
-          <section id="module-runs" class="grid-stack-item" gs-id="runs" gs-x="8" gs-y="8" gs-w="4" gs-h="5" gs-min-w="3" gs-min-h="4" data-module="runs">
+          <section id="module-runs" class="grid-stack-item" gs-id="runs" gs-x="8" gs-y="12" gs-w="4" gs-h="6" gs-min-w="3" gs-min-h="4" data-module="runs">
             <div class="grid-stack-item-content dashboard-module card">
               <header class="module-header widget-drag-handle">
-                <div><span class="module-eyebrow">COLLECTION RUNS</span><h2>最近采集运行</h2></div>
+                <div><span class="module-eyebrow">采集记录</span><h2>最近采集运行</h2></div>
                 <span id="latest-run" class="badge text-bg-light border">—</span>
               </header>
               <div class="module-body table-responsive">
@@ -283,6 +314,6 @@
   <script src="{{ url_for('article_mvp_dashboard.static', filename='vendor/coreui/coreui.bundle.min.js') }}" defer></script>
   <script src="{{ url_for('article_mvp_dashboard.static', filename='vendor/simplebar/simplebar.min.js') }}" defer></script>
   <script src="{{ url_for('article_mvp_dashboard.static', filename='vendor/gridstack/gridstack-all.js') }}" defer></script>
-  <script src="{{ url_for('article_mvp_dashboard.static', filename='dashboard.js', v='20260902-sidebar-shell-v2') }}" defer></script>
+  <script src="{{ url_for('article_mvp_dashboard.static', filename='dashboard.js', v='20260903-dashboard-v3') }}" defer></script>
 </body>
 </html>

@@ -337,9 +337,7 @@ class RegressionTests(DatabaseTestCase):
                 client = app.test_client()
                 page_response = client.get("/data-center/")
                 self.assertEqual(page_response.status_code, 200)
-                self.assertIn(
-                    "发布与采集数据中心", page_response.get_data(as_text=True)
-                )
+                self.assertIn("数据看板", page_response.get_data(as_text=True))
                 asset_response = client.get("/data-center/assets/dashboard.js")
                 self.assertEqual(asset_response.status_code, 200)
                 asset_response.close()

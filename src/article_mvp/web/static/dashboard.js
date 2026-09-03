@@ -14,6 +14,11 @@ const SIDEBAR_WIDTH_MIN = 216;
 const SIDEBAR_WIDTH_MAX = 320;
 const LAYOUT_STORAGE_KEY = "article-mvp.dashboard-layout.v1";
 const METRIC_MODE_STORAGE_KEY = "article-mvp.metric-mode.v1";
+const PLATFORM_FILTER_STORAGE_KEY = "article-mvp.platform-filter.v1";
+const PLATFORM_ORDER = [
+  "xiaoheihe", "zol", "zhihu", "weibo", "smzdm", "baijiahao",
+  "xiaohongshu", "toutiao", "douyin", "wechat",
+];
 
 function readPreference(key) {
   try {
@@ -53,11 +58,11 @@ function readJsonPreference(key, fallback = {}) {
 }
 
 const DEFAULT_LAYOUT = [
-  { id: "summary", x: 0, y: 0, w: 12, h: 3 },
-  { id: "current-tasks", x: 0, y: 3, w: 8, h: 5 },
-  { id: "contract", x: 8, y: 3, w: 4, h: 5 },
-  { id: "articles", x: 0, y: 8, w: 8, h: 5 },
-  { id: "runs", x: 8, y: 8, w: 4, h: 5 },
+  { id: "summary", x: 0, y: 0, w: 12, h: 7 },
+  { id: "current-tasks", x: 0, y: 7, w: 8, h: 5 },
+  { id: "contract", x: 8, y: 7, w: 4, h: 5 },
+  { id: "articles", x: 0, y: 12, w: 8, h: 6 },
+  { id: "runs", x: 8, y: 12, w: 4, h: 6 },
 ];
 
 let dashboardGrid;
@@ -65,7 +70,9 @@ let dashboardEditing = false;
 let currentTasks = [];
 let dashboardPayload = null;
 let metricMode = "overview";
+let activePlatform = "all";
 let savedLayoutState = null;
+let refreshInFlight = null;
 
 function setText(id, value, fallback = "—") {
   const target = byId(id);
@@ -84,7 +91,69 @@ function platformLabel(platform) {
   return {
     xiaoheihe: "小黑盒", zol: "中关村在线", zhihu: "知乎", weibo: "微博",
     smzdm: "什么值得买", baijiahao: "百家号", xiaohongshu: "小红书",
+    toutiao: "头条号", douyin: "抖音", wechat: "微信公众号",
   }[platform] || (platform ? "未知平台" : "—");
+}
+
+function allDashboardArticles() {
+  return dashboardPayload?.articles || [];
+}
+
+function articlesForActivePlatform() {
+  const articles = allDashboardArticles();
+  return activePlatform === "all"
+    ? articles
+    : articles.filter((article) => article.platform === activePlatform);
+}
+
+function platformCounts(articles = allDashboardArticles()) {
+  const counts = new Map();
+  for (const article of articles) {
+    if (!article.platform) continue;
+    counts.set(article.platform, (counts.get(article.platform) || 0) + 1);
+  }
+  return [...counts.entries()].sort((left, right) => {
+    const leftIndex = PLATFORM_ORDER.indexOf(left[0]);
+    const rightIndex = PLATFORM_ORDER.indexOf(right[0]);
+    if (leftIndex !== -1 || rightIndex !== -1) {
+      if (leftIndex === -1) return 1;
+      if (rightIndex === -1) return -1;
+      return leftIndex - rightIndex;
+    }
+    return platformLabel(left[0]).localeCompare(platformLabel(right[0]), "zh-CN");
+  });
+}
+
+function renderPlatformFilters() {
+  const target = byId("platform-filter-list");
+  const counts = platformCounts();
+  const available = new Set(counts.map(([platform]) => platform));
+  if (activePlatform !== "all" && !available.has(activePlatform)) activePlatform = "all";
+
+  const options = [["all", allDashboardArticles().length], ...counts];
+  target.replaceChildren(...options.map(([platform, count]) => {
+    const button = document.createElement("button");
+    const active = platform === activePlatform;
+    button.type = "button";
+    button.className = `platform-filter${active ? " active" : ""}`;
+    button.dataset.platformFilter = platform;
+    button.setAttribute("aria-pressed", String(active));
+    const label = document.createElement("span");
+    label.textContent = platform === "all" ? "全部平台" : platformLabel(platform);
+    const value = document.createElement("strong");
+    value.textContent = Number(count).toLocaleString("zh-CN");
+    button.append(label, value);
+    return button;
+  }));
+}
+
+function setPlatformFilter(platform) {
+  activePlatform = platform || "all";
+  writePreference(PLATFORM_FILTER_STORAGE_KEY, activePlatform);
+  renderPlatformFilters();
+  populateArticlePicker();
+  renderMetricCards();
+  renderArticles(articlesForActivePlatform());
 }
 
 const STATUS_LABELS = {
@@ -167,7 +236,7 @@ function sortedArticles(articles) {
 }
 
 function selectedArticle() {
-  const articles = sortedArticles(dashboardPayload?.articles || []);
+  const articles = sortedArticles(articlesForActivePlatform());
   const selectedId = byId("article-picker").value;
   return articles.find((article) => String(article.id) === selectedId) || articles[0] || null;
 }
@@ -175,7 +244,7 @@ function selectedArticle() {
 function populateArticlePicker() {
   const picker = byId("article-picker");
   const previous = picker.value;
-  const articles = sortedArticles(dashboardPayload?.articles || []);
+  const articles = sortedArticles(articlesForActivePlatform());
   picker.replaceChildren();
   for (const article of articles) {
     const option = document.createElement("option");
@@ -188,14 +257,12 @@ function populateArticlePicker() {
 }
 
 function renderOverviewMetrics() {
-  const payload = dashboardPayload || {};
-  const articles = payload.articles || [];
-  const summary = payload.summary || {};
+  const articles = articlesForActivePlatform();
   const snapshotTime = latestSnapshotTime(articles);
   const publishedTimes = articles.map((article) => article.published_at).filter(Boolean).sort().reverse();
   replaceMetricRows("metric-basic", [
-    metricRow("文章总数", displayMetric(summary.total_articles), { primary: true }),
-    metricRow("已映射", displayMetric(summary.mapped_articles)),
+    metricRow("文章总数", displayMetric(articles.length), { primary: true }),
+    metricRow("已映射", displayMetric(articles.filter((article) => article.status === "MAPPED").length)),
     metricRow("最新发布时间", publishedTimes[0] ? formatTime(publishedTimes[0]) : "—"),
   ]);
   replaceMetricRows("metric-traffic", [
@@ -212,9 +279,69 @@ function renderOverviewMetrics() {
     metricRow("最近采集", snapshotTime ? formatTime(snapshotTime) : "尚未采集"),
     metricRow("数据新鲜度", freshnessLabel(snapshotTime)),
   ]);
+  const scope = activePlatform === "all" ? "全部平台" : platformLabel(activePlatform);
   byId("metric-mode-status").textContent = articles.length
-    ? (snapshotTime ? `基于 ${articles.length} 篇真实文章的最新快照` : "已有文章，尚未采集指标")
+    ? (snapshotTime ? `${scope} · 基于 ${articles.length} 篇文章的真实最新快照` : `${scope} · 已有文章，尚未采集指标`)
     : "尚无平台文章映射";
+}
+
+function renderPlatformBars() {
+  const target = byId("platform-bars");
+  const counts = platformCounts();
+  const maxCount = Math.max(1, ...counts.map(([, count]) => count));
+  setText("platform-chart-total", `${allDashboardArticles().length.toLocaleString("zh-CN")} 篇`);
+  target.replaceChildren(...counts.map(([platform, count]) => {
+    const row = document.createElement("div");
+    row.className = "platform-bar-row";
+    const label = document.createElement("span");
+    label.className = "platform-bar-label";
+    label.textContent = platformLabel(platform);
+    const track = document.createElement("span");
+    track.className = "platform-bar-track";
+    const fill = document.createElement("span");
+    fill.className = `platform-bar-fill platform-${platform}`;
+    fill.style.width = `${Math.max(4, (count / maxCount) * 100)}%`;
+    track.appendChild(fill);
+    const value = document.createElement("strong");
+    value.textContent = count.toLocaleString("zh-CN");
+    row.append(label, track, value);
+    return row;
+  }));
+  target.setAttribute(
+    "aria-label",
+    counts.length
+      ? counts.map(([platform, count]) => `${platformLabel(platform)} ${count} 篇`).join("，")
+      : "暂无平台文章",
+  );
+  if (!counts.length) {
+    const empty = document.createElement("p");
+    empty.className = "chart-empty";
+    empty.textContent = "暂无平台文章";
+    target.appendChild(empty);
+  }
+}
+
+function renderMappingChart() {
+  const articles = articlesForActivePlatform();
+  const mapped = articles.filter((article) => article.status === "MAPPED").length;
+  const pending = Math.max(0, articles.length - mapped);
+  const snapshots = articles.filter((article) => article.latest_metric).length;
+  const percent = articles.length ? Math.round((mapped / articles.length) * 100) : null;
+  const ring = byId("mapping-ring");
+  ring.style.setProperty("--mapping-percent", String(percent || 0));
+  ring.setAttribute(
+    "aria-label",
+    articles.length ? `已映射 ${mapped} 篇，待映射 ${pending} 篇` : "暂无文章映射数据",
+  );
+  setText("mapping-percent", percent === null ? "—" : `${percent}%`);
+  setText("mapping-count", articles.length ? displayMetric(mapped) : "—");
+  setText("unmapped-count", articles.length ? displayMetric(pending) : "—");
+  setText("snapshot-count", articles.length ? displayMetric(snapshots) : "—");
+}
+
+function renderAnalyticsVisuals() {
+  renderPlatformBars();
+  renderMappingChart();
 }
 
 function renderArticleMetrics() {
@@ -257,13 +384,18 @@ function renderArticleMetrics() {
 
 function renderMetricCards() {
   byId("article-picker-wrap").classList.toggle("d-none", metricMode !== "article");
+  byId("overview-charts").classList.toggle("d-none", metricMode !== "overview");
   document.querySelectorAll("[data-metric-mode]").forEach((button) => {
     const active = button.dataset.metricMode === metricMode;
     button.classList.toggle("active", active);
     button.setAttribute("aria-pressed", String(active));
   });
   if (metricMode === "article") renderArticleMetrics();
-  else renderOverviewMetrics();
+  else {
+    renderOverviewMetrics();
+    renderAnalyticsVisuals();
+  }
+  updateResponsiveSummaryHeight();
 }
 
 function setMetricMode(mode) {
@@ -454,6 +586,7 @@ async function fetchJson(url) {
 
 function renderDashboardPayload(payload) {
   dashboardPayload = payload;
+  renderPlatformFilters();
   populateArticlePicker();
   renderMetricCards();
   setText("total-articles", payload.summary?.total_articles);
@@ -462,13 +595,15 @@ function renderDashboardPayload(payload) {
   setText("latest-run", payload.summary?.latest_run_status
     ? statusLabel(payload.summary.latest_run_status) : "暂无运行");
   renderContract(payload.contract || {});
-  renderArticles(payload.articles || []);
+  renderArticles(articlesForActivePlatform());
   renderRuns(payload.runs || []);
 }
 
 function renderDashboardFailure(error) {
   const alert = byId("alert");
   dashboardPayload = null;
+  activePlatform = "all";
+  renderPlatformFilters();
   populateArticlePicker();
   ["metric-basic", "metric-traffic", "metric-engagement", "metric-collection"].forEach((id) => {
     replaceMetricRows(id, [metricRow("加载状态", "新指标暂不可用")]);
@@ -510,7 +645,7 @@ async function loadLegacySummary() {
   }
 }
 
-async function refreshDashboard() {
+async function performDashboardRefresh() {
   const button = byId("refresh");
   button.disabled = true;
   button.classList.add("is-loading");
@@ -532,12 +667,22 @@ async function refreshDashboard() {
   }
 }
 
+function refreshDashboard() {
+  if (refreshInFlight) return refreshInFlight;
+  refreshInFlight = performDashboardRefresh().finally(() => {
+    refreshInFlight = null;
+  });
+  return refreshInFlight;
+}
+
 function readLayoutState() {
   try {
     const value = JSON.parse(localStorage.getItem(LAYOUT_STORAGE_KEY));
     if (!value || !Array.isArray(value.widgets) || !Array.isArray(value.hidden)) {
       return null;
     }
+    const summary = value.widgets.find((item) => item.id === "summary");
+    if (summary && Number(summary.h) < 6) summary.h = 7;
     return value;
   } catch (_error) {
     return null;
@@ -586,11 +731,21 @@ function updateResponsiveSummaryHeight() {
   const summary = moduleElement("summary");
   if (!summary || summary.hidden) return;
 
-  let height = 3;
-  if (window.innerWidth < 576) height = 8;
-  else if (window.innerWidth < 992) height = 5;
+  let height;
+  if (metricMode === "article") {
+    if (window.innerWidth < 576) height = 11;
+    else if (window.innerWidth < 768) height = 10;
+    else if (window.innerWidth < 992) height = 8;
+    else height = 6;
+  } else if (window.innerWidth < 576) height = 18;
+  else if (window.innerWidth < 768) height = 15;
+  else if (window.innerWidth < 992) height = 13;
+  else if (window.innerWidth < 1280) height = 11;
   else {
-    height = savedLayoutState?.widgets.find((item) => item.id === "summary")?.h || 2;
+    height = Math.max(
+      6,
+      savedLayoutState?.widgets.find((item) => item.id === "summary")?.h || 7,
+    );
   }
 
   if (summary.gridstackNode?.h !== height) {
@@ -627,8 +782,8 @@ function setEditMode(enabled) {
   button.setAttribute("aria-pressed", String(enabled));
   button.classList.toggle("btn-primary", !enabled);
   button.classList.toggle("btn-outline-primary", enabled);
-  button.querySelector("i").className = enabled ? "cil-check-circle" : "cil-pencil";
-  button.querySelector("span").textContent = enabled ? "完成编辑" : "编辑看板";
+  button.querySelector("i").className = enabled ? "cil-check-circle" : "cil-grid";
+  button.querySelector("span").textContent = enabled ? "完成编辑" : "自定义模块";
 }
 
 function saveLayout() {
@@ -650,7 +805,7 @@ function restoreDefaultLayout() {
 function initGrid() {
   dashboardGrid = window.GridStack.init({
     column: 12,
-    cellHeight: 88,
+    cellHeight: 76,
     margin: 8,
     animate: true,
     float: false,
@@ -848,6 +1003,10 @@ function bindInteractions() {
   byId("refresh").addEventListener("click", refreshDashboard);
   byId("task-search").addEventListener("input", () => renderCurrentTaskRows(currentTasks));
   byId("article-picker").addEventListener("change", renderArticleMetrics);
+  byId("platform-filter-list").addEventListener("click", (event) => {
+    const button = event.target.closest("[data-platform-filter]");
+    if (button) setPlatformFilter(button.dataset.platformFilter);
+  });
   document.querySelectorAll("[data-metric-mode]").forEach((button) => {
     button.addEventListener("click", () => setMetricMode(button.dataset.metricMode));
   });
@@ -870,6 +1029,7 @@ function bindInteractions() {
 
 function initializeDashboard() {
   metricMode = readPreference(METRIC_MODE_STORAGE_KEY) === "article" ? "article" : "overview";
+  activePlatform = readPreference(PLATFORM_FILTER_STORAGE_KEY) || "all";
   initTheme();
   initGrid();
   initSidebar();

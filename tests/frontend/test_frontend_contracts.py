@@ -39,6 +39,26 @@ def test_dashboard_has_accessible_switchable_metric_cards() -> None:
     assert 'setAttribute("aria-expanded"' in script
 
 
+def test_dashboard_uses_platform_first_analytics_layout_without_fake_trends() -> None:
+    template = read("src/article_mvp/web/templates/dashboard.html")
+    script = read("src/article_mvp/web/static/dashboard.js")
+    styles = read("src/article_mvp/web/static/dashboard.css")
+
+    assert 'id="platform-filter-list"' in template
+    assert 'aria-label="按平台筛选文章"' in template
+    assert 'id="platform-bars"' in template
+    assert 'id="mapping-ring"' in template
+    assert "PLATFORM_FILTER_STORAGE_KEY" in script
+    assert "renderPlatformFilters()" in script
+    assert "renderPlatformBars()" in script
+    assert "renderMappingChart()" in script
+    assert "Promise.allSettled" in script
+    assert "ECharts" not in template + script
+    assert ".analytics-layout" in styles
+    assert "min-height: 44px" in styles
+    assert "@media (prefers-reduced-motion: reduce)" in styles
+
+
 def test_dashboard_combines_two_independent_api_sources() -> None:
     template = read("src/article_mvp/web/templates/dashboard.html")
     script = read("src/article_mvp/web/static/dashboard.js")
@@ -163,7 +183,8 @@ def test_frontend_assets_use_current_ui_cache_versions() -> None:
     assert "filename='css/style.css', v='20260902-ui-v2'" in base
     assert "filename='js/app.js', v='20260902-ui-v2'" in base
     assert "filename='css/account-sessions.css', v='20260902-ui-v2'" in accounts
-    assert "filename='dashboard.css', v='20260902-ui-v2'" in dashboard
+    assert "filename='dashboard.css', v='20260903-dashboard-v3'" in dashboard
+    assert "filename='dashboard.js', v='20260903-dashboard-v3'" in dashboard
 
 
 def test_user_facing_operation_states_are_localized_to_chinese() -> None:

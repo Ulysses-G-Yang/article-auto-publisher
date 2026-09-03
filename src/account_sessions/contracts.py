@@ -13,6 +13,7 @@ from pydantic import (
     StrictInt,
     StrictStr,
     field_validator,
+    model_validator,
 )
 
 PlatformName = Literal[
@@ -25,7 +26,57 @@ PlatformName = Literal[
     "weibo",
     "toutiao",
 ]
+AccountPlatformName = Literal[
+    "xiaoheihe",
+    "zol",
+    "zhihu",
+    "xiaohongshu",
+    "baijiahao",
+    "smzdm",
+    "weibo",
+    "toutiao",
+    "douyin",
+]
 DeliveryMode = Literal["DRAFT", "PUBLISH"]
+PublishOptionKind = Literal["community", "topic"]
+
+# 选项发现只允许极小的查询/结果投影。这里的类型与投递契约分开，避免把
+# platform/account_id、正文、DOM 或任意平台原始响应带进候选接口。
+PUBLISH_OPTIONS_QUERY_MAX_LENGTH = 30
+PUBLISH_OPTIONS_QUERY_MAX_COUNT = 4
+PUBLISH_OPTIONS_KIND_MAX_COUNT = 2
+PUBLISH_OPTIONS_LIMIT_MAX = 20
+PUBLISH_OPTIONS_ACCOUNT_ID_MAX_LENGTH = 64
+PUBLISH_OPTIONS_CANDIDATE_KEY_MAX_LENGTH = 128
+PUBLISH_OPTIONS_LABEL_MAX_LENGTH = 120
+PUBLISH_OPTIONS_OPTION_ID_MAX_LENGTH = 128
+PUBLISH_OPTIONS_TIMESTAMP_MAX_LENGTH = 64
+PUBLISH_OPTIONS_ERROR_CODE_MAX_LENGTH = 64
+
+PublishOptionQuery = Annotated[
+    StrictStr,
+    Field(min_length=1, max_length=PUBLISH_OPTIONS_QUERY_MAX_LENGTH),
+]
+PublishOptionCandidateKey = Annotated[
+    StrictStr,
+    Field(min_length=1, max_length=PUBLISH_OPTIONS_CANDIDATE_KEY_MAX_LENGTH),
+]
+PublishOptionLabel = Annotated[
+    StrictStr,
+    Field(min_length=1, max_length=PUBLISH_OPTIONS_LABEL_MAX_LENGTH),
+]
+PublishOptionId = Annotated[
+    StrictStr,
+    Field(min_length=1, max_length=PUBLISH_OPTIONS_OPTION_ID_MAX_LENGTH),
+]
+PublishOptionTimestamp = Annotated[
+    StrictStr,
+    Field(min_length=1, max_length=PUBLISH_OPTIONS_TIMESTAMP_MAX_LENGTH),
+]
+PublishOptionErrorCode = Annotated[
+    StrictStr,
+    Field(min_length=1, max_length=PUBLISH_OPTIONS_ERROR_CODE_MAX_LENGTH),
+]
 
 # 平台选择是平台适配器之间唯一的可扩展边界；仅接受有限数量的 JSON 标量，
 # 避免把任意请求对象、路径或凭据带入投递执行单。
@@ -94,6 +145,97 @@ class DeliveryRequest(BaseModel):
     _validate_platform_selection = field_validator("platform_selection")(
         validate_platform_selection
     )
+
+
+class PublishOptionsRequest(BaseModel):
+    """账号级只读候选查询请求。
+
+    ``platform`` 和 ``account_id`` 有意不在 body 中：平台必须从路径指定的
+    账号记录派生，避免调用方伪造跨账号/跨平台查询。
+    """
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    queries: list[PublishOptionQuery] = Field(
+        min_length=1,
+        max_length=PUBLISH_OPTIONS_QUERY_MAX_COUNT,
+    )
+    kinds: list[PublishOptionKind] = Field(
+        default_factory=lambda: ["community", "topic"],
+        min_length=1,
+        max_length=PUBLISH_OPTIONS_KIND_MAX_COUNT,
+    )
+    limit: StrictInt = Field(default=PUBLISH_OPTIONS_LIMIT_MAX, ge=1, le=PUBLISH_OPTIONS_LIMIT_MAX)
+    mode: DeliveryMode = "DRAFT"
+
+    @field_validator("queries", mode="before")
+    @classmethod
+    def _require_json_array(cls, value: object) -> object:
+        if not isinstance(value, list):
+            raise ValueError("字段必须是 JSON 数组")
+        return value
+
+    @field_validator("kinds", mode="before")
+    @classmethod
+    def _deduplicate_kinds(cls, value: object) -> object:
+        # 保留调用方顺序，同时让默认/显式重复 kind 不扩大后续工作量。
+        if not isinstance(value, list):
+            raise ValueError("字段必须是 JSON 数组")
+        result: list[object] = []
+        for item in value:
+            if item not in result:
+                result.append(item)
+        return result
+
+
+class PublishOptionCandidate(BaseModel):
+    """候选的最小安全投影，不携带 DOM、URL、路径或原始响应。"""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    candidate_key: PublishOptionCandidateKey
+    label: PublishOptionLabel
+    platform_option_id: PublishOptionId | None = None
+    source_query: PublishOptionQuery | None = None
+
+
+class PublishOptionGroup(BaseModel):
+    """一个候选类型及其有界候选列表。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    kind: PublishOptionKind
+    candidates: list[PublishOptionCandidate] = Field(
+        default_factory=list,
+        max_length=PUBLISH_OPTIONS_LIMIT_MAX,
+    )
+
+
+class PublishOptionsResponse(BaseModel):
+    """候选发现响应；字段白名单由模型本身固定。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    account_id: Annotated[
+        StrictStr,
+        Field(min_length=1, max_length=PUBLISH_OPTIONS_ACCOUNT_ID_MAX_LENGTH),
+    ]
+    platform: AccountPlatformName
+    supported: StrictBool
+    mode: DeliveryMode
+    groups: list[PublishOptionGroup] = Field(
+        default_factory=list,
+        max_length=PUBLISH_OPTIONS_KIND_MAX_COUNT,
+    )
+    observed_at: PublishOptionTimestamp
+    expires_at: PublishOptionTimestamp | None = None
+    error_code: PublishOptionErrorCode | None = None
+
+    @model_validator(mode="after")
+    def _supported_requires_candidates(self) -> "PublishOptionsResponse":
+        if self.supported and not any(group.candidates for group in self.groups):
+            raise ValueError("supported=true 时必须返回至少一个包含候选的候选组")
+        return self
 
 
 class SessionPolicyRequest(BaseModel):

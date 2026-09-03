@@ -17,6 +17,7 @@ from account_sessions.account_service import AccountSessionService
 from account_sessions.contracts import (
     ClearLoginStateRequest,
     DeliveryRequest,
+    PublishOptionsRequest,
     SessionPolicyRequest,
 )
 from account_sessions.database import AccountDatabase
@@ -36,6 +37,7 @@ from account_sessions.permissions import (
     PermissionDeniedError,
 )
 from account_sessions.platform_catalog import public_platform_catalog
+from account_sessions.publish_options import PublishOptionsService
 from account_sessions.runtime import AccountRuntime
 from account_sessions.session_health import (
     HeartbeatPolicy,
@@ -168,6 +170,10 @@ class AccountSessionRuntimeState:
         self.draft_verify = DraftVerifyService(
             self.accounts,
             self.delivery,
+            platform_factory=platform_factory,
+        )
+        self.publish_options = PublishOptionsService(
+            self.accounts,
             platform_factory=platform_factory,
         )
         self.auto_execute = auto_execute
@@ -416,6 +422,28 @@ def create_account_session_blueprint(
         """只读汇总，不返回账号级标识或本机 Profile 信息。"""
 
         return jsonify(state.run(state.heartbeat.get_health_summary(LOCAL_WEB_CONTEXT)))
+
+    @blueprint.post("/api/account-sessions/<account_id>/publish-options")
+    def publish_options(account_id: str):
+        """返回账号级只读发布候选；当前真实编辑器候选保持 fail-closed。"""
+
+        payload = PublishOptionsRequest.model_validate(request.get_json(silent=True) or {})
+        result = state.run(
+            state.publish_options.discover(
+                account_id,
+                payload,
+                LOCAL_WEB_CONTEXT,
+            )
+        )
+        response = jsonify(result.model_dump(mode="json"))
+        response.headers["Cache-Control"] = "no-store"
+        return response
+
+    @blueprint.after_request
+    def no_store_publish_options(response):
+        if request.path.endswith("/publish-options"):
+            response.headers["Cache-Control"] = "no-store"
+        return response
 
     @blueprint.post("/api/platforms/<platform>/accounts/login")
     def create_account_login(platform: str):

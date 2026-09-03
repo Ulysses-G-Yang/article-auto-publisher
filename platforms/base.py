@@ -451,6 +451,23 @@ class BasePlatform(ABC):
         """
         return {"unsupported": True}
 
+    async def discover_publish_options_readonly(
+        self,
+        queries: list[str] | None = None,
+        kinds: list[str] | None = None,
+        limit: int = 20,
+    ) -> dict:
+        """只读发现发布选项的默认 fail-closed 钩子。
+
+        该方法本身不初始化平台、不访问页面，也不启动浏览器；只有经过单独
+        验证的适配器才可以在未来显式覆盖它。
+        """
+
+        return {
+            "supported": False,
+            "groups": [],
+        }
+
     async def apply_cover(self, cover: dict | None = None) -> dict:
         """应用冻结封面；平台未实现时明确报告，不得静默忽略用户选择。"""
 

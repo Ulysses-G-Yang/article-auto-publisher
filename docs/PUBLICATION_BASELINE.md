@@ -37,3 +37,10 @@
 本阶段无真实平台动作：不登录、不导航真实发布页、不输入正文、不选文件、不上传、不保存草稿、不公开发布、不删除，不启动或重启服务，不读取 `data/`、真实 Profile、Cookie、Token、原始响应或用户内容。
 
 阶段 1 文档完成后暂停，等待主线程审查；阶段 2 后端契约实现和阶段 3 定向验证/交付均须遵守上述边界。
+
+## 阶段 3：账号级发布选项能力边界
+
+- 已提供 `POST /api/account-sessions/<account_id>/publish-options` 账号级只读接口；请求查询、候选数量和响应字段均有界，平台只从账号记录派生，响应不返回 Profile、Cookie、Token、正文或原始平台响应。
+- 小黑盒与中关村在线的离线候选解析仅接受受限列表或单层映射 fixture，并执行去空、去重、来源查询和数量限制；生产候选发现因候选位于可能触发 autosave 的编辑器，始终 `supported=false`、`PUBLISH_OPTIONS_READONLY_UNVERIFIED`，不进入编辑器，不初始化平台、租约、浏览器或 identity。
+- 其他平台仅保留 `BasePlatform` 默认 `unsupported` 只读钩子，不启动浏览器；当前不宣称线上候选可用。
+- 阶段 3 不接入 AI、UI 或 MCP，也不改变既有 `select_topic`、保存草稿、发布链路及公开发布门。

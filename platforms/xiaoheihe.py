@@ -4,6 +4,7 @@ import copy
 import io
 import json
 import re
+from collections.abc import Mapping
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -24,6 +25,96 @@ from platforms.content_validation import (
     safe_media_error,
 )
 from platforms.media_progress import safe_media_progress
+
+_OFFLINE_OPTION_MAX_LIMIT = 20
+_OFFLINE_OPTION_MAX_INPUT = 40
+_OFFLINE_OPTION_QUERY_MAX_LENGTH = 30
+_OFFLINE_OPTION_KEY_FIELDS = ("candidate_key", "key", "id")
+_OFFLINE_OPTION_LABEL_FIELDS = ("label", "name", "title")
+_OFFLINE_OPTION_ALLOWED_KEYS = frozenset(
+    (*_OFFLINE_OPTION_KEY_FIELDS, *_OFFLINE_OPTION_LABEL_FIELDS, "platform_option_id")
+)
+_OFFLINE_OPTION_SENSITIVE_RE = re.compile(
+    r"(?:[a-z][a-z0-9+.-]*://|www\.|[<>/\\]|"
+    r"token|cookie|profile|path|selector|auth|secret)",
+    re.IGNORECASE,
+)
+
+
+def _offline_option_text(value: object, limit: int) -> str | None:
+    if isinstance(value, bool) or not isinstance(value, (str, int)):
+        return None
+    text = str(value).strip()
+    if not text or len(text) > limit or _OFFLINE_OPTION_SENSITIVE_RE.search(text):
+        return None
+    return re.sub(r"\s+", " ", text)
+
+
+def parse_xiaoheihe_publish_option_candidates(
+    raw: object = None,
+    kind: str | None = None,
+    source_query: str | None = None,
+    limit: int = _OFFLINE_OPTION_MAX_LIMIT,
+) -> list[dict[str, str | None]]:
+    """仅解析一层、无副作用的 community/topic 候选 fixture。"""
+    if kind not in {"community", "topic"} or type(limit) is not int or not 1 <= limit <= 20:
+        return []
+    if source_query is not None and not isinstance(source_query, str):
+        return []
+    source = _offline_option_text(source_query, _OFFLINE_OPTION_QUERY_MAX_LENGTH)
+    if source_query is not None and source is None:
+        return []
+    if isinstance(raw, list):
+        items = raw
+    elif isinstance(raw, Mapping) and set(raw) == {kind} and isinstance(raw[kind], list):
+        items = raw[kind]
+    else:
+        return []
+    if len(items) > _OFFLINE_OPTION_MAX_INPUT:
+        return []
+
+    result: list[dict[str, str | None]] = []
+    seen: set[tuple[str, str]] = set()
+    for item in items:
+        if not isinstance(item, Mapping) or not item or not set(item) <= _OFFLINE_OPTION_ALLOWED_KEYS:
+            continue
+        values: dict[str, str] = {}
+        for key, value in item.items():
+            if not isinstance(key, str):
+                values = {}
+                break
+            text = _offline_option_text(
+                value,
+                128 if key in (*_OFFLINE_OPTION_KEY_FIELDS, "platform_option_id") else 120,
+            )
+            if text is None:
+                values = {}
+                break
+            values[key] = text
+        if not values:
+            continue
+        key_values = {values[key] for key in _OFFLINE_OPTION_KEY_FIELDS if key in values}
+        label_values = {values[key] for key in _OFFLINE_OPTION_LABEL_FIELDS if key in values}
+        if len(key_values) != 1 or len(label_values) != 1:
+            continue
+        option_id = values.get("platform_option_id")
+        candidate_key = next(iter(key_values))
+        label = next(iter(label_values))
+        dedupe = (candidate_key.casefold(), option_id.casefold() if option_id else "")
+        if dedupe in seen:
+            continue
+        seen.add(dedupe)
+        result.append(
+            {
+                "candidate_key": candidate_key,
+                "label": label,
+                "platform_option_id": option_id,
+                "source_query": source,
+            }
+        )
+        if len(result) >= limit:
+            break
+    return result
 
 
 class XiaoheihePlatform(BasePlatform):
@@ -81,6 +172,34 @@ class XiaoheihePlatform(BasePlatform):
         # 回写正文或重算 ContentVersion 哈希。
         self._expected_persisted_blocks: list[dict] | None = None
         self._pending_cover_path = ""
+
+    @staticmethod
+    def parse_publish_option_candidates(
+        raw: object = None,
+        kind: str | None = None,
+        source_query: str | None = None,
+        limit: int = _OFFLINE_OPTION_MAX_LIMIT,
+    ) -> list[dict[str, str | None]]:
+        return parse_xiaoheihe_publish_option_candidates(
+            raw,
+            kind,
+            source_query,
+            limit,
+        )
+
+    async def discover_publish_options_readonly(
+        self,
+        queries: list[str] | None = None,
+        kinds: list[str] | None = None,
+        limit: int = _OFFLINE_OPTION_MAX_LIMIT,
+    ) -> dict:
+        """编辑器候选尚未完成只读安全证明，生产 hook 明确保持未验证。"""
+
+        return {
+            "supported": False,
+            "groups": [],
+            "error_code": "PUBLISH_OPTIONS_READONLY_UNVERIFIED",
+        }
 
     def _raise_if_page_closed(self, stage: str):
         self._require_page_alive(stage)

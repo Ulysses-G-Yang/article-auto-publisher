@@ -6,6 +6,7 @@ import html
 import os
 import re
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass
 from io import BytesIO
 from pathlib import Path
@@ -30,6 +31,95 @@ from platforms.content_validation import (
     normalize_for_comparison,
     safe_media_error,
 )
+
+_OFFLINE_OPTION_MAX_LIMIT = 20
+_OFFLINE_OPTION_MAX_INPUT = 40
+_OFFLINE_OPTION_QUERY_MAX_LENGTH = 30
+_OFFLINE_OPTION_KEY_FIELDS = ("candidate_key", "key", "id")
+_OFFLINE_OPTION_LABEL_FIELDS = ("label", "name", "title")
+_OFFLINE_OPTION_ALLOWED_KEYS = frozenset(
+    (*_OFFLINE_OPTION_KEY_FIELDS, *_OFFLINE_OPTION_LABEL_FIELDS, "platform_option_id")
+)
+_OFFLINE_OPTION_SENSITIVE_RE = re.compile(
+    r"(?:[a-z][a-z0-9+.-]*://|www\.|[<>/\\]|"
+    r"token|cookie|profile|path|selector|auth|secret)",
+    re.IGNORECASE,
+)
+
+
+def _zol_offline_text(value: object, limit: int) -> str | None:
+    if isinstance(value, bool) or not isinstance(value, (str, int)):
+        return None
+    text = re.sub(r"\s+", " ", str(value)).strip()
+    if not text or len(text) > limit or _OFFLINE_OPTION_SENSITIVE_RE.search(text):
+        return None
+    return text
+
+
+def parse_zol_publish_option_candidates(
+    raw: object = None,
+    kind: str | None = None,
+    source_query: str | None = None,
+    limit: int = _OFFLINE_OPTION_MAX_LIMIT,
+) -> list[dict[str, str | None]]:
+    """只解析有限的 topic fixture，不访问页面、不保留运行时对象。"""
+    if kind != "topic" or type(limit) is not int or not 1 <= limit <= 20:
+        return []
+    if source_query is not None and not isinstance(source_query, str):
+        return []
+    source = _zol_offline_text(source_query, _OFFLINE_OPTION_QUERY_MAX_LENGTH)
+    if source_query is not None and source is None:
+        return []
+    if isinstance(raw, list):
+        items = raw
+    elif isinstance(raw, Mapping) and set(raw) == {"topic"} and isinstance(raw["topic"], list):
+        items = raw["topic"]
+    else:
+        return []
+    if len(items) > _OFFLINE_OPTION_MAX_INPUT:
+        return []
+
+    result: list[dict[str, str | None]] = []
+    seen: set[tuple[str, str]] = set()
+    for item in items:
+        if not isinstance(item, Mapping) or not item or not set(item) <= _OFFLINE_OPTION_ALLOWED_KEYS:
+            continue
+        values: dict[str, str | None] = {}
+        for key, value in item.items():
+            if key == "platform_option_id" and value is None:
+                values[key] = None
+            else:
+                text = _zol_offline_text(
+                    value,
+                    128 if key in (*_OFFLINE_OPTION_KEY_FIELDS, "platform_option_id") else 120,
+                )
+                if text is None:
+                    values = {}
+                    break
+                values[key] = text
+        if not values:
+            continue
+        key_values = {values[key] for key in _OFFLINE_OPTION_KEY_FIELDS if key in values}
+        label_values = {values[key] for key in _OFFLINE_OPTION_LABEL_FIELDS if key in values}
+        if len(key_values) != 1 or len(label_values) != 1:
+            continue
+        candidate_key, label = next(iter(key_values)), next(iter(label_values))
+        option_id = values.get("platform_option_id")
+        dedupe = (candidate_key.casefold(), option_id.casefold() if option_id else "")
+        if dedupe in seen:
+            continue
+        seen.add(dedupe)
+        result.append(
+            {
+                "candidate_key": candidate_key,
+                "label": label,
+                "platform_option_id": option_id,
+                "source_query": source,
+            }
+        )
+        if len(result) >= limit:
+            break
+    return result
 
 
 @dataclass(frozen=True)
@@ -95,6 +185,34 @@ class ZOLPlatform(BasePlatform):
         self._expected_persisted_blocks: list[dict] | None = None
         self._heading_sequence = 0
         self._pending_cover_path = ""
+
+    @staticmethod
+    def parse_publish_option_candidates(
+        raw: object = None,
+        kind: str | None = None,
+        source_query: str | None = None,
+        limit: int = _OFFLINE_OPTION_MAX_LIMIT,
+    ) -> list[dict[str, str | None]]:
+        return parse_zol_publish_option_candidates(
+            raw,
+            kind,
+            source_query,
+            limit,
+        )
+
+    async def discover_publish_options_readonly(
+        self,
+        queries: list[str] | None = None,
+        kinds: list[str] | None = None,
+        limit: int = _OFFLINE_OPTION_MAX_LIMIT,
+    ) -> dict:
+        """编辑器候选尚未完成只读安全证明，生产 hook 明确保持未验证。"""
+
+        return {
+            "supported": False,
+            "groups": [],
+            "error_code": "PUBLISH_OPTIONS_READONLY_UNVERIFIED",
+        }
 
     def _stop_autosave_observer(self) -> None:
         """移除当前页面的自动保存监听器，不影响已收集的响应证据。"""

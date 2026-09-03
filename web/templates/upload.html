@@ -16,7 +16,8 @@
      data-plan-detail-url-template="/api/delivery-plans/{plan_id}"
      data-plan-execute-url-template="/api/delivery-plans/{plan_id}/execute"
      data-accounts-url-template="/api/platforms/{platform}/accounts?usable=true"
-     data-session-policy-url-template="/api/accounts/{account_id}/session-policy">
+     data-session-policy-url-template="/api/accounts/{account_id}/session-policy"
+     data-publication-advice-url-template="/api/content-drafts/{draft_id}/publication-advice">
     <nav class="studio-breadcrumb" aria-label="面包屑导航"><ol class="breadcrumb"><li class="breadcrumb-item"><a href="/">首页</a></li><li class="breadcrumb-item active" aria-current="page">创作与投递</li></ol></nav>
 
     <div class="page-heading studio-heading">
@@ -101,6 +102,9 @@
                             <div class="target-bulk-actions">
                                 <button id="toggle-all-platforms" class="btn btn-outline-primary" type="button" disabled>全选所有平台</button>
                                 <button id="toggle-all-accounts" class="btn btn-outline-primary" type="button" disabled aria-describedby="account-selection-hint">全选所有账户</button>
+                                <button id="generate-publication-advice" class="btn btn-outline-secondary" type="button" disabled title="正在读取平台目录">
+                                    <i class="cil-lightbulb me-1" aria-hidden="true"></i>AI 分析发布建议
+                                </button>
                             </div>
                             <div class="target-selection-status" aria-live="polite">
                                 <strong id="target-selection-summary">已选平台 0 个 · 账户 0 个</strong>
@@ -108,6 +112,16 @@
                                 <span id="account-selection-hint" class="visually-hidden">请先选择至少一个可投递平台</span>
                             </div>
                         </div>
+                        <section id="publication-advice-panel" class="publication-advice-panel d-none" aria-labelledby="publication-advice-heading">
+                            <div class="publication-advice-head">
+                                <div><span class="section-kicker">只读建议</span><h3 id="publication-advice-heading">各平台发布建议</h3></div>
+                                <a class="btn btn-sm btn-outline-secondary" href="/settings/ai"><i class="cil-settings me-1" aria-hidden="true"></i>AI 设置</a>
+                            </div>
+                            <div id="publication-advice-status" class="small text-body-secondary" role="status" aria-live="polite"></div>
+                            <div id="publication-advice-error" class="alert alert-danger d-none mt-3 mb-0" role="alert"></div>
+                            <div id="publication-advice-results" class="publication-advice-results"></div>
+                            <p class="publication-advice-footnote">建议仅供核对，不会自动选择话题、修改草稿或执行平台操作。</p>
+                        </section>
                         <div id="platform-grid-loading" class="platform-grid-loading" role="status"><span class="spinner-border spinner-border-sm" aria-hidden="true"></span><span>正在读取平台目录…</span></div>
                         <div id="target-switcher-list" class="target-switcher-list d-none" role="group" aria-label="投递目标滑块"></div>
                         <div id="target-builder-error" class="alert alert-danger d-none mt-3" role="alert"></div>

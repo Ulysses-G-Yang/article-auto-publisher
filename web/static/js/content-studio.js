@@ -94,6 +94,8 @@
         localDb: null,
         coverAutoSelectionDismissed: false,
         coverAutoNoteVisible: false,
+        publicationAdviceLoading: false,
+        publicationAdvice: null,
     };
 
     function endpoint(template, key, value) {
@@ -1279,6 +1281,9 @@
             state.platforms = (Array.isArray(data) ? data : (data.platforms || []))
                 .filter(platform => platform && typeof platform.id === 'string')
                 .sort((left, right) => Number(left.sort_order || 0) - Number(right.sort_order || 0));
+            const adviceButton = byId('generate-publication-advice');
+            adviceButton.disabled = false;
+            adviceButton.title = '';
             renderTargetSwitcher();
         } catch (error) {
             setMessage('target-builder-error', `平台目录加载失败：${error.message || '未知错误'}`);
@@ -2551,6 +2556,110 @@
         await openDraft(blankDraft(), { historyMode: 'replace' });
     }
 
+    function appendAdviceFact(list, label, value) {
+        const row = document.createElement('div');
+        const term = document.createElement('dt');
+        const detail = document.createElement('dd');
+        term.textContent = label;
+        detail.textContent = value || '—';
+        row.append(term, detail);
+        list.appendChild(row);
+    }
+
+    function renderPublicationAdvice(payload) {
+        state.publicationAdvice = payload;
+        const panel = byId('publication-advice-panel');
+        const results = byId('publication-advice-results');
+        const recommendations = Array.isArray(payload?.recommendations)
+            ? payload.recommendations : [];
+        panel.classList.remove('d-none');
+        results.replaceChildren(...recommendations.map(item => {
+            const card = document.createElement('article');
+            card.className = 'publication-advice-card';
+            const title = document.createElement('h4');
+            title.textContent = platformLabel(item.platform);
+            const facts = document.createElement('dl');
+            appendAdviceFact(facts, '建议社区', item.suggested_community);
+            appendAdviceFact(facts, '建议话题', (item.suggested_topics || []).join('、'));
+            appendAdviceFact(facts, '搜索词', (item.topic_queries || []).join('、'));
+            appendAdviceFact(facts, '关键词', (item.keywords || []).join('、'));
+            const reason = document.createElement('p');
+            reason.className = 'advice-reason';
+            reason.textContent = item.reason || '未提供理由';
+            card.append(title, facts, reason);
+            return card;
+        }));
+        byId('publication-advice-status').textContent = recommendations.length
+            ? `已生成 ${recommendations.length} 个平台建议 · 模型 ${payload.model || '未知'}`
+            : 'AI 未返回可展示的建议';
+    }
+
+    async function generatePublicationAdvice() {
+        if (state.publicationAdviceLoading) return;
+        const platforms = enabledPlatformIds();
+        const panel = byId('publication-advice-panel');
+        const button = byId('generate-publication-advice');
+        panel.classList.remove('d-none');
+        setMessage('publication-advice-error', '');
+        if (!platforms.length) {
+            setMessage('publication-advice-error', '请先启用至少一个需要分析的平台。');
+            document.querySelector('.target-platform-row.is-deliverable input, .target-platform-row.is-deliverable button')?.focus();
+            return;
+        }
+        if (!state.draft?.title?.trim()) {
+            setMessage('publication-advice-error', '请先填写文章标题。');
+            byId('draft-title').focus();
+            return;
+        }
+        if (!(await saveDraftNow()) || !state.draft?.draft_id) {
+            setMessage('publication-advice-error', '草稿尚未同步成功，请先保存后重试。');
+            return;
+        }
+
+        state.publicationAdviceLoading = true;
+        panel.setAttribute('aria-busy', 'true');
+        button.disabled = true;
+        button.dataset.defaultLabel ||= button.textContent.trim();
+        button.textContent = 'AI 正在分析…';
+        byId('publication-advice-status').textContent = '正在发送当前文章全文并生成平台建议…';
+        byId('publication-advice-results').replaceChildren();
+        const adviceDraftId = state.draft.draft_id;
+        const adviceRevision = state.draft.revision;
+        try {
+            const response = await fetch(endpoint(
+                root.dataset.publicationAdviceUrlTemplate,
+                'draft_id',
+                adviceDraftId,
+            ), {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+                cache: 'no-store',
+                body: JSON.stringify({ revision: adviceRevision, platforms }),
+            });
+            const advice = await jsonResponse(response);
+            if (
+                state.dirty
+                || state.draft?.draft_id !== adviceDraftId
+                || state.draft?.revision !== adviceRevision
+                || advice.draft_id !== adviceDraftId
+                || advice.revision !== adviceRevision
+            ) {
+                throw new Error('文章已在分析期间修改，本次旧建议已丢弃，请重新生成。');
+            }
+            renderPublicationAdvice(advice);
+        } catch (error) {
+            const configureHint = ['AI_GUIDANCE_DISABLED', 'AI_CONFIGURATION_ERROR']
+                .includes(error.payload?.error) ? ' 请先打开“AI 发布设置”完成配置。' : '';
+            byId('publication-advice-status').textContent = '本次未生成建议';
+            setMessage('publication-advice-error', `${error.message || 'AI 分析失败'}${configureHint}`);
+        } finally {
+            state.publicationAdviceLoading = false;
+            panel.setAttribute('aria-busy', 'false');
+            button.disabled = false;
+            button.textContent = button.dataset.defaultLabel;
+        }
+    }
+
     function bindEvents() {
         window.addEventListener('hashchange', syncStudioStepFromLocation);
         window.addEventListener('focus', () => {
@@ -2661,6 +2770,7 @@
         });
         byId('toggle-all-platforms').addEventListener('click', toggleAllPlatforms);
         byId('toggle-all-accounts').addEventListener('click', toggleAllAccounts);
+        byId('generate-publication-advice').addEventListener('click', generatePublicationAdvice);
         byId('create-plan').addEventListener('click', createPlan);
         byId('save-draft-now').addEventListener('click', () => saveDraftNow());
         byId('execute-plan').addEventListener('click', () => {

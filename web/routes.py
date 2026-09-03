@@ -2,6 +2,7 @@
 import asyncio
 import json
 import os
+import secrets
 import threading
 import uuid
 from datetime import datetime
@@ -10,6 +11,7 @@ from flask import (
     jsonify,
     render_template,
     request,
+    session,
 )
 from loguru import logger
 
@@ -126,6 +128,18 @@ def register_routes(app):
     @app.route("/upload")
     def upload_page():
         return render_template("upload.html")
+
+    @app.route("/settings/ai")
+    def publication_ai_settings_page():
+        token = session.get("articleops_ai_settings_csrf")
+        if not isinstance(token, str) or not token:
+            token = secrets.token_urlsafe(32)
+            session["articleops_ai_settings_csrf"] = token
+        return (
+            render_template("ai_settings.html", ai_settings_csrf=token),
+            200,
+            {"Cache-Control": "no-store"},
+        )
 
     @app.route("/accounts")
     def accounts_page():

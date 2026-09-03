@@ -411,3 +411,28 @@
     .plan-target { grid-template-columns: 1fr; }
     .plan-target-actions { justify-content: flex-start; }
 }
+
+/* AI publication advice -------------------------------------------------- */
+.publication-advice-panel {
+    margin: var(--ao-space-4) 0;
+    padding: var(--ao-space-4);
+    border: 1px solid var(--ao-info-border);
+    border-radius: var(--ao-radius-md);
+    background: var(--ao-info-bg);
+}
+.publication-advice-head { display: flex; align-items: center; justify-content: space-between; gap: var(--ao-space-4); }
+.publication-advice-head h3 { margin: var(--ao-space-1) 0 0; color: var(--ao-text); font-size: var(--ao-text-lg); }
+.publication-advice-results { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--ao-space-3); margin-top: var(--ao-space-4); }
+.publication-advice-card { padding: var(--ao-space-4); border: 1px solid var(--ao-border); border-radius: var(--ao-radius-md); background: var(--ao-surface); }
+.publication-advice-card h4 { margin: 0 0 var(--ao-space-3); color: var(--ao-text); font-size: var(--ao-text-base); }
+.publication-advice-card dl { display: grid; gap: var(--ao-space-2); margin: 0; }
+.publication-advice-card dl > div { display: grid; grid-template-columns: 76px minmax(0, 1fr); gap: var(--ao-space-2); }
+.publication-advice-card dt { color: var(--ao-text-tertiary); font-size: var(--ao-text-xs); font-weight: 700; }
+.publication-advice-card dd { margin: 0; color: var(--ao-text-secondary); font-size: var(--ao-text-sm); overflow-wrap: anywhere; }
+.publication-advice-card .advice-reason { margin: var(--ao-space-3) 0 0; color: var(--ao-text-secondary); font-size: var(--ao-text-sm); }
+.publication-advice-footnote { margin: var(--ao-space-4) 0 0; color: var(--ao-text-secondary); font-size: var(--ao-text-xs); }
+
+@media (max-width: 767.98px) {
+    .publication-advice-head { align-items: stretch; flex-direction: column; }
+    .publication-advice-results { grid-template-columns: minmax(0, 1fr); }
+}

@@ -130,9 +130,9 @@ def test_sidebar_permission_projection_fails_closed_when_explicit() -> None:
     empty_html = render_main_shell(sidebar_permissions={})
 
     # 未接入权限上下文的旧页面保持兼容；显式权限映射一旦存在，缺失项必须隐藏。
-    assert legacy_html.count("data-permission=") == 4
+    assert legacy_html.count("data-permission=") == 5
     assert 'data-permission="content_studio"' in limited_html
-    for permission in ("overview", "accounts", "data_center"):
+    for permission in ("overview", "accounts", "data_center", "ai_settings"):
         assert f'data-permission="{permission}"' not in limited_html
     assert "data-permission=" not in empty_html
 
@@ -150,7 +150,7 @@ def test_dashboard_permission_projection_uses_the_same_fail_closed_rule() -> Non
     assert response.status_code == 200
     html = response.get_data(as_text=True)
     assert 'data-permission="data_center"' in html
-    for permission in ("overview", "content_studio", "accounts"):
+    for permission in ("overview", "content_studio", "accounts", "ai_settings"):
         assert f'data-permission="{permission}"' not in html
 
 

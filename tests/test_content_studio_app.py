@@ -1,6 +1,7 @@
 """完整 Flask 组合层的 Content Studio 冒烟测试。"""
 
 import importlib
+import re
 import sys
 from pathlib import Path
 
@@ -29,6 +30,29 @@ def test_create_app_mounts_studio_without_touching_legacy_queue(
     assert app_module.start_queue_worker() is False
 
     assert client.get("/upload").status_code == 200
+    settings_page = client.get("/settings/ai")
+    assert settings_page.status_code == 200
+    assert settings_page.headers["Cache-Control"] == "no-store"
+    assert 'id="ai-settings"' in settings_page.get_data(as_text=True)
+    first_token = re.search(
+        r'data-csrf-token="([^"]+)"', settings_page.get_data(as_text=True)
+    ).group(1)
+    second_settings_page = client.get("/settings/ai")
+    second_token = re.search(
+        r'data-csrf-token="([^"]+)"', second_settings_page.get_data(as_text=True)
+    ).group(1)
+    assert second_token == first_token
+    public_settings = client.get("/api/settings/publication-ai")
+    assert public_settings.status_code == 200
+    assert public_settings.headers["Cache-Control"] == "no-store"
+    assert set(public_settings.get_json()) == {
+        "enabled",
+        "base_url",
+        "model",
+        "api_key_configured",
+        "api_key_source",
+        "persistence",
+    }
     redirect = client.get("/delivery/new?draft_id=abc", follow_redirects=False)
     assert redirect.status_code == 302
     assert redirect.headers["Location"] == "/upload?draft_id=abc"

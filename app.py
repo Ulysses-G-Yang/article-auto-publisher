@@ -24,6 +24,7 @@ from article_mvp.web import create_dashboard_blueprint
 from config import get_config
 from content_studio import create_content_studio_blueprint
 from core.logging_setup import configure_logging
+from publication_ai.settings_store import PublicationAISettingsStore
 from web.routes import register_routes
 
 _QUEUE_START_LOCK = threading.Lock()
@@ -143,9 +144,13 @@ def create_app() -> Flask:
         delivery_event_sink=_make_delivery_event_sink(),
     )
     app.register_blueprint(account_blueprint)
+    publication_settings_store = PublicationAISettingsStore(
+        cfg["ai"]["publication_guidance"],
+    )
     app.register_blueprint(
         create_content_studio_blueprint(
             account_state=app.extensions["account_sessions"],
+            publication_settings_store=publication_settings_store,
         )
     )
 

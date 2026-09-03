@@ -13,9 +13,13 @@ from flask import Flask
 from account_sessions.web import create_account_session_blueprint
 from content_studio.database import sqlite_url
 from content_studio.web import create_content_studio_blueprint
-from publication_ai.contracts import PublicationGuidanceResponse
+from publication_ai.contracts import (
+    PublicationAISettingsUpdate,
+    PublicationGuidanceResponse,
+)
 from publication_ai.deepseek import DeepSeekPublicationAdvisor, PublicationAISettings
 from publication_ai.errors import PublicationAIError
+from publication_ai.settings_store import PublicationAISettingsStore
 
 
 def run(coroutine):
@@ -332,6 +336,228 @@ def test_publication_advice_rejects_oversized_body_before_ai(tmp_path: Path) -> 
     assert response.status_code == 413
     assert response.get_json()["error"] == "AI_INPUT_TOO_LARGE"
     assert advisor.calls == []
+
+    studio_state.close()
+    account_state.close()
+
+
+def test_runtime_settings_store_never_exposes_key_and_falls_back_to_environment() -> None:
+    environ = {"DEEPSEEK_API_KEY": "environment-secret"}
+    store = PublicationAISettingsStore(
+        settings(enabled=False).__dict__,
+        environ=environ,
+    )
+    initial = store.public_view()
+    assert initial == {
+        "enabled": False,
+        "base_url": "https://api.deepseek.com",
+        "model": "deepseek-v4-flash",
+        "api_key_configured": True,
+        "api_key_source": "environment",
+        "persistence": "process",
+    }
+    runtime_secret = "runtime-secret-value"
+    updated = store.update(
+        PublicationAISettingsUpdate.model_validate(
+            {
+                "enabled": True,
+                "base_url": "https://proxy.example.com",
+                "model": "deepseek-v4-pro",
+                "api_key": runtime_secret,
+            }
+        )
+    )
+    assert updated["api_key_source"] == "runtime"
+    assert runtime_secret not in json.dumps(updated)
+    assert runtime_secret not in repr(store)
+
+    cleared = store.update(
+        PublicationAISettingsUpdate.model_validate(
+            {
+                "enabled": True,
+                "base_url": "https://proxy.example.com",
+                "model": "deepseek-v4-pro",
+                "clear_api_key": True,
+            }
+        )
+    )
+    assert cleared["api_key_source"] == "environment"
+    assert cleared["api_key_configured"] is True
+
+
+def test_runtime_settings_rejects_blank_key_without_changing_state() -> None:
+    store = PublicationAISettingsStore(settings(enabled=False).__dict__, environ={})
+    before = store.public_view()
+
+    with pytest.raises(ValueError):
+        PublicationAISettingsUpdate.model_validate(
+            {
+                "enabled": True,
+                "base_url": "https://proxy.example.com",
+                "model": "deepseek-v4-pro",
+                "api_key": "   ",
+            }
+        )
+
+    assert store.public_view() == before
+
+
+def test_connection_check_uses_models_endpoint_without_article() -> None:
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(
+            200,
+            json={
+                "object": "list",
+                "data": [
+                    {"id": "deepseek-v4-flash", "object": "model"},
+                    {"id": "deepseek-v4-pro", "object": "model"},
+                ],
+            },
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    advisor = DeepSeekPublicationAdvisor(
+        settings(),
+        http_client=client,
+        api_key="connection-secret",
+        api_key_env=None,
+    )
+    result = run(advisor.check_connection())
+    assert result == {"model": "deepseek-v4-flash", "available_model_count": 2}
+    assert len(seen) == 1
+    assert seen[0].method == "GET"
+    assert seen[0].url.path == "/models"
+    assert seen[0].content == b""
+    assert "connection-secret" not in repr(result)
+    run(client.aclose())
+
+    unavailable_client = httpx.AsyncClient(
+        transport=httpx.MockTransport(
+            lambda _request: httpx.Response(
+                200,
+                json={"object": "list", "data": [{"id": "another-model"}]},
+            )
+        )
+    )
+    unavailable = DeepSeekPublicationAdvisor(
+        settings(),
+        http_client=unavailable_client,
+        api_key="connection-secret",
+        api_key_env=None,
+    )
+    with pytest.raises(PublicationAIError) as captured:
+        run(unavailable.check_connection())
+    assert captured.value.error_code == "AI_MODEL_UNAVAILABLE"
+    run(unavailable_client.aclose())
+
+
+class FakeConnectionAdvisor:
+    async def check_connection(self) -> dict:
+        return {"model": "deepseek-v4-pro", "available_model_count": 2}
+
+
+def test_runtime_settings_http_contract_requires_csrf_and_never_returns_key(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    store = PublicationAISettingsStore(settings(enabled=False).__dict__, environ={})
+    app = Flask("publication-ai-settings-test")
+    app.secret_key = "test-secret"
+    app.register_blueprint(
+        create_account_session_blueprint(
+            database_url=sqlite_url(tmp_path / "accounts.db"),
+            seed_legacy_profiles=False,
+            auto_execute=False,
+            heartbeat_enabled=False,
+        )
+    )
+    account_state = app.extensions["account_sessions"]
+    app.register_blueprint(
+        create_content_studio_blueprint(
+            account_state=account_state,
+            database_url=sqlite_url(tmp_path / "content.db"),
+            asset_root=tmp_path / "assets",
+            work_root=tmp_path / "work",
+            publication_settings_store=store,
+        )
+    )
+    studio_state = app.extensions["content_studio"]
+    client = app.test_client()
+
+    initial = client.get("/api/settings/publication-ai")
+    assert initial.status_code == 200
+    assert initial.headers["Cache-Control"] == "no-store"
+    assert set(initial.get_json()) == {
+        "enabled",
+        "base_url",
+        "model",
+        "api_key_configured",
+        "api_key_source",
+        "persistence",
+    }
+
+    update_payload = {
+        "enabled": True,
+        "base_url": "https://api.deepseek.com",
+        "model": "deepseek-v4-pro",
+        "api_key": "http-contract-secret",
+        "clear_api_key": False,
+    }
+    unauthorized = client.put("/api/settings/publication-ai", json=update_payload)
+    assert unauthorized.status_code == 403
+    assert unauthorized.get_json()["error"] == "AI_SETTINGS_UNAUTHORIZED"
+
+    with client.session_transaction() as session:
+        session["articleops_ai_settings_csrf"] = "csrf-token"
+    headers = {"X-ArticleOps-AI-Settings": "csrf-token"}
+    updated = client.put(
+        "/api/settings/publication-ai",
+        json=update_payload,
+        headers=headers,
+    )
+    assert updated.status_code == 200
+    assert updated.headers["Cache-Control"] == "no-store"
+    assert updated.get_json()["api_key_configured"] is True
+    assert "http-contract-secret" not in updated.get_data(as_text=True)
+    assert set(updated.get_json()) == {
+        "enabled",
+        "base_url",
+        "model",
+        "api_key_configured",
+        "api_key_source",
+        "persistence",
+    }
+
+    monkeypatch.setattr(store, "create_advisor", lambda: FakeConnectionAdvisor())
+    checked = client.post(
+        "/api/settings/publication-ai/test",
+        json={},
+        headers=headers,
+    )
+    assert checked.status_code == 200
+    assert checked.headers["Cache-Control"] == "no-store"
+    assert checked.get_json()["ok"] is True
+    assert checked.get_json()["model"] == "deepseek-v4-pro"
+    assert "http-contract-secret" not in checked.get_data(as_text=True)
+
+    def raise_timeout(coroutine, *, timeout):
+        coroutine.close()
+        raise TimeoutError("test timeout")
+
+    monkeypatch.setattr(studio_state, "run", raise_timeout)
+    timed_out = client.post(
+        "/api/settings/publication-ai/test",
+        json={},
+        headers=headers,
+    )
+    assert timed_out.status_code == 504
+    assert timed_out.get_json() == {
+        "error": "AI_TIMEOUT",
+        "message": "AI 服务响应超时",
+    }
 
     studio_state.close()
     account_state.close()

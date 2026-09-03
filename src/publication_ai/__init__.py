@@ -7,11 +7,13 @@ from publication_ai.contracts import (
 )
 from publication_ai.deepseek import DeepSeekPublicationAdvisor
 from publication_ai.errors import PublicationAIError
+from publication_ai.settings_store import PublicationAISettingsStore
 
 __all__ = [
     "DeepSeekPublicationAdvisor",
     "PublicationAdviceRequest",
     "PublicationAIError",
+    "PublicationAISettingsStore",
     "PublicationGuidanceResponse",
     "PublicationRecommendation",
 ]

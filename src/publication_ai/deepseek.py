@@ -94,7 +94,8 @@ class DeepSeekPublicationAdvisor:
         settings: PublicationAISettings | Mapping[str, Any] | None = None,
         *,
         http_client: httpx.AsyncClient | None = None,
-        api_key_env: str = "DEEPSEEK_API_KEY",
+        api_key: str | None = None,
+        api_key_env: str | None = "DEEPSEEK_API_KEY",
     ) -> None:
         self.settings = (
             settings
@@ -104,6 +105,7 @@ class DeepSeekPublicationAdvisor:
             else PublicationAISettings.from_config()
         )
         self._http_client = http_client
+        self._api_key = api_key
         self._api_key_env = api_key_env
 
     @property
@@ -116,6 +118,75 @@ class DeepSeekPublicationAdvisor:
             f"enabled={self.settings.enabled!r}, model={self.settings.model!r})"
         )
 
+    def _load_api_key(self) -> str:
+        if self._api_key is not None:
+            return self._api_key.strip()
+        if self._api_key_env:
+            return os.getenv(self._api_key_env, "").strip()
+        return ""
+
+    async def check_connection(self) -> dict[str, Any]:
+        """读取官方模型列表验证地址、密钥和当前模型，不发送文章正文。"""
+
+        api_key = self._load_api_key()
+        if not api_key:
+            raise PublicationAIError("AI_CONFIGURATION_ERROR")
+        headers = {"Authorization": f"Bearer {api_key}"}
+        timeout = httpx.Timeout(
+            connect=self.settings.connect_timeout_seconds,
+            read=self.settings.read_timeout_seconds,
+            write=self.settings.connect_timeout_seconds,
+            pool=self.settings.connect_timeout_seconds,
+        )
+        try:
+            if self._http_client is not None:
+                response = await self._http_client.get(
+                    f"{self.settings.base_url}/models",
+                    headers=headers,
+                    timeout=timeout,
+                )
+            else:
+                async with httpx.AsyncClient(
+                    timeout=timeout,
+                    follow_redirects=False,
+                ) as client:
+                    response = await client.get(
+                        f"{self.settings.base_url}/models",
+                        headers=headers,
+                    )
+        except httpx.TimeoutException:
+            raise PublicationAIError("AI_TIMEOUT") from None
+        except httpx.RequestError:
+            raise PublicationAIError("AI_UPSTREAM_ERROR") from None
+
+        self._raise_for_upstream_status(response)
+        try:
+            envelope = response.json()
+            models = envelope["data"]
+            model_ids = [
+                item["id"]
+                for item in models
+                if isinstance(item, dict) and isinstance(item.get("id"), str)
+            ]
+        except (KeyError, TypeError, ValueError):
+            raise PublicationAIError("AI_RESPONSE_INVALID") from None
+        if not model_ids:
+            raise PublicationAIError("AI_RESPONSE_INVALID")
+        if self.settings.model not in model_ids:
+            raise PublicationAIError("AI_MODEL_UNAVAILABLE")
+        return {"model": self.settings.model, "available_model_count": len(model_ids)}
+
+    @staticmethod
+    def _raise_for_upstream_status(response: httpx.Response) -> None:
+        if response.status_code in {401, 403}:
+            raise PublicationAIError("AI_AUTH_FAILED")
+        if response.status_code == 429:
+            raise PublicationAIError("AI_RATE_LIMITED")
+        if response.status_code == 408:
+            raise PublicationAIError("AI_TIMEOUT")
+        if response.status_code >= 500 or not 200 <= response.status_code < 300:
+            raise PublicationAIError("AI_UPSTREAM_ERROR")
+
     async def advise(
         self,
         title: str,
@@ -124,7 +195,7 @@ class DeepSeekPublicationAdvisor:
     ) -> PublicationGuidanceResponse:
         if not self.settings.enabled:
             raise PublicationAIError("AI_GUIDANCE_DISABLED")
-        api_key = os.getenv(self._api_key_env, "").strip()
+        api_key = self._load_api_key()
         if not api_key:
             raise PublicationAIError("AI_CONFIGURATION_ERROR")
         if (
@@ -189,14 +260,7 @@ class DeepSeekPublicationAdvisor:
         except httpx.RequestError:
             raise PublicationAIError("AI_UPSTREAM_ERROR") from None
 
-        if response.status_code in {401, 403}:
-            raise PublicationAIError("AI_AUTH_FAILED")
-        if response.status_code == 429:
-            raise PublicationAIError("AI_RATE_LIMITED")
-        if response.status_code == 408:
-            raise PublicationAIError("AI_TIMEOUT")
-        if response.status_code >= 500 or not 200 <= response.status_code < 300:
-            raise PublicationAIError("AI_UPSTREAM_ERROR")
+        self._raise_for_upstream_status(response)
 
         try:
             envelope = response.json()

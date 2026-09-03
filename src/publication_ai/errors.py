@@ -15,6 +15,8 @@ class PublicationAIError(RuntimeError):
         "AI_UPSTREAM_ERROR": "AI 服务暂时不可用",
         "AI_RESPONSE_INVALID": "AI 服务返回内容不符合建议契约",
         "AI_INPUT_TOO_LARGE": "文章正文超过 AI 建议允许的长度",
+        "AI_MODEL_UNAVAILABLE": "当前 AI 模型在该服务地址不可用",
+        "AI_SETTINGS_UNAUTHORIZED": "AI 设置请求校验失败，请刷新设置页面后重试",
     }
     _STATUSES = {
         "AI_GUIDANCE_DISABLED": 409,
@@ -25,6 +27,8 @@ class PublicationAIError(RuntimeError):
         "AI_UPSTREAM_ERROR": 502,
         "AI_RESPONSE_INVALID": 502,
         "AI_INPUT_TOO_LARGE": 413,
+        "AI_MODEL_UNAVAILABLE": 422,
+        "AI_SETTINGS_UNAUTHORIZED": 403,
     }
 
     def __init__(self, error_code: str, *, message: str | None = None) -> None:

@@ -4,7 +4,17 @@ from __future__ import annotations
 
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, StrictInt, StrictStr, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    SecretStr,
+    StrictBool,
+    StrictInt,
+    StrictStr,
+    field_validator,
+    model_validator,
+)
 
 PublicationPlatform = Literal[
     "xiaoheihe",
@@ -83,6 +93,34 @@ class PublicationGuidanceResponse(BaseModel):
         return value
 
 
+class PublicationAISettingsUpdate(BaseModel):
+    """网页端运行期 AI 设置；密钥用 SecretStr 防止意外出现在 repr。"""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    enabled: StrictBool
+    base_url: StrictStr = Field(min_length=1, max_length=500)
+    model: StrictStr = Field(min_length=1, max_length=128)
+    api_key: SecretStr | None = Field(default=None, min_length=1, max_length=512)
+    clear_api_key: StrictBool = False
+
+    @model_validator(mode="after")
+    def _reject_key_and_clear_together(self) -> PublicationAISettingsUpdate:
+        if self.api_key is not None and self.clear_api_key:
+            raise ValueError("api_key 与 clear_api_key 不能同时提交")
+        return self
+
+    @field_validator("api_key")
+    @classmethod
+    def _reject_whitespace_in_api_key(cls, value: SecretStr | None) -> SecretStr | None:
+        if value is None:
+            return None
+        raw = value.get_secret_value()
+        if not raw or any(character.isspace() for character in raw):
+            raise ValueError("API Key 格式无效")
+        return value
+
+
 def validate_for_platforms(
     response: PublicationGuidanceResponse,
     platforms: list[str] | tuple[str, ...],
@@ -101,6 +139,7 @@ def validate_for_platforms(
 
 __all__ = [
     "PublicationAdviceRequest",
+    "PublicationAISettingsUpdate",
     "PublicationGuidanceResponse",
     "PublicationPlatform",
     "PublicationRecommendation",

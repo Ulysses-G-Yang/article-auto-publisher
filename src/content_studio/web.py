@@ -2,6 +2,7 @@
 
 import asyncio
 import atexit
+import hmac
 import json
 import logging
 import random
@@ -11,7 +12,7 @@ from pathlib import Path
 from threading import Lock
 from typing import Any
 
-from flask import Blueprint, jsonify, request, send_file
+from flask import Blueprint, jsonify, request, send_file, session
 from pydantic import ValidationError
 
 from account_sessions.contracts import ArticleInput, DeliveryRequest
@@ -45,13 +46,17 @@ from content_studio.service import (
 )
 from publication_ai.contracts import (
     PublicationAdviceRequest,
+    PublicationAISettingsUpdate,
     PublicationGuidanceResponse,
     validate_for_platforms,
 )
 from publication_ai.deepseek import DeepSeekPublicationAdvisor
 from publication_ai.errors import PublicationAIError
+from publication_ai.settings_store import PublicationAISettingsStore
 
 LOGGER = logging.getLogger(__name__)
+AI_SETTINGS_CSRF_SESSION_KEY = "articleops_ai_settings_csrf"
+AI_SETTINGS_CSRF_HEADER = "X-ArticleOps-AI-Settings"
 
 
 def _utc_iso_now() -> str:
@@ -101,6 +106,7 @@ class ContentStudioRuntimeState:
         platform_format_capabilities: PlatformFormatCapabilities | None = None,
         operation_delay_range: tuple[float, float] = (8.0, 20.0),
         publication_advisor=None,
+        publication_settings_store: PublicationAISettingsStore | None = None,
     ) -> None:
         self.account_state = account_state
         self.database = ContentDatabase(database_url)
@@ -114,7 +120,12 @@ class ContentStudioRuntimeState:
             platform_format_capabilities=platform_format_capabilities,
         )
         self.account_state.delivery.content_resolver = self.service.resolve_delivery_payload
-        self.publication_advisor = publication_advisor or DeepSeekPublicationAdvisor()
+        self.publication_advisor = publication_advisor or (
+            None
+            if publication_settings_store is not None
+            else DeepSeekPublicationAdvisor()
+        )
+        self.publication_settings_store = publication_settings_store
         self._runtime = runtime
         self._owns_runtime = False
         self._initialized = False
@@ -142,20 +153,27 @@ class ContentStudioRuntimeState:
         if len(body) > 200_000:
             raise PublicationAIError("AI_INPUT_TOO_LARGE")
 
-        recommendations = await self.publication_advisor.advise(
+        advisor = (
+            self.publication_settings_store.create_advisor()
+            if self.publication_settings_store is not None
+            else self.publication_advisor
+        )
+        if advisor is None:
+            raise PublicationAIError("AI_CONFIGURATION_ERROR")
+        recommendations = await advisor.advise(
             title,
             body,
             payload.platforms,
         )
         if isinstance(recommendations, PublicationGuidanceResponse):
-            model = getattr(self.publication_advisor, "model", "")
+            model = getattr(advisor, "model", "")
             result = recommendations
         else:
             try:
                 result = PublicationGuidanceResponse.model_validate(recommendations)
             except (TypeError, ValueError):
                 raise PublicationAIError("AI_RESPONSE_INVALID") from None
-            model = getattr(self.publication_advisor, "model", "")
+            model = getattr(advisor, "model", "")
         try:
             result = validate_for_platforms(result, payload.platforms)
         except (TypeError, ValueError):
@@ -562,6 +580,7 @@ def create_content_studio_blueprint(
     platform_format_capabilities: PlatformFormatCapabilities | None = None,
     mcp_access_resolver: MCPInternalAccessResolver | None = None,
     publication_advisor=None,
+    publication_settings_store: PublicationAISettingsStore | None = None,
 ) -> Blueprint:
     blueprint = Blueprint("content_studio", __name__)
     state = ContentStudioRuntimeState(
@@ -573,8 +592,25 @@ def create_content_studio_blueprint(
         runtime=runtime,
         platform_format_capabilities=platform_format_capabilities,
         publication_advisor=publication_advisor,
+        publication_settings_store=publication_settings_store,
     )
     mcp_resolver = mcp_access_resolver or MCPInternalAccessResolver()
+
+    def require_ai_settings_csrf() -> None:
+        expected = session.get(AI_SETTINGS_CSRF_SESSION_KEY, "")
+        supplied = request.headers.get(AI_SETTINGS_CSRF_HEADER, "")
+        if (
+            not isinstance(expected, str)
+            or not expected
+            or not supplied
+            or not hmac.compare_digest(expected, supplied)
+        ):
+            raise PublicationAIError("AI_SETTINGS_UNAUTHORIZED")
+
+    def require_publication_settings_store() -> PublicationAISettingsStore:
+        if state.publication_settings_store is None:
+            raise PublicationAIError("AI_CONFIGURATION_ERROR")
+        return state.publication_settings_store
 
     @blueprint.record_once
     def register_state(setup_state) -> None:
@@ -610,11 +646,49 @@ def create_content_studio_blueprint(
         response.headers["Cache-Control"] = "no-store"
         return response
 
+    @blueprint.get("/api/settings/publication-ai")
+    def get_publication_ai_settings():
+        response = jsonify(require_publication_settings_store().public_view())
+        response.headers["Cache-Control"] = "no-store"
+        return response
+
+    @blueprint.put("/api/settings/publication-ai")
+    def update_publication_ai_settings():
+        require_ai_settings_csrf()
+        payload = PublicationAISettingsUpdate.model_validate(
+            request.get_json(silent=True) or {}
+        )
+        response = jsonify(require_publication_settings_store().update(payload))
+        response.headers["Cache-Control"] = "no-store"
+        return response
+
+    @blueprint.post("/api/settings/publication-ai/test")
+    def test_publication_ai_connection():
+        require_ai_settings_csrf()
+        advisor = require_publication_settings_store().create_advisor()
+        try:
+            result = state.run(advisor.check_connection(), timeout=130)
+        except TimeoutError:
+            raise PublicationAIError("AI_TIMEOUT") from None
+        response = jsonify(
+            {
+                "ok": True,
+                "model": result["model"],
+                "available_model_count": result["available_model_count"],
+                "checked_at": _utc_iso_now(),
+            }
+        )
+        response.headers["Cache-Control"] = "no-store"
+        return response
+
     @blueprint.after_request
     def no_store_publication_advice(response):
         """建议接口的成功与错误响应都不允许被代理或浏览器缓存。"""
 
-        if request.path.endswith("/publication-advice"):
+        if (
+            request.path.endswith("/publication-advice")
+            or request.path.startswith("/api/settings/publication-ai")
+        ):
             response.headers["Cache-Control"] = "no-store"
         return response
 

@@ -39,8 +39,9 @@ PublishRequest
 - `/data-center/api/dashboard`：只查询 article_mvp 独立数据库。
 - `/data-center/healthz`：只读数据 API 健康检查。
 
-内置 `/data-center/` 页面和 `/api/legacy-summary` 已下线。新模块不导入旧系统的
-`models`、`web`、`core` 或平台适配器，也不通过 bridge 读取 `app.db`。
+内置 `/data-center/` 页面已下线，旧书签会返回主站；`/api/legacy-summary`
+继续作为脱敏只读兼容接口保留。新模块不导入旧系统的 `models`、`web`、`core`
+或平台适配器，也不通过 bridge 读取 `app.db`。
 
 ## 一次性安全迁移
 

@@ -4,7 +4,7 @@ import atexit
 from threading import Lock
 from typing import Any
 
-from flask import Blueprint, Flask, current_app, jsonify
+from flask import Blueprint, Flask, current_app, jsonify, redirect
 
 from article_mvp.db.database import init_db
 from article_mvp.web.query import DashboardQueryService
@@ -74,6 +74,12 @@ def create_dashboard_blueprint(
     @blueprint.get("/healthz")
     def healthz():
         return {"status": "ok", "service": "article-mvp-dashboard"}
+
+    @blueprint.get("/")
+    def retired_dashboard_page():
+        """旧页面书签返回主站，不再把用户留在 Flask 默认 404。"""
+
+        return redirect("/", code=302)
 
     @blueprint.get("/api/dashboard")
     def api_dashboard():

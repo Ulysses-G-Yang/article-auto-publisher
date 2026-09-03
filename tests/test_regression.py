@@ -333,7 +333,8 @@ class RegressionTests(DatabaseTestCase):
             try:
                 client = app.test_client()
                 page_response = client.get("/data-center/")
-                self.assertEqual(page_response.status_code, 404)
+                self.assertEqual(page_response.status_code, 302)
+                self.assertEqual(page_response.headers["Location"], "/")
                 asset_response = client.get("/data-center/assets/dashboard.js")
                 self.assertEqual(asset_response.status_code, 404)
                 home_response = client.get("/")
@@ -348,7 +349,12 @@ class RegressionTests(DatabaseTestCase):
                 self.assertNotIn("current_workflow", dashboard_payload)
                 self.assertEqual(client.get("/data-center/healthz").status_code, 200)
 
-                self.assertEqual(client.get("/api/legacy-summary").status_code, 404)
+                legacy_response = client.get("/api/legacy-summary")
+                self.assertEqual(legacy_response.status_code, 200)
+                legacy_payload = legacy_response.get_json()
+                self.assertTrue(legacy_payload["available"])
+                self.assertIn("summary", legacy_payload)
+                self.assertIn("tasks", legacy_payload)
             finally:
                 app.extensions["article_mvp_dashboard"].close()
 

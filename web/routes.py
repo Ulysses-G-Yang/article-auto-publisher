@@ -416,6 +416,47 @@ def register_routes(app):
         qm = get_queue_manager()
         return jsonify(qm.get_queue_status())
 
+    @app.route("/api/legacy-summary")
+    def api_legacy_summary():
+        """为外部看板保留旧发布系统的脱敏只读摘要。"""
+
+        articles = db.get_all_articles()
+        tasks = db.get_tasks()
+        article_by_id = {article["id"]: article for article in articles}
+        saved_statuses = {"completed", "completed_with_warnings"}
+        task_rows = []
+        for task in tasks[:50]:
+            article = article_by_id.get(task["article_id"], {})
+            task_rows.append(
+                {
+                    "id": task["id"],
+                    "platform": task["platform"],
+                    "status": task["status"],
+                    "article_title": (
+                        article.get("title") or article.get("filename") or "—"
+                    ),
+                    "title_used": task.get("title_used"),
+                    "created_at": task.get("created_at"),
+                }
+            )
+
+        return jsonify(
+            {
+                "available": True,
+                "summary": {
+                    "total_articles": len(articles),
+                    "total_tasks": len(tasks),
+                    "xiaoheihe_tasks": sum(
+                        1 for task in tasks if task["platform"] == "xiaoheihe"
+                    ),
+                    "saved_drafts": sum(
+                        1 for task in tasks if task["status"] in saved_statuses
+                    ),
+                },
+                "tasks": task_rows,
+            }
+        )
+
     @app.route("/api/task/<int:task_id>/logs")
     def api_task_logs(task_id):
         logs = db.get_task_logs(task_id)

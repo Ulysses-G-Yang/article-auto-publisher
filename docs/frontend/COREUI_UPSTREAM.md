@@ -8,19 +8,26 @@ ArticleOps 的管理后台以 CoreUI Free Bootstrap Admin Template `v5.6.0`
 SimpleBar 固定为 `6.3.3`。
 
 - 上游 SSH：`git@github.com:coreui/coreui-free-bootstrap-admin-template.git`
+- 上游 tag：`v5.6.0`
 - 上游 commit：`da2c89f5e71a762fb46a3583f42d5f740d965b1d`
-- 完整上游源码归档：`origin/archive/coreui-full-v5.6.0`
+- 瘦身前 ArticleOps CoreUI v5.6.0 vendored 快照：`origin/archive/coreui-full-v5.6.0`
 - 最小可复现源码：`frontend/coreui-free-bootstrap-admin-template/`
 - 生产编译产物：`web/static/vendor/coreui-template/`
 - 许可证：`frontend/coreui-free-bootstrap-admin-template/LICENSE`
 - 上游忽略规则：`frontend/coreui-free-bootstrap-admin-template/.gitignore`
 
+该远程归档保留的是本次瘦身前 ArticleOps 已引入、已固定依赖的
+vendored 快照，并非官方完整且未修改的上游源码树。官方完整源码以
+上述 SSH 仓库的 `v5.6.0` tag 和 commit 为准。
+
 ## 精简范围
 
-原始上游目录包含 1,138 个文件、8,376,776 字节；其中 1,121 个文件属于
-演示页面、Pug 模板、示例图片、示例图标、图表脚本和示例样式。这些内容
+瘦身前 ArticleOps vendored 目录包含 1,138 个文件、8,376,776 字节。
+本次从活跃分支移除了 1,129 个原有文件，包括演示页面、Pug 模板、示例
+图片、示例图标、图表脚本、示例样式及不再使用的上游开发配置。这些内容
 没有被 ArticleOps 模板、业务 JavaScript、生产静态资源或发行脚本引用，
-已经从活跃分支移除，完整内容仍由上述远端归档分支保存。
+已经从活跃分支移除；瘦身前的 ArticleOps vendored 状态仍由上述远端
+归档分支保存。活跃目录另新增了一个确定性运行资产构建脚本。
 
 活跃目录只保留：
 

@@ -3,10 +3,15 @@
 This directory contains the minimal, reproducible CoreUI source used by
 ArticleOps. It is derived from CoreUI Free Bootstrap Admin Template `v5.6.0`
 at upstream commit `da2c89f5e71a762fb46a3583f42d5f740d965b1d` and keeps
-`@coreui/coreui` pinned to `5.9.0`.
+`@coreui/coreui` pinned to `5.9.0` and SimpleBar pinned to `6.3.3` in the
+ArticleOps dependency manifest and lockfile.
 
-The complete, unmodified upstream template is retained in the remote archive
-branch `origin/archive/coreui-full-v5.6.0`.
+The pre-trim ArticleOps CoreUI v5.6.0 vendored snapshot is retained in the
+remote archive branch `origin/archive/coreui-full-v5.6.0`. That snapshot is not
+a complete, unmodified copy of the official upstream repository. The
+authoritative official tag `v5.6.0` source is available from
+`git@github.com:coreui/coreui-free-bootstrap-admin-template.git` at commit
+`da2c89f5e71a762fb46a3583f42d5f740d965b1d`.
 
 The active tree intentionally excludes upstream demonstration pages, Pug
 templates, sample images, the demonstration icon catalogue, and chart/widget

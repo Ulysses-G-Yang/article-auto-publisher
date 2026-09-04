@@ -422,6 +422,68 @@
 }
 .publication-advice-head { display: flex; align-items: center; justify-content: space-between; gap: var(--ao-space-4); }
 .publication-advice-head h3 { margin: var(--ao-space-1) 0 0; color: var(--ao-text); font-size: var(--ao-text-lg); }
+.publication-advice-actions { display: flex; align-items: center; flex-wrap: wrap; justify-content: flex-end; gap: var(--ao-space-2); }
+.publication-advice-actions .btn { min-height: 44px; }
+.publication-advice-run-status {
+    display: flex;
+    min-height: 44px;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--ao-space-3);
+    margin-top: var(--ao-space-3);
+}
+.publication-advice-countdown {
+    flex: 0 0 auto;
+    padding: var(--ao-space-2) var(--ao-space-3);
+    border: 1px solid var(--ao-warning-border);
+    border-radius: var(--ao-radius-pill);
+    background: var(--ao-warning-bg);
+    color: var(--ao-warning);
+    font-size: var(--ao-text-sm);
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+}
+.publication-advice-progress {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: var(--ao-space-2);
+    margin: var(--ao-space-3) 0 0;
+    padding: 0;
+    list-style: none;
+}
+.publication-advice-progress li {
+    display: flex;
+    min-width: 0;
+    min-height: 68px;
+    align-items: center;
+    gap: var(--ao-space-3);
+    padding: var(--ao-space-3);
+    border: 1px solid var(--ao-border);
+    border-radius: var(--ao-radius-md);
+    background: var(--ao-surface);
+    color: var(--ao-text-secondary);
+}
+.publication-advice-stage-marker {
+    display: grid;
+    width: 28px;
+    height: 28px;
+    flex: 0 0 28px;
+    place-items: center;
+    border: 1px solid var(--ao-border-strong);
+    border-radius: 50%;
+    color: var(--ao-text-secondary);
+    font-size: var(--ao-text-xs);
+    font-weight: 700;
+}
+.publication-advice-stage-copy { display: grid; min-width: 0; gap: var(--ao-space-1); }
+.publication-advice-stage-copy strong { color: var(--ao-text); font-size: var(--ao-text-sm); line-height: 1.4; }
+.publication-advice-stage-copy span { color: var(--ao-text-tertiary); font-size: var(--ao-text-xs); line-height: 1.4; }
+.publication-advice-progress li.is-active { border-color: var(--ao-info-border); background: var(--ao-primary-50); }
+.publication-advice-progress li.is-active .publication-advice-stage-marker { border-color: var(--ao-info); background: var(--ao-info); color: var(--ao-surface); }
+.publication-advice-progress li.is-complete { border-color: var(--ao-success-border); background: var(--ao-success-bg); }
+.publication-advice-progress li.is-complete .publication-advice-stage-marker { border-color: var(--ao-success); background: var(--ao-success); color: var(--ao-surface); }
+.publication-advice-progress li.is-failed { border-color: var(--ao-danger-border); background: var(--ao-danger-bg); }
+.publication-advice-progress li.is-failed .publication-advice-stage-marker { border-color: var(--ao-danger); background: var(--ao-danger); color: var(--ao-surface); }
 .publication-advice-results { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--ao-space-3); margin-top: var(--ao-space-4); }
 .publication-advice-card { padding: var(--ao-space-4); border: 1px solid var(--ao-border); border-radius: var(--ao-radius-md); background: var(--ao-surface); }
 .publication-advice-card h4 { margin: 0 0 var(--ao-space-3); color: var(--ao-text); font-size: var(--ao-text-base); }
@@ -432,7 +494,16 @@
 .publication-advice-card .advice-reason { margin: var(--ao-space-3) 0 0; color: var(--ao-text-secondary); font-size: var(--ao-text-sm); }
 .publication-advice-footnote { margin: var(--ao-space-4) 0 0; color: var(--ao-text-secondary); font-size: var(--ao-text-xs); }
 
+@media (max-width: 1023.98px) {
+    .publication-advice-progress { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
 @media (max-width: 767.98px) {
     .publication-advice-head { align-items: stretch; flex-direction: column; }
+    .publication-advice-actions { justify-content: stretch; }
+    .publication-advice-actions .btn { flex: 1 1 auto; }
+    .publication-advice-run-status { align-items: stretch; flex-direction: column; }
+    .publication-advice-countdown { align-self: flex-start; }
+    .publication-advice-progress { grid-template-columns: minmax(0, 1fr); }
     .publication-advice-results { grid-template-columns: minmax(0, 1fr); }
 }

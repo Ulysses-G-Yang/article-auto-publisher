@@ -50,6 +50,13 @@
         CONTENT_FORMAT_UNSUPPORTED: '当前内容格式超出平台已验证能力',
         PLATFORM_FORMAT_CAPABILITIES_UNDECLARED: '平台格式能力尚未声明',
     };
+    const PUBLICATION_ADVICE_TIMEOUT_MS = 90000;
+    const publicationAdviceStages = [
+        { id: 'saving', activeLabel: '正在保存当前文章' },
+        { id: 'rules', activeLabel: '正在读取平台规则' },
+        { id: 'request', activeLabel: '正在请求 AI' },
+        { id: 'validation', activeLabel: '正在校验返回结果' },
+    ];
     const state = {
         platforms: [],
         drafts: [],
@@ -96,6 +103,13 @@
         coverAutoNoteVisible: false,
         publicationAdviceLoading: false,
         publicationAdvice: null,
+        publicationAdviceController: null,
+        publicationAdviceAbortReason: null,
+        publicationAdviceStage: null,
+        publicationAdviceRunId: 0,
+        publicationAdviceDeadline: 0,
+        publicationAdviceTimeoutTimer: null,
+        publicationAdviceCountdownTimer: null,
     };
 
     function endpoint(template, key, value) {
@@ -2566,6 +2580,225 @@
         list.appendChild(row);
     }
 
+    function resetPublicationAdviceProgress() {
+        state.publicationAdviceStage = null;
+        publicationAdviceStages.forEach(stage => {
+            const item = document.querySelector(`[data-advice-stage="${stage.id}"]`);
+            if (!item) return;
+            item.classList.remove('is-active', 'is-complete', 'is-failed');
+            item.removeAttribute('aria-current');
+            const stageState = item.querySelector('[data-stage-state]');
+            if (stageState) stageState.textContent = '等待开始';
+        });
+    }
+
+    function setPublicationAdviceStage(stageId) {
+        const activeIndex = publicationAdviceStages.findIndex(stage => stage.id === stageId);
+        if (activeIndex < 0) return;
+        state.publicationAdviceStage = stageId;
+        publicationAdviceStages.forEach((stage, index) => {
+            const item = document.querySelector(`[data-advice-stage="${stage.id}"]`);
+            if (!item) return;
+            item.classList.remove('is-active', 'is-complete', 'is-failed');
+            item.removeAttribute('aria-current');
+            const stageState = item.querySelector('[data-stage-state]');
+            if (index < activeIndex) {
+                item.classList.add('is-complete');
+                if (stageState) stageState.textContent = '已完成';
+            } else if (index === activeIndex) {
+                item.classList.add('is-active');
+                item.setAttribute('aria-current', 'step');
+                if (stageState) stageState.textContent = stage.activeLabel;
+            } else if (stageState) {
+                stageState.textContent = '等待开始';
+            }
+        });
+        byId('publication-advice-status').textContent = publicationAdviceStages[activeIndex].activeLabel;
+    }
+
+    function completePublicationAdviceProgress() {
+        publicationAdviceStages.forEach(stage => {
+            const item = document.querySelector(`[data-advice-stage="${stage.id}"]`);
+            if (!item) return;
+            item.classList.remove('is-active', 'is-failed');
+            item.classList.add('is-complete');
+            item.removeAttribute('aria-current');
+            const stageState = item.querySelector('[data-stage-state]');
+            if (stageState) stageState.textContent = '已完成';
+        });
+        state.publicationAdviceStage = null;
+    }
+
+    function failPublicationAdviceStage(outcome) {
+        if (!state.publicationAdviceStage) return;
+        const item = document.querySelector(
+            `[data-advice-stage="${state.publicationAdviceStage}"]`,
+        );
+        if (!item) return;
+        item.classList.remove('is-active');
+        item.classList.add('is-failed');
+        item.removeAttribute('aria-current');
+        const stageState = item.querySelector('[data-stage-state]');
+        if (stageState) stageState.textContent = outcome;
+    }
+
+    function isCurrentPublicationAdviceRun(runId, controller) {
+        return state.publicationAdviceRunId === runId
+            && state.publicationAdviceController === controller;
+    }
+
+    function publicationAdviceAbortError() {
+        const error = new Error('平台建议生成已中止');
+        error.name = 'AbortError';
+        return error;
+    }
+
+    function waitForPublicationAdviceStep(promise, signal) {
+        if (signal.aborted) return Promise.reject(publicationAdviceAbortError());
+        let onAbort;
+        const aborted = new Promise((_, reject) => {
+            onAbort = () => reject(publicationAdviceAbortError());
+            signal.addEventListener('abort', onAbort, { once: true });
+        });
+        return Promise.race([Promise.resolve(promise), aborted])
+            .finally(() => signal.removeEventListener('abort', onAbort));
+    }
+
+    function updatePublicationAdviceCountdown() {
+        const remaining = Math.max(
+            0,
+            Math.ceil((state.publicationAdviceDeadline - Date.now()) / 1000),
+        );
+        byId('publication-advice-seconds').textContent = String(remaining);
+    }
+
+    function stopPublicationAdviceTimers() {
+        window.clearTimeout(state.publicationAdviceTimeoutTimer);
+        window.clearInterval(state.publicationAdviceCountdownTimer);
+        state.publicationAdviceTimeoutTimer = null;
+        state.publicationAdviceCountdownTimer = null;
+        state.publicationAdviceDeadline = 0;
+    }
+
+    function startPublicationAdviceTimers(runId, controller) {
+        state.publicationAdviceDeadline = Date.now() + PUBLICATION_ADVICE_TIMEOUT_MS;
+        byId('publication-advice-countdown').classList.remove('d-none');
+        updatePublicationAdviceCountdown();
+        state.publicationAdviceCountdownTimer = window.setInterval(
+            updatePublicationAdviceCountdown,
+            1000,
+        );
+        state.publicationAdviceTimeoutTimer = window.setTimeout(() => {
+            if (!isCurrentPublicationAdviceRun(runId, controller)) return;
+            state.publicationAdviceAbortReason = 'timeout';
+            controller.abort();
+        }, PUBLICATION_ADVICE_TIMEOUT_MS);
+    }
+
+    function cancelPublicationAdvice() {
+        if (!state.publicationAdviceLoading || !state.publicationAdviceController) return;
+        state.publicationAdviceAbortReason = 'cancelled';
+        byId('publication-advice-status').textContent = '正在取消生成平台建议…';
+        byId('cancel-publication-advice').disabled = true;
+        state.publicationAdviceController.abort();
+    }
+
+    function finishPublicationAdviceRun(runId, controller) {
+        if (!isCurrentPublicationAdviceRun(runId, controller)) return;
+        stopPublicationAdviceTimers();
+        state.publicationAdviceLoading = false;
+        state.publicationAdviceController = null;
+        state.publicationAdviceAbortReason = null;
+        const panel = byId('publication-advice-panel');
+        panel.setAttribute('aria-busy', 'false');
+        byId('publication-advice-countdown').classList.add('d-none');
+        const button = byId('generate-publication-advice');
+        button.disabled = false;
+        byId('generate-publication-advice-label').textContent = '生成平台建议';
+        const cancelButton = byId('cancel-publication-advice');
+        cancelButton.disabled = false;
+        cancelButton.classList.add('d-none');
+    }
+
+    function publicationAdviceFailureMessage(error, abortReason) {
+        if (abortReason === 'timeout') {
+            return '生成平台建议已超时（90 秒）。AI 服务未在规定时间内返回，请检查服务地址、模型状态或网络后重试。';
+        }
+        if (abortReason === 'cancelled') {
+            return '已取消生成平台建议，未执行任何平台操作。';
+        }
+        if (error.code === 'DRAFT_SAVE_FAILED') {
+            return '当前文章未能同步保存，本次未向 AI 发送内容。请先解决草稿同步问题后重试。';
+        }
+        if (error.code === 'PLATFORM_RULES_UNAVAILABLE') {
+            return '无法读取已选平台的规则，本次未向 AI 发送内容。请刷新页面后重试。';
+        }
+        if (error.code === 'AI_RESPONSE_INVALID') {
+            return 'AI 返回结果格式无效，系统没有采用本次建议。请重试或更换模型。';
+        }
+        if (error.code === 'ADVICE_STALE') return error.message;
+        if (error.code === 'AI_NETWORK_ERROR') {
+            return '无法连接 AI 服务，请检查服务地址、网络或中转站状态后重试。';
+        }
+        const configureHint = ['AI_GUIDANCE_DISABLED', 'AI_CONFIGURATION_ERROR']
+            .includes(error.payload?.error) ? ' 请先打开“AI 服务设置”完成配置。' : '';
+        return `${error.message || '生成平台建议失败，请稍后重试。'}${configureHint}`;
+    }
+
+    function validatePublicationAdvice(advice, adviceDraftId, adviceRevision, platforms) {
+        const recommendations = advice?.recommendations;
+        const validStringList = value => Array.isArray(value)
+            && value.every(item => typeof item === 'string');
+        const validRecommendation = item => item
+            && typeof item === 'object'
+            && typeof item.platform === 'string'
+            && (item.suggested_community === null
+                || item.suggested_community === undefined
+                || typeof item.suggested_community === 'string')
+            && validStringList(item.suggested_topics)
+            && validStringList(item.topic_queries)
+            && validStringList(item.keywords)
+            && (item.reason === null || item.reason === undefined || typeof item.reason === 'string');
+        const recommendationPlatforms = Array.isArray(recommendations)
+            ? recommendations.map(item => item?.platform) : [];
+        if (
+            !advice
+            || typeof advice !== 'object'
+            || !Array.isArray(recommendations)
+            || recommendations.length !== platforms.length
+            || !recommendations.every(validRecommendation)
+            || new Set(recommendationPlatforms).size !== recommendationPlatforms.length
+            || platforms.some(platform => !recommendationPlatforms.includes(platform))
+        ) {
+            const error = new Error('AI 返回结果缺少平台建议列表');
+            error.code = 'AI_RESPONSE_INVALID';
+            throw error;
+        }
+        const enabledNow = enabledPlatformIds();
+        if (
+            state.dirty
+            || state.draft?.draft_id !== adviceDraftId
+            || state.draft?.revision !== adviceRevision
+            || advice.draft_id !== adviceDraftId
+            || advice.revision !== adviceRevision
+            || enabledNow.length !== platforms.length
+            || enabledNow.some((platform, index) => platform !== platforms[index])
+        ) {
+            const error = new Error('文章或平台选择已在分析期间修改，本次旧建议已丢弃，请重新生成。');
+            error.code = 'ADVICE_STALE';
+            throw error;
+        }
+    }
+
+    function scrollPublicationAdviceIntoView() {
+        const results = byId('publication-advice-results');
+        const reducedMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)')?.matches;
+        (results.childElementCount ? results : byId('publication-advice-panel')).scrollIntoView({
+            behavior: reducedMotion ? 'auto' : 'smooth',
+            block: 'start',
+        });
+    }
+
     function renderPublicationAdvice(payload) {
         state.publicationAdvice = payload;
         const panel = byId('publication-advice-panel');
@@ -2601,62 +2834,97 @@
         const button = byId('generate-publication-advice');
         panel.classList.remove('d-none');
         setMessage('publication-advice-error', '');
+        resetPublicationAdviceProgress();
         if (!platforms.length) {
+            byId('publication-advice-status').textContent = '无法开始：尚未选择需要生成建议的平台';
             setMessage('publication-advice-error', '请先启用至少一个需要分析的平台。');
             document.querySelector('.target-platform-row.is-deliverable input, .target-platform-row.is-deliverable button')?.focus();
             return;
         }
         if (!state.draft?.title?.trim()) {
+            byId('publication-advice-status').textContent = '无法开始：当前文章没有标题';
             setMessage('publication-advice-error', '请先填写文章标题。');
             byId('draft-title').focus();
             return;
         }
-        if (!(await saveDraftNow()) || !state.draft?.draft_id) {
-            setMessage('publication-advice-error', '草稿尚未同步成功，请先保存后重试。');
-            return;
-        }
 
+        const runId = ++state.publicationAdviceRunId;
+        const controller = new AbortController();
         state.publicationAdviceLoading = true;
+        state.publicationAdviceController = controller;
+        state.publicationAdviceAbortReason = null;
         panel.setAttribute('aria-busy', 'true');
         button.disabled = true;
-        button.dataset.defaultLabel ||= button.textContent.trim();
-        button.textContent = 'AI 正在分析…';
-        byId('publication-advice-status').textContent = '正在发送当前文章全文并生成平台建议…';
+        byId('generate-publication-advice-label').textContent = '生成中…';
+        const cancelButton = byId('cancel-publication-advice');
+        cancelButton.disabled = false;
+        cancelButton.classList.remove('d-none');
         byId('publication-advice-results').replaceChildren();
-        const adviceDraftId = state.draft.draft_id;
-        const adviceRevision = state.draft.revision;
+        startPublicationAdviceTimers(runId, controller);
         try {
-            const response = await fetch(endpoint(
-                root.dataset.publicationAdviceUrlTemplate,
-                'draft_id',
-                adviceDraftId,
-            ), {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
-                cache: 'no-store',
-                body: JSON.stringify({ revision: adviceRevision, platforms }),
-            });
-            const advice = await jsonResponse(response);
-            if (
-                state.dirty
-                || state.draft?.draft_id !== adviceDraftId
-                || state.draft?.revision !== adviceRevision
-                || advice.draft_id !== adviceDraftId
-                || advice.revision !== adviceRevision
-            ) {
-                throw new Error('文章已在分析期间修改，本次旧建议已丢弃，请重新生成。');
+            setPublicationAdviceStage('saving');
+            const saved = await waitForPublicationAdviceStep(saveDraftNow(), controller.signal);
+            if (!isCurrentPublicationAdviceRun(runId, controller)) return;
+            if (!saved || !state.draft?.draft_id) {
+                const error = new Error('草稿同步失败');
+                error.code = 'DRAFT_SAVE_FAILED';
+                throw error;
             }
+            const adviceDraftId = state.draft.draft_id;
+            const adviceRevision = state.draft.revision;
+
+            setPublicationAdviceStage('rules');
+            const knownPlatforms = new Set(deliverablePlatforms().map(platform => platform.id));
+            if (platforms.some(platform => !knownPlatforms.has(platform))) {
+                const error = new Error('平台规则不可用');
+                error.code = 'PLATFORM_RULES_UNAVAILABLE';
+                throw error;
+            }
+            if (controller.signal.aborted) throw publicationAdviceAbortError();
+
+            setPublicationAdviceStage('request');
+            let response;
+            try {
+                response = await waitForPublicationAdviceStep(fetch(endpoint(
+                    root.dataset.publicationAdviceUrlTemplate,
+                    'draft_id',
+                    adviceDraftId,
+                ), {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+                    cache: 'no-store',
+                    body: JSON.stringify({ revision: adviceRevision, platforms }),
+                    signal: controller.signal,
+                }), controller.signal);
+            } catch (error) {
+                if (error.name === 'TypeError') error.code = 'AI_NETWORK_ERROR';
+                throw error;
+            }
+            if (!isCurrentPublicationAdviceRun(runId, controller)) return;
+
+            setPublicationAdviceStage('validation');
+            const advice = await waitForPublicationAdviceStep(jsonResponse(response), controller.signal);
+            if (!isCurrentPublicationAdviceRun(runId, controller)) return;
+            validatePublicationAdvice(advice, adviceDraftId, adviceRevision, platforms);
             renderPublicationAdvice(advice);
+            completePublicationAdviceProgress();
+            scrollPublicationAdviceIntoView();
         } catch (error) {
-            const configureHint = ['AI_GUIDANCE_DISABLED', 'AI_CONFIGURATION_ERROR']
-                .includes(error.payload?.error) ? ' 请先打开“AI 服务设置”完成配置。' : '';
-            byId('publication-advice-status').textContent = '本次未生成建议';
-            setMessage('publication-advice-error', `${error.message || 'AI 分析失败'}${configureHint}`);
+            if (!isCurrentPublicationAdviceRun(runId, controller)) return;
+            const abortReason = state.publicationAdviceAbortReason;
+            const message = publicationAdviceFailureMessage(error, abortReason);
+            failPublicationAdviceStage(
+                abortReason === 'timeout' ? '已超时' : abortReason === 'cancelled' ? '已取消' : '未完成',
+            );
+            byId('publication-advice-status').textContent = abortReason === 'timeout'
+                ? '生成平台建议已超时'
+                : abortReason === 'cancelled' ? '生成平台建议已取消' : '本次未生成平台建议';
+            setMessage('publication-advice-error', abortReason === 'cancelled' ? '' : message);
+            if (abortReason === 'cancelled') {
+                byId('publication-advice-status').textContent = message;
+            }
         } finally {
-            state.publicationAdviceLoading = false;
-            panel.setAttribute('aria-busy', 'false');
-            button.disabled = false;
-            button.textContent = button.dataset.defaultLabel;
+            finishPublicationAdviceRun(runId, controller);
         }
     }
 
@@ -2771,6 +3039,7 @@
         byId('toggle-all-platforms').addEventListener('click', toggleAllPlatforms);
         byId('toggle-all-accounts').addEventListener('click', toggleAllAccounts);
         byId('generate-publication-advice').addEventListener('click', generatePublicationAdvice);
+        byId('cancel-publication-advice').addEventListener('click', cancelPublicationAdvice);
         byId('create-plan').addEventListener('click', createPlan);
         byId('save-draft-now').addEventListener('click', () => saveDraftNow());
         byId('execute-plan').addEventListener('click', () => {

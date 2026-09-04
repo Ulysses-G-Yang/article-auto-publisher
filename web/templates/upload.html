@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 {% block title %}创作与投递 - ArticleOps{% endblock %}
 {% block header_title %}创作与投递{% endblock %}
-{% block extra_head %}<link rel="stylesheet" href="{{ url_for('static', filename='css/content-studio.css', v='20260903-shell-v3') }}">{% endblock %}
+{% block extra_head %}<link rel="stylesheet" href="{{ url_for('static', filename='css/content-studio.css', v='20260904-advice-progress-v1') }}">{% endblock %}
 
 {% block content %}
 <div id="content-studio"
@@ -103,7 +103,7 @@
                                 <button id="toggle-all-platforms" class="btn btn-outline-primary" type="button" disabled>全选所有平台</button>
                                 <button id="toggle-all-accounts" class="btn btn-outline-primary" type="button" disabled aria-describedby="account-selection-hint">全选所有账户</button>
                                 <button id="generate-publication-advice" class="btn btn-outline-secondary" type="button" disabled title="正在读取平台目录">
-                                    <i class="cil-lightbulb me-1" aria-hidden="true"></i>AI 分析发布建议
+                                    <i class="cil-lightbulb me-1" aria-hidden="true"></i><span id="generate-publication-advice-label">生成平台建议</span>
                                 </button>
                             </div>
                             <div class="target-selection-status" aria-live="polite">
@@ -115,9 +115,37 @@
                         <section id="publication-advice-panel" class="publication-advice-panel d-none" aria-labelledby="publication-advice-heading">
                             <div class="publication-advice-head">
                                 <div><span class="section-kicker">只读建议</span><h3 id="publication-advice-heading">各平台发布建议</h3></div>
-                                <a class="btn btn-sm btn-outline-secondary" href="/settings/ai"><i class="cil-settings me-1" aria-hidden="true"></i>AI 设置</a>
+                                <div class="publication-advice-actions">
+                                    <button id="cancel-publication-advice" class="btn btn-outline-danger d-none" type="button">
+                                        <i class="cil-x me-1" aria-hidden="true"></i>取消分析
+                                    </button>
+                                    <a class="btn btn-outline-secondary" href="/settings/ai"><i class="cil-settings me-1" aria-hidden="true"></i>AI 设置</a>
+                                </div>
                             </div>
-                            <div id="publication-advice-status" class="small text-body-secondary" role="status" aria-live="polite"></div>
+                            <div class="publication-advice-run-status">
+                                <div id="publication-advice-status" class="small text-body-secondary" role="status" aria-live="polite" aria-atomic="true">尚未生成平台建议</div>
+                                <div id="publication-advice-countdown" class="publication-advice-countdown d-none" role="timer" aria-live="off" aria-label="平台建议生成剩余时间">
+                                    剩余 <strong id="publication-advice-seconds">90</strong> 秒
+                                </div>
+                            </div>
+                            <ol id="publication-advice-progress" class="publication-advice-progress" aria-label="平台建议生成进度">
+                                <li data-advice-stage="saving">
+                                    <span class="publication-advice-stage-marker" aria-hidden="true">1</span>
+                                    <span class="publication-advice-stage-copy"><strong>保存当前文章</strong><span data-stage-state>等待开始</span></span>
+                                </li>
+                                <li data-advice-stage="rules">
+                                    <span class="publication-advice-stage-marker" aria-hidden="true">2</span>
+                                    <span class="publication-advice-stage-copy"><strong>读取平台规则</strong><span data-stage-state>等待开始</span></span>
+                                </li>
+                                <li data-advice-stage="request">
+                                    <span class="publication-advice-stage-marker" aria-hidden="true">3</span>
+                                    <span class="publication-advice-stage-copy"><strong>请求 AI</strong><span data-stage-state>等待开始</span></span>
+                                </li>
+                                <li data-advice-stage="validation">
+                                    <span class="publication-advice-stage-marker" aria-hidden="true">4</span>
+                                    <span class="publication-advice-stage-copy"><strong>校验返回结果</strong><span data-stage-state>等待开始</span></span>
+                                </li>
+                            </ol>
                             <div id="publication-advice-error" class="alert alert-danger d-none mt-3 mb-0" role="alert"></div>
                             <div id="publication-advice-results" class="publication-advice-results"></div>
                             <p class="publication-advice-footnote">建议仅供核对，不会自动选择话题、修改草稿或执行平台操作。</p>
@@ -165,5 +193,5 @@
 </div>
 {% endblock %}
 
-{% block extra_scripts %}<script src="{{ url_for('static', filename='js/content-studio.js', v='20260903-shell-v3') }}"></script>{% endblock %}
+{% block extra_scripts %}<script src="{{ url_for('static', filename='js/content-studio.js', v='20260904-advice-progress-v1') }}"></script>{% endblock %}
 

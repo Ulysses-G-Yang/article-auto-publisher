@@ -92,8 +92,8 @@ def test_frontend_assets_use_current_ui_cache_versions() -> None:
     assert "filename='css/style.css', v='20260903-shell-v3'" in base
     assert "filename='js/app.js', v='20260902-ui-v2'" in base
     assert "filename='css/account-sessions.css', v='20260903-shell-v3'" in accounts
-    assert "filename='css/content-studio.css', v='20260903-shell-v3'" in upload
-    assert "filename='js/content-studio.js', v='20260903-shell-v3'" in upload
+    assert "filename='css/content-studio.css', v='20260904-advice-progress-v1'" in upload
+    assert "filename='js/content-studio.js', v='20260904-advice-progress-v1'" in upload
     assert "filename='css/ai-settings.css', v='20260903-shell-v3'" in ai_settings
 
 

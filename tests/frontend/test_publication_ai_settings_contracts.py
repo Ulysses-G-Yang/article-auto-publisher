@@ -90,14 +90,42 @@ def test_studio_requests_readonly_advice_for_current_revision_and_platforms() ->
     script = read("web/static/js/content-studio.js")
 
     assert 'id="generate-publication-advice"' in template
+    assert "生成平台建议" in template
     assert 'disabled title="正在读取平台目录"' in template
     assert 'data-publication-advice-url-template=' in template
     assert 'id="publication-advice-results"' in template
+    assert 'id="cancel-publication-advice"' in template
+    assert "取消分析" in template
+    assert 'id="publication-advice-countdown"' in template
+    assert 'id="publication-advice-seconds">90</strong> 秒' in template
+    assert 'id="publication-advice-progress"' in template
+    for stage, label in (
+        ("saving", "保存当前文章"),
+        ("rules", "读取平台规则"),
+        ("request", "请求 AI"),
+        ("validation", "校验返回结果"),
+    ):
+        assert f'data-advice-stage="{stage}"' in template
+        assert label in template
     assert "async function generatePublicationAdvice()" in script
     assert "const platforms = enabledPlatformIds();" in script
     assert "revision: adviceRevision, platforms" in script
     assert "await saveDraftNow()" in script
     assert "panel.setAttribute('aria-busy', 'true')" in script
+    assert "new AbortController()" in script
+    assert "signal:" in script
+    assert "90" in script
+    assert "cancelPublicationAdvice" in script
+    assert "生成平台建议已超时" in script
+    assert "已取消生成平台建议" in script
+    for status in (
+        "正在保存当前文章",
+        "正在读取平台规则",
+        "正在请求 AI",
+        "正在校验返回结果",
+    ):
+        assert status in script
+    assert "scrollIntoView" in script
     assert "renderPublicationAdvice(advice);" in script
     assert "state.dirty" in script
     assert "advice.draft_id !== adviceDraftId" in script

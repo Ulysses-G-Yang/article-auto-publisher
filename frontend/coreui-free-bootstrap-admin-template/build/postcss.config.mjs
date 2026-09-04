@@ -1,12 +1,6 @@
-const mapConfig = {
-  inline: false,
-  annotation: true,
-  sourcesContent: true
-}
-
 export default () => {
   return {
-    map: mapConfig,
+    map: false,
     plugins: {
       autoprefixer: {
         cascade: false

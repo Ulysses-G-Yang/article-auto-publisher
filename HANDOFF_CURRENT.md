@@ -92,13 +92,24 @@ SHA 核验均已通过；删除前后 17 个归档标签 peeled SHA 均匹配，
   `apply_cover` 路径最多调用一次，展示检查失败只附加 UI 提示，不把已完成排版改为失败。
 - `human/simulator.py` 在原生视口下从页面实时 `innerWidth`/`innerHeight` 取鼠标范围，并对窄窗口
   做非负边界夹取；动作次数与节奏不变。
-- 新开浏览器会采用本批修复；当前已运行的旧 helper/窗口未热更新，未重启、未接管，不能把源码修复
-  写成现场旧窗口已生效。当前现场仍停在排版结果页，未点击「下一步」、未暂存离开、未发布。
+- 上一批现场记录：新开浏览器会采用本批修复；当时已运行的旧 helper/窗口未热更新，未重启、未接管，
+  不能把源码修复写成旧窗口已生效；当时现场停在排版结果页，未点击「下一步」、未暂存离开、未发布。
 - 本批离线验证：固定 py312 `compileall` 通过；定向 `probe/media/layout/viewport` 共 80 passed；
   全量 `pytest -q -p no:cacheprovider` 为 1259 passed、7 skipped、1 个既有 aiosqlite 线程告警。
   `git diff --check` 通过；全仓 Ruff 仍为既有 143 项，新增 XHS 与测试代码无 Ruff 项，Base 与
   `human/simulator.py` 仅报告本批前已存在的基线项。未用当前真实 helper 做 native-resize 烟测；
   未启动或重启生产服务或真实账号浏览器，仅隔离本地 HTML 测试启动过临时无账号 Chrome。
+
+### 2026-09-07 用户授权后浏览器切换（最新只读现场）
+
+- 用户已同意关闭旧窗重开；旧 helper 及其 Chrome 子树已退出、租约已释放，其他 Chrome 未动。新 helper/session
+  已使用 `f4098b5c98c7b407e86239826f82fa827ce5ab63` 源码、canonical 账号/Profile；身份昵称匹配通过。本文不记录
+  任何昵称、账号 UUID、平台 UID 或路径敏感值。
+- 新页面为原生视口：`page.viewport_size=None`，页面 `innerWidth/innerHeight=1520/853`，窗口外框为
+  `1382/918`。当前在长文 landing 页；“新创作”和“草稿箱”入口均在屏内。尚未进入编辑器，因此“下一步”不是
+  当前页面控件，不能写成已验收下一步现场可见。
+- 未点击新创作、未上传、未保存、未发布；云端草稿/仅自己可见能力仍未验证；旧文章是否持久化尚未回读，不能写成
+  已恢复。
 
 ### 2026-09-07 小红书完整 Word 发布前检查（本轮新增，仅记录真实结果）
 

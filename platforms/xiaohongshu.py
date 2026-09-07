@@ -10,6 +10,12 @@ IndexedDB 的新上下文中看不到这些卡片；最终页也只有“发布�
 “保存草稿”入口。因此 DRAFT 投递当前明确关闭，绝不能把本地卡片冒充云端
 草稿成功；公开发布同样始终关闭。
 
+经用户明确确认的“仅自己可见”后半程另有专用入口；它不经过
+``BasePlatform.publish``、不调用 ``save_draft``，也不改变公开 ``publish_now``
+的拒绝逻辑。该入口必须绑定调用方提供的最终笔记标题、身份快照和当前页面，
+并在管理页拿到同一新实体的只读证据后才给出结果；证据不足一律
+``RESULT_UNKNOWN``，且不重试提交。
+
 真实登录页（https://creator.xiaohongshu.com/login）：
 - 「APP扫一扫登录」为默认 Tab，二维码为约 160x160 的 base64 PNG。
 - 登录成功信号：.xiaohongshu.com 出现 web_session cookie。
@@ -25,6 +31,7 @@ import hashlib
 import re
 from collections.abc import Mapping, Sequence
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from loguru import logger
 
@@ -47,6 +54,8 @@ from platforms.content_validation import (
 
 CREATOR_HOME = "https://creator.xiaohongshu.com/"
 CREATOR_MAIN = "https://creator.xiaohongshu.com/new/home"
+CREATOR_PUBLISH = "https://creator.xiaohongshu.com/publish/publish"
+CREATOR_NOTE_MANAGER = "https://creator.xiaohongshu.com/new/note-manager"
 LOGIN_URL = "https://creator.xiaohongshu.com/login"
 IDENTITY_NAME_KEYS = {"nickname", "user_name", "screen_name", "name"}
 IDENTITY_UID_KEYS = {"user_id", "sec_uid", "uid"}
@@ -69,6 +78,14 @@ VERIFIED_BODY_IMAGE_ACCEPT = frozenset(
         "image/png",
         "image/webp",
     }
+)
+PRIVATE_VISIBILITY_LABEL = "仅自己可见"
+PRIVATE_VISIBILITY_OPTIONS = (
+    "公开可见",
+    PRIVATE_VISIBILITY_LABEL,
+    "仅互关好友可见",
+    "只给谁看",
+    "不给谁看",
 )
 
 
@@ -140,6 +157,21 @@ class XiaohongshuPlatform(BasePlatform):
         self._preflight_matching_draft_count = 0
         self._resume_existing_title = " ".join(str(resume_existing_title or "").split())
         self._editing_existing_draft = False
+        # 私密发布是显式、独立于 Base.publish 的后半程；这些状态只在当前
+        # 适配器实例内建立，不能通过重新 prepare 清除一次性提交门。
+        self._private_page_binding = None
+        self._private_title_binding = ""
+        self._private_identity_binding: tuple[str, str] | None = None
+        self._private_content_binding: list[dict] | None = None
+        self._private_title_locator = None
+        self._private_visibility_prepared = False
+        self._private_next_step_attempted = False
+        self._private_prepare_result: dict | None = None
+        self._private_baseline_entity_ids: tuple[str, ...] | None = None
+        # prepare 与 publish 共用一把实例锁，确保并发调用不会在检查后重复点击。
+        self._private_flow_lock = asyncio.Lock()
+        self._private_publish_attempted = False
+        self._private_publish_result: dict | None = None
 
     async def initialize(self):
         await super().initialize()
@@ -1214,6 +1246,946 @@ class XiaohongshuPlatform(BasePlatform):
             result["success"] = True
             result["next_step_ui"] = "ready"
         return result
+
+    @staticmethod
+    def _private_unknown(detail_code: str, error: str, **extra) -> dict:
+        """私密后半程的统一未知结果；未知状态禁止再次提交。"""
+
+        result = {
+            "success": False,
+            "status": "RESULT_UNKNOWN",
+            "error_code": "PUBLISH_RESULT_UNKNOWN",
+            "detail_code": detail_code,
+            "error": error,
+            "retry_allowed": False,
+        }
+        result.update(extra)
+        return result
+
+    @staticmethod
+    def _private_blocked(error_code: str, error: str, **extra) -> dict:
+        """提交前置条件不满足时的 fail-closed 结果。"""
+
+        result = {
+            "success": False,
+            "status": "blocked",
+            "error_code": error_code,
+            "error": error,
+            "retry_allowed": False,
+        }
+        result.update(extra)
+        return result
+
+    @staticmethod
+    def _private_identity_key(snapshot: Mapping[str, object]) -> tuple[str, str] | None:
+        """只提取已经确认的身份字段，不记录或返回额外平台数据。"""
+
+        if not isinstance(snapshot, Mapping) or snapshot.get("ok") is not True:
+            return None
+        user_id = str(snapshot.get("user_id") or "").strip()
+        display_name = str(snapshot.get("display_name") or "").strip()
+        if not user_id or not display_name:
+            return None
+        return user_id, display_name
+
+    @staticmethod
+    def _private_entity_ids(values: object) -> tuple[str, ...] | None:
+        """规范化并冻结发布前实体 ID 基线；不接受字符串伪装的序列。"""
+
+        if not isinstance(values, Sequence) or isinstance(values, (str, bytes)):
+            return None
+        result = tuple(str(value or "").strip() for value in values)
+        return result if all(result) else None
+
+    @staticmethod
+    def _private_content_ready(blocks: object) -> bool:
+        """确认冻结内容至少有一个非空正文块或图片块。"""
+
+        if not isinstance(blocks, list):
+            return False
+        for block in blocks:
+            if not isinstance(block, Mapping):
+                continue
+            block_type = str(block.get("type") or "")
+            if block_type == "image":
+                return True
+            if block_type in {"text", "heading"} and str(block.get("text") or "").strip():
+                return True
+        return False
+
+    def _private_locator_on_page(self, locator) -> bool:
+        """拒绝把另一 Page 的 locator 交给当前适配器做实体证明。"""
+
+        try:
+            return getattr(locator, "page", None) is self.page
+        except Exception:  # noqa: BLE001
+            return False
+
+    async def _private_element_in_main_document(self, locator) -> bool:
+        """同一 Page 的 iframe 也不能冒充主编辑/管理文档。"""
+
+        try:
+            handle = await locator.element_handle()
+            if handle is None:
+                return False
+            return await handle.owner_frame() == self.page.main_frame
+        except Exception:  # noqa: BLE001
+            return False
+
+    async def _private_visible_candidates(self, locator) -> list:
+        """返回 locator 下实际可见的候选；异常按未知结构处理。"""
+
+        if not self._private_locator_on_page(locator):
+            return []
+        try:
+            visible = []
+            for index in range(await locator.count()):
+                item = locator.nth(index)
+                if await self._private_element_in_main_document(item) and await item.is_visible():
+                    visible.append(item)
+            return visible
+        except Exception:  # noqa: BLE001
+            return []
+
+    async def _private_exact_candidates(self, label: str, *, role: str | None = None) -> list:
+        """用真实可见文案和语义角色取得候选，不猜平台 class/hash。"""
+
+        try:
+            if role:
+                locator = self.page.get_by_role(role, name=label, exact=True)
+            else:
+                locator = self.page.get_by_text(label, exact=True)
+        except Exception:  # noqa: BLE001
+            return []
+        return await self._private_visible_candidates(locator)
+
+    async def _private_unique_exact_text(self, label: str):
+        candidates = await self._private_exact_candidates(label)
+        return candidates[0] if len(candidates) == 1 else None
+
+    async def _private_wait_unique_exact_text(self, label: str, *, timeout: float = 5.0):
+        """等待已观测文案出现；只轮询 DOM，不导航、不额外请求。"""
+
+        deadline = asyncio.get_running_loop().time() + timeout
+        while True:
+            candidate = await self._private_unique_exact_text(label)
+            if candidate is not None:
+                return candidate
+            if asyncio.get_running_loop().time() >= deadline:
+                return None
+            await asyncio.sleep(0.1)
+
+    async def _private_locator_in_viewport(self, locator) -> bool:
+        """验证完整 rect 在真实窗口内且中心没有被其他元素覆盖。"""
+
+        if not self._private_locator_on_page(locator):
+            return False
+        try:
+            box = await locator.bounding_box()
+            viewport = await self.page.evaluate(
+                "() => ({width: window.innerWidth, height: window.innerHeight})"
+            )
+            if (
+                not isinstance(box, dict)
+                or not isinstance(viewport, Mapping)
+                or float(box.get("width") or 0) <= 0
+                or float(box.get("height") or 0) <= 0
+            ):
+                return False
+            left = float(box.get("x") or 0)
+            top = float(box.get("y") or 0)
+            right = left + float(box.get("width") or 0)
+            bottom = top + float(box.get("height") or 0)
+            width = float(viewport.get("width") or 0)
+            height = float(viewport.get("height") or 0)
+            if left < 0 or top < 0 or right > width or bottom > height:
+                return False
+            uncovered = await locator.evaluate(
+                """(element) => {
+                    const rect = element.getBoundingClientRect();
+                    const target = document.elementFromPoint(
+                        (rect.left + rect.right) / 2,
+                        (rect.top + rect.bottom) / 2,
+                    );
+                    return Boolean(target && (target === element || element.contains(target)));
+                }"""
+            )
+            return uncovered is True
+        except Exception:  # noqa: BLE001
+            return False
+
+    async def _private_scroll_and_check(self, locator) -> bool:
+        if await self._private_locator_in_viewport(locator):
+            return True
+        try:
+            await locator.scroll_into_view_if_needed(timeout=10000)
+        except Exception:  # noqa: BLE001
+            return False
+        return await self._private_locator_in_viewport(locator)
+
+    async def _private_note_title_readback(
+        self,
+        expected: str,
+        locator=None,
+        *,
+        timeout: float = 5.0,
+    ) -> tuple[bool, object | None]:
+        """等待并精确读取最终标题；不截断、不前缀匹配、不要求全页只有一个 textbox。"""
+
+        if locator is not None and not self._private_locator_on_page(locator):
+            return False, None
+        deadline = asyncio.get_running_loop().time() + timeout
+        while True:
+            try:
+                source = locator if locator is not None else self.page.get_by_role("textbox")
+                candidates = await self._private_visible_candidates(source)
+                matches = []
+                for candidate in candidates:
+                    try:
+                        actual = await candidate.input_value()
+                    except Exception:  # noqa: BLE001
+                        actual = await candidate.inner_text()
+                    if str(actual) == expected:
+                        matches.append(candidate)
+                if len(matches) == 1:
+                    return True, matches[0]
+            except Exception:  # noqa: BLE001
+                pass
+            if asyncio.get_running_loop().time() >= deadline:
+                return False, None
+            await asyncio.sleep(0.1)
+
+    async def _private_visibility_trigger(self) -> tuple[str, str | None, object | None]:
+        """寻找唯一可见的当前可见范围控件；不把隐藏选项当当前值。"""
+
+        found: list[tuple[str, object]] = []
+        for label in PRIVATE_VISIBILITY_OPTIONS:
+            candidates = await self._private_exact_candidates(label, role="button")
+            if len(candidates) > 1:
+                return "ambiguous", None, None
+            if len(candidates) == 1:
+                found.append((label, candidates[0]))
+        if len(found) == 1:
+            return "ready", found[0][0], found[0][1]
+        if len(found) > 1:
+            return "ambiguous", None, None
+
+        # 某些页面把选择控件渲染成非 button 语义元素。仍要求精确文案、
+        # 唯一可见和后续视口检查；若出现嵌套重复则保持未知，不猜父节点。
+        found = []
+        for label in PRIVATE_VISIBILITY_OPTIONS:
+            candidates = await self._private_exact_candidates(label)
+            if len(candidates) > 1:
+                return "ambiguous", None, None
+            if len(candidates) == 1:
+                found.append((label, candidates[0]))
+        if len(found) == 1:
+            return "ready", found[0][0], found[0][1]
+        return ("ambiguous", None, None) if found else ("missing", None, None)
+
+    async def _private_wait_visibility_trigger(self, *, timeout: float = 5.0):
+        deadline = asyncio.get_running_loop().time() + timeout
+        while True:
+            state = await self._private_visibility_trigger()
+            if state[0] != "missing":
+                return state
+            if asyncio.get_running_loop().time() >= deadline:
+                return state
+            await asyncio.sleep(0.1)
+
+    async def _private_wait_self_only_readback(self, *, timeout: float = 5.0) -> bool:
+        """等待下拉异步收起，并确认折叠控件精确显示 SELF_ONLY。"""
+
+        deadline = asyncio.get_running_loop().time() + timeout
+        while True:
+            state, label, selected = await self._private_visibility_trigger()
+            visible_options = await self._private_exact_candidates(
+                PRIVATE_VISIBILITY_LABEL,
+                role="option",
+            )
+            if (
+                state == "ready"
+                and label == PRIVATE_VISIBILITY_LABEL
+                and selected is not None
+                and not visible_options
+                and await self._private_scroll_and_check(selected)
+            ):
+                return True
+            if asyncio.get_running_loop().time() >= deadline:
+                return False
+            await asyncio.sleep(0.1)
+
+    async def _private_select_self_only(self) -> dict:
+        """打开最终设置的可见范围并验证折叠后的 SELF_ONLY 值。"""
+
+        state, current_label, trigger = await self._private_wait_visibility_trigger()
+        if state == "missing":
+            more = await self._private_wait_unique_exact_text("更多设置")
+            if more is None:
+                return self._private_unknown(
+                    "XHS_PRIVATE_SETTINGS_NOT_FOUND",
+                    "小红书最终设置「更多设置」不可唯一确认",
+                )
+            if not await self._private_scroll_and_check(more):
+                return self._private_unknown(
+                    "XHS_PRIVATE_SETTINGS_NOT_VISIBLE",
+                    "小红书最终设置「更多设置」未完整落入视口",
+                )
+            try:
+                await more.click(timeout=10000)
+            except Exception:
+                return self._private_unknown(
+                    "XHS_PRIVATE_SETTINGS_OPEN_FAILED",
+                    "小红书最终设置「更多设置」无法打开",
+                )
+            state, current_label, trigger = await self._private_wait_visibility_trigger()
+        if state != "ready" or trigger is None or current_label is None:
+            return self._private_unknown(
+                "XHS_PRIVATE_VISIBILITY_TRIGGER_NOT_UNIQUE",
+                "小红书可见范围当前控件不可唯一确认",
+            )
+        if not await self._private_scroll_and_check(trigger):
+            return self._private_unknown(
+                "XHS_PRIVATE_VISIBILITY_TRIGGER_NOT_VISIBLE",
+                "小红书可见范围当前控件未完整落入视口",
+            )
+        try:
+            await trigger.click(timeout=10000)
+        except Exception:
+            return self._private_unknown(
+                "XHS_PRIVATE_VISIBILITY_OPEN_FAILED",
+                "小红书可见范围下拉无法打开",
+            )
+
+        options: list = []
+        deadline = asyncio.get_running_loop().time() + 5.0
+        while True:
+            options = await self._private_exact_candidates(PRIVATE_VISIBILITY_LABEL, role="option")
+            if not options:
+                # 仅当页面没有提供 option 语义时，才接受一个唯一可见的精确文案；
+                # 当前控件与选项同时可见会得到重复候选并安全停止。
+                options = await self._private_exact_candidates(PRIVATE_VISIBILITY_LABEL)
+            if options or asyncio.get_running_loop().time() >= deadline:
+                break
+            await asyncio.sleep(0.1)
+        if len(options) != 1:
+            return self._private_unknown(
+                "XHS_PRIVATE_SELF_ONLY_OPTION_NOT_UNIQUE",
+                "小红书「仅自己可见」选项不可唯一确认",
+            )
+        if not await self._private_scroll_and_check(options[0]):
+            return self._private_unknown(
+                "XHS_PRIVATE_SELF_ONLY_OPTION_NOT_VISIBLE",
+                "小红书「仅自己可见」选项未完整落入视口",
+            )
+        try:
+            await options[0].click(timeout=10000)
+        except Exception:
+            return self._private_unknown(
+                "XHS_PRIVATE_SELF_ONLY_SELECT_FAILED",
+                "小红书「仅自己可见」选项点击结果未知",
+            )
+
+        if not await self._private_wait_self_only_readback():
+            return self._private_unknown(
+                "XHS_PRIVATE_VISIBILITY_READBACK_FAILED",
+                "小红书可见范围选后未折叠回读为「仅自己可见」",
+            )
+        return {
+            "success": True,
+            "status": "ready",
+            "visibility": "SELF_ONLY",
+            "visibility_label": PRIVATE_VISIBILITY_LABEL,
+            "retry_allowed": False,
+        }
+
+    async def _prepare_private_visibility_unlocked(
+        self,
+        *,
+        note_title: str,
+        identity_snapshot: Mapping[str, object],
+        layout_result: Mapping[str, object] | None = None,
+        note_title_locator=None,
+        baseline_entity_ids: Sequence[str] | None = None,
+    ) -> dict:
+        """锁内完成私密后半程设置，不触发发布。"""
+
+        if self._private_publish_attempted:
+            if self._private_publish_result is not None:
+                return dict(self._private_publish_result)
+            return self._private_unknown(
+                "XHS_PRIVATE_PUBLISH_ALREADY_ATTEMPTED",
+                "小红书私密发布已尝试，禁止重新准备或点击",
+            )
+        if self._private_next_step_attempted:
+            if self._private_prepare_result is not None:
+                return dict(self._private_prepare_result)
+            return self._private_unknown(
+                "XHS_PRIVATE_NEXT_STEP_ALREADY_ATTEMPTED",
+                "小红书私密设置下一步已尝试，禁止重新点击",
+            )
+        try:
+            self._require_page_alive("小红书私密设置准备")
+        except Exception:
+            return self._private_unknown(
+                "XHS_PRIVATE_PAGE_UNAVAILABLE",
+                "小红书私密设置页面不可用",
+            )
+
+        expected_title = str(note_title or "").strip()
+        if not expected_title:
+            return self._private_blocked(
+                "XHS_PRIVATE_NOTE_TITLE_REQUIRED",
+                "小红书最终笔记标题不能为空",
+            )
+        identity_key = self._private_identity_key(identity_snapshot)
+        cached_identity = self._private_identity_key(self._identity_payload or {})
+        if identity_key is None:
+            return self._private_blocked(
+                "XHS_PRIVATE_IDENTITY_REQUIRED",
+                "小红书私密发布缺少已确认身份快照",
+            )
+        if cached_identity is None:
+            return self._private_unknown(
+                "XHS_PRIVATE_IDENTITY_CACHE_MISSING",
+                "小红书当前适配器没有已确认的身份缓存",
+            )
+        if cached_identity != identity_key:
+            return self._private_unknown(
+                "XHS_PRIVATE_IDENTITY_MISMATCH",
+                "小红书当前身份与传入身份快照不一致",
+            )
+        baseline_ids = self._private_entity_ids(baseline_entity_ids)
+        if baseline_ids is None:
+            return self._private_unknown(
+                "XHS_PRIVATE_ENTITY_BASELINE_REQUIRED",
+                "小红书私密发布缺少发布前稳定实体 ID 基线",
+            )
+        if note_title_locator is not None and not self._private_locator_on_page(note_title_locator):
+            return self._private_unknown(
+                "XHS_PRIVATE_TITLE_LOCATOR_PAGE_MISMATCH",
+                "小红书最终标题定位器不属于当前页面",
+            )
+        if (
+            not isinstance(layout_result, Mapping)
+            or layout_result.get("success") is not True
+            or layout_result.get("safe_to_continue") is not True
+        ):
+            return self._private_blocked(
+                "XHS_PRIVATE_LAYOUT_NOT_VERIFIED",
+                "小红书私密发布要求本次排版已验证且允许继续",
+            )
+        if self._layout_finalized is not True:
+            return self._private_blocked(
+                "XHS_PRIVATE_LAYOUT_NOT_VERIFIED",
+                "小红书私密发布要求内部排版完成标记已确认",
+            )
+        if not self._private_content_ready(self._expected_persisted_blocks):
+            return self._private_blocked(
+                "XHS_PRIVATE_CONTENT_EMPTY",
+                "小红书私密发布正文为空或冻结内容不可确认",
+            )
+        if not self._private_url_matches(CREATOR_PUBLISH):
+            return self._private_unknown(
+                "XHS_PRIVATE_PUBLISH_URL_UNVERIFIED",
+                "小红书私密设置点击前页面不是已观测的发布页",
+            )
+
+        try:
+            ui_result = await self.prepare_next_step_visibility()
+        except Exception:
+            ui_result = self._private_unknown(
+                "XHS_PRIVATE_NEXT_STEP_CHECK_FAILED",
+                "小红书下一步展示检查结果未知",
+            )
+        if ui_result.get("success") is not True:
+            return self._private_unknown(
+                "XHS_PRIVATE_NEXT_STEP_NOT_READY",
+                "小红书下一步未通过唯一性和真实视口检查",
+                next_step_ui=ui_result,
+            )
+        action = await self._unique_visible_exact_button("下一步")
+        if action is None or not await self._private_scroll_and_check(action):
+            return self._private_unknown(
+                "XHS_PRIVATE_NEXT_STEP_NOT_UNIQUE",
+                "小红书下一步点击前无法再次确认唯一且可见",
+            )
+
+        # 这是下一步的唯一点击前置标记；任何异常都不能让后续调用再次点击。
+        self._private_next_step_attempted = True
+        self._private_page_binding = self.page
+        self._private_title_binding = expected_title
+        self._private_identity_binding = identity_key
+        self._private_baseline_entity_ids = baseline_ids
+        self._private_content_binding = copy.deepcopy(self._expected_persisted_blocks)
+        try:
+            await action.click(timeout=10000)
+        except Exception:
+            result = self._private_unknown(
+                "XHS_PRIVATE_NEXT_STEP_CLICK_UNKNOWN",
+                "小红书下一步点击结果未知，禁止重新点击",
+            )
+            self._private_prepare_result = result
+            return dict(result)
+
+        title_ok, title_locator = await self._private_note_title_readback(
+            expected_title,
+            note_title_locator,
+        )
+        if not title_ok:
+            result = self._private_unknown(
+                "XHS_PRIVATE_NOTE_TITLE_READBACK_FAILED",
+                "小红书最终设置未精确回读调用方确认的笔记标题",
+            )
+            self._private_prepare_result = result
+            return dict(result)
+        self._private_title_locator = title_locator
+
+        selection = await self._private_select_self_only()
+        if selection.get("success") is not True:
+            self._private_prepare_result = dict(selection)
+            return dict(selection)
+
+        self._private_visibility_prepared = True
+        result = {
+            "success": True,
+            "status": "ready",
+            "visibility": "SELF_ONLY",
+            "visibility_label": PRIVATE_VISIBILITY_LABEL,
+            "note_title_readback": True,
+            "identity_bound": True,
+            "page_bound": True,
+            "entity_baseline_bound": True,
+            "next_step_clicked": True,
+            "retry_allowed": False,
+        }
+        self._private_prepare_result = dict(result)
+        return result
+
+    async def prepare_private_visibility(
+        self,
+        *,
+        note_title: str,
+        identity_snapshot: Mapping[str, object],
+        layout_result: Mapping[str, object] | None = None,
+        note_title_locator=None,
+        baseline_entity_ids: Sequence[str] | None = None,
+    ) -> dict:
+        """在实例锁内完成私密设置；下一步最多点击一次，不触发发布。"""
+
+        async with self._private_flow_lock:
+            return await self._prepare_private_visibility_unlocked(
+                note_title=note_title,
+                identity_snapshot=identity_snapshot,
+                layout_result=layout_result,
+                note_title_locator=note_title_locator,
+                baseline_entity_ids=baseline_entity_ids,
+            )
+
+    async def _private_selected_visibility_confirmed(self) -> bool:
+        return await self._private_wait_self_only_readback()
+
+    def _private_url_matches(self, expected: str) -> bool:
+        try:
+            parsed = urlsplit(str(getattr(self.page, "url", "")))
+        except Exception:  # noqa: BLE001
+            return False
+        wanted = urlsplit(expected)
+        return (
+            parsed.scheme == wanted.scheme
+            and parsed.netloc == wanted.netloc
+            and parsed.path == wanted.path
+        )
+
+    async def _publish_private_unlocked(
+        self,
+        *,
+        confirmed: bool,
+        note_title: str,
+        identity_snapshot: Mapping[str, object],
+        page_token: object | None = None,
+    ) -> dict:
+        if self._private_publish_attempted:
+            if self._private_publish_result is not None:
+                return dict(self._private_publish_result)
+            return self._private_unknown(
+                "XHS_PRIVATE_PUBLISH_ALREADY_ATTEMPTED",
+                "小红书私密发布已尝试，禁止再次点击",
+            )
+        if confirmed is not True:
+            return self._private_blocked(
+                "XHS_PRIVATE_CONFIRMATION_REQUIRED",
+                "小红书私密发布必须提供显式确认",
+            )
+        expected_title = str(note_title or "").strip()
+        if not expected_title or expected_title != self._private_title_binding:
+            return self._private_unknown(
+                "XHS_PRIVATE_NOTE_TITLE_MISMATCH",
+                "小红书私密发布标题与准备阶段绑定标题不一致",
+            )
+        identity_key = self._private_identity_key(identity_snapshot)
+        cached_identity = self._private_identity_key(self._identity_payload or {})
+        if (
+            identity_key is None
+            or identity_key != self._private_identity_binding
+            or cached_identity is None
+            or cached_identity != identity_key
+        ):
+            return self._private_unknown(
+                "XHS_PRIVATE_IDENTITY_MISMATCH",
+                "小红书私密发布身份与当前已确认缓存不一致",
+            )
+        if (
+            page_token is None
+            or page_token is not self.page
+            or self._private_page_binding is not self.page
+        ):
+            return self._private_unknown(
+                "XHS_PRIVATE_PAGE_MISMATCH",
+                "小红书私密发布页面实例与准备阶段不一致",
+            )
+        if not self._private_visibility_prepared:
+            return self._private_blocked(
+                "XHS_PRIVATE_VISIBILITY_NOT_PREPARED",
+                "小红书仅自己可见范围尚未完成折叠回读",
+            )
+        if self._layout_finalized is not True:
+            return self._private_blocked(
+                "XHS_PRIVATE_LAYOUT_NOT_VERIFIED",
+                "小红书私密发布要求排版已验证",
+            )
+        if not self._private_content_ready(self._expected_persisted_blocks):
+            return self._private_blocked(
+                "XHS_PRIVATE_CONTENT_EMPTY",
+                "小红书私密发布正文为空或冻结内容不可确认",
+            )
+        if (
+            self._private_content_binding is None
+            or self._expected_persisted_blocks != self._private_content_binding
+        ):
+            return self._private_unknown(
+                "XHS_PRIVATE_CONTENT_CHANGED",
+                "小红书发布前冻结正文与准备阶段不一致",
+            )
+        if not self._private_url_matches(CREATOR_PUBLISH):
+            return self._private_unknown(
+                "XHS_PRIVATE_PUBLISH_URL_UNVERIFIED",
+                "小红书私密发布点击前页面不是已观测的发布页",
+            )
+        if self._private_title_locator is None or not self._private_locator_on_page(
+            self._private_title_locator
+        ):
+            return self._private_unknown(
+                "XHS_PRIVATE_NOTE_TITLE_LOCATOR_UNBOUND",
+                "小红书私密发布缺少绑定的最终标题定位器",
+            )
+        title_ok, _ = await self._private_note_title_readback(
+            expected_title,
+            self._private_title_locator,
+        )
+        if not title_ok:
+            return self._private_unknown(
+                "XHS_PRIVATE_NOTE_TITLE_READBACK_CHANGED",
+                "小红书发布前最终标题未精确回读为绑定标题",
+            )
+
+        try:
+            self._require_page_alive("小红书私密发布点击前检查")
+            if not await self._private_selected_visibility_confirmed():
+                return self._private_blocked(
+                    "XHS_PRIVATE_VISIBILITY_NOT_CONFIRMED",
+                    "小红书最终设置未确认折叠值为「仅自己可见」",
+                )
+            action = await self._unique_visible_exact_button("发布")
+            if action is None or not await self._private_scroll_and_check(action):
+                return self._private_unknown(
+                    "XHS_PRIVATE_PUBLISH_BUTTON_NOT_UNIQUE",
+                    "小红书最终设置发布按钮不可唯一且可见确认",
+                )
+        except Exception:
+            return self._private_unknown(
+                "XHS_PRIVATE_PUBLISH_PRECHECK_FAILED",
+                "小红书私密发布点击前检查结果未知",
+            )
+
+        # 不论 click 成功、超时还是抛出异常，attempted 都保持 True。
+        self._private_publish_attempted = True
+        try:
+            await action.click(timeout=10000)
+        except Exception:
+            result = self._private_unknown(
+                "XHS_PRIVATE_PUBLISH_CLICK_UNKNOWN",
+                "小红书私密发布点击结果未知，禁止重试",
+            )
+            self._private_publish_result = result
+            return dict(result)
+        result = self._private_unknown(
+            "XHS_PRIVATE_SUBMIT_CLICKED_PENDING_MANAGER_VERIFICATION",
+            "小红书私密发布已点击，管理页实体与审核状态待只读核验",
+            submitted=True,
+            result_status="pending_manager_verification",
+            visibility="SELF_ONLY",
+        )
+        self._private_publish_result = dict(result)
+        return dict(result)
+
+    async def publish_private(
+        self,
+        *,
+        confirmed: bool,
+        note_title: str,
+        identity_snapshot: Mapping[str, object],
+        page_token: object | None = None,
+    ) -> dict:
+        """在已准备的 SELF_ONLY 设置上执行唯一一次私密发布点击。"""
+
+        async with self._private_flow_lock:
+            return await self._publish_private_unlocked(
+                confirmed=confirmed,
+                note_title=note_title,
+                identity_snapshot=identity_snapshot,
+                page_token=page_token,
+            )
+
+    async def _private_locator_descendant(self, child_locator, parent_locator) -> bool:
+        """验证 locator 对应节点确实属于目标卡片，不接受全局/邻居状态。"""
+
+        if not self._private_locator_on_page(child_locator) or not self._private_locator_on_page(
+            parent_locator
+        ):
+            return False
+        try:
+            parent_handle = await parent_locator.element_handle()
+            child_handle = await child_locator.element_handle()
+            if parent_handle is None or child_handle is None:
+                return False
+            return bool(
+                await child_handle.evaluate(
+                    "(child, parent) => Boolean(parent && parent.contains(child))",
+                    parent_handle,
+                )
+            )
+        except Exception:  # noqa: BLE001
+            return False
+
+    async def _private_read_entity_id(self, locator, attribute: str | None) -> str | None:
+        """从调用方已观测的 ID 节点读取文本或明确指定属性，不猜属性名。"""
+
+        if not self._private_locator_on_page(locator):
+            return None
+        try:
+            if await locator.count() != 1:
+                return None
+            item = locator.first
+            if attribute is not None:
+                attribute = str(attribute).strip()
+                if not attribute:
+                    return None
+                value = await item.get_attribute(attribute)
+            else:
+                value = await item.inner_text()
+            clean = str(value or "").strip()
+            return clean or None
+        except Exception:  # noqa: BLE001
+            return None
+
+    def _private_cache_verified_result(self, result: dict) -> dict:
+        """管理页只读核验后缓存回执；后续调用绝不重新点击。"""
+
+        self._private_publish_result = dict(result)
+        return dict(result)
+
+    async def verify_private_result(
+        self,
+        *,
+        note_title: str,
+        identity_snapshot: Mapping[str, object],
+        entity_id: str | None,
+        baseline_entity_ids: Sequence[str] | None = None,
+        card_locator=None,
+        entity_id_locator=None,
+        entity_id_attribute: str | None = None,
+        status_locator=None,
+        page_token: object | None = None,
+    ) -> dict:
+        """只读核验管理页中同一次私密发布的稳定实体。
+
+        ``card_locator``、``entity_id_locator`` 和 ``status_locator`` 必须来自同一
+        已观测管理页 DOM；适配器只验证它们属于同一 Page/卡片，并从 ID 节点实际
+        读取文本或调用方明确指定的属性。当前唯一已观测状态是「审核中」；其它
+        文案、卡片消失或状态缺失都不会被冒充为已发布。
+        """
+
+        if not self._private_publish_attempted:
+            return self._private_unknown(
+                "XHS_PRIVATE_PUBLISH_NOT_ATTEMPTED",
+                "小红书私密发布尚未发生，不能核验管理页结果",
+            )
+        expected_title = str(note_title or "").strip()
+        if not expected_title or expected_title != self._private_title_binding:
+            return self._private_unknown(
+                "XHS_PRIVATE_NOTE_TITLE_MISMATCH",
+                "小红书管理页核验标题与本次绑定标题不一致",
+            )
+        identity_key = self._private_identity_key(identity_snapshot)
+        cached_identity = self._private_identity_key(self._identity_payload or {})
+        if (
+            identity_key is None
+            or identity_key != self._private_identity_binding
+            or cached_identity is None
+            or cached_identity != identity_key
+        ):
+            return self._private_unknown(
+                "XHS_PRIVATE_IDENTITY_MISMATCH",
+                "小红书管理页核验身份与当前已确认缓存不一致",
+            )
+        if (
+            page_token is None
+            or page_token is not self.page
+            or self._private_page_binding is not self.page
+        ):
+            return self._private_unknown(
+                "XHS_PRIVATE_PAGE_MISMATCH",
+                "小红书管理页核验页面实例与本次发布不一致",
+            )
+        if not self._private_url_matches(CREATOR_NOTE_MANAGER):
+            return self._private_unknown(
+                "XHS_PRIVATE_MANAGER_URL_UNVERIFIED",
+                "小红书当前页面不是已观测的笔记管理页",
+            )
+
+        clean_entity_id = str(entity_id or "").strip()
+        baseline_ids = self._private_baseline_entity_ids
+        supplied_baseline = (
+            self._private_entity_ids(baseline_entity_ids)
+            if baseline_entity_ids is not None
+            else baseline_ids
+        )
+        if baseline_ids is None or supplied_baseline != baseline_ids:
+            return self._private_unknown(
+                "XHS_PRIVATE_ENTITY_BASELINE_MISMATCH",
+                "小红书私密结果缺少或修改了发布前冻结的实体 ID 基线",
+            )
+        if not clean_entity_id:
+            return self._private_unknown(
+                "XHS_PRIVATE_ENTITY_ID_MISSING",
+                "小红书私密结果缺少稳定实体 ID",
+            )
+        if clean_entity_id in baseline_ids:
+            return self._private_unknown(
+                "XHS_PRIVATE_ENTITY_NOT_NEW",
+                "小红书管理页实体 ID 属于发布前基线，不能冒充本次结果",
+            )
+        if card_locator is None or entity_id_locator is None:
+            return self._private_unknown(
+                "XHS_PRIVATE_ENTITY_LOCATOR_MISSING",
+                "小红书私密结果缺少同一实体的卡片与稳定 ID 定位器",
+            )
+        if not self._private_locator_on_page(card_locator) or not self._private_locator_on_page(
+            entity_id_locator
+        ):
+            return self._private_unknown(
+                "XHS_PRIVATE_ENTITY_LOCATOR_PAGE_MISMATCH",
+                "小红书私密结果定位器不属于当前管理页",
+            )
+        if status_locator is not None and not self._private_locator_on_page(status_locator):
+            return self._private_unknown(
+                "XHS_PRIVATE_STATUS_LOCATOR_PAGE_MISMATCH",
+                "小红书审核状态定位器不属于当前管理页",
+            )
+
+        try:
+            cards = await self._private_visible_candidates(card_locator)
+            if len(cards) != 1:
+                return self._private_unknown(
+                    "XHS_PRIVATE_ENTITY_CARD_NOT_UNIQUE",
+                    "小红书管理页目标实体卡片不可唯一确认",
+                )
+            card = cards[0]
+            if not await self._private_locator_descendant(entity_id_locator, card):
+                return self._private_unknown(
+                    "XHS_PRIVATE_ENTITY_ID_NOT_DESCENDANT",
+                    "小红书稳定实体 ID 节点不属于目标卡片",
+                )
+            observed_entity_id = await self._private_read_entity_id(
+                entity_id_locator,
+                entity_id_attribute,
+            )
+            if observed_entity_id != clean_entity_id:
+                return self._private_unknown(
+                    "XHS_PRIVATE_ENTITY_ID_READBACK_MISMATCH",
+                    "小红书目标卡片实际读取的实体 ID 与本次结果不一致",
+                )
+            title_matches = await self._private_visible_candidates(
+                card.get_by_text(expected_title, exact=True)
+            )
+            if len(title_matches) != 1:
+                return self._private_unknown(
+                    "XHS_PRIVATE_ENTITY_TITLE_MISMATCH",
+                    "小红书管理页目标卡片未精确回读本次笔记标题",
+                )
+            visibility_matches = await self._private_visible_candidates(
+                card.get_by_text(PRIVATE_VISIBILITY_LABEL, exact=True)
+            )
+            if len(visibility_matches) != 1:
+                return self._private_unknown(
+                    "XHS_PRIVATE_ENTITY_VISIBILITY_UNVERIFIED",
+                    "小红书管理页目标卡片未在自身范围内回读「仅自己可见」",
+                )
+            status_items = (
+                await self._private_visible_candidates(status_locator)
+                if status_locator is not None
+                else []
+            )
+            if len(status_items) == 0:
+                return self._private_cache_verified_result(
+                    {
+                        "success": True,
+                        "status": "submitted",
+                        "result_status": "审核状态待确认",
+                        "visibility": "SELF_ONLY",
+                        "entity_bound": True,
+                        "status_verified": False,
+                        "retry_allowed": False,
+                    }
+                )
+            if len(status_items) != 1:
+                return self._private_unknown(
+                    "XHS_PRIVATE_ENTITY_STATUS_NOT_UNIQUE",
+                    "小红书管理页目标实体审核状态不可唯一确认",
+                )
+            status_item = status_items[0]
+            if not await self._private_locator_descendant(status_item, card):
+                return self._private_unknown(
+                    "XHS_PRIVATE_ENTITY_STATUS_NOT_DESCENDANT",
+                    "小红书审核状态节点不属于目标卡片",
+                )
+            status_text = str(await status_item.inner_text()).strip()
+        except Exception:
+            return self._private_unknown(
+                "XHS_PRIVATE_ENTITY_READ_FAILED",
+                "小红书管理页目标实体只读回读失败",
+            )
+
+        if status_text == "审核中":
+            return self._private_cache_verified_result(
+                {
+                    "success": True,
+                    "status": "submitted",
+                    "result_status": "审核中",
+                    "visibility": "SELF_ONLY",
+                    "entity_bound": True,
+                    "retry_allowed": False,
+                }
+            )
+        return self._private_cache_verified_result(
+            self._private_unknown(
+                "XHS_PRIVATE_ENTITY_STATUS_UNRECOGNIZED",
+                "小红书管理页审核状态文案未在已观测状态中确认",
+                visibility="SELF_ONLY",
+                entity_bound=True,
+            )
+        )
 
     async def _finalize_long_text_layout(
         self,

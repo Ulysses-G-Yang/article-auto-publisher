@@ -14,7 +14,8 @@
 | 长期分支 | `main` |
 | 文档批次开始前的主线代码 SHA | `055a2406e596cb56352ed25298d1b9fcaf5f41fe` |
 | 本批首个文档 focused commit | `80f2640da878659dc27ffdecb5332108c1204e61` |
-| 当前 `main` / `origin/main`（本轮文档更新前） | `fcc153654be3c49d3bc2a912fbff3e15ac07b4d8` |
+| 本批浏览器显示修复开始前的 `main` / `origin/main` | `1123d7ebc4bd5996066a102734a14997c00942ca` |
+| 本批浏览器显示修复范围 | 仅小红书新开 headed Chrome 使用原生窗口 viewport；其他平台仍固定 1366×900 |
 | Git 远端 | `git@github.com:Ulysses-G-Yang/article-auto-publisher.git` |
 | 固定 Python | `C:\Users\Administrator\miniconda3\envs\article-publisher-py312\python.exe` |
 | CoreUI 代码状态 | 最小可复现源码和生产资产已在 `main`；瘦身提交为 `74288d0e`、`055a2406` |
@@ -29,7 +30,9 @@
 - 推送使用 SSH，推送后核对目标远端分支完整 40 位 SHA；禁止 force push。
 - 真实登录、保存平台草稿、公开发布、删除和不确定状态重试都需要单独明确授权。
 - 本轮公开发布保持默认关闭，不改监听 host/port，不启动或停止服务。
-- 本轮仅新增验收记录，没有生产业务代码变更。
+- 本批新增浏览器显示修复与离线回归：Base 默认仍固定 1366×900，仅小红书类级开关使用
+  headed persistent Chrome 的 `no_viewport=True`；排版成功后最多滚动一次唯一精确的「下一步」
+  到真实视口并回读 rect/中心遮挡提示，不点击、不导航、不保存，也不改变 DRAFT 成功门槛。
 
 ## 3. 分支收口状态
 
@@ -79,6 +82,23 @@ CoreUI 定向测试已在当前 `main` worktree 通过：`tests/frontend/test_co
 （69.43s）。首个 focused commit 的 `git diff --check`、SSH 推送和 `origin/main` 完整 40 位
 SHA 核验均已通过；删除前后 17 个归档标签 peeled SHA 均匹配，最终本地/远端只剩 `main`。
 此前文档批次未启动服务、未登录平台、未保存草稿、未发布、未删除用户数据，也未重试任何不确定副作用；本次真实小红书检查的状态见下节。
+
+### 2026-09-07 小红书浏览器显示修复（本批源码变更）
+
+- 本批从 `1123d7ebc4bd5996066a102734a14997c00942ca` 开始；Base 默认 viewport 行为保持不变，
+  仅 `XiaohongshuPlatform` 使用 `no_viewport=True`，让新开的 headed Chrome 页面随实际窗口尺寸变化。
+- 小红书排版 snapshot 保留原 `next_visible`/`save_visible` 语义，仅附加真实视口宽高、唯一按钮
+  rect、完整落入视口和中心未被覆盖的提示；`prepare_next_step_visibility()` 只在排版成功后的
+  `apply_cover` 路径最多调用一次，展示检查失败只附加 UI 提示，不把已完成排版改为失败。
+- `human/simulator.py` 在原生视口下从页面实时 `innerWidth`/`innerHeight` 取鼠标范围，并对窄窗口
+  做非负边界夹取；动作次数与节奏不变。
+- 新开浏览器会采用本批修复；当前已运行的旧 helper/窗口未热更新，未重启、未接管，不能把源码修复
+  写成现场旧窗口已生效。当前现场仍停在排版结果页，未点击「下一步」、未暂存离开、未发布。
+- 本批离线验证：固定 py312 `compileall` 通过；定向 `probe/media/layout/viewport` 共 80 passed；
+  全量 `pytest -q -p no:cacheprovider` 为 1259 passed、7 skipped、1 个既有 aiosqlite 线程告警。
+  `git diff --check` 通过；全仓 Ruff 仍为既有 143 项，新增 XHS 与测试代码无 Ruff 项，Base 与
+  `human/simulator.py` 仅报告本批前已存在的基线项。未用当前真实 helper 做 native-resize 烟测，
+  未启动或重启任何服务/浏览器。
 
 ### 2026-09-07 小红书完整 Word 发布前检查（本轮新增，仅记录真实结果）
 

@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from playwright.async_api import async_playwright
 
 from platforms.content_validation import ContentValidationError
 from platforms.xiaohongshu import (
@@ -29,10 +31,19 @@ def test_none_cover_still_finalizes_images_before_draft_save() -> None:
     platform._expected_persisted_blocks = [{"type": "text", "text": "正文"}]
     platform._layout_expected_image_count = 0
     platform._finalize_long_text_layout = AsyncMock(return_value={"success": True})
+    platform.prepare_next_step_visibility = AsyncMock(
+        return_value={
+            "success": False,
+            "next_step_ui": "out_of_viewport",
+        }
+    )
 
     result = run(platform.apply_cover({"strategy": "NONE"}))
 
     assert result["cover_status"] == "not_required"
+    assert result["success"] is True
+    assert result["next_step_ui"]["success"] is False
+    platform.prepare_next_step_visibility.assert_awaited_once()
     assert platform._layout_finalized is True
     assert platform._expected_persisted_cover is False
     platform._finalize_long_text_layout.assert_awaited_once_with(
@@ -214,6 +225,174 @@ def test_layout_snapshot_emits_valid_javascript_newline_escape() -> None:
 
     assert "join('\\n')" in captured["script"]
     assert "join('\n')" not in captured["script"]
+    assert "window.innerWidth" in captured["script"]
+    assert "window.innerHeight" in captured["script"]
+    assert "next_rect" in captured["script"]
+    assert "save_rect" in captured["script"]
+    assert "next_visible: exactVisible('下一步')" in captured["script"]
+
+
+def _next_step_platform(button_count: int, snapshot: dict):
+    buttons = []
+    for _ in range(button_count):
+        button = MagicMock()
+        button.is_visible = AsyncMock(return_value=True)
+        button.scroll_into_view_if_needed = AsyncMock()
+        button.click = AsyncMock()
+        buttons.append(button)
+    candidates = MagicMock()
+    candidates.count = AsyncMock(return_value=button_count)
+    candidates.nth = MagicMock(side_effect=lambda index: buttons[index])
+    page = MagicMock(is_closed=lambda: False)
+    page.get_by_role = MagicMock(return_value=candidates)
+    platform = _platform()
+    platform.page = page
+    platform._layout_snapshot = AsyncMock(return_value=snapshot)
+    return platform, buttons
+
+
+def test_prepare_next_step_scrolls_unique_button_without_clicking() -> None:
+    platform, buttons = _next_step_platform(
+        1,
+        {
+            "next_visible": True,
+            "next_in_viewport": True,
+            "next_center_uncovered": True,
+            "next_rect": {"left": 10, "top": 20, "right": 110, "bottom": 60},
+            "viewport_width": 800,
+            "viewport_height": 600,
+        },
+    )
+
+    result = run(platform.prepare_next_step_visibility())
+
+    assert result["success"] is True
+    assert result["next_step_ui"] == "ready"
+    buttons[0].scroll_into_view_if_needed.assert_awaited_once_with(timeout=10000)
+    buttons[0].click.assert_not_awaited()
+
+
+def test_prepare_next_step_reports_button_outside_viewport_without_clicking() -> None:
+    platform, buttons = _next_step_platform(
+        1,
+        {
+            "next_visible": True,
+            "next_in_viewport": False,
+            "next_center_uncovered": False,
+            "next_rect": {"left": 10, "top": 700, "right": 110, "bottom": 740},
+            "viewport_width": 800,
+            "viewport_height": 600,
+        },
+    )
+
+    result = run(platform.prepare_next_step_visibility())
+
+    assert result["success"] is False
+    assert result["next_step_ui"] == "out_of_viewport"
+    buttons[0].scroll_into_view_if_needed.assert_awaited_once_with(timeout=10000)
+    buttons[0].click.assert_not_awaited()
+
+
+def test_prepare_next_step_fails_closed_for_missing_or_duplicate_buttons() -> None:
+    for count in (0, 2):
+        platform, buttons = _next_step_platform(
+            count,
+            {
+                "next_visible": True,
+                "next_in_viewport": True,
+                "next_center_uncovered": True,
+            },
+        )
+
+        result = run(platform.prepare_next_step_visibility())
+
+        assert result["success"] is False
+        assert result["next_step_ui"] == "not_unique"
+        for button in buttons:
+            button.scroll_into_view_if_needed.assert_not_awaited()
+            button.click.assert_not_awaited()
+        platform._layout_snapshot.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_layout_snapshot_reads_live_viewport_rects_in_local_chrome() -> None:
+    executable = Path("C:/Program Files/Google/Chrome/Application/chrome.exe")
+    if not executable.is_file():
+        pytest.skip("本机未安装隔离测试用 Chrome")
+
+    html = """
+    <style>
+      .editor-cards-container { position: relative; width: 780px; min-height: 900px; }
+      #next, #save { position: absolute; width: 100px; height: 40px; }
+      #next { left: 10px; top: 700px; z-index: 1; }
+      #save { left: 150px; top: 10px; }
+    </style>
+    <div class="editor-cards-container">
+      <div class="editor-cards-wrapper"><div class="card-outer-container"></div></div>
+      <button id="next">下一步</button>
+      <button id="save">暂存离开</button>
+    </div>
+    """
+    async with async_playwright() as playwright:
+        browser = await playwright.chromium.launch(
+            headless=True,
+            executable_path=str(executable),
+        )
+        try:
+            page = await browser.new_page(viewport={"width": 800, "height": 600})
+            await page.set_content(html)
+            platform = XiaohongshuPlatform()
+            platform.page = page
+
+            outside = await platform._layout_snapshot()
+            assert outside["viewport_width"] == 800
+            assert outside["viewport_height"] == 600
+            assert outside["next_visible"] is True
+            assert outside["next_in_viewport"] is False
+            assert outside["next_rect"]["top"] >= 700
+
+            await page.set_viewport_size({"width": 800, "height": 800})
+            visible = await platform._layout_snapshot()
+            assert visible["viewport_height"] == 800
+            assert visible["next_in_viewport"] is True
+            assert visible["next_center_uncovered"] is True
+            prepared = await platform.prepare_next_step_visibility()
+            assert prepared["success"] is True
+            assert page.url == "about:blank"
+
+            await page.evaluate(
+                """() => {
+                    const overlay = document.createElement('div');
+                    overlay.id = 'overlay';
+                    overlay.style.cssText = 'position:fixed;left:10px;top:700px;'
+                        + 'width:100px;height:40px;z-index:2;';
+                    document.body.appendChild(overlay);
+                }"""
+            )
+            obscured = await platform._layout_snapshot()
+            assert obscured["next_in_viewport"] is True
+            assert obscured["next_center_uncovered"] is False
+            obscured_result = await platform.prepare_next_step_visibility()
+            assert obscured_result["success"] is False
+            assert obscured_result["next_step_ui"] == "obscured"
+
+            await page.evaluate(
+                """() => {
+                    const duplicate = document.createElement('button');
+                    duplicate.textContent = '下一步';
+                    duplicate.style.cssText = 'position:absolute;left:300px;top:10px;';
+                    document.querySelector('.editor-cards-container').appendChild(duplicate);
+                }"""
+            )
+            duplicate = await platform._layout_snapshot()
+            assert duplicate["next_visible"] is True
+            assert duplicate["next_rect"] is None
+            assert duplicate["next_in_viewport"] is False
+            duplicate_result = await platform.prepare_next_step_visibility()
+            assert duplicate_result["success"] is False
+            assert duplicate_result["next_step_ui"] == "not_unique"
+        finally:
+            await browser.close()
 
 
 def test_layout_wait_requires_two_stable_complete_reads() -> None:

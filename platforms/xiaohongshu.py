@@ -110,6 +110,7 @@ class XiaohongshuPlatform(BasePlatform):
     """小红书账号会话与长文草稿适配器；证据不足时保持 fail closed。"""
 
     platform_name = "xiaohongshu"
+    use_native_viewport = True
     # 2026-08 真实验证：小红书已不再下发 web_session，现行会话 cookie 为
     # customer-sso-sid / customerClientId / access-token-creator.* /
     # x-user-id-creator.* / galaxy_creator_session_id；web_session 保留兼容。
@@ -919,6 +920,21 @@ class XiaohongshuPlatform(BasePlatform):
 
         expected_images = self._layout_expected_image_count
         wants_cover = strategy != "NONE"
+
+        async def with_next_step_ui(result: dict) -> dict:
+            """只附加展示提示；失败不得改变已完成的排版结果。"""
+
+            try:
+                ui_result = await self.prepare_next_step_visibility()
+            except Exception:  # noqa: BLE001
+                ui_result = {
+                    "success": False,
+                    "next_step_ui": "check_failed",
+                    "error_code": "XHS_NEXT_STEP_VIEWPORT_CHECK_FAILED",
+                    "error": "小红书下一步按钮展示提示失败",
+                }
+            return {**result, "next_step_ui": ui_result}
+
         if wants_cover:
             first_image = self._first_body_image_path()
             requested = str((cover or {}).get("local_path") or "")
@@ -960,17 +976,21 @@ class XiaohongshuPlatform(BasePlatform):
                 )
             self._expected_persisted_cover = wants_cover
             if wants_cover:
-                return {
+                return await with_next_step_ui(
+                    {
+                        "success": True,
+                        "cover_status": "pending_verification",
+                        "safe_to_continue": True,
+                        "cover_mode": "PLATFORM_GENERATED_LONGFORM",
+                    }
+                )
+            return await with_next_step_ui(
+                {
                     "success": True,
-                    "cover_status": "pending_verification",
+                    "cover_status": "not_required",
                     "safe_to_continue": True,
-                    "cover_mode": "PLATFORM_GENERATED_LONGFORM",
                 }
-            return {
-                "success": True,
-                "cover_status": "not_required",
-                "safe_to_continue": True,
-            }
+            )
 
         finalized = await self._finalize_long_text_layout(
             expected_images=expected_images,
@@ -982,17 +1002,21 @@ class XiaohongshuPlatform(BasePlatform):
         self._layout_finalized = True
         self._expected_persisted_cover = wants_cover
         if wants_cover:
-            return {
+            return await with_next_step_ui(
+                {
+                    "success": True,
+                    "cover_status": "pending_verification",
+                    "safe_to_continue": True,
+                    "cover_mode": "PLATFORM_GENERATED_LONGFORM",
+                }
+            )
+        return await with_next_step_ui(
+            {
                 "success": True,
-                "cover_status": "pending_verification",
+                "cover_status": "not_required",
                 "safe_to_continue": True,
-                "cover_mode": "PLATFORM_GENERATED_LONGFORM",
             }
-        return {
-            "success": True,
-            "cover_status": "not_required",
-            "safe_to_continue": True,
-        }
+        )
 
     def _first_body_image_path(self) -> str:
         for block in self._expected_persisted_blocks or []:
@@ -1108,6 +1132,88 @@ class XiaohongshuPlatform(BasePlatform):
             if await item.is_visible():
                 visible.append(item)
         return visible[0] if len(visible) == 1 else None
+
+    async def _unique_visible_exact_button(self, label: str):
+        """仅按 button 角色确认唯一精确按钮，不改变旧调用方语义。"""
+
+        candidates = self.page.get_by_role("button", name=label, exact=True)
+        visible = []
+        for index in range(await candidates.count()):
+            item = candidates.nth(index)
+            if await item.is_visible():
+                visible.append(item)
+        return visible[0] if len(visible) == 1 else None
+
+    async def prepare_next_step_visibility(self) -> dict:
+        """仅调整排版后的「下一步」按钮展示；不点击、不导航、不保存。
+
+        该方法只提供 UI 可见性提示，不能改变排版或草稿成功状态。调用方应在
+        排版成功后最多调用一次；若按钮不存在、不唯一或滚动后仍未完整落入真实
+        视口，返回失败提示但不推翻已经完成的排版结果。
+        """
+
+        self._require_page_alive("小红书下一步视口准备")
+        try:
+            action = await self._unique_visible_exact_button("下一步")
+        except Exception as exc:  # noqa: BLE001
+            if self._exception_means_browser_closed(exc):
+                raise BrowserLifecycleError(
+                    "BROWSER_CONTEXT_CLOSED: 小红书下一步视口准备时页面已关闭"
+                ) from exc
+            return {
+                "success": False,
+                "next_step_ui": "check_failed",
+                "error_code": "XHS_NEXT_STEP_VIEWPORT_CHECK_FAILED",
+                "error": "小红书下一步按钮唯一性检查失败",
+            }
+        if action is None:
+            return {
+                "success": False,
+                "next_step_ui": "not_unique",
+                "error_code": "XHS_NEXT_STEP_NOT_UNIQUE",
+                "error": "小红书下一步按钮不可见或候选不唯一",
+            }
+        try:
+            await action.scroll_into_view_if_needed(timeout=10000)
+            snapshot = await self._layout_snapshot()
+        except BrowserLifecycleError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            if self._exception_means_browser_closed(exc):
+                raise BrowserLifecycleError(
+                    "BROWSER_CONTEXT_CLOSED: 小红书下一步视口准备时页面已关闭"
+                ) from exc
+            return {
+                "success": False,
+                "next_step_ui": "check_failed",
+                "error_code": "XHS_NEXT_STEP_VIEWPORT_CHECK_FAILED",
+                "error": "小红书下一步按钮视口复核失败",
+            }
+
+        result = {
+            "success": False,
+            "next_step_ui": "not_ready",
+            "next_visible": snapshot.get("next_visible") is True,
+            "next_in_viewport": snapshot.get("next_in_viewport") is True,
+            "next_center_uncovered": snapshot.get("next_center_uncovered"),
+            "next_rect": snapshot.get("next_rect"),
+            "viewport_width": snapshot.get("viewport_width"),
+            "viewport_height": snapshot.get("viewport_height"),
+        }
+        if not result["next_in_viewport"]:
+            result["next_step_ui"] = "out_of_viewport"
+            result["error"] = "小红书下一步按钮未完整落入真实视口"
+        elif result["next_center_uncovered"] is not True:
+            result["next_step_ui"] = "obscured"
+            result["error"] = "小红书下一步按钮中心被遮挡或无法确认"
+        if (
+            result["next_visible"]
+            and result["next_in_viewport"]
+            and result["next_center_uncovered"] is True
+        ):
+            result["success"] = True
+            result["next_step_ui"] = "ready"
+        return result
 
     async def _finalize_long_text_layout(
         self,
@@ -1226,6 +1332,43 @@ class XiaohongshuPlatform(BasePlatform):
                 const exactVisible = (label) => buttons.some((button) =>
                     visible(button) && (button.innerText || '').trim() === label
                 );
+                const inViewport = (rect) => rect.left >= 0 && rect.top >= 0 &&
+                    rect.right <= window.innerWidth && rect.bottom <= window.innerHeight;
+                const rectNumbers = (rect) => ({
+                    left: rect.left,
+                    top: rect.top,
+                    right: rect.right,
+                    bottom: rect.bottom,
+                });
+                const centerUncovered = (button, rect) => {
+                    if (!inViewport(rect)) return false;
+                    const target = document.elementFromPoint(
+                        (rect.left + rect.right) / 2,
+                        (rect.top + rect.bottom) / 2,
+                    );
+                    return Boolean(target && (target === button || button.contains(target)));
+                };
+                const buttonDetails = (label) => {
+                    const matches = buttons.filter((button) =>
+                        visible(button) && (button.innerText || '').trim() === label
+                    );
+                    if (matches.length !== 1) {
+                        return {
+                            rect: null,
+                            in_viewport: false,
+                            center_uncovered: false,
+                        };
+                    }
+                    const button = matches[0];
+                    const rect = button.getBoundingClientRect();
+                    return {
+                        rect: rectNumbers(rect),
+                        in_viewport: inViewport(rect),
+                        center_uncovered: centerUncovered(button, rect),
+                    };
+                };
+                const nextButton = buttonDetails('下一步');
+                const saveButton = buttonDetails('暂存离开');
                 const first = document.querySelector(
                     '.editor-cards-wrapper .card-outer-container'
                 );
@@ -1241,6 +1384,14 @@ class XiaohongshuPlatform(BasePlatform):
                     ).length,
                     save_visible: exactVisible('暂存离开'),
                     next_visible: exactVisible('下一步'),
+                    viewport_width: window.innerWidth,
+                    viewport_height: window.innerHeight,
+                    save_rect: saveButton.rect,
+                    save_in_viewport: saveButton.in_viewport,
+                    save_center_uncovered: saveButton.center_uncovered,
+                    next_rect: nextButton.rect,
+                    next_in_viewport: nextButton.in_viewport,
+                    next_center_uncovered: nextButton.center_uncovered,
                     image_count: images.length,
                     loaded_image_count: images.filter((image) =>
                         image.complete && image.naturalWidth > 0

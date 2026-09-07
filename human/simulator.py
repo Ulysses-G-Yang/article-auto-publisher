@@ -182,11 +182,19 @@ class HumanSimulator:
             count = random.randint(1, 5)
 
         viewport = page.viewport_size
-        w = viewport["width"] if viewport else 1920
-        h = viewport["height"] if viewport else 1080
+        if viewport is None:
+            viewport = await page.evaluate(
+                "() => ({width: window.innerWidth, height: window.innerHeight})"
+            )
+        w = max(1, int(viewport.get("width") or 1))
+        h = max(1, int(viewport.get("height") or 1))
+        x_min = min(100, w - 1)
+        x_max = max(x_min, w - 100)
+        y_min = min(100, h - 1)
+        y_max = max(y_min, h - 200)
 
         for _ in range(count):
-            x = random.randint(100, w - 100)
-            y = random.randint(100, h - 200)
+            x = random.randint(x_min, x_max)
+            y = random.randint(y_min, y_max)
             await self.move_mouse_to(page, x, y, steps=random.randint(10, 25))
             await self.random_delay(0.5, 2.0)

@@ -194,6 +194,7 @@ class BasePlatform(ABC):
     """平台自动化基类，使用系统 Chrome 浏览器"""
 
     platform_name: str = ""
+    use_native_viewport: bool = False
 
     def __init__(
         self,
@@ -327,20 +328,26 @@ class BasePlatform(ABC):
         max_attempts = 1 if self.strict_profile_lock else 3
         for attempt in range(max_attempts):
             try:
-                self.context = await self.playwright.chromium.launch_persistent_context(
-                    user_data_dir=str(chrome_profile_dir),
-                    channel="chrome",
-                    headless=False,
-                    viewport={"width": 1366, "height": 900},
-                    locale="zh-CN",
-                    timezone_id="Asia/Shanghai",
-                    args=[
+                launch_kwargs = {
+                    "user_data_dir": str(chrome_profile_dir),
+                    "channel": "chrome",
+                    "headless": False,
+                    "locale": "zh-CN",
+                    "timezone_id": "Asia/Shanghai",
+                    "args": [
                         "--disable-blink-features=AutomationControlled",
                         "--no-first-run",
                         "--no-default-browser-check",
                         "--no-proxy-server",          # 不走系统代理
                         "--disable-features=IsolateOrigins,site-per-process",
                     ],
+                }
+                if self.use_native_viewport:
+                    launch_kwargs["no_viewport"] = True
+                else:
+                    launch_kwargs["viewport"] = {"width": 1366, "height": 900}
+                self.context = await self.playwright.chromium.launch_persistent_context(
+                    **launch_kwargs
                 )
                 break
             except Exception as e:

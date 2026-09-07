@@ -7,7 +7,7 @@ at upstream commit `da2c89f5e71a762fb46a3583f42d5f740d965b1d` and keeps
 ArticleOps dependency manifest and lockfile.
 
 The pre-trim ArticleOps CoreUI v5.6.0 vendored snapshot is retained in the
-remote archive branch `origin/archive/coreui-full-v5.6.0`. That snapshot is not
+annotated archive tag `archive/2026-09-07/archive-coreui-full-v5.6.0`. That snapshot is not
 a complete, unmodified copy of the official upstream repository. The
 authoritative official tag `v5.6.0` source is available from
 `git@github.com:coreui/coreui-free-bootstrap-admin-template.git` at commit

@@ -1,6 +1,6 @@
-# AI 发布建议与兼容服务配置（Phase 4）
+# 生成平台建议与兼容服务配置（Phase 4）
 
-本阶段只提供**只读建议**：读取当前 Content Studio 草稿的标题和完整可见正文，
+本阶段只提供**只读生成平台建议**：读取当前 Content Studio 草稿的标题和完整可见正文，
 向用户配置的 OpenAI 兼容服务请求每个平台的社区、话题和关键词建议。结果不会自动修改草稿、创建投递计划、
 保存平台草稿或执行公开发布；平台候选与建议仍需由调用方核对。
 
@@ -8,7 +8,7 @@
 
 打开 `/settings/ai`，可以填写：
 
-- 是否启用 AI 发布建议；
+- 是否启用生成平台建议；
 - OpenAI 兼容服务地址（支持 DeepSeek 官方服务、自建中转站和兼容服务）；
 - 模型 ID；
 - API Key。
@@ -21,32 +21,42 @@
 测试失败不会撤销配置。页面不回显已有 Key，保存成功后会立即清空密码输入框。
 
 网页输入只保存在当前 Python 服务进程内，不写文件、数据库、Git 或日志。服务重启后，
-运行期配置会消失并回退到以下环境变量。当前项目尚未实现真正的 Web 管理员登录，
+运行期配置会消失并回退到本机环境变量。当前项目尚未实现真正的 Web 管理员登录，
 所以该页面只应部署在可信单用户网络；CSRF 和侧边栏隐藏不能代替鉴权。
 
 ## 环境变量配置
 
-默认关闭。只在启动 ArticleOps 的外部 PowerShell 会话中设置：
+默认关闭。Windows 生产运行复用现有 `data\production_env.ps1`，由管理员在本机维护；
+现有 `scripts\launch_articleops_windows.ps1` 启动时按既有流程加载它，Web/MCP 进程继承
+其中的环境变量。本轮不自动生成、覆写、迁移或检查真实 `data\production_env.ps1`，也不把
+它复制进 Git。以下四个变量是运维人员需要关注的核心 AI 配置项，均保持注释状态直到
+管理员按需在本机配置：
 
 ```powershell
-$env:ARTICLEOPS_AI_GUIDANCE_ENABLED = "true"
-$env:DEEPSEEK_API_KEY = "在本地环境变量中设置，不要写入仓库"
+# data\production_env.ps1（管理员本机配置；不要提交到仓库）
+# $env:ARTICLEOPS_AI_GUIDANCE_ENABLED = "false"
+# $env:DEEPSEEK_BASE_URL = "https://api.deepseek.com"
+# $env:DEEPSEEK_MODEL = "deepseek-v4-flash"
+# $env:DEEPSEEK_API_KEY = "<local secret; never commit>"
+# 可选的超时和输出限制（均有默认值）：
+# $env:DEEPSEEK_CONNECT_TIMEOUT_SECONDS = "10"
+# $env:DEEPSEEK_READ_TIMEOUT_SECONDS = "90"
+# $env:DEEPSEEK_MAX_OUTPUT_TOKENS = "2000"
 ```
 
-可选配置（均有默认值）：
-
-```powershell
-$env:DEEPSEEK_BASE_URL = "https://api.deepseek.com"
-$env:DEEPSEEK_MODEL = "deepseek-v4-flash"
-$env:DEEPSEEK_CONNECT_TIMEOUT_SECONDS = "10"
-$env:DEEPSEEK_READ_TIMEOUT_SECONDS = "90"
-$env:DEEPSEEK_MAX_OUTPUT_TOKENS = "2000"
-```
+实际启用 AI 时，管理员必须在本机配置中将 `ARTICLEOPS_AI_GUIDANCE_ENABLED` 设为 `"true"`；
+示例中的注释 `"false"` 只是安全占位，不会启用 AI。
 
 `DEEPSEEK_BASE_URL` 启用时必须是无凭据、查询参数和片段的 HTTPS 地址。网页运行期 Key
-优先于 `DEEPSEEK_API_KEY`；清除网页 Key 后自动回退环境变量。API Key 不会进入
-`DEFAULT_CONFIG`、YAML 配置对象、日志、数据库或响应。接口不自动重试；认证失败、
-限流、超时、模型不存在和非法响应会返回稳定中文错误。
+优先于 `DEEPSEEK_API_KEY`；清除网页 Key 后自动回退环境变量。长期 Key 通过本机环境注入；
+网页输入的临时 Key 只在当前 Python 进程内存中生效，不会进入 `DEFAULT_CONFIG`、YAML 配置对象、
+Git、日志、数据库或响应。管理员应使用
+Windows 文件 ACL 将本机配置限制为管理员和运行账号；该文件是明文配置，不是加密金库，
+不要把它描述为安全存储。接口不自动重试；认证失败、限流、超时、模型不存在和非法响应
+会返回稳定中文错误。
+
+页面的“保存设置”只是当前 Python 进程的临时覆盖；服务重启后回到本机环境变量。将配置
+永久保存在网页或数据库中需要另行设计管理员权限，本轮不实现。
 
 ## 设置接口
 
@@ -76,7 +86,7 @@ POST /api/settings/publication-ai/test
 
 ## 创作工作台
 
-在 `/upload` 选择至少一个可投递平台后点击“AI 分析发布建议”。页面会先同步当前草稿，
+在 `/upload` 选择至少一个可投递平台后点击“生成平台建议”。页面会先同步当前草稿，
 再把当前修订的完整可见正文发送给已配置的 AI 服务。结果只展示建议社区、话题、搜索词、关键词和理由：
 
 - 不自动修改草稿；

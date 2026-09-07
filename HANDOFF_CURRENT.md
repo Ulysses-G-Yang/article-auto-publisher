@@ -1,237 +1,80 @@
-# ArticleOps 当前模块化开发交接
+# ArticleOps 当前主线交接
 
-日期：2026-08-25
+日期：2026-09-07
 
-## 1. 本文目的
+本文是当前唯一有效的协作接力入口。没有新的明确任务包就停止写入；旧
+`codex_handoff*.md`、旧 `RESUMABLE_SESSION.md` 和旧分支说明不再作为任务来源。
 
-本文是当前唯一有效的协作接力入口。协作方式如下：
-
-- 外部 AI：快速开发用户明确指定的新模块，仅在任务包授权范围内写代码。
-- Codex：负责只读审查、测试、验收、必要的聚焦修正，以及集成到当前主集成分支。
-
-本文不要求任何 AI 自动续做旧 P0、旧平台待办或历史路线图。没有新的明确任务包，就停止写入并请求确认。
-
-## 2. 当前可信基线
+## 1. 当前可信基线
 
 | 项目 | 当前值 |
 | --- | --- |
 | 仓库 | `D:\Backup\Documents\article-auto-publisher` |
-| 当前工作树 | `D:\Backup\Documents\article-auto-publisher-worktrees\weibo-v043-integration` |
-| 当前集成分支 | `integrate/weibo-draft-v0.4.3` |
+| 唯一主工作树 | `D:\Backup\Documents\article-auto-publisher-worktrees\ai-guided-publication` |
+| 长期分支 | `main` |
+| 文档批次开始前的主线代码 SHA | `055a2406e596cb56352ed25298d1b9fcaf5f41fe` |
 | Git 远端 | `git@github.com:Ulysses-G-Yang/article-auto-publisher.git` |
-| 本文之前的功能代码基线 SHA | `d55ea1f40adf41cc58870e8c43f9d6fc292b178c` |
-| Python | `C:\Users\Administrator\miniconda3\envs\article-publisher-py312\python.exe` |
+| 固定 Python | `C:\Users\Administrator\miniconda3\envs\article-publisher-py312\python.exe` |
+| CoreUI 代码状态 | 最小可复现源码和生产资产已在 `main`；瘦身提交为 `74288d0e`、`055a2406` |
 
-开始任何新模块前都必须执行 `git fetch origin`，并确认起点为远端
-`origin/integrate/weibo-draft-v0.4.3`。不得从旧本地分支、旧交付包或旧 SHA 开始。
+`main` 是业务和开发的唯一长期基线。本批文档提交后的最终 SHA 必须以 Git
+和远端 40 位 SHA 核验结果为准，不能在文档中制造自引用的最终 SHA。
 
-## 3. 当前已完成的四个提交
+## 2. 任务与提交纪律
 
-1. `a811f4f361c030158fa341ad140d03f296bc951f`
-   `fix(content): normalize Word delivery structure`
-   - 完善 Word 视觉标题识别及样式字号继承。
-   - 生成不修改原稿的投递副本，移除可安全降级的展示 marks/link 样式。
-   - 将段内文字和图片按原 child 顺序投影，保留图片数量、重复图片和图文顺序。
+- 每个完成任务必须更新本文，并与该任务实现放在同一个 focused commit。
+- 只暂存任务文件；禁止 `git add -A`，禁止夹带 `uv.lock`、`data`、真实用户内容或运行产物。
+- 推送使用 SSH，推送后核对目标远端分支完整 40 位 SHA；禁止 force push。
+- 真实登录、保存平台草稿、公开发布、删除和不确定状态重试都需要单独明确授权。
+- 本轮公开发布保持默认关闭，不改监听 host/port，不启动或停止服务。
 
-2. `ae8bd7e580a581f37384f0424a28c2e64b4983f5`
-   `fix(content): preserve source semantics in delivery normalization`
-   - 保留 canonical Word 文档的原始 H1 语义，只在投递副本中归一正文标题。
-   - 标题块保持原子性，避免标题中的混合节点泄漏到正文投影。
-   - 升级投递策略版本并补齐公式节点 fail-closed 检测。
+## 3. 分支收口状态
 
-3. `a1b4d751a9b307b085bde19f62fcdb7140e5a210`
-   `feat(studio): simplify bulk target selection`
-   - 增加可投递平台和有效账号的批量选择/取消能力。
-   - 草稿目标取消二次勾选，公开发布确认仍保留。
-   - 合并目标保存、处理跨草稿响应及修订竞态，减少连续操作造成的冲突。
+- `main` 已从 `809527f65e49f8c82bd394aa2f5925b365cbac56` fast-forward 到
+  `055a2406e596cb56352ed25298d1b9fcaf5f41fe`，包含 `378bd2f1` 全部主线提交及
+  CoreUI 瘦身/版权指向修正；不从 shared/weibo 历史分支整条合并。
+- 17 个非 `main` 远端 head 已用注释标签 `archive/2026-09-07/*` 保全，标签、原分支和
+  精确 peeled SHA 见 `docs/BRANCH_ARCHIVE_20260907.md`。
+- 主线文档提交并完成远端 40 位 SHA 核验后，才可按归档清单删除 17 个远端 head 和 13 个
+  本地旧分支；删除前必须再次核对标签 SHA，禁止 force push。
+- 旧 worktree 目录一律保留，不执行 `git worktree remove --force`；可在确认文件原样后
+  `git switch --detach HEAD` 解除旧分支占用，但不得搬移、清理或覆盖运行数据。
 
-4. `d55ea1f40adf41cc58870e8c43f9d6fc292b178c`
-   `fix(delivery): serialize batch platform execution`
-   - 同一进程中的平台实际操作使用全局串行批次。
-   - 除进程内第一条外，平台操作之间随机等待 8～20 秒；测试可注入零延迟。
-   - 单项失败继续下一项；重启恢复按计划和目标位置稳定排序。
+## 4. 必须原地保全的本机状态
 
-## 4. 旧文档状态
+- canonical worktree 的未跟踪 `uv.lock` 原样保留，绝不读取、暂存、覆盖或提交。
+- 旧 `weibo-v043-integration` 的脏 `HANDOFF_CURRENT.md` 原样保留，不夹带到主线。
+- 两个本地 stash 原样保留，不上传、不恢复、不在未审查秘密前读取内容。
+- 各旧 worktree 的 `data`、`uploads`、`images`、Profile、Cookie、Token 和其他忽略运行目录
+  原样保留；本轮只记录根层目录名，不读取其内容。
 
-以下内容只能作为历史参考，不能作为当前任务来源：
+## 5. AI 配置边界
 
-- 旧 `codex_handoff*.md` 中的分支、优先级和待办。
-- `RESUMABLE_SESSION.md` 中的恢复命令和进行中状态。
-- `AGENTS.md` 中以下内容已经失效，不得执行：旧 canonical/current branch、旧主线程与执行线程角色、
-  硬编码的 `origin/feat/...` 推送及 SHA 核对目标、旧 P0 顺序，以及旧暂停条件。
+AI 只提供只读“生成平台建议”，默认关闭。生产 Windows 继续复用管理员本机维护的
+`data\production_env.ps1`；现有 launcher 在启动时加载并让进程继承，不新增脚本生成、覆写、
+迁移或持久化真实配置。本仓库只保留注释示例，不接触真实文件。
 
-`AGENTS.md` 只有以下通用规则继续有效：固定 Python 3.12 路径；禁止触碰
-`data/`、Profile、Cookie、Token、`uv.lock`；真实副作用必须单独授权；只暂存任务文件；
-focused commit；使用 SSH 推送；禁止 force push。实际推送和远端 SHA 核对始终针对当前新分支，
-不得使用 `AGENTS.md` 中硬编码的旧分支。
-若历史文档与本文冲突，以本文的当前分支和协作流程为准；若安全规则冲突，采用更严格的规则。
+运维配置项仅为：`ARTICLEOPS_AI_GUIDANCE_ENABLED`、`DEEPSEEK_BASE_URL`、
+`DEEPSEEK_MODEL`、`DEEPSEEK_API_KEY`。长期 Key 只从本机环境注入，页面临时 Key 仅存当前
+Python 进程；二者都不写 YAML、Git、日志、数据库或响应。本机配置是明文文件，应由 Windows
+ACL 限制管理员和运行账号，不宣称为加密金库。网页永久保存需先实现管理员鉴权，本轮不做。
+所有数据路径和账号/Profile 保持不变。
 
-## 5. 外部 AI 的默认边界
+## 6. 已取消、外部和后续目标
 
-外部 AI 必须遵守：
+- 完整诊断/脱敏包已取消，不再列待办。
+- 后续不再制作 ZIP 或新的发行包；已有 release 仅作为历史回滚参考。
+- 数据看板属于项目外部系统，本仓库不接管其代码、部署或数据。
+- 本轮收口后才开始三阶段目标：单平台仅自己可见真实发布 → AI 真实选项写入 → 多平台多账号。
+  这些是后续目标，不是当前已有能力的宣称。
 
-- 只实现用户或 Codex 下发任务包中明确指定的新模块。
-- 不自行续做旧平台、旧 P0、旧路线图或“顺手修复”的旁支问题。
-- 不修改百家号或任何未被任务包明确授权的平台模块。
-- 不扩大数据库、MCP、账号、权限、发布契约或前端范围。
-- 不自行执行真实登录、保存草稿、公开发布、删除或数据迁移。
-- 发现任务包外问题时只记录证据和风险，不直接修改。
+## 7. 验证与下一步
 
-## 6. 新分支与独立工作树模板
+CoreUI 定向测试已在当前 `main` worktree 通过：`tests/frontend/test_coreui_source_trim.py -q`
+为 `4 passed`；该测试文件 Ruff 为 `All checks passed`，示例 PowerShell 仅做 ParseFile 语法
+校验且为 `0 errors`。固定 Python 3.12 全量 `pytest -q` 实测为 `1251 passed, 7 skipped`
+（69.43s）。文档批次仍需完成 `git diff --check` 与远端 SHA 核验；不得启动真实平台。
 
-将 `<module-slug>` 替换为简短模块名；目录和分支都不得复用旧工作树。
-
-```powershell
-Set-Location 'D:\Backup\Documents\article-auto-publisher'
-git fetch origin
-git worktree add `
-  -b "feature/<module-slug>" `
-  "D:\Backup\Documents\article-auto-publisher-worktrees\<module-slug>" `
-  origin/integrate/weibo-draft-v0.4.3
-
-Set-Location "D:\Backup\Documents\article-auto-publisher-worktrees\<module-slug>"
-git rev-parse HEAD
-git status --short
-```
-
-实际开发起点必须等于 `git fetch` 后的远端集成分支 HEAD。`d55ea1f...`
-只是本文之前的功能代码基线，不是要求新工作树停留的提交。创建工作树后执行：
-
-```powershell
-$localHead = git rev-parse HEAD
-$remoteHead = git rev-parse origin/integrate/weibo-draft-v0.4.3
-if ($localHead -ne $remoteHead) {
-  throw "工作树 HEAD 与远端集成分支不一致：$localHead != $remoteHead"
-}
-
-git merge-base --is-ancestor d55ea1f40adf41cc58870e8c43f9d6fc292b178c HEAD
-if ($LASTEXITCODE -ne 0) {
-  throw '当前 HEAD 不包含本文之前的功能代码基线'
-}
-```
-
-在任务报告中记录 `$remoteHead` 的完整 40 位 SHA；不得擅自回退到功能代码基线。
-
-## 7. 新模块任务包协议
-
-每个任务包必须在写代码前冻结以下内容：
-
-```text
-任务名称：
-业务目标：
-基线分支与 SHA：
-允许修改的目录/文件：
-禁止修改的目录/文件：
-冻结 API/路由/模型/数据库/MCP 契约：
-输入、输出与错误语义：
-必须通过的定向测试：
-是否要求全量测试：
-允许的副作用：默认“无”
-停止条件：
-目标提交信息：
-```
-
-默认冻结项为现有 API 路径、请求/响应字段、数据库结构、账号权限和 MCP 工具契约。
-只有任务包逐项明确授权时才能修改。任务包存在歧义、需要新权限、需要真实平台动作、
-或需要修改禁止目录时，外部 AI 必须停止并请求补充，不得自行推断。
-
-## 8. 外部 AI 的交付报告
-
-完成模块后，必须向 Codex 提供：
-
-1. 分支名、focused commit 和远端完整 40 位 SHA。
-2. 精确文件清单及每个文件的职责变化。
-3. 新增或变化的接口、输入、输出、错误码和兼容性说明。
-4. 实际运行的测试命令和完整结果摘要。
-5. 已知风险、未覆盖场景和明确停止条件。
-6. 未执行的真实副作用清单，例如未登录、未保存平台草稿、未发布、未删除。
-7. 工作树是否干净，以及是否存在未跟踪文件。
-
-没有推送远端、没有 40 位 SHA 或夹带无关修改，均不视为完成。
-
-## 9. Codex 的审查、修正与集成流程
-
-1. 获取外部 AI 的远端分支，只读检查基线、提交范围和工作树差异。
-2. 按任务包审核安全边界、冻结契约、错误语义、并发/幂等及兼容性。
-3. 在干净环境重新运行定向测试和必要的全量测试，不采信仅口头报告。
-4. 若发现小型明确问题，Codex 可做单独 focused 修正提交；若涉及架构或契约变化，退回任务包重新确认。
-5. 集成前再次核对提交清单，确保不含 `data/`、凭据、运行产物或无关文件。
-6. 集成到 `integrate/weibo-draft-v0.4.3` 后重新运行验收，SSH 推送并核对远端 40 位 SHA。
-7. 只有代码、测试、提交、推送和远端 SHA 全部完成后，才向用户报告交付完成。
-
-## 10. 安全与副作用红线
-
-- 禁止读取、复制、修改、提交或输出 `data/`、Profile、Cookie、Token、原始敏感响应。
-- 禁止触碰未跟踪的 `uv.lock`。
-- 真实登录、真实草稿保存、公开发布、删除动作必须分别取得用户明确授权。
-- 公开发布保持关闭，测试不得通过修改开关绕过。
-- 平台结果证据不足必须记录 `RESULT_UNKNOWN`，禁止自动重试可能已产生副作用的操作。
-- 禁止 force push、批量暂存和恢复用户无关修改。
-- 文档、日志、测试 fixture 和提交信息不得包含秘密、本机凭据或真实用户内容。
-
-## 11. 最小验证与 Git 交付
-
-PowerShell 示例：
-
-```powershell
-$articleOpsPython = 'C:\Users\Administrator\miniconda3\envs\article-publisher-py312\python.exe'
-
-# 按任务包运行定向测试
-& $articleOpsPython -m pytest <tests-for-module> -q
-
-# 需要全量时运行
-& $articleOpsPython -m pytest -q
-
-# Python 改动检查
-& $articleOpsPython -m ruff check <changed-python-files>
-
-# JavaScript 改动逐文件检查
-node --check <changed-javascript-file>
-
-# 提交前检查
-git diff --check
-git status --short
-```
-
-Git 交付必须只暂存任务文件：
-
-```powershell
-git add -- <task-file-1> <task-file-2>
-git commit -m "<focused commit message>"
-$env:GIT_SSH_COMMAND = 'ssh -o StrictHostKeyChecking=accept-new'
-git push origin HEAD
-git rev-parse HEAD
-git ls-remote origin "refs/heads/$(git branch --show-current)"
-```
-
-当前基线曾验证为 `857 passed, 7 skipped`，但这只是接力时的历史基线。
-任何新 AI 都必须在自己的工作树 fresh 运行任务包要求的测试，不能直接引用该结果。
-
-## 12. 可直接复制给新 AI 的启动提示
-
-```text
-你负责 ArticleOps 的一个独立新模块。请先只读预检，不要续做任何旧 P0 或历史平台待办。
-
-可信起点：
-- repo：D:\Backup\Documents\article-auto-publisher
-- base：origin/integrate/weibo-draft-v0.4.3
-- 本文之前的功能代码基线 SHA：d55ea1f40adf41cc58870e8c43f9d6fc292b178c（不是实际开发起点）
-- Python：C:\Users\Administrator\miniconda3\envs\article-publisher-py312\python.exe
-- remote：git@github.com:Ulysses-G-Yang/article-auto-publisher.git
-
-先执行完整的 git fetch origin，并从 origin/integrate/weibo-draft-v0.4.3 创建独立 feature 分支和独立 worktree。
-实际工作树 HEAD 必须等于 fetch 后的远端分支 HEAD，并且
-git merge-base --is-ancestor d55ea1f40adf41cc58870e8c43f9d6fc292b178c HEAD 必须成功。
-报告实际远端 HEAD 的完整 40 位 SHA，不要把功能代码基线当作当前 HEAD。
-阅读根目录 HANDOFF_CURRENT.md 和 AGENTS.md；HANDOFF_CURRENT.md 决定当前分支和协作流程。
-AGENTS.md 中旧分支、旧线程角色、硬编码 origin/feat 推送目标、旧 P0 和暂停条件均已失效；
-只继承其中 Python 路径、数据与凭据安全、真实副作用授权、focused commit、SSH、no force push
-和只暂存任务文件等通用规则，实际推送始终使用当前新分支。
-
-在我提供完整任务包前禁止写代码。收到任务包后，只修改允许目录；冻结 API/路由/模型/数据库/MCP 契约；
-不得触碰百家号或其他未授权模块，不得触碰 data/Profile/Cookie/Token/uv.lock；
-不得执行真实登录、草稿、发布或删除。完成后运行 fresh 测试，创建 focused commit，SSH 推送，
-并交付远端 40 位 SHA、文件清单、接口变化、测试结果、风险和未执行副作用。
-
-你的第一条回复只报告：实际 worktree、分支、HEAD、远端、工作树状态，以及等待的任务包字段。
-```
+下一步顺序：审查文档 diff → 按任务文件 focused commit → SSH 推送 `main` → 核对远端完整
+40 位 SHA → 再次核对 17 个归档标签 peeled SHA → 解除旧 worktree 分支占用并删除旧 refs →
+复核 `main` 与标签状态。任何数据、凭据、用户文件或不确定副作用边界不明时立即停止。

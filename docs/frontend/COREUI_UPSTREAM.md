@@ -10,7 +10,7 @@ SimpleBar 固定为 `6.3.3`。
 - 上游 SSH：`git@github.com:coreui/coreui-free-bootstrap-admin-template.git`
 - 上游 tag：`v5.6.0`
 - 上游 commit：`da2c89f5e71a762fb46a3583f42d5f740d965b1d`
-- 瘦身前 ArticleOps CoreUI v5.6.0 vendored 快照：`origin/archive/coreui-full-v5.6.0`
+- 瘦身前 ArticleOps CoreUI v5.6.0 vendored 快照：`archive/2026-09-07/archive-coreui-full-v5.6.0`
 - 最小可复现源码：`frontend/coreui-free-bootstrap-admin-template/`
 - 生产编译产物：`web/static/vendor/coreui-template/`
 - 许可证：`frontend/coreui-free-bootstrap-admin-template/LICENSE`

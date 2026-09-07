@@ -12,7 +12,7 @@ The active `frontend/coreui-free-bootstrap-admin-template/` directory keeps the
 minimum reproducible CoreUI build source required by ArticleOps, including its
 MIT license and the ArticleOps-pinned dependency manifest and lockfile. The
 pre-trim ArticleOps CoreUI v5.6.0 vendored snapshot is retained in
-`origin/archive/coreui-full-v5.6.0`; that snapshot is not a complete,
+`archive/2026-09-07/archive-coreui-full-v5.6.0`; that snapshot is not a complete,
 unmodified copy of the official upstream repository. The authoritative
 official v5.6.0 source is the upstream SSH repository at commit
 `da2c89f5e71a762fb46a3583f42d5f740d965b1d`.

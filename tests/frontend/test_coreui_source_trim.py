@@ -34,7 +34,7 @@ def test_coreui_manifest_only_keeps_articleops_runtime_dependencies() -> None:
 def test_coreui_source_notices_describe_the_archive_accurately() -> None:
     official_commit = "da2c89f5e71a762fb46a3583f42d5f740d965b1d"
     official_ssh = "git@github.com:coreui/coreui-free-bootstrap-admin-template.git"
-    archive = "origin/archive/coreui-full-v5.6.0"
+    archive = "archive/2026-09-07/archive-coreui-full-v5.6.0"
     third_party = (PROJECT_ROOT / "THIRD_PARTY_NOTICES.md").read_text(
         encoding="utf-8"
     )

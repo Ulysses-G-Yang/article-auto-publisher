@@ -28,3 +28,15 @@ $env:ARTICLEOPS_MCP_ALLOWED_ACCOUNT_IDS = '00000000-0000-0000-0000-000000000000'
 # 只有完成账号白名单配置后才改为 true；该开关仅授予平台草稿权限。
 $env:ARTICLEOPS_MCP_DRAFT_DELIVERY_ENABLED = 'false'
 $env:MCP_LEGACY_MUTATIONS_ENABLED = 'false'
+
+# 可选的只读平台建议配置。以下内容在示例中保持注释；管理员可按需维护到
+# data\production_env.ps1。
+# 实际启用时将启用开关设为 'true'；示例中的 'false' 只是安全占位。
+# $env:ARTICLEOPS_AI_GUIDANCE_ENABLED = 'false'
+# $env:DEEPSEEK_BASE_URL = 'https://api.deepseek.com'
+# $env:DEEPSEEK_MODEL = 'deepseek-v4-flash'
+# $env:DEEPSEEK_API_KEY = '<set only in the administrator-maintained local file>'
+# 可选的超时和输出限制（均有默认值）：
+# $env:DEEPSEEK_CONNECT_TIMEOUT_SECONDS = '10'
+# $env:DEEPSEEK_READ_TIMEOUT_SECONDS = '90'
+# $env:DEEPSEEK_MAX_OUTPUT_TOKENS = '2000'

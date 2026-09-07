@@ -1968,8 +1968,23 @@ class XiaohongshuPlatform(BasePlatform):
         except Exception:  # noqa: BLE001
             return False
 
+    @staticmethod
+    def _private_note_id_from_view_url(value: str) -> str | None:
+        """仅解析已观测的笔记查看路径；不访问链接、不保留查询签名。"""
+
+        if not isinstance(value, str) or any(ord(char) < 32 for char in value):
+            return None
+        try:
+            parsed = urlsplit(value.strip())
+        except ValueError:
+            return None
+        if parsed.scheme != "https" or parsed.netloc != "www.xiaohongshu.com":
+            return None
+        match = re.fullmatch(r"/explore/([0-9a-f]{24})", parsed.path)
+        return match.group(1) if match else None
+
     async def _private_read_entity_id(self, locator, attribute: str | None) -> str | None:
-        """从调用方已观测的 ID 节点读取文本或明确指定属性，不猜属性名。"""
+        """读取已观测 ID 节点；href 只接受已确认的笔记查看 URL 形式。"""
 
         if not self._private_locator_on_page(locator):
             return None
@@ -1985,6 +2000,8 @@ class XiaohongshuPlatform(BasePlatform):
             else:
                 value = await item.inner_text()
             clean = str(value or "").strip()
+            if attribute == "href":
+                return self._private_note_id_from_view_url(clean)
             return clean or None
         except Exception:  # noqa: BLE001
             return None

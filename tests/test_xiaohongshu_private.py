@@ -21,6 +21,35 @@ IDENTITY = {"ok": True, "user_id": "user-1", "display_name": "测试账号"}
 LAYOUT_RESULT = {"success": True, "safe_to_continue": True}
 
 
+@pytest.mark.parametrize(
+    "suffix",
+    ["", "?xsec_token=synthetic-signature&xsec_source=pc_user", "#synthetic-fragment"],
+)
+def test_private_view_url_extracts_id_without_signature(suffix: str) -> None:
+    note_id = "abcdefabcdefabcdefabcdef"
+    url = f"https://www.xiaohongshu.com/explore/{note_id}{suffix}"
+    assert XiaohongshuPlatform._private_note_id_from_view_url(url) == note_id
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://www.xiaohongshu.com/explore/111111111111111111111111",
+        "https://www.xiaohongshu.com.invalid/explore/111111111111111111111111",
+        "https://www.xiaohongshu.com@invalid.test/explore/111111111111111111111111",
+        "https://creator.xiaohongshu.com/new/note-manager",
+        "https://www.xiaohongshu.com/explore/not-a-note-id",
+        "https://www.xiaohongshu.com/explore/111111111111111111111111/edit",
+        "/explore/111111111111111111111111",
+        "javascript:alert(1)",
+        "https://www.xiaohongshu.com/\nexplore/111111111111111111111111",
+        "https://[invalid",
+    ],
+)
+def test_private_view_url_rejects_unobserved_routes(url: str) -> None:
+    assert XiaohongshuPlatform._private_note_id_from_view_url(url) is None
+
+
 def _editor_html(
     *,
     visibility: str | None = "公开可见",
@@ -648,3 +677,39 @@ async def test_private_manager_rejects_same_page_iframe_locators() -> None:
 
         assert result["status"] == "RESULT_UNKNOWN"
         assert result["detail_code"] == "XHS_PRIVATE_ENTITY_CARD_NOT_UNIQUE"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("link_id", ["111111111111111111111111", "222222222222222222222222"])
+async def test_private_manager_binds_actual_card_href_without_retaining_signature(link_id: str):
+    note_id = "111111111111111111111111"
+    signature = "synthetic-do-not-retain"
+    view_url = f"https://www.xiaohongshu.com/explore/{link_id}?xsec_token={signature}"
+    html = _manager_html(entity_id=note_id).replace(
+        f'<span class="entity-id" data-note-id="{note_id}">{note_id}</span>',
+        f'<a class="entity-id" href="{view_url}">查看</a>',
+    )
+    async with _local_page(html, url=CREATOR_NOTE_MANAGER) as page:
+        platform = _bound_manager_platform(page)
+        result = await _verify_manager(
+            platform, page, entity_id=note_id, entity_attribute="href"
+        )
+        assert signature not in str(result)
+        assert "xsec_token" not in str(result)
+        if link_id == note_id:
+            assert result["status"] == "submitted"
+            assert result["entity_bound"] is True
+        else:
+            assert result["status"] == "RESULT_UNKNOWN"
+            assert result["detail_code"] == "XHS_PRIVATE_ENTITY_ID_READBACK_MISMATCH"
+
+
+@pytest.mark.asyncio
+async def test_private_reader_link_does_not_replace_manager_evidence() -> None:
+    note_id = "111111111111111111111111"
+    view_url = f"https://www.xiaohongshu.com/explore/{note_id}"
+    async with _local_page(_manager_html(entity_id=note_id), url=view_url) as page:
+        platform = _bound_manager_platform(page)
+        result = await _verify_manager(platform, page, entity_id=note_id)
+        assert result["status"] == "RESULT_UNKNOWN"
+        assert result["detail_code"] == "XHS_PRIVATE_MANAGER_URL_UNVERIFIED"

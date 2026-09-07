@@ -13,6 +13,8 @@
 | 唯一主工作树 | `D:\Backup\Documents\article-auto-publisher-worktrees\ai-guided-publication` |
 | 长期分支 | `main` |
 | 文档批次开始前的主线代码 SHA | `055a2406e596cb56352ed25298d1b9fcaf5f41fe` |
+| 本批首个文档 focused commit | `80f2640da878659dc27ffdecb5332108c1204e61` |
+| 当前 `main` / `origin/main` | `80f2640da878659dc27ffdecb5332108c1204e61`（首个提交核验） |
 | Git 远端 | `git@github.com:Ulysses-G-Yang/article-auto-publisher.git` |
 | 固定 Python | `C:\Users\Administrator\miniconda3\envs\article-publisher-py312\python.exe` |
 | CoreUI 代码状态 | 最小可复现源码和生产资产已在 `main`；瘦身提交为 `74288d0e`、`055a2406` |
@@ -31,14 +33,14 @@
 ## 3. 分支收口状态
 
 - `main` 已从 `809527f65e49f8c82bd394aa2f5925b365cbac56` fast-forward 到
-  `055a2406e596cb56352ed25298d1b9fcaf5f41fe`，包含 `378bd2f1` 全部主线提交及
-  CoreUI 瘦身/版权指向修正；不从 shared/weibo 历史分支整条合并。
-- 17 个非 `main` 远端 head 已用注释标签 `archive/2026-09-07/*` 保全，标签、原分支和
-  精确 peeled SHA 见 `docs/BRANCH_ARCHIVE_20260907.md`。
-- 主线文档提交并完成远端 40 位 SHA 核验后，才可按归档清单删除 17 个远端 head 和 13 个
-  本地旧分支；删除前必须再次核对标签 SHA，禁止 force push。
-- 旧 worktree 目录一律保留，不执行 `git worktree remove --force`；可在确认文件原样后
-  `git switch --detach HEAD` 解除旧分支占用，但不得搬移、清理或覆盖运行数据。
+  `055a2406e596cb56352ed25298d1b9fcaf5f41fe`，再由本批首个文档提交推进到
+  `80f2640da878659dc27ffdecb5332108c1204e61`；包含 `378bd2f1` 全部主线提交及
+  CoreUI 瘦身/版权指向修正，不从 shared/weibo 历史分支整条合并。
+- 17 个非 `main` 远端 head 已由注释标签 `archive/2026-09-07/*` 保全并删除；标签和
+  精确 peeled SHA 见 `docs/BRANCH_ARCHIVE_20260907.md`，标签不删。
+- 13 个本地旧分支 refs 已删除；本地和远端长期分支均只剩 `main`，未使用 force push。
+- 10 个旧 worktree 已 `git switch --detach HEAD`，目录、文件、HEAD 和脏状态均保留；不执行
+  `git worktree remove --force`，不得搬移、清理或覆盖运行数据。
 
 ## 4. 必须原地保全的本机状态
 
@@ -68,13 +70,11 @@ ACL 限制管理员和运行账号，不宣称为加密金库。网页永久保�
 - 本轮收口后才开始三阶段目标：单平台仅自己可见真实发布 → AI 真实选项写入 → 多平台多账号。
   这些是后续目标，不是当前已有能力的宣称。
 
-## 7. 验证与下一步
+## 7. 验证与最终状态
 
 CoreUI 定向测试已在当前 `main` worktree 通过：`tests/frontend/test_coreui_source_trim.py -q`
 为 `4 passed`；该测试文件 Ruff 为 `All checks passed`，示例 PowerShell 仅做 ParseFile 语法
 校验且为 `0 errors`。固定 Python 3.12 全量 `pytest -q` 实测为 `1251 passed, 7 skipped`
-（69.43s）。文档批次仍需完成 `git diff --check` 与远端 SHA 核验；不得启动真实平台。
-
-下一步顺序：审查文档 diff → 按任务文件 focused commit → SSH 推送 `main` → 核对远端完整
-40 位 SHA → 再次核对 17 个归档标签 peeled SHA → 解除旧 worktree 分支占用并删除旧 refs →
-复核 `main` 与标签状态。任何数据、凭据、用户文件或不确定副作用边界不明时立即停止。
+（69.43s）。首个 focused commit 的 `git diff --check`、SSH 推送和 `origin/main` 完整 40 位
+SHA 核验均已通过；删除前后 17 个归档标签 peeled SHA 均匹配，最终本地/远端只剩 `main`。
+本轮未启动服务、未登录平台、未保存草稿、未发布、未删除用户数据，也未重试任何不确定副作用。

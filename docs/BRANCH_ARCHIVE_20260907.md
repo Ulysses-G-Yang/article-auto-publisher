@@ -2,9 +2,10 @@
 
 日期：2026-09-07
 
-本清单记录分支收口前的远端 head。17 个非 `main` head 已创建并推送为注释标签；
-下表 SHA 是标签的 peeled commit SHA，不是注释标签对象自身的 SHA。删除任何 branch
-前必须再次执行 peeled SHA 比对。`main` 是唯一长期分支，不在删除清单中。
+本清单记录 2026-09-07 已完成的分支收口。17 个非 `main` head 已先创建并推送为注释
+标签，再在逐项比对 peeled SHA 后删除；下表 SHA 是标签的 peeled commit SHA，不是注释
+标签对象自身的 SHA。`main` 是唯一长期分支，不在删除清单中，当前首个文档提交为
+`80f2640da878659dc27ffdecb5332108c1204e61`。
 
 ## 远端 head → 归档 tag → commit
 
@@ -31,8 +32,8 @@
 ## 本地 worktree 占用与保全
 
 本轮不删除任何旧 worktree 目录，不使用 `git worktree remove --force`。主 worktree
-已经是 `ai-guided-publication` 的 `main`；以下 10 个旧 worktree 只可在文件原样、
-运行目录不变的前提下 detach，以解除旧分支引用占用：
+已经是 `ai-guided-publication` 的 `main`；以下 10 个旧 worktree 已在文件原样、运行目录
+不变的前提下 detach，仅解除旧分支引用占用：
 
 | worktree | 收口前分支 | HEAD | 保全状态 |
 | --- | --- | --- | --- |
@@ -56,14 +57,25 @@
 - 两个 stash 原样保留，不上传、不恢复：
   `stash@{2026-08-13 14:13:50}`（`temp-codex-platform-grid-ui-before-hermes-e0bfe4a`）和
   `stash@{2026-08-13 13:07:57}`（`hermes-stopgap-before-multiline-validation-20260813`）。
-- 本地待解除/删除的旧分支共 13 个；`main` 不动。没有远端 open PR，删除前仍需复核
+- 本地旧分支 refs 共 13 个，已全部删除；`main` 不动。远端没有 open PR，删除动作前已复核
   远端 head 与本表标签一一对应。
 - 不触碰任何 `data`、uploads、images、真实 Profile、Cookie、Token、用户内容或 `uv.lock`。
 
-## 收口顺序
+## 验证记录
 
-1. 在 `main` 完成文档 focused commit，SSH 推送并核对 `origin/main` 完整 40 位 SHA。
-2. 再次用 `git ls-remote --tags origin` 的 `^{}` peeled 值逐项核对本表 17 个标签。
-3. detach 旧 worktree（仅解除分支占用，文件和运行目录原样保留）。
-4. 删除本表 17 个远端 heads 和 13 个本地旧分支；禁止 force push，标签不删。
-5. fetch 后确认 `main` 为唯一长期分支，复核标签、stash、脏文档和旧 worktree 均仍按本表保全。
+- 当前 `main` worktree 的 `tests/frontend/test_coreui_source_trim.py -q` 为 `4 passed`。
+- 该测试文件 Ruff 为 `All checks passed`；`scripts/production_env.example.ps1` 仅做
+  PowerShell ParseFile 语法校验，为 `0 errors`，未执行真实配置。
+- 固定 Python 3.12 全量 `pytest -q` 为 `1251 passed, 7 skipped`（69.43s）。
+- 17 个归档标签的远端 peeled SHA 在删除前后均逐项匹配；删除后远端 heads 和本地 heads
+  均只剩 `main`，未使用 force push。
+
+## 收口执行记录
+
+1. 首个文档 focused commit `80f2640da878659dc27ffdecb5332108c1204e61` 已在 `main`
+   SSH 推送，并核对 `origin/main` 完整 40 位 SHA。
+2. 用 `git ls-remote --tags origin` 的 `^{}` peeled 值逐项核对本表 17 个标签，17/17 匹配。
+3. detach 10 个旧 worktree；每个 HEAD、文件和工作树脏状态均与收口前一致。
+4. 删除本表 17 个远端 heads 和 13 个本地旧分支；标签不删，未使用 force push。
+5. `git fetch origin --prune` 后确认本地/远端仅 `main`，17 个归档标签、2 个 stash、canonical
+   未跟踪 `uv.lock` 和旧脏 HANDOFF 均按本表保全。

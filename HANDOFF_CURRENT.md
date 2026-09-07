@@ -97,8 +97,8 @@ SHA 核验均已通过；删除前后 17 个归档标签 peeled SHA 均匹配，
 - 本批离线验证：固定 py312 `compileall` 通过；定向 `probe/media/layout/viewport` 共 80 passed；
   全量 `pytest -q -p no:cacheprovider` 为 1259 passed、7 skipped、1 个既有 aiosqlite 线程告警。
   `git diff --check` 通过；全仓 Ruff 仍为既有 143 项，新增 XHS 与测试代码无 Ruff 项，Base 与
-  `human/simulator.py` 仅报告本批前已存在的基线项。未用当前真实 helper 做 native-resize 烟测，
-  未启动或重启任何服务/浏览器。
+  `human/simulator.py` 仅报告本批前已存在的基线项。未用当前真实 helper 做 native-resize 烟测；
+  未启动或重启生产服务或真实账号浏览器，仅隔离本地 HTML 测试启动过临时无账号 Chrome。
 
 ### 2026-09-07 小红书完整 Word 发布前检查（本轮新增，仅记录真实结果）
 

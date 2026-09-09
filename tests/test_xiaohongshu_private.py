@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import asynccontextmanager
+from functools import partial
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -172,6 +173,7 @@ def _ready_editor_platform(page) -> XiaohongshuPlatform:
     platform._layout_expected_image_count = 0
     platform._identity_payload = dict(IDENTITY)
     platform.simulator.random_delay = AsyncMock()
+    platform._wait_private_submission = partial(platform._wait_private_submission, timeout=0)
     return platform
 
 
@@ -186,6 +188,45 @@ async def _prepare(
         layout_result=LAYOUT_RESULT,
         baseline_entity_ids=baseline,
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ack", ["message", "redirect", "failure", "none"])
+async def test_private_submit_needs_no_entity_ids_or_article_url(ack: str) -> None:
+    async with _local_page(_editor_html(), url=CREATOR_PUBLISH) as page:
+        platform = _ready_editor_platform(page)
+        prepared = await platform.prepare_private_visibility(
+            note_title=NOTE_TITLE, identity_snapshot=IDENTITY, layout_result=LAYOUT_RESULT,
+        )
+        assert prepared["success"] is True
+        assert prepared["entity_baseline_bound"] is False
+        await page.locator("#publish").evaluate("""(button, ack) => {
+          button.addEventListener('click', () => {
+            if (ack === 'redirect') history.replaceState({}, '', '/new/note-manager');
+            if (ack === 'message' || ack === 'failure') {
+              const toast = document.createElement('div');
+              toast.textContent = ack === 'message' ? '发布成功' : '发布失败';
+              document.body.append(toast);
+            }
+          });
+        }""", ack)
+        result = await platform.publish_private(
+            confirmed=True, note_title=NOTE_TITLE, identity_snapshot=IDENTITY, page_token=page,
+        )
+        assert result["success"] is (ack in {"message", "redirect"})
+        if result["success"]:
+            assert result["status"] == "SUBMITTED"
+            assert result["verification_evidence"]["submit_acknowledged"] is True
+            assert not result.get("post_url")
+        elif ack == "failure":
+            assert result["error_code"] == "XHS_PRIVATE_SUBMIT_FAILED"
+        else:
+            assert result["status"] == "RESULT_UNKNOWN"
+        repeated = await platform.publish_private(
+            confirmed=True, note_title=NOTE_TITLE, identity_snapshot=IDENTITY, page_token=page,
+        )
+        assert repeated == result
+        assert await page.evaluate("() => window.publishClicks") == 1
 
 
 @pytest.mark.asyncio

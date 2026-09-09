@@ -70,7 +70,7 @@
                             <tr>
                                 <td><span class="platform-pill" x-text="platformLabel(op.platform)"></span></td>
                                 <td class="data-table-primary" x-text="op.account_display_name || '账号信息不可用'"></td>
-                                <td><span class="mode-pill" x-text="op.mode === 'PUBLISH' ? '公开发布' : '平台草稿'"></span></td>
+                                <td><span class="mode-pill" x-text="op.mode === 'PRIVATE_PUBLISH' ? '仅自己可见发布' : op.mode === 'PUBLISH' ? '公开发布' : '平台草稿'"></span></td>
                                 <td>
                                     <span class="status-label" :class="deliveryClass(op.status, op)" x-text="deliveryLabel(op.status, op)"></span>
                                     <small class="table-detail table-detail-danger" x-show="deliveryErrorLabel(op)" x-text="deliveryErrorLabel(op)"></small>
@@ -188,7 +188,7 @@ document.addEventListener('alpine:init', () => {
         deliveryLabel(s, operation = null) {
             const m = {
                 QUEUED: '已排队', RUNNING: '执行中', DRAFT_SAVED: '草稿已保存',
-                DRAFT_SAVED_WITH_WARNINGS: '草稿已保存（需核对）', PUBLISHED: '已发布',
+                DRAFT_SAVED_WITH_WARNINGS: '草稿已保存（需核对）', PUBLISHED: '已发布', SUBMITTED: '已提交（仅自己可见）',
                 PUBLISHED_WITH_WARNINGS: '已发布（图片未完整）', FAILED: '失败',
                 RESULT_UNKNOWN: '结果未知', DELIVERY_INCOMPLETE: '投递未完成',
                 CONFIRMATION_REQUIRED: '待公开确认', BLOCKED: '已拦截',
@@ -203,7 +203,7 @@ document.addEventListener('alpine:init', () => {
 
         deliveryClass(s, operation = null) {
             const m = {
-                DRAFT_SAVED: 'is-success', PUBLISHED: 'is-success',
+                DRAFT_SAVED: 'is-success', PUBLISHED: 'is-success', SUBMITTED: 'is-success',
                 DRAFT_SAVED_WITH_WARNINGS: 'is-warning', PUBLISHED_WITH_WARNINGS: 'is-warning',
                 FAILED: 'is-danger', RESULT_UNKNOWN: 'is-warning', DELIVERY_INCOMPLETE: 'is-warning', BLOCKED: 'is-danger',
             };

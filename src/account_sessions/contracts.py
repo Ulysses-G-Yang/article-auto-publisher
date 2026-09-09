@@ -37,7 +37,7 @@ AccountPlatformName = Literal[
     "toutiao",
     "douyin",
 ]
-DeliveryMode = Literal["DRAFT", "PUBLISH"]
+DeliveryMode = Literal["DRAFT", "PUBLISH", "PRIVATE_PUBLISH"]
 PublishOptionKind = Literal["community", "topic"]
 
 # 选项发现只允许极小的查询/结果投影。这里的类型与投递契约分开，避免把
@@ -145,6 +145,12 @@ class DeliveryRequest(BaseModel):
     _validate_platform_selection = field_validator("platform_selection")(
         validate_platform_selection
     )
+
+    @model_validator(mode="after")
+    def validate_private_platform(self) -> "DeliveryRequest":
+        if self.mode == "PRIVATE_PUBLISH" and self.platform != "xiaohongshu":
+            raise ValueError("目前仅小红书支持仅自己可见发布")
+        return self
 
 
 class PublishOptionsRequest(BaseModel):

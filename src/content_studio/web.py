@@ -891,7 +891,7 @@ def create_content_studio_blueprint(
         )
         if has_confirmation:
             result["error"] = "PUBLISH_CONFIRMATION_REQUIRED"
-            result["message"] = "一个或多个公开发布目标需要逐条确认"
+            result["message"] = "一个或多个发布目标需要确认发布范围和账号"
         return jsonify(result), 428 if has_confirmation else 202
 
     @blueprint.errorhandler(DraftRevisionConflictError)

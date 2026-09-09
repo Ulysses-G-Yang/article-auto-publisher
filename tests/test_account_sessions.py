@@ -1302,6 +1302,7 @@ def test_blueprint_matches_frontend_contract_and_injects_article(tmp_path: Path)
         "status": "AVAILABLE",
         "delivery_enabled": True,
         "account_enabled": True,
+        "private_publish_enabled": False,
         "sort_order": 30,
     }
 

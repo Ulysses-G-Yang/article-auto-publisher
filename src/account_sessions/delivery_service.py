@@ -138,7 +138,7 @@ class DeliveryService:
         if account.status != "ACTIVE" or account.session_status != "VALID":
             raise AccountUnavailableError("所选账号登录态当前不可用")
 
-        if request.mode == "PUBLISH":
+        if request.mode in {"PUBLISH", "PRIVATE_PUBLISH"}:
             if not request.confirmation_token:
                 raise await self._new_confirmation(
                     request,
@@ -155,7 +155,7 @@ class DeliveryService:
                 confirmation_scope=confirmation_scope,
             )
             access.require("publish.execute", account.account_id)
-            if not self.public_publish_enabled:
+            if request.mode == "PUBLISH" and not self.public_publish_enabled:
                 raise PublicPublishDisabledError("公开发布总开关保持关闭；本阶段只允许保存草稿")
 
         operation_id = str(uuid.uuid4())
@@ -184,7 +184,7 @@ class DeliveryService:
             account_display_name_snapshot=account.display_name,
             status="QUEUED",
             article_mapping_status=ARTICLE_MAPPING_NOT_PENDING,
-            confirmation_used=request.mode == "PUBLISH",
+            confirmation_used=request.mode in {"PUBLISH", "PRIVATE_PUBLISH"},
         )
         try:
             async with self.database.session() as session:
@@ -197,6 +197,8 @@ class DeliveryService:
                         message=(
                             "草稿保存执行单已创建"
                             if request.mode == "DRAFT"
+                            else "仅自己可见发布执行单已创建"
+                            if request.mode == "PRIVATE_PUBLISH"
                             else "公开发布执行单已创建"
                         ),
                         operation_id=operation_id,
@@ -288,7 +290,17 @@ class DeliveryService:
                         platform,
                         access,
                     )
-                    result = await platform.publish(
+                    publish_method = platform.publish
+                    extra = {}
+                    if operation.mode == "PRIVATE_PUBLISH":
+                        if account.platform != "xiaohongshu" or not operation.confirmation_used:
+                            raise AccountUnavailableError(
+                                "仅自己可见发布未确认或平台不支持",
+                                error_code="PRIVATE_PUBLISH_NOT_CONFIRMED",
+                            )
+                        publish_method = platform.publish_private_article
+                        extra["confirmed"] = True
+                    result = await publish_method(
                         title=resolved_title,
                         content_blocks=content_blocks,
                         images=images,
@@ -300,6 +312,7 @@ class DeliveryService:
                         selection_override=getattr(
                             operation, "platform_selection_snapshot", None
                         ),
+                        **extra,
                     )
                     selection_outcome = _selection_outcome(result)
                 finally:
@@ -327,6 +340,21 @@ class DeliveryService:
                 )
             media_incomplete = result.get("media_status") in {"partial", "failed"}
             verification_evidence = result.get("verification_evidence")
+            if operation.mode == "PRIVATE_PUBLISH":
+                if (
+                    result.get("status") != "SUBMITTED"
+                    or result.get("visibility") != "SELF_ONLY"
+                    or not isinstance(verification_evidence, dict)
+                    or verification_evidence.get("submit_acknowledged") is not True
+                ):
+                    raise AccountUnavailableError(
+                        "发布已尝试，但平台未明确确认接收；不会自动重发",
+                        error_code="PUBLISH_RESULT_UNKNOWN",
+                    )
+                return await self._mark_completed(
+                    operation_id, account, access, result, buffered_log.entries,
+                    selection_outcome=selection_outcome,
+                )
             entity_confirmed = _evidence_confirms_entity(verification_evidence)
             content_confirmed = _evidence_confirms_complete_draft(
                 verification_evidence
@@ -401,7 +429,7 @@ class DeliveryService:
                 current_operation = None
             if (
                 current_operation is None
-                or current_operation.status not in ARTICLE_MAPPING_SUCCESS_STATUSES
+                or current_operation.status not in ARTICLE_MAPPING_SUCCESS_STATUSES | {"SUBMITTED"}
             ):
                 await self._mark_failed(
                     operation_id,
@@ -736,7 +764,7 @@ class DeliveryService:
                     account,
                     access,
                     action="PUBLISH_CONFIRMATION_REQUESTED",
-                    message="已生成一次性公开发布确认令牌",
+                    message="已生成一次性发布确认令牌",
                 )
             )
         return ConfirmationRequiredError(
@@ -890,7 +918,10 @@ class DeliveryService:
             operation = await session.get(DeliveryOperation, operation_id)
             if operation is None:
                 raise AccountNotFoundError("投递执行单不存在")
-            operation.status = "DRAFT_SAVED" if operation.mode == "DRAFT" else "PUBLISHED"
+            operation.status = (
+                "SUBMITTED" if operation.mode == "PRIVATE_PUBLISH"
+                else "DRAFT_SAVED" if operation.mode == "DRAFT" else "PUBLISHED"
+            )
             operation.draft_url = result.get("draft_url")
             operation.platform_url = result.get("post_url") or None
             operation.platform_article_id = platform_article_id
@@ -903,7 +934,7 @@ class DeliveryService:
                 )
             operation.article_mapping_status = (
                 ARTICLE_MAPPING_PENDING
-                if self.delivery_event_sink is not None
+                if self.delivery_event_sink is not None and operation.mode != "PRIVATE_PUBLISH"
                 else ARTICLE_MAPPING_NOT_PENDING
             )
             operation.article_mapping_error_code = None
@@ -918,6 +949,8 @@ class DeliveryService:
                     message=(
                         "平台已确认草稿保存成功"
                         if operation.mode == "DRAFT"
+                        else "平台已接收仅自己可见发布，不等待审核结果"
+                        if operation.mode == "PRIVATE_PUBLISH"
                         else "平台已确认公开发布成功"
                     ),
                     operation_id=operation_id,

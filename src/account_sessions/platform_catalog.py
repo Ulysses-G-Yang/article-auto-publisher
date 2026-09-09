@@ -20,6 +20,7 @@ class PlatformCatalogItem:
     delivery_enabled: bool
     account_enabled: bool
     sort_order: int
+    private_publish_enabled: bool = False
 
     def public_dict(self) -> dict[str, str | bool | int]:
         """返回不含适配器实现和本机路径的公开字段。"""
@@ -34,6 +35,7 @@ def _item(
     *,
     account_enabled: bool = False,
     delivery_enabled: bool = False,
+    private_publish_enabled: bool = False,
 ) -> PlatformCatalogItem:
     return PlatformCatalogItem(
         id=platform_id,
@@ -43,6 +45,7 @@ def _item(
         delivery_enabled=delivery_enabled,
         account_enabled=account_enabled,
         sort_order=sort_order,
+        private_publish_enabled=private_publish_enabled,
     )
 
 
@@ -56,7 +59,7 @@ PLATFORM_CATALOG: tuple[PlatformCatalogItem, ...] = (
     _item("baijiahao", "百家号", 70, delivery_enabled=True, account_enabled=True),
     # 网页端长文“草稿箱”经跨浏览器复核只存在于隔离 Profile 本地，
     # 不是账号云端草稿。保留登录/账号管理，关闭自动投递，避免假成功。
-    _item("xiaohongshu", "小红书", 80, account_enabled=True),
+    _item("xiaohongshu", "小红书", 80, account_enabled=True, private_publish_enabled=True),
     _item("douyin", "抖音", 90, account_enabled=True),
     _item("wechat_mp", "微信公众号", 100),
 )

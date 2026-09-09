@@ -10,6 +10,7 @@ from uuid import uuid4
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from account_sessions.contracts import (
+    DeliveryMode,
     PlatformSelection,
     validate_platform_selection,
 )
@@ -27,7 +28,6 @@ PlatformName = Literal[
     "weibo",
     "toutiao",
 ]
-DeliveryMode = Literal["DRAFT", "PUBLISH"]
 CoverStrategy = Literal["NONE", "FIRST_BODY_IMAGE", "EXPLICIT"]
 ContentSchemaVersion = Literal[1, 2]
 
@@ -87,6 +87,12 @@ class DraftTargetInput(StrictModel):
     _validate_platform_selection = field_validator("platform_selection")(
         validate_platform_selection
     )
+
+    @model_validator(mode="after")
+    def validate_private_platform(self) -> "DraftTargetInput":
+        if self.mode == "PRIVATE_PUBLISH" and self.platform != "xiaohongshu":
+            raise ValueError("目前仅小红书支持仅自己可见发布")
+        return self
 
 
 class MCPDraftTargetInput(StrictModel):

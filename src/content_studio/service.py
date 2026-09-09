@@ -96,6 +96,7 @@ PLAN_INCOMPLETE_TARGET_STATUSES = frozenset(
 )
 PLAN_SUCCESS_TARGET_STATUSES = frozenset(
     {
+        "SUBMITTED",
         "DRAFT_SAVED",
         "DRAFT_SAVED_WITH_WARNINGS",
         "PUBLISHED",
@@ -113,6 +114,7 @@ PLAN_FAILURE_TARGET_STATUSES = frozenset(
 )
 PLAN_OPERATION_SYNC_STATUSES = frozenset(
     {
+        "SUBMITTED",
         "QUEUED",
         "RUNNING",
         "DRAFT_SAVED",
@@ -556,6 +558,7 @@ class ContentStudioService:
                     self.platform_format_capabilities,
                     schema_version=stored_schema_version,
                     required_heading_levels=required_heading_levels,
+                    mode=target.mode,
                 )
                 for target in targets
             }
@@ -1754,11 +1757,23 @@ def _format_target_result(
     *,
     schema_version: int,
     required_heading_levels: frozenset[int] = frozenset(),
+    mode: str = "DRAFT",
 ) -> tuple[str, str | None, str | None]:
     """返回目标初始格式状态、错误码和安全说明。"""
 
     if schema_version != 2:
         return "READY", None, None
+    # 2026-09-07 完整 Word 已验证小红书 H2 和图文排版；仅用于私密发布，
+    # 不把这份证据声明为云端草稿能力，也不放开其他结构。
+    if platform == "xiaohongshu" and mode == "PRIVATE_PUBLISH":
+        missing = required_features - {"heading", "image_order"}
+        missing_levels = required_heading_levels - {2}
+        if not missing and not missing_levels:
+            return "READY", None, None
+        return (
+            "FORMAT_REVIEW_REQUIRED", "CONTENT_FORMAT_UNSUPPORTED",
+            "小红书当前只支持普通正文、二级标题和有序图片",
+        )
     declaration = capabilities.get(platform)
     if declaration is None:
         features = _format_required_features(required_features, required_heading_levels)

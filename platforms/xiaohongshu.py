@@ -10,11 +10,12 @@ IndexedDB 的新上下文中看不到这些卡片；最终页也只有“发布�
 “保存草稿”入口。因此 DRAFT 投递当前明确关闭，绝不能把本地卡片冒充云端
 草稿成功；公开发布同样始终关闭。
 
-经用户明确确认的“仅自己可见”后半程另有专用入口；它不经过
+经用户明确确认的“仅自己可见”投递另有专用入口；它不经过
 ``BasePlatform.publish``、不调用 ``save_draft``，也不改变公开 ``publish_now``
 的拒绝逻辑。该入口必须绑定调用方提供的最终笔记标题、身份快照和当前页面，
-并在管理页拿到同一新实体的只读证据后才给出结果；证据不足一律
-``RESULT_UNKNOWN``，且不重试提交。
+并在单次提交后收到成功提示或同页跳转笔记管理页时返回 ``SUBMITTED``。
+这只表示平台已接收，不表示审核通过；无需采集文章 ID 或查看链接。
+接收证据不足一律 ``RESULT_UNKNOWN``，且不重试提交。
 
 真实登录页（https://creator.xiaohongshu.com/login）：
 - 「APP扫一扫登录」为默认 Tab，二维码为约 160x160 的 base64 PNG。
@@ -172,6 +173,7 @@ class XiaohongshuPlatform(BasePlatform):
         self._private_flow_lock = asyncio.Lock()
         self._private_publish_attempted = False
         self._private_publish_result: dict | None = None
+        self._private_article_attempted = False
 
     async def initialize(self):
         await super().initialize()
@@ -1656,11 +1658,7 @@ class XiaohongshuPlatform(BasePlatform):
                 "小红书当前身份与传入身份快照不一致",
             )
         baseline_ids = self._private_entity_ids(baseline_entity_ids)
-        if baseline_ids is None:
-            return self._private_unknown(
-                "XHS_PRIVATE_ENTITY_BASELINE_REQUIRED",
-                "小红书私密发布缺少发布前稳定实体 ID 基线",
-            )
+        # 历史实体 ID 只供旧版可选核验使用，不再作为发布前置要求。
         if note_title_locator is not None and not self._private_locator_on_page(note_title_locator):
             return self._private_unknown(
                 "XHS_PRIVATE_TITLE_LOCATOR_PAGE_MISMATCH",
@@ -1755,7 +1753,7 @@ class XiaohongshuPlatform(BasePlatform):
             "note_title_readback": True,
             "identity_bound": True,
             "page_bound": True,
-            "entity_baseline_bound": True,
+            "entity_baseline_bound": baseline_ids is not None,
             "next_step_clicked": True,
             "retry_allowed": False,
         }
@@ -1912,22 +1910,124 @@ class XiaohongshuPlatform(BasePlatform):
         self._private_publish_attempted = True
         try:
             await action.click(timeout=10000)
-        except Exception:
+        except asyncio.CancelledError:
             result = self._private_unknown(
-                "XHS_PRIVATE_PUBLISH_CLICK_UNKNOWN",
-                "小红书私密发布点击结果未知，禁止重试",
+                "XHS_PRIVATE_SUBMIT_CANCELLED", "发布提交时任务中断，结果待确认；不会自动重发",
+                submitted=True, visibility="SELF_ONLY",
             )
-            self._private_publish_result = result
-            return dict(result)
-        result = self._private_unknown(
-            "XHS_PRIVATE_SUBMIT_CLICKED_PENDING_MANAGER_VERIFICATION",
-            "小红书私密发布已点击，管理页实体与审核状态待只读核验",
-            submitted=True,
-            result_status="pending_manager_verification",
-            visibility="SELF_ONLY",
-        )
+            self._private_publish_result = dict(result)
+            return result
+        except Exception:
+            # click 超时也可能已经提交，只读取结果，绝不再点一次。
+            pass
+        try:
+            result = await self._wait_private_submission()
+        except asyncio.CancelledError:
+            result = self._private_unknown(
+                "XHS_PRIVATE_SUBMIT_CANCELLED", "等待发布回执时任务中断；不会自动重发",
+                submitted=True, visibility="SELF_ONLY",
+            )
         self._private_publish_result = dict(result)
         return dict(result)
+
+    async def _wait_private_submission(self, *, timeout: float = 15.0) -> dict:
+        """只等待本次点击后的平台回执，不采集文章 ID、不等待审核。"""
+        deadline = asyncio.get_running_loop().time() + timeout
+        while True:
+            try:
+                self._require_page_alive("小红书发布结果")
+                if self.page is not self._private_page_binding:
+                    break
+                for label in ("发布失败", "笔记发布失败", "提交失败"):
+                    if await self._private_exact_candidates(label):
+                        return self._private_blocked(
+                            "XHS_PRIVATE_SUBMIT_FAILED",
+                            f"小红书提示{label}，本次不会自动重发",
+                        )
+                acknowledged = bool(await self._private_exact_candidates("发布成功"))
+                redirected = self._private_url_matches(CREATOR_NOTE_MANAGER)
+                if acknowledged or redirected:
+                    return {
+                        "success": True,
+                        "status": "SUBMITTED",
+                        "submitted": True,
+                        "visibility": "SELF_ONLY",
+                        "retry_allowed": False,
+                        "verification_evidence": {
+                            "submit_acknowledged": True,
+                            "visibility": "SELF_ONLY",
+                            "acknowledgment": (
+                                "success_message" if acknowledged else "manager_redirect"
+                            ),
+                        },
+                    }
+            except Exception:  # 页面关闭或读取失败不能变成再次提交。
+                break
+            if asyncio.get_running_loop().time() >= deadline:
+                break
+            await asyncio.sleep(0.25)
+        return self._private_unknown(
+            "XHS_PRIVATE_SUBMIT_ACK_UNAVAILABLE",
+            "已尝试发布，但未读到平台确认；请查看笔记管理，本次不会自动重发",
+            submitted=True,
+            visibility="SELF_ONLY",
+        )
+
+    async def publish_private_article(
+        self, *, title: str, content_blocks: list, images: list, cover: dict,
+        confirmed: bool, task_id: int = 0, db=None, **_kwargs,
+    ) -> dict:
+        """网页执行单的私密发布入口；复用已有图文/排版，不走本地草稿。"""
+        if confirmed is not True:
+            return self._private_blocked("PRIVATE_PUBLISH_NOT_CONFIRMED", "仅自己可见发布尚未确认")
+        if self._private_article_attempted:
+            return dict(self._private_publish_result or self._private_unknown(
+                "XHS_PRIVATE_ARTICLE_ALREADY_ATTEMPTED", "本次文章已执行，禁止自动重试",
+            ))
+        identity = copy.deepcopy(self._identity_payload or {})
+        if self._private_identity_key(identity) is None:
+            return self._private_blocked("XHS_PRIVATE_IDENTITY_REQUIRED", "请先确认小红书账号身份")
+        if not title.strip() or not self._private_content_ready(content_blocks):
+            return self._private_blocked("XHS_PRIVATE_CONTENT_EMPTY", "标题或正文不能为空")
+        self._private_article_attempted = True
+
+        def log(message: str) -> None:
+            if db is not None:
+                db.add_task_log(task_id, "INFO", message)
+
+        log("小红书：进入新长文编辑器")
+        await self.navigate_to_editor()
+        log("小红书：写入标题和完整图文")
+        await self.fill_title(title)
+        field = self.page.locator("textarea.d-text").first
+        if await field.input_value() != title.strip():
+            return self._private_blocked("CONTENT_VALIDATION_ERROR", "长文标题未完整写入")
+        media = await self.fill_content(content_blocks, images)
+        if (
+            media.get("text_ok") is not True
+            or media.get("media_status") not in {"completed", "not_required"}
+        ):
+            return {**media, **self._private_blocked(
+                "CONTENT_VALIDATION_ERROR", "小红书正文或图片未完整写入，未点击发布",
+            )}
+        log("小红书：完成长文排版")
+        layout = await self.apply_cover(cover)
+        if not layout.get("success"):
+            return layout
+        log("小红书：进入发布设置并选择仅自己可见")
+        prepared = await self.prepare_private_visibility(
+            note_title=title.strip(), identity_snapshot=identity, layout_result=layout,
+        )
+        if not prepared.get("success"):
+            return prepared
+        log("小红书：仅点击一次发布，等待平台接收")
+        receipt = await self.publish_private(
+            confirmed=True, note_title=title.strip(), identity_snapshot=identity,
+            page_token=self.page,
+        )
+        if receipt.get("success"):
+            log("小红书：平台已接收仅自己可见发布，不等待审核")
+        return {**media, **receipt, "cover_status": layout.get("cover_status", "not_required")}
 
     async def publish_private(
         self,

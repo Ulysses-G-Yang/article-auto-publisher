@@ -22,7 +22,7 @@
     const planStatusLabels = {
         READY: '待执行', CREATING: '正在创建执行单', QUEUED: '已排队', RUNNING: '执行中', SUCCESS: '全部成功',
         PARTIAL_FAIL: '部分成功 / 部分失败', FATAL: '全部失败', CONFIRMATION_REQUIRED: '待公开确认',
-        DRAFT_SAVED: '平台草稿已保存', PUBLISHED: '已公开发布', BLOCKED: '已拦截', FAILED: '失败',
+        DRAFT_SAVED: '平台草稿已保存', PUBLISHED: '已公开发布', SUBMITTED: '已提交（仅自己可见）', BLOCKED: '已拦截', FAILED: '失败',
         DRAFT_SAVED_WITH_WARNINGS: '草稿已保存（需核对）',
         PUBLISHED_WITH_WARNINGS: '已发布（需核对）',
         RESULT_UNKNOWN: '结果未知，需人工核对', FORMAT_REVIEW_REQUIRED: '待格式复核',
@@ -1317,7 +1317,7 @@
     }
 
     function enabledPlatformIds() {
-        return deliverablePlatforms()
+        return state.platforms.filter(canSelectPlatform)
             .filter(platform => state.switcherToggles[platform.id])
             .map(platform => platform.id);
     }
@@ -1384,7 +1384,18 @@
     // ===== iOS 风格目标选择器：竖排滑块 =====
 
     function switcherMode(platformId) {
+        const platform = state.platforms.find(item => item.id === platformId);
+        if (platform?.private_publish_enabled && !platform.delivery_enabled) return 'PRIVATE_PUBLISH';
         return state.switcherModes[platformId] || 'DRAFT';
+    }
+
+    function canSelectPlatform(platform) {
+        return Boolean(platform?.delivery_enabled || platform?.private_publish_enabled);
+    }
+
+    function modeLabel(mode) {
+        return mode === 'PRIVATE_PUBLISH' ? '仅自己可见发布'
+            : mode === 'PUBLISH' ? '公开发布' : '平台草稿';
     }
 
     function switcherPlatformIcon(platform) {
@@ -1410,22 +1421,24 @@
         if (!list) return;
         list.replaceChildren(...state.platforms.map(platform => switcherRow(platform)));
         const deliverable = state.platforms.filter(platform => platform.delivery_enabled).length;
-        const accountOnly = state.platforms.filter(platform => !platform.delivery_enabled && platform.account_enabled).length;
-        const comingSoon = state.platforms.length - deliverable - accountOnly;
+        const privateCount = state.platforms.filter(platform => platform.private_publish_enabled && !platform.delivery_enabled).length;
+        const accountOnly = state.platforms.filter(platform => !canSelectPlatform(platform) && platform.account_enabled).length;
+        const comingSoon = state.platforms.length - deliverable - privateCount - accountOnly;
         const summary = byId('platform-capability-summary');
-        if (summary) summary.textContent = `${deliverable} 个可投递 · ${accountOnly} 个仅账号管理 · ${comingSoon} 个即将接入`;
+        if (summary) summary.textContent = `${deliverable} 个可投递草稿 · ${privateCount} 个仅自己可见发布 · ${accountOnly} 个仅账号管理 · ${comingSoon} 个即将接入`;
         byId('targets-empty').classList.toggle('d-none', (state.draft?.targets || []).length > 0);
         updateBulkTargetControls();
     }
 
     function platformCapability(platform) {
+        if (platform.private_publish_enabled) return { label: '仅自己可见发布', className: 'is-deliverable' };
         if (platform.delivery_enabled) return { label: '可投递', className: 'is-deliverable' };
         if (platform.account_enabled) return { label: '仅账号管理', className: 'is-account-only' };
         return { label: '即将接入', className: 'is-coming-soon' };
     }
 
     function switcherRow(platform) {
-        const canDeliver = Boolean(platform.delivery_enabled);
+        const canDeliver = canSelectPlatform(platform);
         const on = canDeliver && Boolean(state.switcherToggles[platform.id]);
         const capability = platformCapability(platform);
         const row = document.createElement('div');
@@ -1464,7 +1477,14 @@
         modePublish.disabled = !on;
         modeDraft.addEventListener('click', () => setSwitcherMode(platform.id, 'DRAFT'));
         modePublish.addEventListener('click', () => setSwitcherMode(platform.id, 'PUBLISH'));
-        mode.append(modeDraft, modePublish);
+        if (platform.private_publish_enabled && !platform.delivery_enabled) {
+            const privateMode = document.createElement('span');
+            privateMode.className = 'mode-seg is-active';
+            privateMode.textContent = '仅自己可见';
+            mode.append(privateMode);
+        } else {
+            mode.append(modeDraft, modePublish);
+        }
         head.appendChild(mode);
 
         const switchWrap = document.createElement('div');
@@ -1769,7 +1789,7 @@
 
     function togglePlatform(platformId, checked) {
         const platform = state.platforms.find(item => item.id === platformId);
-        if (!platform?.delivery_enabled) return;
+        if (!canSelectPlatform(platform)) return;
         state.switcherToggles[platformId] = checked;
         delete state.switcherAccounts[platformId];
         delete state.switcherAccountDiagnostics[platformId];
@@ -1810,7 +1830,7 @@
         if (!state.draft) return;
         const targets = [];
         for (const platform of state.platforms) {
-            if (!platform.delivery_enabled || !state.switcherToggles[platform.id]) continue;
+            if (!canSelectPlatform(platform) || !state.switcherToggles[platform.id]) continue;
             const mode = switcherMode(platform.id);
             const accounts = state.switcherAccounts[platform.id] || [];
             const accountsLoading = !Array.isArray(state.switcherAccounts[platform.id])
@@ -1975,6 +1995,15 @@
         const targets = state.draft?.targets || [];
         const drafts = targets.filter(target => target.mode === 'DRAFT').length;
         const publishes = targets.filter(target => target.mode === 'PUBLISH').length;
+        const privatePublishes = targets.filter(target => target.mode === 'PRIVATE_PUBLISH').length;
+        if (privatePublishes > 0) {
+            const actions = [];
+            if (drafts) actions.push(`保存到 ${drafts} 个草稿箱`);
+            if (publishes) actions.push(`确认 ${publishes} 个公开发布`);
+            actions.push(`确认 ${privatePublishes} 个仅自己可见发布`);
+            button.textContent = actions.join('，');
+            return;
+        }
         if (publishes > 0 && drafts > 0) {
             button.textContent = `保存到 ${drafts} 个草稿箱，并确认 ${publishes} 个公开发布目标`;
         } else if (publishes > 0) {
@@ -1992,7 +2021,7 @@
             const row = document.createElement('article'); row.className = 'target-row';
             const platform = document.createElement('div'); const platformStrong = document.createElement('strong'); platformStrong.textContent = platformLabel(target.platform); const platformSmall = document.createElement('small'); platformSmall.textContent = '平台'; platform.append(platformStrong, platformSmall);
             const account = document.createElement('div'); const accountStrong = document.createElement('strong'); accountStrong.textContent = target.account_display_name || '平台账号'; const accountSmall = document.createElement('small'); accountSmall.textContent = target.account_id ? `账号 ${target.account_id.slice(0, 8)}…` : '账号'; account.append(accountStrong, accountSmall);
-            const mode = document.createElement('div'); const modeBadge = document.createElement('span'); modeBadge.className = `badge ${target.mode === 'PUBLISH' ? 'text-bg-danger' : 'text-bg-info'}`; modeBadge.textContent = target.mode === 'PUBLISH' ? '公开发布' : '平台草稿'; mode.appendChild(modeBadge);
+            const mode = document.createElement('div'); const modeBadge = document.createElement('span'); modeBadge.className = `badge ${target.mode === 'PUBLISH' ? 'text-bg-danger' : 'text-bg-info'}`; modeBadge.textContent = modeLabel(target.mode); mode.appendChild(modeBadge);
             const policy = document.createElement('div'); const policyStrong = document.createElement('strong'); policyStrong.textContent = target.persist_login ? '保持登录态' : '不持久会话'; const policySmall = document.createElement('small'); policySmall.textContent = '会话策略'; policy.append(policyStrong, policySmall);
             const remove = document.createElement('button'); remove.type = 'button'; remove.className = 'btn btn-outline-danger btn-sm'; remove.textContent = '移除'; remove.addEventListener('click', () => {
                 // 从滑块状态移除该账号勾选，重建 targets（与滑块同源）
@@ -2094,7 +2123,7 @@
             const strong = document.createElement('strong'); strong.textContent = `${platformLabel(target.platform)} · ${target.account_display_name || '平台账号'}`;
             const detail = document.createElement('div'); detail.className = 'small text-body-secondary'; detail.textContent = blocked
                 ? formatTargetReason(target)
-                : target.mode === 'PUBLISH' ? '公开发布（还需逐条二次确认）' : '保存到平台草稿箱';
+                : target.mode === 'DRAFT' ? '保存到平台草稿箱' : `${modeLabel(target.mode)}（确认一次后执行）`;
             card.append(strong, detail); return card;
         }));
         const blockedTargets = state.plan.targets.filter(isFormatBlockedTarget);
@@ -2115,7 +2144,7 @@
     function planBadge(status, target = null) {
         if (isFormatBlockedTarget(target)) return 'text-bg-warning';
         if (target?.degraded && target.status === 'DRAFT_SAVED') return 'text-bg-warning';
-        if (['SUCCESS', 'DRAFT_SAVED', 'PUBLISHED'].includes(status)) return 'text-bg-success';
+        if (['SUCCESS', 'DRAFT_SAVED', 'PUBLISHED', 'SUBMITTED'].includes(status)) return 'text-bg-success';
         if (['BLOCKED', 'FAILED', 'FATAL'].includes(status)) return 'text-bg-danger';
         if (['PARTIAL_FAIL', 'CONFIRMATION_REQUIRED', 'RESULT_UNKNOWN', 'DELIVERY_INCOMPLETE', 'FORMAT_REVIEW_REQUIRED', 'DRAFT_SAVED_WITH_WARNINGS', 'PUBLISHED_WITH_WARNINGS'].includes(status)) return 'text-bg-warning';
         return 'text-bg-info';
@@ -2202,7 +2231,7 @@
             ? localizedErrorMessage(target.error_code, target.error_message)
             : (target.operation_id
                 ? `执行单 ${target.operation_id}`
-                : target.mode === 'PUBLISH' ? '公开发布' : '平台草稿');
+                : modeLabel(target.mode));
     }
 
     function planDisplayStatus(plan) {
@@ -2402,6 +2431,13 @@
         state.activePublishTarget = state.pendingPublishTargets.shift() || null;
         if (!state.activePublishTarget) { schedulePlanPoll(); return; }
         const target = state.activePublishTarget;
+        const privatePublish = target.mode === 'PRIVATE_PUBLISH';
+        byId('publish-confirm-title').textContent = privatePublish ? '确认仅自己可见发布' : '逐条确认公开发布';
+        byId('publish-confirm-description').textContent = privatePublish
+            ? '将文章真实提交到小红书，并设置为仅自己可见；不是保存草稿。'
+            : '该目标会将内容公开发布到平台，不是保存草稿。';
+        byId('confirm-publish-target').textContent = privatePublish
+            ? '确认发布（仅自己可见）' : '我已核对，确认公开发布';
         const summary = byId('publish-target-summary'); summary.replaceChildren();
         const strong = document.createElement('strong'); strong.textContent = `${platformLabel(target.platform)} · ${target.account_display_name || '平台账号'}`;
         const detail = document.createElement('div'); detail.className = 'small mt-1'; detail.textContent = `标题：${state.draft.title}`;

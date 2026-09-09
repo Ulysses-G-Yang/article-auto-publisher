@@ -134,6 +134,7 @@ def test_platform_catalog_api_exposes_only_public_fields(tmp_path: Path) -> None
             "logo_url",
             "status",
             "delivery_enabled",
+            "private_publish_enabled",
             "account_enabled",
             "sort_order",
         }

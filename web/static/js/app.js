@@ -277,6 +277,7 @@ const STATUS_LABELS = {
     DRAFT_SAVED: '草稿已保存',
     DRAFT_SAVED_WITH_WARNINGS: '草稿已保存（需核对）',
     PUBLISHED: '已公开发布', PUBLISHED_WITH_WARNINGS: '已发布（需核对）',
+    SUBMITTED: '已提交（仅自己可见）', PRIVATE_PUBLISH: '仅自己可见发布',
     RESULT_UNKNOWN: '结果未知，需人工核对',
     DELIVERY_INCOMPLETE: '投递未完成', FORMAT_REVIEW_REQUIRED: '待格式处理',
     AWAITING_CONFIRMATION: '等待公开发布确认', BLOCKED: '已拦截',

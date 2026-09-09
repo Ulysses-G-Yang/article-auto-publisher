@@ -17,7 +17,7 @@
 | 本批浏览器显示修复开始前的 `main` / `origin/main` | `1123d7ebc4bd5996066a102734a14997c00942ca` |
 | 本批浏览器显示修复范围 | 仅小红书新开 headed Chrome 使用原生窗口 viewport；其他平台仍固定 1366×900 |
 | 私密发布后半程批次开始前 SHA | `5716e6bc88b1fd8f7793b8a7bb590228117af731` |
-| 最新任务状态 | 小红书仅自己可见已接入网页投递计划；离线回归通过，真实自动化验收待执行，见第 10 节 |
+| 最新任务状态 | 小红书仅自己可见已接入网页投递计划；5000 已启动供用户测试，真实自动化验收待完成，见第 10 节 |
 | Git 远端 | `git@github.com:Ulysses-G-Yang/article-auto-publisher.git` |
 | 固定 Python | `C:\Users\Administrator\miniconda3\envs\article-publisher-py312\python.exe` |
 | CoreUI 代码状态 | 最小可复现源码和生产资产已在 `main`；瘦身提交为 `74288d0e`、`055a2406` |
@@ -217,3 +217,14 @@ SHA 核验均已通过；删除前后 17 个归档标签 peeled SHA 均匹配，
   按用户授权执行指定完整 Word 的一次私密发布；失败/未知不重试，并追加实际结果。
 - 启动配置文件目前未找到；不生成 `production_env.ps1`，不创建空账号库替代旧数据。
   本轮仅需 Web；MCP 配置与启动不在范围内。
+
+### 2026-09-09 14:03 用户要求启动服务供手动测试
+
+- 已从当前主工作树绝对入口 `run_flask_production.py` 启动 Web，PID 24988，监听
+  `0.0.0.0:5000`；运行代码提交为 `1631e8c4152cb8479c0037d7411d4cdedfa3c2db`。
+- 复用 canonical `data`、`account_sessions`、`content_studio` 及原 Profile 路径；
+  不复制、清空或替换账号数据。启动前只读确认无 QUEUED/RUNNING 投递，不自动续跑旧任务。
+- 本机 `http://127.0.0.1:5000/upload` 与内网 `http://10.0.0.28:5000/upload` 均为 200。
+  公开发布、旧上传队列和账号心跳均关闭；8765 MCP 未启动，不影响网页手动测试。
+- 使用进程级随机强 APP_SECRET_KEY，未写入磁盘配置、未输出密钥；这不会替换平台登录态。
+  未触发真实登录、上传、保存或发布。真实私密发布结果仍待用户本次测试确认。

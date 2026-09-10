@@ -125,6 +125,7 @@ def test_native_cover_confirmation_and_cropped_variants_survive_reopen(tmp_path,
 
 @pytest.mark.parametrize("case", [
     "success", "wrong_draft", "rejected", "bool_code", "missing_cover", "duplicate", "old_message",
+    "multipart", "multipart_wrong_draft", "multipart_duplicate",
 ])
 def test_zol_submission_requires_current_request_and_clicks_once(case):
     async def check():
@@ -139,7 +140,19 @@ def test_zol_submission_requires_current_request_and_clicks_once(case):
                 )
                 button = '<div class="foot-item" onclick="submit()">发布</div>'
                 cover_items = ('<span class="uploader__pic-item">' + image + '</span>') * 2
-                draft = "other" if case == "wrong_draft" else "123"
+                draft = "other" if case in {"wrong_draft", "multipart_wrong_draft"} else "123"
+                fields = json.dumps({
+                    "draftUpdateId": draft, "title": "测试文章标题", "saveType": "1",
+                })
+                payload = "new URLSearchParams(" + fields + ")"
+                if case.startswith("multipart"):
+                    payload = (
+                        "(()=>{const data=new FormData();Object.entries(" + fields
+                        + ").forEach(([k,v])=>data.append(k,v));"
+                        + ("data.append('draftUpdateId','other');"
+                           if case == "multipart_duplicate" else "")
+                        + "return data;})()"
+                    )
                 html = (
                     '<input placeholder="请输入文章标题" value="测试文章标题">'
                     '<span class="ant-tag">电脑外设</span><div class="ant-form-item">'
@@ -151,18 +164,17 @@ def test_zol_submission_requires_current_request_and_clicks_once(case):
                     + ('' if case == "old_message" else (
                         "await fetch('https://open-api.zol.com.cn"
                         + ZOLPlatform.PUBLICATION_RESPONSE_PATH
-                        + "',{method:'POST',body:new URLSearchParams("
-                        + json.dumps({
-                            "draftUpdateId": draft, "title": "测试文章标题", "saveType": "1",
-                        })
-                        + ")});"
+                        + "',{method:'POST',body:" + payload + "});"
                     )) + '}</script>'
                 )
+                post_count = 0
 
                 async def serve(route):
+                    nonlocal post_count
                     if route.request.method == "OPTIONS":
                         await route.fulfill(headers={"Access-Control-Allow-Origin": "*"})
                     elif route.request.method == "POST":
+                        post_count += 1
                         code = 500 if case == "rejected" else False if case == "bool_code" else 0
                         await route.fulfill(
                             json={"errcode": code, "data": {}},
@@ -182,8 +194,8 @@ def test_zol_submission_requires_current_request_and_clicks_once(case):
                 p._read_editor_dom_tokens = AsyncMock(return_value=p._expected_content_tokens(
                     p._expected_persisted_blocks, [],
                 ))
-                p.PUBLICATION_TIMEOUT_MS = 200
-                if case == "success":
+                p.PUBLICATION_TIMEOUT_MS = 200 if case == "old_message" else 2000
+                if case in {"success", "multipart"}:
                     assert await p.publish_now("测试文章标题") == receipt()
                 else:
                     error = SelectorError if case in {"missing_cover", "duplicate"} else (
@@ -193,6 +205,7 @@ def test_zol_submission_requires_current_request_and_clicks_once(case):
                         await p.publish_now("测试文章标题")
                 clicked = case not in {"missing_cover", "duplicate"}
                 assert await page.evaluate("window.clicks") == int(clicked)
+                assert post_count == int(clicked and case != "old_message")
                 if clicked:
                     with pytest.raises(ZOLPublishUnknownError):
                         await p.publish_now("测试文章标题")
@@ -201,6 +214,49 @@ def test_zol_submission_requires_current_request_and_clicks_once(case):
                 await browser.close()
 
     asyncio.run(check())
+
+
+@pytest.mark.parametrize("case", [
+    "missing_boundary", "duplicate", "file", "update", "invalid_utf8",
+    "encoded_field", "duplicate_disposition",
+])
+def test_multipart_submission_rejects_unverifiable_fields(case):
+    fields = [("draftUpdateId", "123"), ("title", "测试文章标题"), ("saveType", "1")]
+    if case == "duplicate":
+        fields.append(("draftUpdateId", "123"))
+    if case == "update":
+        fields.append(("isUpdate", "1"))
+    parts = [
+        f'--boundary\r\nContent-Disposition: form-data; name="{key}"\r\n\r\n{value}\r\n'
+        for key, value in fields
+    ]
+    if case == "file":
+        parts.append(
+            '--boundary\r\nContent-Disposition: form-data; name="file"; filename="a.png"'
+            '\r\n\r\nfile data\r\n'
+        )
+    if case == "invalid_utf8":
+        parts.append(
+            '--boundary\r\nContent-Disposition: form-data; name="extra"'
+            '\r\nContent-Transfer-Encoding: base64\r\n\r\n/w==\r\n'
+        )
+    if case == "encoded_field":
+        parts[0] = (
+            '--boundary\r\nContent-Disposition: form-data; name="draftUpdateId"'
+            '\r\nContent-Transfer-Encoding: base64\r\n\r\nMTIz\r\n'
+        )
+    if case == "duplicate_disposition":
+        parts[0] = (
+            '--boundary\r\nContent-Disposition: form-data; name="draftUpdateId"'
+            '\r\nContent-Disposition: form-data; name="other"\r\n\r\n123\r\n'
+        )
+    request = SimpleNamespace(
+        post_data="".join(parts) + "--boundary--\r\n",
+        headers={"content-type": "multipart/form-data" + (
+            "" if case == "missing_boundary" else "; boundary=boundary"
+        )},
+    )
+    assert ZOLPlatform._publication_request_matches(request, "123", "测试文章标题") is False
 
 
 def test_base_preserves_public_submission_without_fabricating_url():

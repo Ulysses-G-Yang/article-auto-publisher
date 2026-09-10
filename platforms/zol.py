@@ -9,6 +9,8 @@ import re
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass
+from email import policy
+from email.parser import BytesParser
 from io import BytesIO
 from pathlib import Path
 from urllib.parse import parse_qs, urlencode, urlparse
@@ -3568,7 +3570,27 @@ class ZOLPlatform(BasePlatform):
         """只读取当前发布请求的草稿和标题，不记录正文或身份参数。"""
         try:
             raw = request.post_data or ""
-            if raw.lstrip().startswith("{"):
+            content_type = (getattr(request, "headers", {}) or {}).get("content-type", "")
+            if content_type.split(";", 1)[0].strip().lower() == "multipart/form-data":
+                message = BytesParser(policy=policy.default).parsebytes(
+                    f"Content-Type: {content_type}\r\nMIME-Version: 1.0\r\n\r\n".encode()
+                    + raw.encode("utf-8")
+                )
+                if not message.get_boundary() or not message.is_multipart() or message.defects:
+                    return False
+                fields = {}
+                for part in message.iter_parts():
+                    name = part.get_param("name", header="content-disposition")
+                    if (
+                        part.defects or part.is_multipart() or not name or name in fields
+                        or part.get_content_disposition() != "form-data"
+                        or len(part.get_all("Content-Disposition", [])) != 1
+                        or part.get("Content-Transfer-Encoding") is not None
+                        or part.get_filename() is not None
+                    ):
+                        return False
+                    fields[name] = (part.get_payload(decode=True) or b"").decode("utf-8")
+            elif raw.lstrip().startswith("{"):
                 fields = json.loads(raw)
             else:
                 parsed = parse_qs(raw, keep_blank_values=True)

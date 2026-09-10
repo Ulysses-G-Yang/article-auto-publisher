@@ -15,6 +15,7 @@ from platforms.base import (
     BrowserLifecycleError,
     DraftResultUnknownError,
     DraftVerificationEvidence,
+    PlatformAutomationError,
     SelectorError,
 )
 from platforms.content_validation import (
@@ -117,6 +118,10 @@ def parse_xiaoheihe_publish_option_candidates(
     return result
 
 
+class XiaoheihePublishUnknownError(PlatformAutomationError):
+    error_code = "PUBLISH_RESULT_UNKNOWN"
+
+
 class XiaoheihePlatform(BasePlatform):
     platform_name = "xiaoheihe"
 
@@ -153,6 +158,7 @@ class XiaoheihePlatform(BasePlatform):
     IDENTITY_CAPTURE_ATTEMPTS = 6
     IDENTITY_CAPTURE_INTERVAL_SECONDS = 0.5
     PUBLISH_NOW_BTN = "button.editor-publish__btn.main-btn"        # 发布
+    PUBLICATION_RESULT_TIMEOUT_MS = 15000
     IMAGE_LOCAL_UPLOAD = (
         ".editor-model__image-model .model-image__local-box "
         ".editor-image-wrapper__box.upload, "
@@ -1258,14 +1264,15 @@ class XiaoheihePlatform(BasePlatform):
         return candidates[:4]
 
     @staticmethod
-    def _candidate_is_invalid(name: str, query: str) -> bool:
+    def _candidate_is_invalid(name: str, query: str, *, allow_query_match: bool = False) -> bool:
         """拒绝搜索词回显、JSON/对象文本和空候选，避免误选。"""
         value = " ".join(str(name or "").split()).strip()
         compact_value = "".join(value.split())
         compact_query = "".join(str(query or "").split())
         return (
             not value
-            or compact_value == compact_query
+            or (compact_value == compact_query and not allow_query_match)
+            or bool(re.fullmatch(r"[\d.,万亿]+讨论\s*[\d.,万亿]+人参与", value))
             or value.startswith(("[", "{"))
             or "\"word\"" in value
             or value in {"搜索", "搜索结果", "无结果", "暂无结果"}
@@ -1273,6 +1280,13 @@ class XiaoheihePlatform(BasePlatform):
 
     async def _extract_candidate_name(self, locator, query: str) -> str:
         """从候选项读取真实显示名称，优先使用名称属性再读取文本行。"""
+        # 真实话题卡片把名称与讨论人数放在两个节点。名称恰好等于搜索词
+        # 是合法匹配；只允许这个已观测的专用名称节点通过，搜索词回显仍拒绝。
+        names = locator.locator(".hashtag-list-item__title, .topic-list-item__title")
+        if await names.count() == 1 and await names.first.is_visible():
+            value = " ".join((await names.first.inner_text()).split()).strip()
+            if not self._candidate_is_invalid(value, query, allow_query_match=True):
+                return value
         for attr in ("data-name", "data-title", "title", "aria-label"):
             try:
                 value = await locator.get_attribute(attr)
@@ -1498,7 +1512,26 @@ class XiaoheihePlatform(BasePlatform):
             await search.fill(query[:30])
             await self.simulator.random_delay(1, 2)
 
-            result = await self._wait_first_visible(result_selector, timeout_ms=5000)
+            first_result = await self._wait_first_visible(result_selector, timeout_ms=5000)
+            result = None
+            selected_name = ""
+            if first_result is not None:
+                # 平台搜索可能返回推荐游戏。只接受名称实际匹配查询的候选，
+                # 不能把搜索列表第一项直接当成文章所属社区。
+                candidates = self.page.locator(result_selector)
+                for index in range(min(await candidates.count(), 40)):
+                    candidate = candidates.nth(index)
+                    if not await candidate.is_visible():
+                        continue
+                    name = await self._extract_candidate_name(candidate, query)
+                    if self._candidate_is_invalid(name, query, allow_query_match=True):
+                        continue
+                    if query.casefold() not in name.casefold():
+                        continue
+                    if result is None or name.casefold() == query.casefold():
+                        result, selected_name = candidate, name
+                    if name.casefold() == query.casefold():
+                        break
             if result is None:
                 await self._dismiss_overlays()
                 return {
@@ -1507,8 +1540,7 @@ class XiaoheihePlatform(BasePlatform):
                     "error": f"小黑盒实时搜索没有找到{kind}: {query}",
                 }
 
-            selected_name = await self._extract_candidate_name(result, query)
-            if self._candidate_is_invalid(selected_name, query):
+            if self._candidate_is_invalid(selected_name, query, allow_query_match=True):
                 await self._dismiss_overlays()
                 return {
                     "success": False,
@@ -1568,6 +1600,7 @@ class XiaoheihePlatform(BasePlatform):
                            selection_query: str = "", selection_override: dict = None):
         """自动优先选择社区和话题；无结果时进入 needs_selection。"""
         override = selection_override or {}
+        selection_query = str(override.get("selection_query") or selection_query or "").strip()
         explicit_community = override.get("community") or community or ""
         community_query = explicit_community or self._query_candidates(
             selection_query or topic or "", split_terms=True
@@ -1997,9 +2030,11 @@ class XiaoheihePlatform(BasePlatform):
                         "[data-draft-empty]",
                         ".draft-empty",
                         ".empty-draft",
+                        ".creator-draft__list .hb-empty",
                     ].join(",");
                     const emptyLabels = new Set([
                         "暂无草稿", "暂无草稿内容", "还没有草稿", "没有草稿",
+                        "暂无内容",
                     ]);
 
                     const visible = (element) => {
@@ -2627,47 +2662,40 @@ class XiaoheihePlatform(BasePlatform):
         return ""
 
     async def publish_now(self, title: str = "") -> str:
-        """点击「发布」按钮真正发布文章，返回发布后的文章 URL；失败返回空串"""
-        if "creator/editor" not in (self.page.url or ""):
-            await self._back_to_editor()
-        if "creator/editor" not in (self.page.url or ""):
-            return ""
-
+        """一次发布后确认本篇文章页；未知结果不得再次点击。"""
+        if getattr(self, "_public_publish_attempted", False):
+            raise XiaoheihePublishUnknownError("本次发布已尝试，不会自动重发")
+        draft_id = self._draft_id_from_editor_url(self.page.url)
+        expected_title = self._normalize_platform_title(title)
+        title_field = await self._first_visible(self.TITLE_FIELD)
+        if (
+            not draft_id or not expected_title or title_field is None
+            or self._normalize_platform_title(await title_field.inner_text()) != expected_title
+        ):
+            raise SelectorError("发布前未确认当前草稿及标题")
+        await self._dismiss_overlays()
+        buttons = self.page.locator(self.PUBLISH_NOW_BTN).filter(has_text=re.compile(r"^发布$"))
+        if (
+            await buttons.count() != 1
+            or not await buttons.is_visible()
+            or not await buttons.is_enabled()
+        ):
+            raise SelectorError("发布按钮不可用或不唯一")
+        # 2026-09-10 真实发布证明同一数字草稿 ID 跳转到该文章路由。
+        expected_url = f"https://www.xiaoheihe.cn/app/bbs/link/{draft_id}"
+        self._public_publish_attempted = True
         try:
-            btn = self.page.locator(self.PUBLISH_NOW_BTN, has_text="发布").first
-            if await btn.count() == 0:
-                btn = self.page.locator("span.editor-publish__button-content", has_text="发布").first
-            if await btn.count() == 0:
-                return ""
-            # close leftover modal mask if any
-            await self._dismiss_overlays()
-            await btn.click(timeout=8000)
-        except Exception as e:
-            logger.error("小黑盒点击发布失败: {}", e)
-            return ""
-
-        await self.simulator.random_delay(3, 6)
-
-        # 可能弹出确认框
-        try:
-            confirm = self.page.locator("button:has-text('确定'), button:has-text('确认发布')").first
-            if await confirm.count() > 0:
-                await confirm.click(timeout=3000)
-                await self.simulator.random_delay(3, 6)
-        except Exception:
-            pass
-
-        post_url = self.page.url
-        try:
-            success = await self.page.evaluate("""() => {
-                const t = document.body.innerText || '';
-                return t.includes('发布成功') || t.includes('发布完成') || t.includes('已发布');
-            }""")
-            if success:
-                return post_url
-            if "creator/editor" not in post_url:
-                return post_url
-        except Exception:
-            pass
-        # 无法确认，返回空（视为仅存草稿）
-        return ""
+            await buttons.click(timeout=8000)
+            await self.simulator.random_delay(3, 6)
+            confirmation = self.page.get_by_role("button", name="确认发布", exact=True)
+            if await confirmation.count() == 1 and await confirmation.is_visible():
+                await confirmation.click(timeout=3000)
+            await self.page.wait_for_url(expected_url, timeout=self.PUBLICATION_RESULT_TIMEOUT_MS)
+            await self.page.get_by_text(expected_title, exact=True).first.wait_for(
+                state="visible", timeout=self.PUBLICATION_RESULT_TIMEOUT_MS,
+            )
+            return expected_url
+        except Exception as exc:
+            raise XiaoheihePublishUnknownError(
+                "已尝试发布，但本篇文章页未能确认；不会自动重发"
+            ) from exc

@@ -396,6 +396,11 @@ class DeliveryService:
                     "图片未完整写入平台且草稿未保存",
                     error_code=(result.get("media_error_code") or "PLATFORM_MEDIA_INCOMPLETE"),
                 )
+            if operation.mode == "PUBLISH" and not result.get("post_url"):
+                raise AccountUnavailableError(
+                    "平台未返回公开文章地址，发布结果未知",
+                    error_code="PUBLISH_RESULT_UNKNOWN",
+                )
             if media_incomplete or cover_incomplete or verification_warning:
                 # 草稿已保存但正文图片或封面未完整：如实标记 WITH_WARNINGS，
                 # 绝不伪装成完整成功，也绝不把已保存的草稿抹成失败。
@@ -406,11 +411,6 @@ class DeliveryService:
                     result,
                     buffered_log.entries,
                     selection_outcome=selection_outcome,
-                )
-            if operation.mode == "PUBLISH" and not result.get("post_url"):
-                raise AccountUnavailableError(
-                    "平台未返回公开文章地址，发布结果未知",
-                    error_code="PUBLISH_RESULT_UNKNOWN",
                 )
             return await self._mark_completed(
                 operation_id,

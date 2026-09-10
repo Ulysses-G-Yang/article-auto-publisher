@@ -102,6 +102,80 @@ def test_legacy_javascript_escaped_nickname_is_decoded() -> None:
     assert _clean("%E6%B5%8B%E8%AF%95+account") == "测试 account"
 
 
+@pytest.mark.parametrize("warning", ["media", "cover", "verification"])
+def test_unconfirmed_publication_with_warning_is_never_published(tmp_path, warning):
+    class FakePlatform:
+        platform_name = "xiaoheihe"
+        context = None
+
+        async def initialize(self):
+            pass
+
+        async def check_login(self):
+            return True
+
+        async def fetch_identity_payload(self):
+            return {"ok": True, "user_id": "10001234", "display_name": "夜航员"}
+
+        async def publish(self, **kwargs):
+            return {
+                "success": True, "draft_url": "https://example.invalid/draft/42",
+                "post_url": "", "media_status": "partial" if warning == "media" else "completed",
+                "cover_status": "failed" if warning == "cover" else "not_required",
+                "draft_verification_warning": warning == "verification",
+            }
+
+        async def cleanup(self):
+            pass
+
+    async def check():
+        db = AccountDatabase(sqlite_database_url(tmp_path))
+        accounts = AccountSessionService(
+            db, seed_legacy_profiles=False, platform_factory=lambda account: FakePlatform(),
+            allowed_profile_roots=(tmp_path / "runtime" / "profiles",),
+        )
+        await accounts.initialize()
+        try:
+            account = await insert_account(db, make_profile(tmp_path, "xiaoheihe", "publish"))
+            async def resolve_content(reference):
+                assert reference == "fixture-version"
+                cover = (
+                    {"strategy": "FIRST_BODY_IMAGE", "local_path": str(tmp_path / "cover.png")}
+                    if warning == "cover" else {"strategy": "NONE"}
+                )
+                return (
+                    SAMPLE_ARTICLE_TITLE,
+                    [{"type": "text", "text": SAMPLE_ARTICLE_BODY}],
+                    [],
+                    cover,
+                )
+
+            delivery = DeliveryService(
+                accounts, public_publish_enabled=True, content_resolver=resolve_content,
+            )
+            req = DeliveryRequest.model_validate(
+                delivery_payload(account.account_id, mode="PUBLISH")
+            )
+            with pytest.raises(ConfirmationRequiredError) as exc:
+                await delivery.request_delivery(
+                    req, LOCAL_WEB_CONTEXT, content_reference="fixture-version",
+                )
+            req.confirmation_token = exc.value.token
+            op = await delivery.request_delivery(
+                req, LOCAL_WEB_CONTEXT, content_reference="fixture-version",
+            )
+            with pytest.raises(AccountUnavailableError) as error:
+                await delivery.execute_operation(op["operation_id"], LOCAL_WEB_CONTEXT)
+            assert error.value.error_code == "PUBLISH_RESULT_UNKNOWN"
+            async with db.session() as session:
+                stored = await session.get(DeliveryOperation, op["operation_id"])
+                assert stored.status == "RESULT_UNKNOWN"
+        finally:
+            await db.dispose()
+
+    run(check())
+
+
 def test_database_schema_pragmas_and_idempotent_initialization(tmp_path: Path) -> None:
     database_path = tmp_path / "accounts.db"
     database = AccountDatabase(sqlite_database_url(tmp_path))

@@ -799,6 +799,12 @@ class BasePlatform(ABC):
                 if delivery_mode is not None
                 else self.cfg.get("app", {}).get("publish_after_draft", False)
             )
+            if should_publish and (
+                selection_status == "needs_selection"
+                or content_result.get("media_status") in {"partial", "failed"}
+                or cover_result.get("cover_status") not in {"completed", "not_required"}
+            ):
+                public_publish_blocked = True
             # 若调用方使用旧的 delivery_mode=None 且配置误开公开发布，
             # 降级结果同样必须停在草稿；正常无 degraded 的路径不受影响。
             if public_publish_blocked or (degraded is not None and should_publish):

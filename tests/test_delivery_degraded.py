@@ -274,6 +274,31 @@ def _platform_with_save_raising(evidence: DraftVerificationEvidence) -> _FakePla
     return platform
 
 
+@pytest.mark.parametrize("incomplete", ["selection", "media", "cover"])
+def test_publication_stops_when_required_content_is_incomplete(incomplete: str) -> None:
+    platform = _FakePlatform()
+    platform.platform_name = "xiaoheihe"
+    platform.save_draft = AsyncMock(return_value="https://example.invalid/draft/42")
+    platform.publish_now = AsyncMock(return_value="https://example.invalid/post/42")
+    if incomplete == "selection":
+        platform.select_topic = AsyncMock(return_value={
+            "success": False, "needs_selection": True, "error": "话题未选中",
+        })
+    elif incomplete == "media":
+        platform.fill_content = AsyncMock(return_value={
+            "text_ok": True, "media_status": "partial", "expected_images": 7,
+            "uploaded_images": 6,
+        })
+    else:
+        platform.apply_cover = AsyncMock(return_value={
+            "success": False, "cover_status": "failed", "safe_to_continue": True,
+        })
+    result = _run_publish_mode(platform, "PUBLISH")
+    assert result["success"] is False
+    assert result["error_code"] == "DELIVERY_INCOMPLETE"
+    platform.publish_now.assert_not_awaited()
+
+
 def test_publish_degraded_success_when_draft_list_unique() -> None:
     """保存响应未确认但草稿箱标题唯一 → 降级成功，带 draft_list_confirmed。"""
     evidence = DraftVerificationEvidence()

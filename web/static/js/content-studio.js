@@ -22,7 +22,7 @@
     const planStatusLabels = {
         READY: '待执行', CREATING: '正在创建执行单', QUEUED: '已排队', RUNNING: '执行中', SUCCESS: '全部成功',
         PARTIAL_FAIL: '部分成功 / 部分失败', FATAL: '全部失败', CONFIRMATION_REQUIRED: '待公开确认',
-        DRAFT_SAVED: '平台草稿已保存', PUBLISHED: '已公开发布', SUBMITTED: '已提交（仅自己可见）', BLOCKED: '已拦截', FAILED: '失败',
+        DRAFT_SAVED: '平台草稿已保存', PUBLISHED: '已公开发布', SUBMITTED: '已提交平台', BLOCKED: '已拦截', FAILED: '失败',
         DRAFT_SAVED_WITH_WARNINGS: '草稿已保存（需核对）',
         PUBLISHED_WITH_WARNINGS: '已发布（需核对）',
         RESULT_UNKNOWN: '结果未知，需人工核对', FORMAT_REVIEW_REQUIRED: '待格式复核',

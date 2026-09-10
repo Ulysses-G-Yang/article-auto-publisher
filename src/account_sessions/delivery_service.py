@@ -396,6 +396,16 @@ class DeliveryService:
                     "图片未完整写入平台且草稿未保存",
                     error_code=(result.get("media_error_code") or "PLATFORM_MEDIA_INCOMPLETE"),
                 )
+            if operation.mode == "PUBLISH" and _is_zol_public_submission(account.platform, result):
+                if media_incomplete or cover_incomplete or verification_warning:
+                    raise AccountUnavailableError(
+                        "平台接收回执与内容完整性结果冲突，需人工核对",
+                        error_code="PUBLISH_RESULT_UNKNOWN",
+                    )
+                return await self._mark_completed(
+                    operation_id, account, access, result, buffered_log.entries,
+                    selection_outcome=selection_outcome,
+                )
             if operation.mode == "PUBLISH" and not result.get("post_url"):
                 raise AccountUnavailableError(
                     "平台未返回公开文章地址，发布结果未知",
@@ -919,7 +929,10 @@ class DeliveryService:
             if operation is None:
                 raise AccountNotFoundError("投递执行单不存在")
             operation.status = (
-                "SUBMITTED" if operation.mode == "PRIVATE_PUBLISH"
+                "SUBMITTED" if operation.mode == "PRIVATE_PUBLISH" or (
+                    operation.mode == "PUBLISH"
+                    and _is_zol_public_submission(account.platform, result)
+                )
                 else "DRAFT_SAVED" if operation.mode == "DRAFT" else "PUBLISHED"
             )
             operation.draft_url = result.get("draft_url")
@@ -934,7 +947,7 @@ class DeliveryService:
                 )
             operation.article_mapping_status = (
                 ARTICLE_MAPPING_PENDING
-                if self.delivery_event_sink is not None and operation.mode != "PRIVATE_PUBLISH"
+                if self.delivery_event_sink is not None and operation.status != "SUBMITTED"
                 else ARTICLE_MAPPING_NOT_PENDING
             )
             operation.article_mapping_error_code = None
@@ -951,6 +964,8 @@ class DeliveryService:
                         if operation.mode == "DRAFT"
                         else "平台已接收仅自己可见发布，不等待审核结果"
                         if operation.mode == "PRIVATE_PUBLISH"
+                        else "平台已接收公开投稿，不等待审核结果"
+                        if operation.status == "SUBMITTED"
                         else "平台已确认公开发布成功"
                     ),
                     operation_id=operation_id,
@@ -1670,6 +1685,17 @@ def _format_media_progress_log(progress: dict[str, int | str]) -> str:
         f"uploaded_images={progress['uploaded_images']}，"
         f"failed_image_count={progress['failed_image_count']}，"
         f"media_status={progress['media_status']}"
+    )
+
+
+def _is_zol_public_submission(platform: str, result: dict) -> bool:
+    evidence = result.get("verification_evidence")
+    return (
+        platform == "zol" and result.get("status") == "SUBMITTED"
+        and isinstance(evidence, dict)
+        and evidence.get("submit_acknowledged") is True
+        and evidence.get("submission_source") == "zol_publish_response"
+        and evidence.get("submission_scope") == "PUBLIC"
     )
 
 

@@ -180,6 +180,12 @@ class DraftBaselineError(PlatformAutomationError):
         self.evidence = evidence
 
 
+class PublishResultUnknownError(PlatformAutomationError):
+    """公开提交已尝试，但没有明确的接收证据。"""
+
+    error_code = "PUBLISH_RESULT_UNKNOWN"
+
+
 class DraftResultUnknownError(PlatformAutomationError):
     """保存动作可能已经发生，但平台未提供可证明的结果。"""
 
@@ -436,9 +442,9 @@ class BasePlatform(ABC):
         """保存草稿，返回草稿URL；保存失败必须返回空串，绝不能以当前页URL冒充成功"""
         ...
 
-    async def publish_now(self, title: str = "") -> str:
-        """真正发布文章，返回发布后的文章URL；不支持/失败返回空串。
-        默认实现不执行任何操作（草稿保存即视为完成），各平台可覆盖。"""
+    async def publish_now(self, title: str = "") -> str | dict:
+        """返回公开文章 URL 或受控接收回执；默认不执行任何发布操作。
+        空串不代表发布成功，各平台可覆盖。"""
         return ""
 
     async def verify_draft_readonly(self, title: str) -> dict:
@@ -592,7 +598,13 @@ class BasePlatform(ABC):
             selection_status = "not_required"
             selection_error = None
             selection_error_code = None
-            should_select = bool(topic or community or selection_query or self.platform_name == "xiaoheihe")
+            should_select = bool(
+                topic
+                or community
+                or selection_query
+                or self.platform_name == "xiaoheihe"
+                or (self.platform_name == "zol" and selection_override)
+            )
             if should_select:
                 db.add_task_log(
                     task_id,
@@ -794,6 +806,7 @@ class BasePlatform(ABC):
             # 本轮回归默认只保存草稿，避免验证时误公开发布；未来需要公开发布时
             # 可显式打开 app.publish_after_draft 配置。
             post_url = ""
+            publication_status = None
             should_publish = (
                 delivery_mode == "PUBLISH"
                 if delivery_mode is not None
@@ -838,13 +851,28 @@ class BasePlatform(ABC):
                 should_publish = False
             if should_publish:
                 db.add_task_log(task_id, "INFO", "提交发布...")
-                post_url = await self.publish_now(title)
+                publication = await self.publish_now(title)
+                if isinstance(publication, dict):
+                    receipt = publication.get("verification_evidence")
+                    if (
+                        self.platform_name != "zol" or publication.get("status") != "SUBMITTED"
+                        or not isinstance(receipt, dict)
+                        or receipt.get("submit_acknowledged") is not True
+                        or receipt.get("submission_source") != "zol_publish_response"
+                        or receipt.get("submission_scope") != "PUBLIC"
+                    ):
+                        raise PublishResultUnknownError("平台发布接收回执无效")
+                    publication_status = "SUBMITTED"
+                    evidence_payload = {**(evidence_payload or {}), **receipt}
+                else:
+                    post_url = publication
                 await self.simulator.random_delay(1, 2)
             else:
                 db.add_task_log(task_id, "INFO", "按当前配置仅保存草稿，未公开发布")
 
             return {
                 "success": True,
+                **({"status": publication_status} if publication_status else {}),
                 "draft_url": draft_url,
                 "post_url": post_url,
                 "selection": selection,

@@ -3,6 +3,7 @@ import asyncio
 import copy
 import hashlib
 import html
+import json
 import os
 import re
 import time
@@ -22,6 +23,7 @@ from platforms.base import (
     DraftVerificationEvidence,
     LoginRequiredError,
     PlatformAccessError,
+    PlatformAutomationError,
     SelectorError,
 )
 from platforms.content_validation import (
@@ -131,6 +133,10 @@ class _ZOLDraftSnapshot:
     title_to_ids: dict[str, frozenset[str]]
 
 
+class ZOLPublishUnknownError(PlatformAutomationError):
+    error_code = "PUBLISH_RESULT_UNKNOWN"
+
+
 class ZOLPlatform(BasePlatform):
     platform_name = "zol"
 
@@ -158,6 +164,9 @@ class ZOLPlatform(BasePlatform):
     DRAFT_RESPONSE_POLL_INTERVAL = 0.1
     DRAFT_LIST_POLL_DELAYS = (0, 1, 2, 3, 4)
     DRAFT_CONTENT_POLL_DELAYS = (0, 1, 2)
+    PUBLICATION_RESPONSE_PATH = "/api/v1/creator.content.save.orther"
+    PUBLICATION_TIMEOUT_MS = 15000
+    GUIDE_IMAGE_SELECTOR = "[role='uploader'] .uploader__pic-item img.flex-pic__img"
     TITLE_SELECTORS = (
         "input.main-title",
         ".main-title",
@@ -715,8 +724,14 @@ class ZOLPlatform(BasePlatform):
                 "DRAFT_RESULT_UNKNOWN: 保存响应 JSON 无法解析"
             ) from exc
         if not cls._response_success(payload):
+            code = payload.get("errcode") if isinstance(payload, dict) else None
+            safe_code = (
+                str(code) if type(code) in {int, str} and re.fullmatch(r"-?\d{1,8}", str(code))
+                else "unavailable"
+            )
             raise DraftResultUnknownError(
-                "DRAFT_RESULT_UNKNOWN: 保存响应未返回明确成功码"
+                "DRAFT_RESULT_UNKNOWN: 保存响应未返回明确成功码; "
+                f"platform_code={safe_code}"
             )
         response_id = cls._response_id(payload)
         if not response_id:
@@ -2780,6 +2795,7 @@ class ZOLPlatform(BasePlatform):
     async def apply_cover(self, cover: dict | None = None) -> dict:
         """通过 ZOL 独立“导读图”单文件控件上传冻结封面。"""
 
+        self._pending_cover_digests = ()
         strategy = str((cover or {}).get("strategy") or "NONE").upper()
         if strategy == "NONE":
             self._pending_cover_path = ""
@@ -2824,9 +2840,22 @@ class ZOLPlatform(BasePlatform):
                 "error": "ZOL 导读图区域无法确认",
             }
         try:
+            region = self.page.locator(".ant-form-item").filter(
+                has=self.page.locator("label[title='导读图']"),
+            )
+            if await region.count() != 1:
+                raise ContentValidationError("ZOL_COVER_REGION_UNVERIFIED: 导读图区域不唯一")
+            before_urls = await region.locator(self.GUIDE_IMAGE_SELECTOR).evaluate_all(
+                "els => els.map(e => e.currentSrc || e.src)"
+            )
+            before_sources = tuple(
+                (urlparse(url).hostname, urlparse(url).path) for url in before_urls
+            )
             await inputs.first.set_input_files(str(cover_path), timeout=15000)
             await asyncio.sleep(1)
             modals = self.page.locator(".ant-modal-wrap:visible")
+            await modals.first.wait_for(state="visible", timeout=5000)
+            crop_confirmed = False
             if await modals.count() == 1:
                 modal = modals.first
                 modal_text = normalize_for_comparison(await modal.inner_text())
@@ -2834,7 +2863,7 @@ class ZOLPlatform(BasePlatform):
                     raise ContentValidationError(
                         "ZOL_COVER_MODAL_UNSAFE: 封面上传落入非导读图弹窗"
                     )
-                confirms = modal.get_by_text(re.compile(r"^(确定|确认)$"))
+                confirms = modal.get_by_role("button", name=re.compile(r"^确\s*[定认]$"))
                 visible_confirms = [
                     confirms.nth(index)
                     for index in range(await confirms.count())
@@ -2845,16 +2874,28 @@ class ZOLPlatform(BasePlatform):
                         "ZOL_COVER_CONFIRM_AMBIGUOUS: 导读图确认控件不唯一"
                     )
                 await visible_confirms[0].click(timeout=5000)
+                await modal.wait_for(state="hidden", timeout=15000)
+                crop_confirmed = True
+            if not crop_confirmed:
+                raise ContentValidationError("ZOL_COVER_CONFIRM_AMBIGUOUS: 未确认本次原生裁剪")
             ready = False
             for _ in range(30):
                 await asyncio.sleep(0.5)
                 ready = bool(
                     await self.page.evaluate(
-                        """() => Array.from(document.querySelectorAll('img')).some((image) => {
+                        """() => {
+                            const allImages = Array.from(document.querySelectorAll(
+                                '[role="uploader"] .uploader__pic-item img.flex-pic__img'
+                            ));
+                            const images = allImages.filter(image => {
                             const region = image.closest('.ant-upload-list, .ant-form-item, .upload-box');
                             if (!region || !/导读图|重新上传/.test(region.innerText || '')) return false;
-                            return image.complete && image.naturalWidth > 0;
-                        })"""
+                            return true;
+                            });
+                            return images.length === 2 && images.every(
+                                image => image.complete && image.naturalWidth > 0
+                            );
+                        }"""
                     )
                 )
                 if ready:
@@ -2863,6 +2904,14 @@ class ZOLPlatform(BasePlatform):
                 raise ContentValidationError(
                     "ZOL_COVER_PREVIEW_NOT_READY: 导读图预览未稳定加载"
                 )
+            cropped = await self._guide_image_bytes()
+            after_urls = await region.locator(self.GUIDE_IMAGE_SELECTOR).evaluate_all(
+                "els => els.map(e => e.currentSrc || e.src)"
+            )
+            after_sources = tuple((urlparse(url).hostname, urlparse(url).path) for url in after_urls)
+            if not cropped or set(before_sources).intersection(after_sources):
+                raise ContentValidationError("ZOL_COVER_PREVIEW_NOT_READY: 裁剪图无法核对")
+            self._pending_cover_digests = tuple(hashlib.sha256(b).hexdigest() for b in cropped)
         except Exception as exc:
             if self._exception_means_browser_closed(exc):
                 raise BrowserLifecycleError(
@@ -2883,6 +2932,30 @@ class ZOLPlatform(BasePlatform):
             "cover_mode": "EXPLICIT_GUIDE_IMAGE",
         }
 
+    async def _guide_image_bytes(self) -> list[bytes]:
+        """读取本次控件生成的横/竖裁剪图；不把裁剪图与原图强行逐像素比较。"""
+        region = self.page.locator(".ant-form-item").filter(
+            has=self.page.locator("label[title='导读图']"),
+        )
+        if await region.count() != 1:
+            return []
+        urls = await region.locator(self.GUIDE_IMAGE_SELECTOR).evaluate_all(
+            "els => els.length === 2 && els.every(e => e.complete && e.naturalWidth > 0)"
+            " ? els.map(e => e.currentSrc || e.src) : []"
+        )
+        if not isinstance(urls, list) or len(urls) != 2 or self.context is None:
+            return []
+        images = []
+        for url in urls:
+            response = await self.context.request.get(url, timeout=15000)
+            if not response.ok:
+                return []
+            data = await response.body()
+            if not data:
+                return []
+            images.append(data)
+        return images
+
     async def verify_persisted_cover(
         self,
         *,
@@ -2892,6 +2965,20 @@ class ZOLPlatform(BasePlatform):
         apply_result: dict,
     ) -> dict:
         del title, draft_url, cover
+        expected_digests = getattr(self, "_pending_cover_digests", ())
+        if expected_digests:
+            try:
+                observed = await self._guide_image_bytes()
+                actual_digests = tuple(hashlib.sha256(b).hexdigest() for b in observed)
+            except Exception:
+                actual_digests = ()
+            if actual_digests == expected_digests:
+                return {**apply_result, "success": True, "cover_status": "completed"}
+            return {
+                "success": False, "cover_status": "failed", "safe_to_continue": True,
+                "error_code": "ZOL_COVER_CONTENT_UNVERIFIED",
+                "error": "ZOL 重开后的导读裁剪图与本次上传不一致",
+            }
         urls = await self.page.evaluate(
             """() => Array.from(document.querySelectorAll('img')).filter((image) => {
                 const region = image.closest('.ant-upload-list, .ant-form-item, .upload-box');
@@ -2935,6 +3022,7 @@ class ZOLPlatform(BasePlatform):
         self._require_page_alive("ZOL 选择话题")
         override = selection_override or {}
         explicit_topic = str(override.get("topic") or topic or "").strip()
+        selection_query = str(override.get("selection_query") or selection_query or "").strip()
         queries = self._topic_queries(explicit_topic, selection_query)
         if not queries:
             return {"success": True, "selection": {}, "selection_status": "not_required"}
@@ -2986,7 +3074,9 @@ class ZOLPlatform(BasePlatform):
                         "needs_selection": True,
                         "error_code": "ZOL_SELECTION_CONTROL_NOT_FOUND",
                         "error": "ZOL 话题弹窗中未找到确定按钮",
-                        "selection": {"kind": "topic", "query": query, "candidates": all_candidates},
+                        "selection": {
+                            "kind": "topic", "query": query, "candidates": all_candidates,
+                        },
                     }
                 await confirm.click(timeout=5000)
                 await modal.wait_for(state="hidden", timeout=5000)
@@ -2998,6 +3088,7 @@ class ZOLPlatform(BasePlatform):
                         "error": f"ZOL 话题已点击但页面未出现真实标签: {selected}",
                         "selection": {"kind": "topic", "query": query, "candidates": all_candidates},
                     }
+                self._publication_topic = selected
                 logger.info("ZOL 话题选择并验证成功: query={}, topic={}", query, selected)
                 return {
                     "success": True,
@@ -3427,6 +3518,7 @@ class ZOLPlatform(BasePlatform):
                 draft_fingerprint,
             )
             evidence.mark_reopen(title_match=True, dom_blocks_match=True)
+            self._bound_draft_id = response_id
             evidence.set_draft_url(draft_url)
             evidence.finalize()
             return draft_url
@@ -3457,6 +3549,106 @@ class ZOLPlatform(BasePlatform):
                     await draft_page.close()
                 except Exception:
                     logger.warning("ZOL 草稿核验页关闭失败，业务结果保持原状态")
+
+    @classmethod
+    def _is_publication_response(cls, response) -> bool:
+        try:
+            parsed = urlparse(response.url)
+            return (
+                parsed.scheme == "https"
+                and parsed.hostname in cls.DRAFT_SAVE_API_HOSTS
+                and parsed.path == cls.PUBLICATION_RESPONSE_PATH
+                and response.request.method == "POST"
+            )
+        except Exception:
+            return False
+
+    @staticmethod
+    def _publication_request_matches(request, draft_id: str, title: str) -> bool:
+        """只读取当前发布请求的草稿和标题，不记录正文或身份参数。"""
+        try:
+            raw = request.post_data or ""
+            if raw.lstrip().startswith("{"):
+                fields = json.loads(raw)
+            else:
+                parsed = parse_qs(raw, keep_blank_values=True)
+                if any(len(values) != 1 for values in parsed.values()):
+                    return False
+                fields = {key: values[0] for key, values in parsed.items()}
+            return (
+                isinstance(fields, dict)
+                and str(fields.get("draftUpdateId", "")) == draft_id
+                and normalize_for_comparison(str(fields.get("title", ""))) == title
+                and str(fields.get("saveType", "")) == "1"
+                and not fields.get("isUpdate")
+            )
+        except (TypeError, ValueError):
+            return False
+
+    async def publish_now(self, title: str = "") -> dict:
+        """单次提交本篇已核验草稿，明确接收后返回 SUBMITTED，不宣称审核通过。"""
+        if getattr(self, "_public_publish_attempted", False):
+            raise ZOLPublishUnknownError("本次发布已尝试，不会自动重发")
+        draft_id = self._editor_draft_id(self.page.url)
+        expected_title = normalize_for_comparison(title)
+        blocks = self._expected_persisted_blocks
+        if (
+            not draft_id or draft_id != self._bound_draft_id or not expected_title
+            or blocks is None or await self._read_editor_title() != expected_title
+        ):
+            raise SelectorError("ZOL 发布前草稿或标题不匹配")
+        editor, kind = await self._resolve_content_editor()
+        image_count = sum(block.get("type") == "image" for block in blocks)
+        expected = self._expected_content_tokens(blocks, ["image"] * image_count)
+        actual = await self._read_editor_dom_tokens(editor, kind)
+        if not self._content_tokens_match(expected, actual):
+            raise SelectorError("ZOL 发布前正文图文不完整")
+        topic = getattr(self, "_publication_topic", "")
+        if not topic or not await self._verify_topic_selected(topic):
+            raise SelectorError("ZOL 发布前关联话题未确认")
+        cover_region = self.page.locator(".ant-form-item").filter(
+            has=self.page.locator("label[title='导读图']"),
+        )
+        cover_ready = await cover_region.locator(self.GUIDE_IMAGE_SELECTOR).evaluate_all(
+            "els => els.length === 2 && els.every(e => e.complete && e.naturalWidth > 0)"
+        )
+        if not cover_ready or await self.page.locator(".ant-modal-wrap:visible").count():
+            raise SelectorError("ZOL 导读图或发文设置尚未完成")
+        button = self.page.locator(".foot-item").filter(has_text=re.compile(r"^发布$"))
+        if (
+            await button.count() != 1
+            or not await button.is_visible() or not await button.is_enabled()
+        ):
+            raise SelectorError("ZOL 发布控件不可用或不唯一")
+        self._public_publish_attempted = True
+        try:
+            async with self.page.expect_response(
+                self._is_publication_response, timeout=self.PUBLICATION_TIMEOUT_MS,
+            ) as pending:
+                await button.click(timeout=8000)
+            response = await pending.value
+            if not self._publication_request_matches(response.request, draft_id, expected_title):
+                raise ValueError("发布请求与当前草稿不匹配")
+            payload = await response.json()
+            if (
+                not 200 <= response.status < 300
+                or not isinstance(payload, dict)
+                or type(payload.get("errcode")) not in {int, str}
+                or payload["errcode"] not in (0, "0")
+            ):
+                raise ValueError("平台未明确确认接收")
+            return {
+                "status": "SUBMITTED",
+                "verification_evidence": {
+                    "submit_acknowledged": True,
+                    "submission_source": "zol_publish_response",
+                    "submission_scope": "PUBLIC",
+                },
+            }
+        except Exception as exc:
+            raise ZOLPublishUnknownError(
+                "已尝试提交发布，但未确认本篇接收回执；不会自动重发"
+            ) from exc
 
     async def verify_draft_readonly(self, title: str) -> dict:
         """只读核验：通过 getlist 按标题列出稳定草稿 ID，不打开编辑页。"""

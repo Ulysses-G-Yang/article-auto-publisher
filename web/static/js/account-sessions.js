@@ -55,7 +55,7 @@
         SESSION_VERIFY_FAILED: '登录状态验证失败', DELIVERY_QUEUED: '投递已排队',
         DELIVERY_STARTED: '投递已开始', DELIVERY_COMPLETED_WITH_WARNINGS: '草稿已保存（需核对）',
         DELIVERY_INCOMPLETE: '投递未完成', DELIVERY_RESULT_UNKNOWN: '投递结果未知',
-        DELIVERY_FAILED: '投递失败', DRAFT_SAVED: '草稿已保存', SUBMITTED: '已提交（仅自己可见）',
+        DELIVERY_FAILED: '投递失败', DRAFT_SAVED: '草稿已保存', SUBMITTED: '已提交平台',
         DRAFT_SAVED_WITH_WARNINGS: '草稿已保存（需核对）',
         PUBLISH_CONFIRMATION_REQUESTED: '等待公开发布确认', PLATFORM_LOG: '平台执行记录',
         HEARTBEAT_SUCCEEDED: '登录状态检查完成',

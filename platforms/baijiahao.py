@@ -1,8 +1,8 @@
 """百家号（百度创作平台）账号会话适配器。
 
 登录态与身份验证链路（真实扫码 → BDUSS 会话 cookie → 身份捕获/DOM）。
-图文投递只支持 DRAFT：正文使用 UEditor iframe，图片必须经正文图片弹窗
-上传并确认；公开发布保持 fail-closed。
+正文使用 UEditor iframe，图片必须经正文图片弹窗上传并确认。
+公开投稿仅接受当前已核验草稿的单次原生提交及明确接收回执。
 
 真实登录载体（百度 passport，扫码登录为默认 Tab）：
 - 登录页：https://passport.baidu.com/v2/?login
@@ -29,6 +29,7 @@ from platforms.base import (
     DraftVerificationEvidence,
     LoginRequiredError,
     PlatformAutomationError,
+    PublishResultUnknownError,
     SelectorError,
 )
 from platforms.content_validation import (
@@ -57,12 +58,18 @@ class PlatformNotImplementedError(PlatformAutomationError):
 
 
 class BaijiahaoPlatform(BasePlatform):
-    """百家号账号会话与 DRAFT-only 图文投递适配器。"""
+    """百家号账号会话、图文草稿与受控公开投稿适配器。"""
 
     platform_name = "baijiahao"
     SESSION_COOKIE_NAMES = frozenset({"BDUSS"})
     LOGIN_POLL_ATTEMPTS = 40
     LOGIN_POLL_INTERVAL_SECONDS = 3
+    PUBLICATION_RESPONSE_PATH = "/pcui/article/publish"
+    PUBLICATION_TIMEOUT_MS = 45000
+    PUBLICATION_EXTRA_MODES = (
+        "timer_time", "online_modify", "only_modify_goods", "replace_publish",
+        "is_pay", "is_pay_training_camp", "is_pay_subscribe", "is_pay_mvp", "pay_read_type",
+    )
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
@@ -70,6 +77,9 @@ class BaijiahaoPlatform(BasePlatform):
         self._identity_payload: dict[str, str | int | bool] | None = None
         self._expected_persisted_blocks: list[dict] | None = None
         self._expected_persisted_cover = False
+        self._bound_draft_id = ""
+        self._publication_preview_required: bool | None = None
+        self._publication_preview_draft_id = ""
         self._preflight_title = ""
         self._preflight_matching_draft_count = 0
         self._preflight_draft_ids: frozenset[str] = frozenset()
@@ -81,6 +91,39 @@ class BaijiahaoPlatform(BasePlatform):
     async def initialize(self):
         await super().initialize()
         self._identity_payload = None
+        self._publication_preview_required = None
+        self._publication_preview_draft_id = ""
+        self.page.on("response", self._capture_publication_capability)
+
+    async def _capture_publication_capability(self, response) -> None:
+        """从当前草稿的原生只读响应确认是否要求额外的预览保存。"""
+        try:
+            parsed = urlsplit(response.url)
+            if (
+                parsed.scheme != "https" or parsed.netloc != "baijiahao.baidu.com"
+                or parsed.path != "/pcui/article/edit" or response.request.method != "GET"
+                or not 200 <= response.status < 300
+            ):
+                return
+            pairs = parse_qsl(parsed.query)
+            ids = [v for k, v in pairs if k == "article_id"]
+            if len(ids) != 1 or [v for k, v in pairs if k == "type"] != ["news"]:
+                return
+            payload = await response.json()
+            if not isinstance(payload, dict) or type(payload.get("errno")) not in {int, str}:
+                return
+            if payload["errno"] not in (0, "0"):
+                return
+            data = payload.get("data")
+            ability = data.get("ability") if isinstance(data, dict) else None
+            value = ability.get("is_preview_gray") if isinstance(ability, dict) else None
+            if type(value) not in {int, str} or value not in (0, 1, "0", "1"):
+                return
+            self._publication_preview_required = str(value) == "1"
+            self._publication_preview_draft_id = ids[0]
+        except Exception:
+            # Missing capability is a pre-click stop, never a guess about publication.
+            return
 
     # ==================== 登录态与身份 ====================
 
@@ -2097,6 +2140,9 @@ class BaijiahaoPlatform(BasePlatform):
             raise DraftResultUnknownError(
                 "DRAFT_RESULT_UNKNOWN: 百家号缺少冻结内容核验快照"
             )
+        self._bound_draft_id = ""
+        self._publication_preview_required = None
+        self._publication_preview_draft_id = ""
         await self.page.goto(edit_url, wait_until="domcontentloaded", timeout=30000)
         await self._wait_for_editor_ready(timeout_seconds=45)
         expected_tokens = self._expected_content_tokens(blocks)
@@ -2116,6 +2162,12 @@ class BaijiahaoPlatform(BasePlatform):
                         not self._expected_persisted_cover
                         or await self._has_persisted_cover()
                     ):
+                        article_id = self._editor_article_id(edit_url)
+                        if not article_id or self._editor_article_id(self.page.url) != article_id:
+                            raise DraftResultUnknownError(
+                                "DRAFT_RESULT_UNKNOWN: 百家号重开后的草稿 ID 不匹配"
+                            )
+                        self._bound_draft_id = article_id
                         return
             if attempt + 1 < 20:
                 await asyncio.sleep(1.5)
@@ -2170,5 +2222,202 @@ class BaijiahaoPlatform(BasePlatform):
             return False
         return int(count or 0) == 1
 
-    async def publish_now(self, title: str = "") -> str:
-        self._not_implemented("公开发布")
+    @classmethod
+    def _editor_article_id(cls, url: str) -> str:
+        try:
+            safe = cls._safe_draft_url(url)
+        except (DraftResultUnknownError, ValueError):
+            return ""
+        if not safe:
+            return ""
+        pairs = parse_qsl(urlsplit(safe).query, keep_blank_values=True)
+        ids = [value for key, value in pairs if key == "article_id"]
+        types = [value for key, value in pairs if key == "type"]
+        if len(ids) != 1 or not re.fullmatch(r"\d{1,30}", ids[0]) or types != ["news"]:
+            return ""
+        if any(k in cls.PUBLICATION_EXTRA_MODES and v not in {"", "0"} for k, v in pairs):
+            return ""
+        return ids[0]
+
+    async def prepare_publication_options(self) -> None:
+        """关闭原生表单默认开启的附加播客，不改变文章或创作声明。"""
+        labels = self.page.locator("label:visible").filter(
+            has_text=re.compile(r"^自动生成播客$"),
+        )
+        if await labels.count() != 1:
+            raise SelectorError("百家号自动生成播客选项不存在或不唯一")
+        checkbox = labels.locator('input[type="checkbox"]')
+        if await checkbox.count() != 1 or not await checkbox.is_enabled():
+            raise SelectorError("百家号自动生成播客状态无法确认")
+        if await checkbox.is_checked():
+            # Controlled React inputs may briefly revert before the parent commits.
+            # Click once, then observe settlement; never toggle again on a timeout.
+            await checkbox.click(timeout=5000)
+        for _ in range(50):
+            if not await checkbox.is_checked():
+                return
+            await asyncio.sleep(0.1)
+        raise SelectorError("百家号自动生成播客未关闭")
+
+    async def _assert_publication_ready(self, title: str) -> str:
+        expected_title = self._normalize_title(title)
+        if (
+            not expected_title or not self._bound_draft_id
+            or self._expected_persisted_blocks is None
+        ):
+            raise SelectorError("百家号发布前缺少已核验草稿")
+        self._require_page_alive("百家号发布前核验")
+        draft_id = self._editor_article_id(self.page.url)
+        titles = self._editors()
+        if (
+            draft_id != self._bound_draft_id or await titles.count() != 1
+            or self._normalize_title(await titles.inner_text()) != expected_title
+        ):
+            raise SelectorError("百家号发布前草稿或标题不匹配")
+        if (
+            self._publication_preview_required is not False
+            or self._publication_preview_draft_id != draft_id
+        ):
+            raise SelectorError("百家号直接发布能力未确认，预览保存流程尚未接入")
+        blocks = self._expected_persisted_blocks
+        if await self._read_editor_dom_tokens() != self._expected_content_tokens(blocks):
+            raise SelectorError("百家号发布前正文图文不完整")
+        image_count = sum(block.get("type") == "image" for block in blocks)
+        if await self._count_body_images() != image_count or (
+            image_count and not await self._new_body_images_ready(0)
+        ):
+            raise SelectorError("百家号发布前正文图片尚未全部加载")
+        if not await self._has_persisted_cover():
+            raise SelectorError("百家号发布前缺少唯一已加载封面")
+        if await self.page.locator('.cheetah-modal:visible, [role="dialog"]:visible').count():
+            raise SelectorError("百家号发布前仍有未完成弹窗")
+        return draft_id
+
+    @classmethod
+    def _is_publication_response(cls, response) -> bool:
+        try:
+            parsed = urlsplit(response.url)
+            return (
+                parsed.scheme == "https" and parsed.netloc == "baijiahao.baidu.com"
+                and parsed.path == cls.PUBLICATION_RESPONSE_PATH
+                and [v for k, v in parse_qsl(parsed.query) if k == "type"] == ["news"]
+                and response.request.method == "POST"
+            )
+        except (AttributeError, TypeError, ValueError):
+            return False
+
+    @staticmethod
+    def _publication_fields(request) -> dict:
+        """只在内存解码已观察到的原生表单；拒绝重复字段和其他编码。"""
+        content_type = (getattr(request, "headers", {}) or {}).get("content-type", "")
+        if content_type.split(";", 1)[0].strip().lower() != "application/x-www-form-urlencoded":
+            raise ValueError("unsupported publication encoding")
+        fields = {}
+        pairs = parse_qsl(request.post_data or "", keep_blank_values=True, errors="strict")
+        for key, value in pairs:
+            if key in fields:
+                raise ValueError("duplicate field")
+            fields[key] = value
+        return fields
+
+    @classmethod
+    def _publication_request_matches(cls, request, draft_id: str, title: str) -> bool:
+        try:
+            fields = cls._publication_fields(request)
+            podcast_indexes = [
+                match[1] for key, value in fields.items()
+                if (match := re.fullmatch(r"activity_list\[([0-9]+)\]\[id\]", key))
+                and value == "ai_tts"
+            ]
+            return (
+                isinstance(fields, dict) and fields.get("type") == "news"
+                and str(fields.get("article_id", "")) == draft_id
+                and cls._normalize_title(str(fields.get("title", ""))) == title
+                and all(fields.get(k) in (None, "", "0") for k in cls.PUBLICATION_EXTRA_MODES)
+                and len(podcast_indexes) == 1
+                and fields.get(f"activity_list[{podcast_indexes[0]}][is_checked]") == "0"
+            )
+        except (TypeError, ValueError, AttributeError):
+            return False
+
+    async def publish_now(self, title: str = "") -> dict:
+        """只提交一次已核验原草稿，明确回执只证明接收，不证明审核通过。"""
+        if getattr(self, "_public_publish_attempted", False):
+            raise PublishResultUnknownError("百家号本次发布已尝试，不会自动重发")
+        await self._assert_publication_ready(title)
+        await self.prepare_publication_options()
+        draft_id = await self._assert_publication_ready(title)
+        buttons = self.page.get_by_role("button", name="发布", exact=True)
+        if (
+            await buttons.count() != 1 or not await buttons.is_visible()
+            or not await buttons.is_enabled()
+        ):
+            raise SelectorError("百家号发布按钮不可用或不唯一")
+        forwarded = 0
+        pattern = "**/pcui/article/publish*"
+
+        async def guard(route, request):
+            nonlocal forwarded
+            parsed = urlsplit(request.url)
+            allowed = (
+                not forwarded and request.method == "POST"
+                and parsed.scheme == "https" and parsed.netloc == "baijiahao.baidu.com"
+                and parsed.path == self.PUBLICATION_RESPONSE_PATH
+                and [v for k, v in parse_qsl(parsed.query) if k == "type"] == ["news"]
+                and self._publication_request_matches(
+                    request, draft_id, self._normalize_title(title),
+                )
+            )
+            if not allowed:
+                await route.abort()
+                return
+            forwarded += 1
+            await route.fallback()
+
+        await self.page.route(pattern, guard)
+        self._public_publish_attempted = True
+        try:
+            async with self.page.expect_response(
+                self._is_publication_response, timeout=self.PUBLICATION_TIMEOUT_MS,
+            ) as pending:
+                await buttons.click(timeout=8000)
+            response = await pending.value
+            if not self._publication_request_matches(
+                response.request, draft_id, self._normalize_title(title),
+            ):
+                raise ValueError("发布请求与当前草稿不匹配")
+            payload = await response.json()
+            if (
+                isinstance(payload, dict) and type(payload.get("errno")) in {int, str}
+                and str(payload["errno"]) == "10000015"
+            ):
+                raise PublishResultUnknownError(
+                    "百家号触发百度安全验证（平台代码 10000015），需本人处理；不会自动重发"
+                )
+            if (
+                not 200 <= response.status < 300 or not isinstance(payload, dict)
+                or type(payload.get("errno")) not in {int, str}
+                or payload["errno"] not in (0, "0")
+                or not isinstance(payload.get("ret"), dict)
+            ):
+                raise ValueError("平台未明确确认接收")
+            article_id = payload["ret"].get("nid")
+            if type(article_id) not in {int, str} or not re.fullmatch(
+                r"[0-9]{1,30}", str(article_id),
+            ):
+                raise ValueError("平台回执缺少有效文章 ID")
+            return {
+                "status": "SUBMITTED", "platform_article_id": str(article_id),
+                "verification_evidence": {
+                    "submit_acknowledged": True,
+                    "submission_source": "baijiahao_publish_response",
+                    "submission_scope": "PUBLIC", "submission_article_id": str(article_id),
+                    "submission_draft_id": draft_id,
+                },
+            }
+        except PublishResultUnknownError:
+            raise
+        except Exception as exc:
+            raise PublishResultUnknownError(
+                "百家号已尝试发布，但未确认本篇接收回执；不会自动重发"
+            ) from exc

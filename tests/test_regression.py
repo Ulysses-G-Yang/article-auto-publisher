@@ -12,9 +12,6 @@ from models.database import Database
 from platforms.baijiahao import (
     BaijiahaoPlatform,
 )
-from platforms.baijiahao import (
-    PlatformNotImplementedError as BaijiahaoNotImplementedError,
-)
 from platforms.base import (
     BasePlatform,
     BrowserLifecycleError,
@@ -1946,9 +1943,9 @@ class RegressionTests(DatabaseTestCase):
         self.assertEqual(identity.platform_user_id, "170123456789")
         self.assertEqual(identity.display_name, "百家号昵称")
 
-    def test_baijiahao_publish_now_still_fails_closed(self):
+    def test_baijiahao_publish_now_requires_verified_draft(self):
         platform = BaijiahaoPlatform()
-        with self.assertRaises(BaijiahaoNotImplementedError):
+        with self.assertRaises(SelectorError):
             asyncio.run(platform.publish_now())
 
     def test_baijiahao_navigate_to_editor_waits_for_editor(self):

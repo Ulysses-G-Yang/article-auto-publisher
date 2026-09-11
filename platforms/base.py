@@ -807,6 +807,7 @@ class BasePlatform(ABC):
             # 可显式打开 app.publish_after_draft 配置。
             post_url = ""
             publication_status = None
+            publication_article_id = None
             should_publish = (
                 delivery_mode == "PUBLISH"
                 if delivery_mode is not None
@@ -855,13 +856,24 @@ class BasePlatform(ABC):
                 if isinstance(publication, dict):
                     receipt = publication.get("verification_evidence")
                     if (
-                        self.platform_name != "zol" or publication.get("status") != "SUBMITTED"
+                        self.platform_name not in {"zol", "baijiahao"}
+                        or publication.get("status") != "SUBMITTED"
                         or not isinstance(receipt, dict)
                         or receipt.get("submit_acknowledged") is not True
-                        or receipt.get("submission_source") != "zol_publish_response"
+                        or receipt.get("submission_source")
+                        != f"{self.platform_name}_publish_response"
                         or receipt.get("submission_scope") != "PUBLIC"
                     ):
                         raise PublishResultUnknownError("平台发布接收回执无效")
+                    if self.platform_name == "baijiahao":
+                        article_id = publication.get("platform_article_id")
+                        if (
+                            not isinstance(article_id, str) or not article_id.isascii()
+                            or not article_id.isdigit() or len(article_id) > 30
+                            or receipt.get("submission_article_id") != article_id
+                        ):
+                            raise PublishResultUnknownError("百家号发布回执缺少有效文章 ID")
+                        publication_article_id = article_id
                     publication_status = "SUBMITTED"
                     evidence_payload = {**(evidence_payload or {}), **receipt}
                 else:
@@ -873,6 +885,10 @@ class BasePlatform(ABC):
             return {
                 "success": True,
                 **({"status": publication_status} if publication_status else {}),
+                **(
+                    {"platform_article_id": publication_article_id}
+                    if publication_article_id else {}
+                ),
                 "draft_url": draft_url,
                 "post_url": post_url,
                 "selection": selection,

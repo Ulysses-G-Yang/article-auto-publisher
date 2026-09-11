@@ -396,7 +396,9 @@ class DeliveryService:
                     "图片未完整写入平台且草稿未保存",
                     error_code=(result.get("media_error_code") or "PLATFORM_MEDIA_INCOMPLETE"),
                 )
-            if operation.mode == "PUBLISH" and _is_zol_public_submission(account.platform, result):
+            if operation.mode == "PUBLISH" and _is_verified_public_submission(
+                account.platform, result,
+            ):
                 if media_incomplete or cover_incomplete or verification_warning:
                     raise AccountUnavailableError(
                         "平台接收回执与内容完整性结果冲突，需人工核对",
@@ -406,7 +408,9 @@ class DeliveryService:
                     operation_id, account, access, result, buffered_log.entries,
                     selection_outcome=selection_outcome,
                 )
-            if operation.mode == "PUBLISH" and not result.get("post_url"):
+            if operation.mode == "PUBLISH" and (
+                result.get("status") == "SUBMITTED" or not result.get("post_url")
+            ):
                 raise AccountUnavailableError(
                     "平台未返回公开文章地址，发布结果未知",
                     error_code="PUBLISH_RESULT_UNKNOWN",
@@ -931,7 +935,7 @@ class DeliveryService:
             operation.status = (
                 "SUBMITTED" if operation.mode == "PRIVATE_PUBLISH" or (
                     operation.mode == "PUBLISH"
-                    and _is_zol_public_submission(account.platform, result)
+                    and _is_verified_public_submission(account.platform, result)
                 )
                 else "DRAFT_SAVED" if operation.mode == "DRAFT" else "PUBLISHED"
             )
@@ -1688,13 +1692,21 @@ def _format_media_progress_log(progress: dict[str, int | str]) -> str:
     )
 
 
-def _is_zol_public_submission(platform: str, result: dict) -> bool:
+def _is_verified_public_submission(platform: str, result: dict) -> bool:
     evidence = result.get("verification_evidence")
+    if platform == "baijiahao":
+        article_id = result.get("platform_article_id")
+        if (
+            not isinstance(article_id, str) or not re.fullmatch(r"[0-9]{1,30}", article_id)
+            or not isinstance(evidence, dict)
+            or evidence.get("submission_article_id") != article_id
+        ):
+            return False
     return (
-        platform == "zol" and result.get("status") == "SUBMITTED"
+        platform in {"zol", "baijiahao"} and result.get("status") == "SUBMITTED"
         and isinstance(evidence, dict)
         and evidence.get("submit_acknowledged") is True
-        and evidence.get("submission_source") == "zol_publish_response"
+        and evidence.get("submission_source") == f"{platform}_publish_response"
         and evidence.get("submission_scope") == "PUBLIC"
     )
 

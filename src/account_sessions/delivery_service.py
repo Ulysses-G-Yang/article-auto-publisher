@@ -1703,7 +1703,7 @@ def _is_verified_public_submission(platform: str, result: dict) -> bool:
         ):
             return False
     return (
-        platform in {"zol", "baijiahao"} and result.get("status") == "SUBMITTED"
+        platform in {"zol", "baijiahao", "weibo"} and result.get("status") == "SUBMITTED"
         and isinstance(evidence, dict)
         and evidence.get("submit_acknowledged") is True
         and evidence.get("submission_source") == f"{platform}_publish_response"

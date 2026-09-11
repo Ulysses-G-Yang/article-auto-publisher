@@ -22,7 +22,6 @@ from platforms.content_validation import ContentValidationError
 from platforms.douyin import DouyinPlatform, PlatformNotImplementedError
 from platforms.smzdm import PlatformNotImplementedError as SmzdmNotImplementedError
 from platforms.smzdm import SmzdmPlatform
-from platforms.weibo import PlatformNotImplementedError as WeiboNotImplementedError
 from platforms.weibo import WeiboPlatform
 from platforms.xiaoheihe import XiaoheihePlatform
 from platforms.xiaohongshu import (
@@ -1780,9 +1779,9 @@ class RegressionTests(DatabaseTestCase):
         self.assertEqual(found, ("1234567890", "微博昵称"))
         self.assertIsNone(platform._extract_identity_from_json({"foo": "bar"}))
 
-    def test_weibo_publish_now_still_fails_closed(self):
+    def test_weibo_publish_requires_verified_draft(self):
         platform = WeiboPlatform()
-        with self.assertRaises(WeiboNotImplementedError):
+        with self.assertRaises(SelectorError):
             asyncio.run(platform.publish_now())
 
     def test_weibo_navigate_to_editor_sequence(self):

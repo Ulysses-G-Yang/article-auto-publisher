@@ -1,7 +1,7 @@
 """微博账号会话与头条文章草稿适配器。
 
-登录态通过持久 Profile 验证；草稿链路只允许 ``DRAFT``，按冻结图文块顺序
-写入 TipTap，保存后必须重开同一 draft ID 并复核标题、H2 与正文图片。
+登录态通过持久 Profile 验证；按冻结图文块顺序写入 TipTap，保存后重开
+同一 draft ID 复核图文。公开发布另核对封面和阅读范围，单次保存/提交。
 
 真实登录页（https://passport.weibo.com/sso/signin?entry=miniblog...）：
 - 「扫描二维码登录」为默认 Tab，二维码为约 140x140 的 img（v2.qr.weibo.cn）。
@@ -17,7 +17,7 @@ import copy
 import hashlib
 import re
 from pathlib import Path
-from urllib.parse import urlsplit
+from urllib.parse import parse_qsl, urlsplit
 
 from loguru import logger
 
@@ -29,6 +29,7 @@ from platforms.base import (
     DraftVerificationEvidence,
     LoginRequiredError,
     PlatformAutomationError,
+    PublishResultUnknownError,
     SelectorError,
 )
 from platforms.content_validation import (
@@ -1838,79 +1839,65 @@ class WeiboPlatform(BasePlatform):
             }
 
     async def set_cover(self) -> dict:
-        """从正文图片中选择第一张设为文章封面（微博封面必须来自正文图）。
-
-        2026-08-17 用户实测：**微博正文插图可自动化上传**（input[type=file]
-        控件存在，图片随文章保存/发布成功）。封面弹窗从正文图缩略图中选
-        第一张；正文无图则弹窗无图可选，set_cover 如实失败、绝不假成功。
-        用户手动粘贴/拖拽插图后可手动设置封面。
-        """
-
+        """原生选择正文首图、裁剪一次，要求唯一新封面实际加载。"""
         self._require_page_alive("微博设置封面")
-        clicked = await self.page.evaluate(
-            """() => {
-                const nodes = Array.from(document.querySelectorAll('*'));
-                const target = nodes.find(el => {
-                    const t = (el.innerText || '').trim();
-                    return t === '设置文章封面' && el.children.length === 0;
-                });
-                if (!target) return 'not-found';
-                const clickable = target.closest(
-                    'button, [role="button"], [class*="btn" i], [class*="click" i], label, a'
-                );
-                if (clickable) { clickable.click(); return 'clicked'; }
-                target.click();
-                return 'clicked';
-            }"""
-        )
-        if clicked != "clicked":
-            return {"success": False, "error": "微博「设置文章封面」按钮未找到"}
-        await self.simulator.random_delay(1, 2)
-
-        # 弹窗中选择第一张正文图片（缩略图/图片容器）
-        picked = await self.page.evaluate(
-            """() => {
-                const dialog = document.querySelector('.n-dialog');
-                if (!dialog) return 'no-dialog';
-                const imgs = Array.from(dialog.querySelectorAll('img'));
-                if (imgs.length === 0) return 'no-images';
-                const container = imgs[0].closest(
-                    '[class*="item" i], [class*="pic" i], label'
-                );
-                const target = container || imgs[0];
-                target.click();
-                return 'picked';
-            }"""
-        )
-        await self.simulator.random_delay(1, 2)
-        if picked != "picked":
-            return {"success": False, "error": "微博封面弹窗未找到正文图片"}
-
-        # 点「下一步」（有图片时弹窗按钮应为「下一步」）
-        next_clicked = await self.page.evaluate(
-            """() => {
-                const dialog = document.querySelector('.n-dialog');
-                if (!dialog) return 'no-dialog';
-                const buttons = Array.from(dialog.querySelectorAll('button'));
-                const target = buttons.find(b =>
-                    ['下一步', '确定', '完成', '使用该图'].includes((b.innerText || '').trim()));
-                if (target) { target.click(); return 'clicked'; }
-                return 'no-next-btn';
-            }"""
-        )
-        await self.simulator.random_delay(2, 3)
-
-        # 成功判据：弹窗关闭
-        dialog_open = await self.page.evaluate(
-            "() => !!document.querySelector('.n-dialog')"
-        )
-        if dialog_open:
-            return {
-                "success": False,
-                "error": f"微博封面设置弹窗未关闭（pick={picked} next={next_clicked}）",
-            }
-        logger.info("微博封面已从正文首图设置完成")
-        return {"success": True, "error": ""}
+        if getattr(self, "_cover_attempted", False):
+            return {"success": False, "error": "微博封面已尝试，不会自动重复上传"}
+        editor = await self._current_body_editor()
+        body_images = editor.locator("figure.wb-node-image img.image-view__body__image")
+        if not await body_images.count():
+            return {"success": False, "error": "微博正文无图片可用作封面"}
+        first_source = await body_images.first.get_attribute("src")
+        trigger = self.page.locator(".cover-empty:visible")
+        if await trigger.count() != 1:
+            return {"success": False, "error": "微博空封面入口不唯一，现有封面不自动替换"}
+        self._cover_attempted = True
+        try:
+            await trigger.click(timeout=5000)
+            dialog = self.page.locator(".n-dialog:visible")
+            await dialog.wait_for(timeout=10000)
+            if await dialog.get_by_text("正文图片", exact=True).count() != 1:
+                raise SelectorError("微博封面弹窗不是正文图片列表")
+            items = dialog.locator(".image-list .image-item")
+            if await items.count() != await body_images.count():
+                raise SelectorError("微博封面候选与正文图片数量不一致")
+            candidate = items.first.locator("img")
+            await candidate.wait_for(timeout=10000)
+            if await candidate.count() != 1 or await candidate.get_attribute("src") != first_source:
+                raise SelectorError("微博封面首候选与正文首图不匹配")
+            await items.first.click(timeout=5000)
+            if await dialog.locator(".image-item.is-selected").count() != 1:
+                raise SelectorError("微博封面未唯一选中首图")
+            await dialog.get_by_role("button", name="下一步", exact=True).click(timeout=5000)
+            crop = self.page.locator(".n-dialog:visible").filter(
+                has=self.page.locator("cropper-selection"),
+            )
+            await crop.wait_for(timeout=10000)
+            await crop.locator("cropper-selection").wait_for(state="visible", timeout=10000)
+            # Native cropper settles its selection after image loading and resize.
+            for _ in range(60):
+                ready = await crop.locator("cropper-selection").evaluate(
+                    "e => e.width > 0 && e.height > 0",
+                )
+                if ready:
+                    break
+                await asyncio.sleep(0.2)
+            if not ready:
+                raise SelectorError("微博原生裁剪区域尚未就绪")
+            await asyncio.sleep(0.5)
+            await crop.get_by_role("button", name="确定", exact=True).click(timeout=5000)
+            await crop.wait_for(state="hidden", timeout=45000)
+            covers = self.page.locator(".cover-preview img.cover-img")
+            await covers.wait_for(timeout=10000)
+            for _ in range(50):
+                if await covers.count() == 1 and await covers.evaluate(
+                    "i => i.complete && i.naturalWidth > 0 && i.naturalHeight > 0",
+                ):
+                    return {"success": True, "error": ""}
+                await asyncio.sleep(0.2)
+            raise SelectorError("微博新封面尚未加载")
+        except Exception as exc:
+            return {"success": False, "error": safe_media_error(exc, fallback="微博封面设置未确认")}
 
     async def select_topic(
         self,
@@ -2289,5 +2276,238 @@ class WeiboPlatform(BasePlatform):
         normalized = str(path or "").lower()
         return "/publish" in normalized or "/article/publish" in normalized
 
-    async def publish_now(self, title: str = "") -> str:
-        self._not_implemented("公开发布")
+    PUBLICATION_TIMEOUT_MS = 30000
+    PUBLICATION_PATH = "/article/v5/aj/editor/draft/publish"
+    PUBLICATION_SAVE_PATH = "/article/v5/aj/editor/draft/save"
+
+    @staticmethod
+    def _native_form(request) -> dict[str, str]:
+        content_type = request.headers.get("content-type", "").split(";", 1)[0]
+        if content_type.strip().lower() != "application/x-www-form-urlencoded":
+            raise ValueError("unsupported native form")
+        fields = {}
+        for key, value in parse_qsl(request.post_data or "", keep_blank_values=True):
+            if key in fields:
+                raise ValueError("duplicate native field")
+            fields[key] = value
+        return fields
+
+    @staticmethod
+    def _native_request_at(request, path: str) -> bool:
+        parsed = urlsplit(request.url)
+        return (
+            request.method == "POST" and parsed.scheme == "https"
+            and parsed.netloc == "card.weibo.com" and parsed.path == path
+        )
+
+    async def prepare_publication_options(self) -> None:
+        labels = self.page.locator("span:visible").filter(
+            has_text=re.compile(r"^仅粉丝阅读全文$"),
+        )
+        if await labels.count() != 1:
+            raise SelectorError("微博粉丝阅读设置无法唯一确认")
+        checkbox = labels.locator("..").get_by_role("checkbox")
+        if await checkbox.count() != 1:
+            raise SelectorError("微博粉丝阅读复选框不唯一")
+        state = await checkbox.get_attribute("aria-checked")
+        if state == "true":
+            await checkbox.click(timeout=5000)
+        for _ in range(40):
+            if await checkbox.get_attribute("aria-checked") == "false":
+                return
+            await asyncio.sleep(0.1)
+        raise SelectorError("微博仅粉丝阅读全文尚未关闭")
+
+    async def _assert_publication_ready(self, title: str) -> str:
+        if not self._active_draft_id or self._expected_persisted_blocks is None:
+            raise SelectorError("微博发布前缺少已核验草稿")
+        current = urlsplit(self.page.url)
+        if (
+            current.scheme != "https" or current.netloc != "card.weibo.com"
+            or current.path != "/article/v5/editor"
+        ):
+            raise SelectorError("微博发布前不是原生草稿编辑页")
+        titles = self.page.get_by_placeholder("请输入标题", exact=True)
+        if (
+            await self._current_draft_id() != self._active_draft_id
+            or await titles.count() != 1
+            or self._normalize_draft_title(await titles.input_value())
+            != self._normalize_draft_title(title)
+        ):
+            raise SelectorError("微博发布前草稿或标题不匹配")
+        await self._validate_dom_exact(self._expected_persisted_blocks, phase="公开发布前")
+        count = sum(b.get("type") == "image" for b in self._expected_persisted_blocks)
+        editor = await self._current_body_editor()
+        images = editor.locator("figure.wb-node-image img.image-view__body__image")
+        if (
+            await self._semantic_editor_image_count() != count
+            or not await images.evaluate_all(
+                "els => els.every(i => i.complete && i.naturalWidth > 0)",
+            )
+        ):
+            raise SelectorError("微博发布前正文图片尚未完整加载")
+        covers = self.page.locator(".cover-preview img.cover-img")
+        if await covers.count() != 1 or not await covers.evaluate(
+            "i => i.complete && i.naturalWidth > 0",
+        ):
+            raise SelectorError("微博发布前缺少唯一已加载封面")
+        labels = self.page.locator("span").filter(has_text=re.compile(r"^仅粉丝阅读全文$"))
+        if await labels.count() != 1:
+            raise SelectorError("微博发布前阅读范围不明确")
+        checks = labels.locator("..").get_by_role("checkbox")
+        if await checks.count() != 1 or await checks.get_attribute("aria-checked") != "false":
+            raise SelectorError("微博发布前仍限制粉丝阅读")
+        return self._active_draft_id
+
+    async def _install_publication_guard(self) -> None:
+        if getattr(self, "_publication_guard_installed", False):
+            return
+        self._publication_stage = "blocked"
+        self._publication_save_sent = False
+        self._publication_post_sent = False
+
+        async def guard(route, request):
+            path = urlsplit(request.url).path
+            if request.method in {"GET", "HEAD", "OPTIONS"} or not path.startswith(
+                "/article/v5/aj/editor/draft/",
+            ):
+                await route.fallback()
+                return
+            allowed = False
+            try:
+                fields = self._native_form(request)
+                bound = fields.get("id") == self._active_draft_id
+                if self._publication_stage == "save" and not self._publication_save_sent:
+                    allowed = (
+                        bound and self._native_request_at(request, self.PUBLICATION_SAVE_PATH)
+                        and fields.get("action") == "2"
+                        and fields.get("title") == self._publication_title
+                        and fields.get("cover") == self._publication_cover
+                        and fields.get("follow_to_read") == "0"
+                        and bool(fields.get("content"))
+                        and not fields.get("free_content")
+                    )
+                    if allowed:
+                        self._publication_save_sent = True
+                elif self._publication_stage == "publish" and not self._publication_post_sent:
+                    allowed = (
+                        bound and self._native_request_at(request, self.PUBLICATION_PATH)
+                        and fields.get("text") == self._publication_text
+                        and all(fields.get(key) == "0" for key in (
+                            "rank", "follow_to_read", "follow_official", "sync_wb",
+                            "is_original", "mpkey",
+                        ))
+                        and fields.get("time") == ""
+                        and fields.get("timestamp") == ""
+                    )
+                    if allowed:
+                        self._publication_post_sent = True
+            except (AttributeError, TypeError, ValueError):
+                allowed = False
+            if allowed:
+                await route.fallback()
+            else:
+                await route.abort()
+
+        await self.page.route("**/article/v5/aj/editor/draft/**", guard)
+        self._publication_guard_installed = True
+
+    @staticmethod
+    async def _assert_native_ack(response) -> None:
+        payload = await response.json()
+        if (
+            not 200 <= response.status < 300 or not isinstance(payload, dict)
+            or type(payload.get("code")) not in {int, str}
+            or str(payload["code"]) not in {"100000", "A00006"}
+            or not isinstance(payload.get("data"), dict)
+            or payload["data"].get("geetest")
+        ):
+            raise ValueError("微博未返回明确成功回执")
+
+    async def open_publication_dialog(self, title: str) -> None:
+        """原生下一步会保存一次 action=2；只放行当前稿，禁止自动保存重试。"""
+        if getattr(self, "_publication_next_attempted", False):
+            raise PublishResultUnknownError("微博下一步已尝试，不会重复保存")
+        await self._assert_publication_ready(title)
+        await self._install_publication_guard()
+        buttons = self.page.get_by_role("button", name="下一步", exact=True)
+        if await buttons.count() != 1 or not await buttons.is_enabled():
+            raise SelectorError("微博下一步按钮不可用或不唯一")
+        self._publication_title = self._normalize_draft_title(title)
+        self._publication_cover = await self.page.locator(
+            ".cover-preview img.cover-img",
+        ).get_attribute("src")
+        self._publication_next_attempted = True
+        self._publication_stage = "save"
+        try:
+            async with self.page.expect_response(
+                lambda response: self._native_request_at(
+                    response.request, self.PUBLICATION_SAVE_PATH,
+                ),
+                timeout=self.PUBLICATION_TIMEOUT_MS,
+            ) as pending:
+                await buttons.click(timeout=8000)
+            await self._assert_native_ack(await pending.value)
+            await self.page.locator(".publish-modal:visible").wait_for(timeout=15000)
+            await self._assert_publication_ready(title)
+            self._publication_save_confirmed = self._active_draft_id
+        except Exception as exc:
+            raise PublishResultUnknownError(
+                "微博下一步保存或发布窗口未确认，已停止；不会自动重试",
+            ) from exc
+        finally:
+            self._publication_stage = "blocked"
+
+    async def publish_now(self, title: str = "") -> dict:
+        if getattr(self, "_public_publish_attempted", False):
+            raise PublishResultUnknownError("微博本次发布已尝试，不会自动重发")
+        await self._assert_publication_ready(title)
+        if getattr(self, "_publication_save_confirmed", None) != self._active_draft_id:
+            await self.open_publication_dialog(title)
+        dialog = self.page.locator(".publish-modal:visible")
+        if await dialog.count() != 1:
+            raise SelectorError("微博最终发布窗口不唯一")
+        follow = dialog.get_by_role("checkbox").filter(has_text="关注@头条文章")
+        if await follow.count() > 1:
+            raise SelectorError("微博附加关注选项不唯一")
+        if await follow.count() == 1:
+            if await follow.get_attribute("aria-checked") == "true":
+                await follow.click(timeout=5000)
+            if await follow.get_attribute("aria-checked") != "false":
+                raise SelectorError("微博附加关注选项未关闭")
+        if await dialog.get_by_text("公开", exact=True).count() != 1:
+            raise SelectorError("微博最终发布范围不是公开")
+        text = dialog.locator("textarea")
+        if await text.count() != 1:
+            raise SelectorError("微博发布配文不唯一")
+        self._publication_text = await text.input_value()
+        if self._normalize_draft_title(title) not in self._publication_text:
+            raise SelectorError("微博发布配文与本篇标题不匹配")
+        buttons = dialog.get_by_role("button", name="发布", exact=True)
+        if await buttons.count() != 1 or not await buttons.is_enabled():
+            raise SelectorError("微博正式发布按钮不可用或不唯一")
+        await self._assert_publication_ready(title)
+        self._public_publish_attempted = True
+        self._publication_stage = "publish"
+        try:
+            async with self.page.expect_response(
+                lambda response: self._native_request_at(response.request, self.PUBLICATION_PATH),
+                timeout=self.PUBLICATION_TIMEOUT_MS,
+            ) as pending:
+                await buttons.click(timeout=8000)
+            await self._assert_native_ack(await pending.value)
+            return {
+                "status": "SUBMITTED",
+                "verification_evidence": {
+                    "submit_acknowledged": True,
+                    "submission_source": "weibo_publish_response",
+                    "submission_scope": "PUBLIC",
+                    "submission_draft_id": self._active_draft_id,
+                },
+            }
+        except Exception as exc:
+            raise PublishResultUnknownError(
+                "微博已尝试发布，但未确认本篇接收回执；不会自动重发",
+            ) from exc
+        finally:
+            self._publication_stage = "blocked"

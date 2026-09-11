@@ -856,7 +856,7 @@ class BasePlatform(ABC):
                 if isinstance(publication, dict):
                     receipt = publication.get("verification_evidence")
                     if (
-                        self.platform_name not in {"zol", "baijiahao"}
+                        self.platform_name not in {"zol", "baijiahao", "weibo"}
                         or publication.get("status") != "SUBMITTED"
                         or not isinstance(receipt, dict)
                         or receipt.get("submit_acknowledged") is not True

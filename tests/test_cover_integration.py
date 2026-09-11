@@ -19,7 +19,6 @@ if str(SRC_ROOT) not in sys.path:
 from platforms.baijiahao import BaijiahaoPlatform
 from platforms.base import DraftResultUnknownError
 from platforms.smzdm import SmzdmPlatform
-from platforms.weibo import WeiboPlatform
 from platforms.xiaoheihe import XiaoheihePlatform
 from platforms.zhihu import ZhihuPlatform
 from platforms.zol import ZOLPlatform
@@ -141,13 +140,6 @@ class _FakePage:
         return _Expect(self)
 
 
-def _make_weibo(page: _FakePage) -> WeiboPlatform:
-    platform = WeiboPlatform()
-    platform.page = page
-    platform.simulator = _InstantSimulator()
-    return platform
-
-
 def _make_baijiahao(page: _FakePage) -> BaijiahaoPlatform:
     platform = BaijiahaoPlatform()
     platform.page = page
@@ -155,37 +147,8 @@ def _make_baijiahao(page: _FakePage) -> BaijiahaoPlatform:
     return platform
 
 
-# ==================== 微博封面 ====================
-
-
-def test_weibo_set_cover_success_flow() -> None:
-    page = _FakePage(["clicked", "picked", "clicked", False])
-    platform = _make_weibo(page)
-
-    result = run(platform.set_cover())
-
-    assert result["success"] is True
-    assert len(page.evaluate_calls) == 4
-
-
-def test_weibo_set_cover_fails_when_button_missing() -> None:
-    page = _FakePage(["not-found"])
-    platform = _make_weibo(page)
-
-    result = run(platform.set_cover())
-
-    assert result["success"] is False
-    assert "按钮未找到" in result["error"]
-
-
-def test_weibo_set_cover_fails_when_dialog_has_no_images() -> None:
-    page = _FakePage(["clicked", "no-images"])
-    platform = _make_weibo(page)
-
-    result = run(platform.set_cover())
-
-    assert result["success"] is False
-    assert "未找到正文图片" in result["error"]
+# 微博封面已迁移到 test_weibo_publication.py 的原生页面契约，
+# 不再使用按 evaluate 调用次数返回预设成功值的模拟。
 
 
 # ==================== 百家号封面 ====================

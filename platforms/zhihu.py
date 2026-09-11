@@ -233,6 +233,11 @@ class ZhihuPlatform(BasePlatform):
     LOGIN_POLL_INTERVAL_SECONDS = 2
     PERSIST_VERIFY_ATTEMPTS = 15
     PERSIST_VERIFY_INTERVAL_SECONDS = 2
+    TEXT_CHUNK_SIZE = 8
+    TEXT_CHUNK_INTERVAL_SECONDS = 0.16
+    BLOCK_SETTLE_SECONDS = 0.6
+    EDITOR_WAIT_ATTEMPTS = 30
+    EDITOR_WAIT_INTERVAL_SECONDS = 0.1
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
@@ -427,17 +432,25 @@ class ZhihuPlatform(BasePlatform):
         """按冻结 ContentVersion 的图文顺序写入并校验 Draft.js 正文。"""
 
         self._require_page_alive("知乎填写正文")
+        # 在清空编辑器之前检查整个结构，不能输入到一半才发现不支持的标题。
+        for block in content_blocks:
+            if not isinstance(block, dict) or block.get("type") not in {
+                "text", "heading", "image"
+            }:
+                raise ContentValidationError("ZHIHU_CONTENT_CONTRACT_INVALID: 正文块无效")
+            if block.get("type") == "heading" and (
+                block.get("level") != 2
+                or "\n" in str(block.get("text") or "")
+                or "\r" in str(block.get("text") or "")
+            ):
+                raise ContentValidationError("ZHIHU_HEADING_UNSUPPORTED: 仅支持单行二级标题")
         self._expected_persisted_blocks = copy.deepcopy(content_blocks)
-        editor = await self._current_body_editor()
-        await editor.click()
-        await self.page.keyboard.press("Control+A")
-        await self.page.keyboard.press("Backspace")
-        await self.simulator.random_delay(0.3, 0.8)
+        await self._clear_body_editor()
 
         expected_images = sum(1 for block in content_blocks if block.get("type") == "image")
         uploaded_images = 0
         failed_images: list[dict[str, str]] = []
-        content_started = False
+        written_blocks: list[dict] = []
 
         for block_index, block in enumerate(content_blocks):
             if not isinstance(block, dict):
@@ -447,33 +460,34 @@ class ZhihuPlatform(BasePlatform):
                 text = str(block.get("text") or "").strip()
                 if not text:
                     continue
-                if block_type == "heading":
-                    if block.get("level") != 2 or "\n" in text or "\r" in text:
-                        raise ContentValidationError(
-                            "ZHIHU_HEADING_UNSUPPORTED: 仅支持单行二级标题"
+                for line in text.splitlines():
+                    line = line.strip()
+                    if not line:
+                        continue
+                    await self._prepare_empty_body_block()
+                    for start in range(0, len(line), self.TEXT_CHUNK_SIZE):
+                        await self.page.keyboard.insert_text(
+                            line[start : start + self.TEXT_CHUNK_SIZE]
                         )
-                if content_started:
-                    await self._place_body_caret_at_end()
-                    await self.page.keyboard.press("Enter")
-                await self._place_body_caret_at_end()
-                lines = text.splitlines() or [text]
-                for line_index, line in enumerate(lines):
-                    if line.strip():
-                        await self.page.keyboard.insert_text(line.strip())
-                    if line_index < len(lines) - 1:
-                        await self.page.keyboard.press("Enter")
-                if block_type == "heading":
-                    await self._apply_h2_to_current_block()
-                content_started = True
+                        await asyncio.sleep(self.TEXT_CHUNK_INTERVAL_SECONDS)
+                    paragraph = {"type": "text", "text": line}
+                    await self._wait_dom_exact(
+                        [*written_blocks, paragraph], phase=f"第{block_index + 1}块文字"
+                    )
+                    if block_type == "heading":
+                        await self._apply_h2_to_current_block()
+                        paragraph = {"type": "heading", "level": 2, "text": line}
+                        await self._wait_dom_exact(
+                            [*written_blocks, paragraph], phase=f"第{block_index + 1}块标题"
+                        )
+                    written_blocks.append(paragraph)
+                    await asyncio.sleep(self.BLOCK_SETTLE_SECONDS)
                 continue
 
             if block_type != "image":
                 raise ContentValidationError("ZHIHU_CONTENT_CONTRACT_INVALID: 未知正文块类型")
 
-            if content_started:
-                await self._place_body_caret_at_end()
-                await self.page.keyboard.press("Enter")
-            await self._place_body_caret_at_end()
+            await self._prepare_empty_body_block()
             image_path = self._image_path_for_block(block, images)
             if image_path:
                 upload_result = await self._upload_image(image_path) or {}
@@ -501,8 +515,12 @@ class ZhihuPlatform(BasePlatform):
                     }
                 )
             await self._dismiss_media_overlay()
-            content_started = True
-            await self._validate_dom_prefix(
+            if failed_images:
+                raise ContentValidationError(
+                    "ZHIHU_IMAGE_UPLOAD_FAILED: " + failed_images[-1]["error"]
+                )
+            written_blocks.append(block)
+            await self._wait_dom_exact(
                 content_blocks[: block_index + 1],
                 phase=f"图片处理后第{block_index + 1}块",
             )
@@ -543,10 +561,10 @@ class ZhihuPlatform(BasePlatform):
 
     async def _current_body_editor(self):
         self._require_page_alive("知乎定位当前正文编辑器")
-        editor = self.page.locator(BODY_SELECTOR).first
+        editor = self.page.locator(BODY_SELECTOR)
         try:
-            if await editor.count() == 0 or not await editor.is_visible():
-                raise SelectorError("知乎正文编辑器未找到或当前不可见")
+            if await editor.count() != 1 or not await editor.is_visible():
+                raise SelectorError("知乎正文编辑器不唯一或当前不可见")
             return editor
         except SelectorError:
             raise
@@ -564,6 +582,11 @@ class ZhihuPlatform(BasePlatform):
             # 光标，但不会可靠同步内部状态；真实键盘 End 事件才会让后续
             # Enter 在文档末尾创建新 block。
             await editor.press("Control+End")
+            for _ in range(self.EDITOR_WAIT_ATTEMPTS):
+                if (await self._body_selection_state()).get("at_end"):
+                    return
+                await asyncio.sleep(self.EDITOR_WAIT_INTERVAL_SECONDS)
+            raise ContentValidationError("ZHIHU_CARET_POSITION_FAILED: 未确认正文末尾光标")
         except Exception as exc:
             if self._exception_means_browser_closed(exc):
                 raise BrowserLifecycleError(
@@ -573,11 +596,97 @@ class ZhihuPlatform(BasePlatform):
                 "ZHIHU_CARET_POSITION_FAILED: 正文末尾光标定位失败"
             ) from exc
 
+    async def _body_selection_state(self) -> dict:
+        """只读 DOM 和原生 Selection；不改 Draft.js 内部状态或 DOM Range。"""
+        editor = await self._current_body_editor()
+        state = await editor.evaluate(
+            """root => {
+                const blocks = Array.from(root.querySelectorAll('[data-block="true"]'));
+                const tail = blocks[blocks.length - 1];
+                const selection = window.getSelection();
+                const clean = value => (value || '').replace(/[\\s\\u200b\\ufeff]/g, '');
+                const inside = selection && selection.rangeCount === 1 &&
+                    root.contains(selection.anchorNode) && root.contains(selection.focusNode);
+                let atEnd = false, selectedAll = false;
+                if (inside && tail) {
+                    const range = selection.getRangeAt(0);
+                    const focus = selection.focusNode.nodeType === Node.ELEMENT_NODE
+                        ? selection.focusNode : selection.focusNode.parentElement;
+                    if (selection.isCollapsed && focus.closest('[data-block="true"]') === tail) {
+                        const suffix = range.cloneRange();
+                        suffix.setEnd(tail, tail.childNodes.length);
+                        atEnd = !clean(suffix.toString());
+                    }
+                    selectedAll = !selection.isCollapsed &&
+                        clean(range.toString()) === clean(root.innerText) &&
+                        Array.from(root.querySelectorAll('img')).every(
+                            img => range.intersectsNode(img));
+                }
+                return {
+                    key: tail ? tail.getAttribute('data-offset-key') : '',
+                    empty: Boolean(tail && !clean(tail.innerText) && !tail.querySelector('img')),
+                    tag: tail ? tail.tagName.toLowerCase() : '',
+                    at_end: atEnd, selected_all: selectedAll,
+                };
+            }"""
+        )
+        if not isinstance(state, dict):
+            raise ContentValidationError("ZHIHU_SELECTION_UNVERIFIED: 无法读取正文光标")
+        return state
+
+    async def _clear_body_editor(self) -> None:
+        if await self._read_editor_dom_tokens():
+            # 真实编辑器中 Control+A 可能只选中局部文本。先用原生按键选到
+            # 文档起点，确认全文及图片均在选区内，才允许删除旧正文。
+            await self._place_body_caret_at_end()
+            await self.page.keyboard.press("Control+Shift+Home")
+            for _ in range(self.EDITOR_WAIT_ATTEMPTS):
+                if (await self._body_selection_state()).get("selected_all"):
+                    break
+                await asyncio.sleep(self.EDITOR_WAIT_INTERVAL_SECONDS)
+            else:
+                raise ContentValidationError("ZHIHU_SELECTION_UNVERIFIED: 未完整选中旧正文")
+            await self.page.keyboard.press("Backspace")
+        await self._wait_dom_exact([], phase="清空正文")
+        await asyncio.sleep(self.BLOCK_SETTLE_SECONDS)
+
+    async def _prepare_empty_body_block(self) -> None:
+        await self._place_body_caret_at_end()
+        previous = await self._body_selection_state()
+        if not previous.get("empty"):
+            await self.page.keyboard.press("Enter")
+        for _ in range(self.EDITOR_WAIT_ATTEMPTS):
+            current = await self._body_selection_state()
+            if (
+                current.get("empty") and current.get("at_end")
+                and current.get("tag") == "div" and current.get("key")
+                and (previous.get("empty") or current["key"] != previous.get("key"))
+            ):
+                return
+            await asyncio.sleep(self.EDITOR_WAIT_INTERVAL_SECONDS)
+        raise ContentValidationError(
+            "ZHIHU_PARAGRAPH_NOT_READY: 未确认新的空正文段落，停止后续输入"
+        )
+
+    async def _wait_dom_exact(self, blocks: list[dict], *, phase: str) -> None:
+        expected = self._expected_content_tokens(blocks)
+        for _ in range(self.EDITOR_WAIT_ATTEMPTS):
+            actual = await self._read_editor_dom_tokens()
+            if self._tokens_match(expected, actual):
+                return
+            await asyncio.sleep(self.EDITOR_WAIT_INTERVAL_SECONDS)
+        await self._validate_dom_exact(blocks, phase=phase)
+
     async def _apply_h2_to_current_block(self) -> None:
         try:
             heading_menu = self.page.get_by_role("button", name="标题", exact=True)
+            if await heading_menu.count() != 1 or not await heading_menu.is_visible():
+                raise ContentValidationError("ZHIHU_HEADING_APPLY_FAILED: 标题菜单不唯一")
             await heading_menu.click(timeout=5000)
             h2_option = self.page.get_by_role("button", name="二级标题", exact=True)
+            await h2_option.wait_for(state="visible", timeout=5000)
+            if await h2_option.count() != 1 or not await h2_option.is_visible():
+                raise ContentValidationError("ZHIHU_HEADING_APPLY_FAILED: 二级标题选项不唯一")
             await h2_option.click(timeout=5000)
         except Exception as exc:
             if self._exception_means_browser_closed(exc):
@@ -756,56 +865,39 @@ class ZhihuPlatform(BasePlatform):
             )
 
     async def _upload_image(self, image_path: str) -> dict:
-        """通过正文图片文件控件上传单张图片；以编辑器内图片数量增加为成功判据。"""
+        """上传单张正文图片；等待唯一新增图片获得真实地址并完整加载。"""
 
         self._require_page_alive("知乎上传图片")
         try:
-            file_input = self.page.locator(BODY_IMAGE_INPUT).first
-            if await file_input.count() == 0:
+            file_input = self.page.locator(BODY_IMAGE_INPUT)
+            if await file_input.count() != 1:
                 return {"success": False, "error": "知乎正文图片上传控件未找到"}
-            opened = await self.page.evaluate(
-                """() => {
-                    const btns = Array.from(
-                        document.querySelectorAll('button, [role=button]')
-                    );
-                    const target = btns.find((b) =>
-                        (b.innerText || '')
-                            .replace(/[\\u200b\\u200c\\n\\s]/g, '') === '图片'
-                    );
-                    if (target) { target.click(); return true; }
-                    return false;
-                }"""
-            )
-            await self.simulator.random_delay(0.3, 0.8)
-            if not opened:
+            # 打开上传弹窗后可能新增同形状的文件控件；绑定之前唯一的正文
+            # input，不能让 set_input_files 重新解析成弹窗/封面的另一控件。
+            input_handle = await file_input.element_handle()
+            button = self.page.get_by_role("button", name="图片", exact=True)
+            if await button.count() != 1 or not await button.is_visible():
                 return {"success": False, "error": "知乎工具栏图片按钮未找到"}
-
-            before = await self.page.evaluate(
-                """(sel) => {
-                    const root = document.querySelector(sel);
-                    return root ? root.querySelectorAll('img').length : 0;
-                }""",
-                BODY_SELECTOR,
-            )
-            await file_input.set_input_files(str(image_path), timeout=15000)
-            after = before
-            for _ in range(10):
-                await asyncio.sleep(1)
-                after = await self.page.evaluate(
-                    """(sel) => {
-                        const root = document.querySelector(sel);
-                        return root ? root.querySelectorAll('img').length : 0;
-                    }""",
-                    BODY_SELECTOR,
+            editor = await self._current_body_editor()
+            before = await editor.locator("img").count()
+            await button.click(timeout=5000)
+            await self.simulator.random_delay(0.5, 0.8)
+            if input_handle is None or not await input_handle.evaluate("e => e.isConnected"):
+                return {"success": False, "error": "知乎正文图片上传控件已替换"}
+            await input_handle.set_input_files(str(image_path), timeout=15000)
+            for _ in range(60):
+                editor = await self._current_body_editor()
+                ready = await editor.locator("img").evaluate_all(
+                    """images => ({count: images.length, loaded: images.filter(image =>
+                        image.complete && image.naturalWidth > 0 &&
+                        /^https?:/.test(image.currentSrc || image.src)).length})"""
                 )
-                if after > before:
-                    break
-            if after <= before:
-                return {
-                    "success": False,
-                    "error": "上传后编辑器图片数量未增加",
-                }
-            return {"success": True, "error": ""}
+                if ready["count"] > before + 1:
+                    return {"success": False, "error": "上传后出现多张新增图片"}
+                if ready["count"] == before + 1 and ready["loaded"] == before + 1:
+                    return {"success": True, "error": ""}
+                await asyncio.sleep(0.5)
+            return {"success": False, "error": "上传后唯一新增正文图片未完整加载"}
         except Exception as exc:
             if self._exception_means_browser_closed(exc):
                 raise BrowserLifecycleError(

@@ -354,6 +354,13 @@ class _FakeLocator:
     async def evaluate(self, script):
         if "const tokens" in script:
             return [dict(item) for item in self.page.dom_tokens]
+        if "selected_all" in script:
+            tail = self.page.dom_tokens[-1] if self.page.dom_tokens else {}
+            return {
+                "key": str(len(self.page.dom_tokens)), "tag": "div", "at_end": True,
+                "empty": not tail.get("text") and tail.get("kind") != "image",
+                "selected_all": self.page.selected_all,
+            }
         return None
 
     async def press(self, key):
@@ -365,6 +372,15 @@ class _FakeRoleButton:
     def __init__(self, page, name):
         self.page = page
         self.name = name
+
+    async def count(self):
+        return 1
+
+    async def is_visible(self):
+        return True
+
+    async def wait_for(self, **_kwargs):
+        return None
 
     async def click(self, **_kwargs):
         if self.name == "二级标题":
@@ -380,7 +396,7 @@ class _FakeEditorKeyboard:
         self.page = page
 
     async def press(self, key):
-        if key in ("Control+A", "Meta+A"):
+        if key in ("Control+A", "Meta+A", "Control+Shift+Home"):
             self.page.selected_all = True
         elif key == "Backspace" and self.page.selected_all:
             self.page.body.text = ""
@@ -556,6 +572,10 @@ def _make_delivery_platform(page=None):
     platform.context = FakeContext()
     platform.simulator = _InstantSimulator()
     platform.PERSIST_VERIFY_INTERVAL_SECONDS = 0
+    platform.TEXT_CHUNK_INTERVAL_SECONDS = 0
+    platform.BLOCK_SETTLE_SECONDS = 0
+    platform.EDITOR_WAIT_INTERVAL_SECONDS = 0
+    platform.EDITOR_WAIT_ATTEMPTS = 2
     return platform
 
 
@@ -707,16 +727,18 @@ def test_media_error_never_exposes_physical_path(monkeypatch) -> None:
     monkeypatch.setattr(platform, "_upload_image", upload)
     monkeypatch.setattr(platform, "_validate_dom_prefix", no_verify)
     monkeypatch.setattr(platform, "_validate_dom_exact", no_verify)
-    result = run(
-        platform.fill_content(
-            [{"type": "image", "local_path": r"D:\Secret Folder\private.png"}],
+    monkeypatch.setattr(platform, "_wait_dom_exact", no_verify)
+    with pytest.raises(ContentValidationError, match="ZHIHU_IMAGE_UPLOAD_FAILED") as caught:
+        run(platform.fill_content(
+            [
+                {"type": "image", "local_path": r"D:\Secret Folder\private.png"},
+                {"type": "text", "text": "失败后不能继续写入"},
+            ],
             [],
-        )
-    )
-
-    rendered = str(result["failed_images"])
+        ))
+    rendered = str(caught.value)
     assert "D:\\Secret" not in rendered
-    assert "private.png" in rendered
+    assert "失败后不能继续写入" not in page.body.text
 
 
 def test_parse_draft_card_fixture_uses_semantic_classes_and_deduplicates_links() -> None:

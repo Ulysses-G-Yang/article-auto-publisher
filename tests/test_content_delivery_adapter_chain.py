@@ -35,8 +35,10 @@ from content_studio.database import ContentDatabase, sqlite_url
 from content_studio.service import ContentStudioService
 from platforms.base import DraftVerificationEvidence
 from platforms.xiaoheihe import XiaoheihePlatform
+from platforms.zhihu import ZhihuPlatform
 from platforms.zol import ZOLPlatform
 from tests.test_regression import FakePage, FakeXiaoPage
+from tests.test_zhihu_adapter import _FakeEditorPage
 
 FROZEN_BODY = "第一段\n\nA &amp; B\u200b\n第三段"
 
@@ -69,7 +71,7 @@ class _AdapterRuntimeMixin:
         self.simulator.random_mouse_movement = AsyncMock()
         editor = (
             self._fake_page.body
-            if self.platform_name == "xiaoheihe"
+            if self.platform_name in {"xiaoheihe", "zhihu"}
             else self._fake_page.frame_body
         )
         original_inner_text = editor.inner_text
@@ -139,6 +141,15 @@ class ChainZOLPlatform(_AdapterRuntimeMixin, ZOLPlatform):
         self._fake_page = FakePage("iframe")
 
 
+class ChainZhihuPlatform(_AdapterRuntimeMixin, ZhihuPlatform):
+    def __init__(self) -> None:
+        super().__init__()
+        self._fake_page = _FakeEditorPage()
+        self.TEXT_CHUNK_INTERVAL_SECONDS = 0
+        self.BLOCK_SETTLE_SECONDS = 0
+        self.EDITOR_WAIT_INTERVAL_SECONDS = 0
+
+
 def _account_url(tmp_path: Path) -> str:
     return f"sqlite+aiosqlite:///{(tmp_path / 'accounts.db').as_posix()}"
 
@@ -166,6 +177,7 @@ def _make_studio(tmp_path: Path, accounts: AccountSessionService) -> ContentStud
     [
         ("xiaoheihe", ChainXiaoheihePlatform),
         ("zol", ChainZOLPlatform),
+        ("zhihu", ChainZhihuPlatform),
     ],
 )
 def test_frozen_content_version_reaches_real_adapter_validation(
@@ -285,7 +297,7 @@ def test_frozen_content_version_reaches_real_adapter_validation(
         assert frozen_cover["local_path"] is None
         assert adapter.written_title == "冻结版本标题"
         assert adapter.draft_calls == 1
-        if platform_name == "xiaoheihe":
+        if platform_name in {"xiaoheihe", "zhihu"}:
             written = adapter._fake_page.body.text
         else:
             written = adapter._fake_page.frame_body.text

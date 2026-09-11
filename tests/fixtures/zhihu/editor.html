@@ -1,0 +1,76 @@
+<!doctype html><meta charset="utf-8">
+<style>body{margin:40px;width:800px} [contenteditable]{min-height:120px;padding:20px;border:1px solid} [data-block]{min-height:24px} img{width:80px}</style>
+<textarea class="Input" placeholder="请输入标题"></textarea>
+<button aria-label="标题">标题</button><button aria-label="二级标题" hidden>二级标题</button>
+<button aria-label="图片">图片</button><input type="file" accept="image/*" hidden>
+<div class="notranslate public-DraftEditor-content" contenteditable="true"></div>
+<script>
+// Local Draft.js-shaped browser fixture: asynchronous block commits and remounts.
+// No account, production assets, network writes or platform internal APIs.
+let serial = 0;
+window.caseName = 'normal'; window.inputs = []; window.uploads = 0; window.enters = 0;
+const root = () => document.querySelector('[contenteditable]');
+const tail = () => root().lastElementChild;
+function block(text='', tag='div') {
+  const node = document.createElement(tag);
+  node.dataset.block = 'true'; node.dataset.offsetKey = `local-${++serial}-0-0`;
+  const span = document.createElement('span'); span.textContent = text;
+  node.append(span); if (!text) span.append(document.createElement('br'));
+  return node;
+}
+function caret(node=tail()) {
+  root().focus(); const range = document.createRange(); range.selectNodeContents(node);
+  range.collapse(false); const selection = getSelection(); selection.removeAllRanges(); selection.addRange(range);
+}
+function remount() { const replacement = root().cloneNode(true); root().replaceWith(replacement); caret(); }
+root().append(block('旧稿第一段'), block('旧稿后半段')); caret();
+document.addEventListener('keydown', event => {
+  if (!root().contains(event.target)) return;
+  // A stale select-all handler is deliberately inert. Replacement must prove selection.
+  if (event.ctrlKey && event.key.toLowerCase() === 'a') { event.preventDefault(); return; }
+  if (event.key === 'Backspace' && !getSelection().isCollapsed) {
+    event.preventDefault(); setTimeout(() => { root().replaceChildren(block()); caret(); }, 35); return;
+  }
+  if (event.key === 'Enter') {
+    event.preventDefault(); window.enters++;
+    if (window.caseName === 'ignored_enter') return;
+    setTimeout(() => { root().append(block()); caret(); }, 160);
+  }
+});
+document.addEventListener('beforeinput', event => {
+  if (!root().contains(event.target) || event.inputType !== 'insertText') return;
+  event.preventDefault(); window.inputs.push(event.data);
+  if (window.caseName === 'lost_input') return;
+  const node = tail(); const current = node.textContent;
+  node.replaceChildren(document.createTextNode(current + event.data)); caret(node);
+});
+document.querySelector('[aria-label="标题"]').onclick = () => {
+  setTimeout(() => { document.querySelector('[aria-label="二级标题"]').hidden = false; }, 120);
+};
+document.querySelector('[aria-label="二级标题"]').onclick = () => {
+  document.querySelector('[aria-label="二级标题"]').hidden = true;
+  setTimeout(() => {
+    if (window.caseName === 'lost_heading') return;
+    const previous = tail(); const heading = block(previous.textContent, 'h3');
+    previous.replaceWith(heading); remount();
+  }, 180);
+};
+document.querySelector('input[type=file]').onchange = () => {
+  window.uploads++;
+  setTimeout(() => {
+    const figure = block(); figure.replaceChildren();
+    const img = document.createElement('img'); img.src = `/body-${window.uploads}.png`;
+    figure.append(img); tail().replaceWith(figure);
+    root().append(block()); remount();
+  }, 170);
+};
+document.querySelector('[aria-label="图片"]').onclick = () => {
+  const extra = document.createElement('input'); extra.type = 'file';
+  extra.accept = 'image/*'; extra.hidden = true; extra.dataset.decoy = 'true';
+  extra.onchange = () => { throw new Error('wrong image input'); };
+  document.body.append(extra);
+};
+document.addEventListener('keydown', event => {
+  if (event.key === 'Escape') document.querySelectorAll('[data-decoy]').forEach(e => e.remove());
+});
+</script>

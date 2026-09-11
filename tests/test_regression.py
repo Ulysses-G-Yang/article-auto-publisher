@@ -20,7 +20,6 @@ from platforms.base import (
 )
 from platforms.content_validation import ContentValidationError
 from platforms.douyin import DouyinPlatform, PlatformNotImplementedError
-from platforms.smzdm import PlatformNotImplementedError as SmzdmNotImplementedError
 from platforms.smzdm import SmzdmPlatform
 from platforms.weibo import WeiboPlatform
 from platforms.xiaoheihe import XiaoheihePlatform
@@ -2049,10 +2048,11 @@ class RegressionTests(DatabaseTestCase):
         self.assertEqual(found, ("4668373440", "值友3424774480"))
         self.assertIsNone(platform._extract_identity_from_json({"foo": "bar"}))
 
-    def test_smzdm_publish_now_still_fails_closed(self):
+    def test_smzdm_publish_now_requires_verified_original_draft(self):
         platform = SmzdmPlatform()
-        with self.assertRaises(SmzdmNotImplementedError):
+        with self.assertRaises(SelectorError):
             asyncio.run(platform.publish_now())
+        self.assertFalse(getattr(platform, "_public_publish_attempted", False))
 
     def test_smzdm_navigate_to_editor_sequence(self):
         platform = SmzdmPlatform()

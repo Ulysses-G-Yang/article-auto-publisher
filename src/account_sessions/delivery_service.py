@@ -1694,6 +1694,14 @@ def _format_media_progress_log(progress: dict[str, int | str]) -> str:
 
 def _is_verified_public_submission(platform: str, result: dict) -> bool:
     evidence = result.get("verification_evidence")
+    if platform == "smzdm":
+        article_id = result.get("platform_article_id")
+        if (
+            not isinstance(article_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", article_id)
+            or not isinstance(evidence, dict)
+            or evidence.get("submission_article_id") != article_id
+        ):
+            return False
     if platform == "baijiahao":
         article_id = result.get("platform_article_id")
         if (
@@ -1703,7 +1711,7 @@ def _is_verified_public_submission(platform: str, result: dict) -> bool:
         ):
             return False
     return (
-        platform in {"zol", "baijiahao", "weibo"} and result.get("status") == "SUBMITTED"
+        platform in {"zol", "baijiahao", "weibo", "smzdm"} and result.get("status") == "SUBMITTED"
         and isinstance(evidence, dict)
         and evidence.get("submit_acknowledged") is True
         and evidence.get("submission_source") == f"{platform}_publish_response"

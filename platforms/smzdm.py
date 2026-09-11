@@ -43,6 +43,7 @@ from platforms.content_validation import (
     safe_media_error,
 )
 from platforms.media_progress import safe_media_progress
+from platforms.smzdm_publication import SmzdmPublicationMixin
 
 LOGIN_URL = "https://zhiyou.smzdm.com/user/login"
 HOME_URL = "https://zhiyou.smzdm.com/"
@@ -173,8 +174,8 @@ async def _run_native_chrome_login(
         )
 
 
-class SmzdmPlatform(BasePlatform):
-    """什么值得买账号会话与 DRAFT-only 图文投递适配器。"""
+class SmzdmPlatform(SmzdmPublicationMixin, BasePlatform):
+    """什么值得买账号会话、图文草稿与经确认的原稿公开投递适配器。"""
 
     platform_name = "smzdm"
     SESSION_COOKIE_NAMES = frozenset({"sess"})
@@ -2035,6 +2036,3 @@ class SmzdmPlatform(BasePlatform):
                 "error_code": "PROBE_RESULT_UNKNOWN",
                 "error_message": "草稿箱核验失败",
             }
-
-    async def publish_now(self, title: str = "") -> str:
-        self._not_implemented("公开发布")

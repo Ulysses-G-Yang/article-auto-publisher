@@ -1,6 +1,7 @@
 """平台自动化抽象基类 —— 使用系统 Chrome 浏览器，Cookie 天然持久化"""
 import os
 import random
+import re
 import asyncio
 from abc import ABC, abstractmethod
 from typing import Optional
@@ -856,7 +857,7 @@ class BasePlatform(ABC):
                 if isinstance(publication, dict):
                     receipt = publication.get("verification_evidence")
                     if (
-                        self.platform_name not in {"zol", "baijiahao", "weibo"}
+                        self.platform_name not in {"zol", "baijiahao", "weibo", "smzdm"}
                         or publication.get("status") != "SUBMITTED"
                         or not isinstance(receipt, dict)
                         or receipt.get("submit_acknowledged") is not True
@@ -873,6 +874,15 @@ class BasePlatform(ABC):
                             or receipt.get("submission_article_id") != article_id
                         ):
                             raise PublishResultUnknownError("百家号发布回执缺少有效文章 ID")
+                        publication_article_id = article_id
+                    if self.platform_name == "smzdm":
+                        article_id = publication.get("platform_article_id")
+                        if (
+                            not isinstance(article_id, str)
+                            or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", article_id)
+                            or receipt.get("submission_article_id") != article_id
+                        ):
+                            raise PublishResultUnknownError("什么值得买发布回执缺少有效文章 ID")
                         publication_article_id = article_id
                     publication_status = "SUBMITTED"
                     evidence_payload = {**(evidence_payload or {}), **receipt}

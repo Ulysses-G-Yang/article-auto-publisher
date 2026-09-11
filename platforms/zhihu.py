@@ -12,7 +12,7 @@
   保存判据 = 草稿箱列表出现对应标题，绝不拿当前页 URL 冒充成功。
 - 正文图片：工具栏「图片」按钮 + ``input[type=file]:not(.UploadPicture-input)[accept*='image']``。
 
-公开发布（publish_now）仍明确拒绝：真实发布验收完成并开放开关前，不允许知乎公开投递。
+公开发布复用已核验草稿，通过原生按钮最多保存一次、提交一次；公开页全文回读后才返回 URL。
 """
 
 from __future__ import annotations
@@ -20,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import io
+import json
 import re
 from html.parser import HTMLParser
 from pathlib import Path
@@ -35,6 +36,7 @@ from platforms.base import (
     DraftVerificationEvidence,
     LoginRequiredError,
     PlatformAutomationError,
+    PublishResultUnknownError,
     SelectorError,
 )
 from platforms.content_validation import (
@@ -86,6 +88,22 @@ def _draft_id_from_edit_href(href: object) -> str:
         return ""
     match = DRAFT_EDIT_PATH_PATTERN.fullmatch(parts.path)
     return match.group("draft_id") if match else ""
+
+
+def _publication_image_key(source: str) -> str:
+    """知乎同一媒体的 CDN 分片、尺寸与临时签名会变化，绑定原始 v2 媒体摘要。"""
+    parsed = urlsplit(source)
+    if parsed.scheme != "https" or not (
+        re.fullmatch(r"pic[0-9a-z]*\.zhimg\.com", parsed.netloc)
+        or parsed.netloc == "pic-private.zhihu.com"
+    ):
+        raise ValueError("知乎正文图片不在已验证媒体域名")
+    match = re.fullmatch(
+        r"/(?:[0-9]+/)?v2-([0-9a-f]{32})"
+        r"(?:_[0-9]+w|~resize:[0-9]+:q[0-9]+)?\.(?:png|jpg|jpeg|webp|gif)",
+        parsed.path,
+    )
+    return f"v2:{match.group(1)}" if match else source
 
 
 class _ZhihuDraftCardParser(HTMLParser):
@@ -225,7 +243,7 @@ class PlatformNotImplementedError(PlatformAutomationError):
 
 
 class ZhihuPlatform(BasePlatform):
-    """知乎账号会话与草稿投递适配器；公开发布能力保持关闭。"""
+    """知乎账号会话、草稿与任务单独授权的原生公开发布适配器。"""
 
     platform_name = "zhihu"
     SESSION_COOKIE_NAMES = frozenset({"z_c0", "d_c0", "q_c1"})
@@ -238,6 +256,7 @@ class ZhihuPlatform(BasePlatform):
     BLOCK_SETTLE_SECONDS = 0.6
     EDITOR_WAIT_ATTEMPTS = 30
     EDITOR_WAIT_INTERVAL_SECONDS = 0.1
+    PUBLICATION_TIMEOUT_MS = 45000
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
@@ -1520,8 +1539,273 @@ class ZhihuPlatform(BasePlatform):
     def _not_implemented(operation: str):
         raise PlatformNotImplementedError(f"PLATFORM_NOT_IMPLEMENTED: 知乎{operation}能力尚未接入")
 
+    async def _publication_html(self, html: str) -> tuple[list[dict], list[str]]:
+        """只解析原生请求/公开页 HTML，不修改编辑器或使用编辑器私有状态。"""
+        raw = await self.page.evaluate(
+            """html => {
+                const doc = new DOMParser().parseFromString(html, 'text/html');
+                doc.querySelectorAll('br').forEach(e => e.replaceWith(doc.createTextNode('\\n')));
+                return {
+                    tokens: Array.from(doc.querySelectorAll('p,h2,h3,img')).map(e => {
+                        if (e.tagName === 'IMG') return {kind:'image'};
+                        if (e.querySelector('img')) return null;
+                        const text = e.textContent || '';
+                        if (!text.trim()) return null;
+                        return e.tagName === 'P' ? {kind:'text', text} :
+                            {kind:'heading', level:e.tagName === 'H3' ? 2 : 1, text};
+                    }).filter(Boolean),
+                    images: Array.from(doc.querySelectorAll('img')).map(e =>
+                        e.getAttribute('src') || '')
+                };
+            }""", html,
+        )
+        tokens = []
+        for item in raw["tokens"]:
+            if item["kind"] == "text":
+                for paragraph in extract_expected_paragraphs([{"type": "text", **item}]):
+                    tokens.append({"kind": "text", "text": paragraph.comparison_text})
+            elif item["kind"] == "heading":
+                tokens.append({**item, "text": normalize_for_comparison(item["text"])})
+            else:
+                tokens.append(item)
+        return tokens, raw["images"]
+
+    async def prepare_existing_publication(self, title: str, edit_url: str) -> None:
+        """在只读保护下重开原稿；必须由已验证账号身份的任务调用。"""
+        if getattr(self, "_publication_guard_installed", False):
+            raise SelectorError("知乎发布准备已执行，不重复初始化提交计数")
+        draft_id = _draft_id_from_edit_href(edit_url)
+        identity = self._identity_payload or {}
+        if not draft_id or not identity.get("ok") or not self._expected_persisted_blocks:
+            raise SelectorError("知乎发布缺少原稿、冻结内容或已验证身份")
+        self._publication_id = draft_id
+        self._publication_title = title
+        self._publication_stage = "blocked"
+        self._publication_save_sent = 0
+        self._publication_post_sent = 0
+        self._publication_save_ack = False
+        self._publication_persisted_verified = False
+        self._publication_images: list[str] = []
+        self._publication_blocked: list[str] = []
+        save_path = f"/api/articles/{draft_id}/draft"
+
+        async def guard(route, request):
+            if request.method in {"GET", "HEAD", "OPTIONS"}:
+                await route.fallback()
+                return
+            parsed = urlsplit(request.url)
+            allowed = False
+            try:
+                # 非文章遥测可能是二进制；不要让 Playwright 的 JSON 异常携带原始请求。
+                relevant = (
+                    request.method == "PATCH" and parsed.path == save_path
+                ) or self._is_publication_request(request)
+                data = json.loads(request.post_data or "") if relevant else None
+                if self._publication_stage == "submit" and isinstance(data, dict):
+                    if (
+                        request.method == "PATCH" and parsed.scheme == "https"
+                        and parsed.netloc == "zhuanlan.zhihu.com" and parsed.path == save_path
+                        and self._publication_save_sent == 0 and self._publication_post_sent == 0
+                        and set(data) <= {"content", "table_of_contents", "delta_time",
+                                         "can_reward", "title"}
+                        and data.get("title", title) == title
+                        and data.get("can_reward") is False
+                    ):
+                        allowed = await self._publication_content_matches(data.get("content"))
+                        if allowed:
+                            self._publication_save_sent += 1
+                    elif (
+                        self._is_publication_request(request)
+                        and (
+                            self._publication_save_ack and self._publication_save_sent == 1
+                            or (
+                                self._publication_persisted_verified
+                                and self._publication_save_sent == 0
+                            )
+                        )
+                        and self._publication_post_sent == 0
+                    ):
+                        allowed = await self._publication_payload_matches(data)
+                        if allowed:
+                            self._publication_post_sent += 1
+            except Exception:
+                allowed = False
+            if allowed:
+                await route.fallback()
+            else:
+                if "/api/articles/" in parsed.path or parsed.path == "/api/v4/content/publish":
+                    self._publication_blocked.append(f"{request.method} {parsed.path}")
+                await route.abort()
+
+        def save_response(response):
+            request = response.request
+            parsed = urlsplit(request.url)
+            if (
+                request.method == "PATCH" and parsed.scheme == "https"
+                and parsed.netloc == "zhuanlan.zhihu.com" and parsed.path == save_path
+                and self._publication_save_sent == 1
+            ):
+                self._publication_save_ack = 200 <= response.status < 300
+
+        await self.context.route("**/*", guard)
+        self.page.on("response", save_response)
+        self._publication_guard_installed = True
+        async with self.page.expect_response(
+            lambda r: r.request.method == "GET"
+            and r.url == f"https://zhuanlan.zhihu.com{save_path}", timeout=30000,
+        ) as pending:
+            await self._verify_persisted_draft(title, edit_url)
+        response = await pending.value
+        persisted = await response.json()
+        if (
+            not response.ok or persisted.get("state") != "draft"
+            or str(persisted.get("id")) != draft_id or persisted.get("title") != title
+            or str((persisted.get("author") or {}).get("id")) != str(identity.get("user_id"))
+        ):
+            raise SelectorError("知乎原稿状态或作者不匹配，拒绝更新已发表文章")
+        self._publication_author_token = str((persisted.get("author") or {}).get("url_token") or "")
+        await self._assert_publication_ready(title)
+        if not await self._publication_content_matches(persisted.get("content")):
+            raise SelectorError("知乎云端原稿正文或图片源与编辑器不一致")
+        self._publication_persisted_verified = True
+
+    async def _assert_publication_ready(self, title: str) -> None:
+        if (
+            not getattr(self, "_publication_guard_installed", False)
+            or _draft_id_from_edit_href(self.page.url) != self._publication_id
+            or title != self._publication_title
+            or await self.page.locator(TITLE_SELECTOR).input_value() != title
+        ):
+            raise SelectorError("知乎发布前未绑定原草稿及标题")
+        await self._validate_dom_exact(self._expected_persisted_blocks, phase="公开发布前")
+        images = (await self._current_body_editor()).locator("img")
+        for index in range(await images.count()):
+            await images.nth(index).scroll_into_view_if_needed(timeout=5000)
+        await self.page.wait_for_function(
+            "selector => Array.from(document.querySelectorAll(selector + ' img'))"
+            ".every(e => e.complete && e.naturalWidth > 0)", arg=BODY_SELECTOR, timeout=15000,
+        )
+        sources = [
+            _publication_image_key(source)
+            for source in await images.evaluate_all("els => els.map(e => e.currentSrc || e.src)")
+        ]
+        if self._publication_images and sources != self._publication_images:
+            raise SelectorError("知乎发布前正文图片发生变化")
+        self._publication_images = sources
+        disabled_reward = self.page.locator("#PublishPanel-RewardSetting-1")
+        combos = self.page.get_by_role("combobox")
+        combo_labels = [
+            value.strip() for value in await combos.all_text_contents() if value.strip()
+        ]
+        if (
+            await disabled_reward.count() != 1 or not await disabled_reward.is_checked()
+            or combo_labels != ["未选择", "无声明"]
+        ):
+            raise SelectorError("知乎发布设置不是已核对的普通免费文章设置")
+
+    async def _publication_content_matches(self, html: object) -> bool:
+        if not isinstance(html, str) or not html:
+            return False
+        tokens, images = await self._publication_html(html)
+        return (
+            tokens == self._expected_content_tokens(self._expected_persisted_blocks)
+            and [_publication_image_key(source) for source in images] == self._publication_images
+        )
+
+    @staticmethod
+    def _is_publication_request(request) -> bool:
+        parsed = urlsplit(request.url)
+        return (
+            request.method == "POST" and parsed.scheme == "https"
+            and parsed.netloc == "www.zhihu.com" and parsed.path == "/api/v4/content/publish"
+        )
+
+    async def _publication_payload_matches(self, payload: dict) -> bool:
+        data = payload.get("data")
+        if payload.get("action") != "article" or not isinstance(data, dict):
+            return False
+        if (
+            data.get("draft") != {"disabled": 1, "id": self._publication_id, "isPublished": False}
+            or data.get("title") != {"title": self._publication_title}
+            or data.get("commentsPermission") != {"comment_permission": "anyone"}
+            or data.get("creationStatement") != {
+                "disclaimer_type": "none", "disclaimer_status": "close",
+            }
+            or data.get("appreciate") != {"can_reward": False, "tagline": ""}
+            or data.get("commercialReportInfo") != {"isReport": 0}
+            or any(key in data for key in (
+                "schedule", "column", "pay_type_config", "column_truncate_config",
+                "commercialZhitaskBindInfo", "question", "answer",
+            ))
+        ):
+            return False
+        return await self._publication_content_matches((data.get("hybrid") or {}).get("html"))
+
+    async def verify_publication_readonly(self, title: str) -> str:
+        """要求公开文章页面的标题、作者链接、全文结构和有序图片全部匹配。"""
+        url = f"https://zhuanlan.zhihu.com/p/{self._publication_id}"
+        response = await self.page.goto(url, wait_until="domcontentloaded", timeout=30000)
+        heading = self.page.locator("h1.Post-Title")
+        body = self.page.locator(".Post-RichTextContainer")
+        await heading.wait_for(state="visible", timeout=20000)
+        token = self._publication_author_token
+        if not re.fullmatch(r"[A-Za-z0-9_-]+", token):
+            raise PublishResultUnknownError("知乎公开页作者绑定信息不足")
+        author = self.page.locator(
+            f':is(a.AuthorInfo-name, .AuthorInfo-name a)[href$="/people/{token}"]',
+        )
+        if (
+            not response or not response.ok or self.page.url.split("?", 1)[0] != url
+            or await heading.count() != 1 or await heading.inner_text() != title
+            or not token or await author.count() != 1
+            or await body.count() != 1
+            or not await self._publication_content_matches(await body.inner_html())
+        ):
+            raise PublishResultUnknownError("知乎公开页尚未完整匹配本篇，停止且不重发")
+        return url
+
     async def publish_now(self, title: str = "") -> str:
-        self._not_implemented("公开发布")
+        if getattr(self, "_public_publish_attempted", False):
+            raise PublishResultUnknownError("知乎本次发布已尝试，不会自动重发")
+        if not getattr(self, "_publication_guard_installed", False):
+            evidence = getattr(self, "_last_draft_evidence", None)
+            if (
+                isinstance(evidence, DraftVerificationEvidence) and not evidence.unknown
+                and evidence.draft_entity_bound is True and evidence.draft_list_title_unique is True
+                and evidence.reopen_title_match is True and evidence.reopen_dom_blocks_match is True
+                and evidence.draft_url
+            ):
+                await self.prepare_existing_publication(title, evidence.draft_url)
+        await self._assert_publication_ready(title)
+        buttons = self.page.get_by_role("button", name="发布", exact=True)
+        if await buttons.count() != 1 or not await buttons.is_enabled():
+            raise SelectorError("知乎发布按钮不可用或不唯一")
+        self._public_publish_attempted = True
+        self._publication_stage = "submit"
+        try:
+            async with self.page.expect_response(
+                lambda r: self._is_publication_request(r.request),
+                timeout=self.PUBLICATION_TIMEOUT_MS,
+            ) as pending:
+                await buttons.click(timeout=8000)
+            response = await pending.value
+            if not response.ok or self._publication_post_sent != 1:
+                raise PublishResultUnknownError("知乎原生提交未返回成功 HTTP 状态")
+            self._publication_stage = "blocked"
+            # HTTP 成功仅表示请求返回；必须等原生跳转，再独立重开公开页全文核验。
+            await self.page.wait_for_url(
+                re.compile(rf"https://zhuanlan\.zhihu\.com/p/{self._publication_id}(?:\?.*)?$"),
+                timeout=20000,
+            )
+            return await self.verify_publication_readonly(title)
+        except Exception as exc:
+            if self._publication_save_sent == 0 and self._publication_post_sent == 0:
+                raise SelectorError("知乎原生提交被本地校验拦截，保存和发布请求均未发送") from exc
+            raise PublishResultUnknownError(
+                "知乎已尝试原生发布，但公开结果未确认；停止且不自动重发",
+            ) from exc
+        finally:
+            self._publication_stage = "blocked"
 
 
 def _text(value: object) -> str:

@@ -23,11 +23,11 @@ from platforms.base import (
     DraftBaselineError,
     DraftResultUnknownError,
     LoginRequiredError,
+    SelectorError,
 )
 from platforms.content_validation import ContentValidationError
 from platforms.zhihu import (
     DRAFTS_URL,
-    PlatformNotImplementedError,
     ZhihuPlatform,
     find_unique_exact_draft,
     parse_zhihu_draft_cards,
@@ -1179,10 +1179,10 @@ def test_select_topic_blocks_public_topic_selection_honestly() -> None:
     assert result["error_code"] == "TOPIC_SELECTION_NOT_IMPLEMENTED"
 
 
-def test_publish_now_still_fails_closed() -> None:
+def test_publish_now_requires_verified_existing_draft() -> None:
     platform = _make_delivery_platform()
 
-    with pytest.raises(PlatformNotImplementedError) as error:
+    with pytest.raises(SelectorError) as error:
         run(platform.publish_now())
 
-    assert error.value.error_code == "PLATFORM_NOT_IMPLEMENTED"
+    assert error.value.error_code == "SELECTOR_ERROR"

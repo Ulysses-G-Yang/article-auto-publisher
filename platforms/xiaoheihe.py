@@ -1000,8 +1000,8 @@ class XiaoheihePlatform(BasePlatform):
         """把插入点放到当前可见正文编辑器末尾，不使用中心 click。"""
 
         editor = await self._current_body_editor()
-        await editor.focus()
-        await editor.evaluate(
+        await self.actions.perform(editor.focus)
+        await self.actions.perform(editor.evaluate,
             """element => {
                 element.focus();
                 const selection = window.getSelection();
@@ -1474,7 +1474,7 @@ class XiaoheihePlatform(BasePlatform):
             except Exception:
                 pass
             try:
-                await locator.scroll_into_view_if_needed(timeout=2000)
+                await self.actions.perform(locator.scroll_into_view_if_needed, timeout=2000)
             except Exception:
                 pass
             try:

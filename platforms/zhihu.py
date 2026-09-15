@@ -1679,7 +1679,7 @@ class ZhihuPlatform(BasePlatform):
         await self._validate_dom_exact(self._expected_persisted_blocks, phase="公开发布前")
         images = (await self._current_body_editor()).locator("img")
         for index in range(await images.count()):
-            await images.nth(index).scroll_into_view_if_needed(timeout=5000)
+            await self.actions.perform(images.nth(index).scroll_into_view_if_needed, timeout=5000)
         await self.page.wait_for_function(
             "selector => Array.from(document.querySelectorAll(selector + ' img'))"
             ".every(e => e.complete && e.naturalWidth > 0)", arg=BODY_SELECTOR, timeout=15000,

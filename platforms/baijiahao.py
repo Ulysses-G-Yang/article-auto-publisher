@@ -603,7 +603,7 @@ class BaijiahaoPlatform(BasePlatform):
         try:
             await self.actions.perform(editor.click, timeout=5000)
         except Exception:
-            await editor.evaluate("(el) => el.focus()")
+            await self.actions.perform(editor.evaluate, "(el) => el.focus()")
         # 焦点检查必须在编辑器所属 frame 内执行（正文在 iframe 中）
         focused = await editor.evaluate(
             """() => {

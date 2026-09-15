@@ -829,7 +829,7 @@ class _NewDraftPage:
 
     def expect_response(self, predicate, *, timeout: int):
         response = _CreateResponse()
-        assert timeout == 21000  # Original 20 seconds plus the default action pause.
+        assert timeout == 30000  # Original 20 seconds plus the maximum random action pause.
         assert predicate(response) is True
         return _ResponseInfo(response)
 

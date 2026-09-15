@@ -267,7 +267,7 @@ class SmzdmPublicationMixin:
         await self._validate_dom_exact(self._expected_persisted_blocks, phase="发布前")
         images = self.page.locator("div.ProseMirror img")
         for index in range(await images.count()):
-            await images.nth(index).scroll_into_view_if_needed(timeout=5000)
+            await self.actions.perform(images.nth(index).scroll_into_view_if_needed, timeout=5000)
         await self.page.wait_for_function(
             "() => Array.from(document.querySelectorAll('div.ProseMirror img'))"
             ".every(e => e.complete && e.naturalWidth > 0)",
@@ -386,7 +386,9 @@ class SmzdmPublicationMixin:
             self._publication_stage = "blocked"
 
     async def _assert_publication_covers(self) -> None:
-        await self.page.locator("#publish-setting").scroll_into_view_if_needed(timeout=5000)
+        await self.actions.perform(
+            self.page.locator("#publish-setting").scroll_into_view_if_needed, timeout=5000
+        )
         await self.page.wait_for_function(
             "s => {const es=Array.from(document.querySelectorAll(s));"
             "return es.length===2 && es.every(e => e.complete && e.naturalWidth>0)}",

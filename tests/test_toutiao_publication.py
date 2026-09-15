@@ -14,6 +14,10 @@ from account_sessions.delivery_service import _is_verified_public_submission
 from platforms.base import DraftVerificationEvidence, PublishResultUnknownError, SelectorError
 from platforms.toutiao import ToutiaoPlatform
 from platforms.toutiao_publication import EDIT_PATH, SUBMIT_PATH, native_payload, native_receipt_id
+from platforms.toutiao_request_policy import (
+    NATIVE_BACKGROUND_POSTS,
+    publication_request_kind,
+)
 from tests.test_delivery_degraded import _FakePlatform, _run_publish_mode
 
 ARTICLE_ID = "7000000000000000001"
@@ -165,6 +169,11 @@ def test_raw_and_client_id_aliases_must_agree(data, expected):
         "background_autosave",
         "repeated_call",
         "editor_changed",
+        "native_background",
+        "unknown_background",
+        "unexpected_image_upload",
+        "background_transport_failure",
+        "background_http_failure",
     ],
 )
 def test_verified_original_preview_and_publication_exactly_once(case, tmp_path):
@@ -208,6 +217,7 @@ def test_verified_original_preview_and_publication_exactly_once(case, tmp_path):
         pixel = io.BytesIO()
         Image.new("RGB", (80, 60), "blue").save(pixel, format="PNG")
         writes = []
+        background = []
         async with async_playwright() as pw:
             browser = await pw.chromium.launch(channel="chrome", headless=True)
             try:
@@ -215,7 +225,16 @@ def test_verified_original_preview_and_publication_exactly_once(case, tmp_path):
                 page = await context.new_page()
 
                 async def fixture(route, request):
-                    if EDIT_PATH in request.url:
+                    if request.url.endswith("/bcs/notice/boxes/"):
+                        background.append(request.method)
+                        if case == "background_transport_failure":
+                            await route.abort()
+                        else:
+                            await route.fulfill(
+                                status=503 if case == "background_http_failure" else 200,
+                                json={"code": 0},
+                            )
+                    elif EDIT_PATH in request.url:
                         await route.fulfill(json=cloud)
                     elif SUBMIT_PATH in request.url:
                         body = native_payload(request)
@@ -257,7 +276,19 @@ def test_verified_original_preview_and_publication_exactly_once(case, tmp_path):
                         <script>
                         const previewData={json.dumps(payload(preview=True))};
                         const publicData={json.dumps(public)};
-                        fetch('{EDIT_PATH}?pgc_id={ARTICLE_ID}&format=json');
+                        window.networkErrors=0;
+                        (async()=>{{
+                            const c={json.dumps(case)};
+                            let path=null;
+                            if(['native_background','background_transport_failure',
+                                'background_http_failure'].includes(c))
+                                path='/bcs/notice/boxes/';
+                            if(c==='unknown_background') path='/mp/agw/account/update';
+                            if(c==='unexpected_image_upload') path='/spice/image';
+                            if(path) await fetch(path,{{method:'POST',body:'{{}}'}})
+                                .catch(()=>{{window.networkErrors++}});
+                            fetch('{EDIT_PATH}?pgc_id={ARTICLE_ID}&format=json');
+                        }})();
                         document.getElementById('none').onclick=()=>{{
                             document.querySelectorAll('.byte-radio-inner')
                                 .forEach(e=>e.classList.remove('checked'));
@@ -288,17 +319,32 @@ def test_verified_original_preview_and_publication_exactly_once(case, tmp_path):
                 platform._identity_payload = {"ok": True, "user_id": USER_ID}
                 platform._expected_persisted_tokens = TOKENS
                 platform.PUBLICATION_TIMEOUT_MS = 700
+                # This fixture skips controller sleeps through conftest. Keep
+                # rejection waits short too; real armed-event timing is covered
+                # by test_action_pacing with actual randomized waits.
+                platform.actions.event_timeout = lambda timeout_ms, **_: timeout_ms
                 platform.verify_draft_readonly = AsyncMock(
                     return_value={
                         "match_count": 1,
                         "draft_url": EDIT_URL,
                     }
                 )
-                cloud_cases = {"already_published", "wrong_author", "wrong_cloud_content"}
+                cloud_cases = {
+                    "already_published",
+                    "wrong_author",
+                    "wrong_cloud_content",
+                    "unknown_background",
+                    "unexpected_image_upload",
+                }
                 if case in cloud_cases:
                     with pytest.raises(SelectorError):
                         await platform.prepare_existing_publication(TITLE, EDIT_URL)
                     assert not writes
+                    if case in {"unknown_background", "unexpected_image_upload"}:
+                        events = list(platform._publication_network_events)
+                        assert any(e["code"] == "LOCAL_REQUEST_BLOCKED" for e in events)
+                        assert not any(e["code"] == "BROWSER_REQUEST_FAILED" for e in events)
+                        assert platform._publication_guard_error
                     return
                 if case == "pipeline":
                     evidence = DraftVerificationEvidence()
@@ -323,6 +369,9 @@ def test_verified_original_preview_and_publication_exactly_once(case, tmp_path):
                     "concurrent_duplicate",
                     "background_autosave",
                     "repeated_call",
+                    "native_background",
+                    "background_transport_failure",
+                    "background_http_failure",
                 }
                 if case in good:
                     assert await platform.publish_now(TITLE) == receipt()
@@ -337,6 +386,23 @@ def test_verified_original_preview_and_publication_exactly_once(case, tmp_path):
                         2 if case in {"api_failure", "bool_code", "wrong_receipt"} else 1
                     )
                 assert platform._publication_stage == "blocked"
+                if case in {
+                    "native_background",
+                    "background_transport_failure",
+                    "background_http_failure",
+                }:
+                    assert background == ["POST"]
+                    codes = [e["code"] for e in platform._publication_network_events]
+                    if case == "native_background":
+                        assert await page.evaluate("window.networkErrors") == 0
+                        assert "LOCAL_REQUEST_BLOCKED" not in codes
+                        assert "BROWSER_REQUEST_FAILED" not in codes
+                    elif case == "background_transport_failure":
+                        assert "BROWSER_REQUEST_FAILED" in codes
+                        assert "LOCAL_REQUEST_BLOCKED" not in codes
+                    elif case == "background_http_failure":
+                        assert "PLATFORM_HTTP_ERROR" in codes
+                        assert "BROWSER_REQUEST_FAILED" not in codes
                 # Neither account-profile writes nor unbound article creation may escape the guard.
                 for path in ("/mp/agw/article/new", "/mp/agw/article/delete"):
                     await page.evaluate("p=>fetch(p).catch(()=>null)", path)
@@ -350,3 +416,45 @@ def test_verified_original_preview_and_publication_exactly_once(case, tmp_path):
 def test_publish_without_original_evidence_stops():
     with pytest.raises(SelectorError, match="完整原草稿证据"):
         asyncio.run(ToutiaoPlatform().publish_now(TITLE))
+
+
+@pytest.mark.parametrize("host,path", NATIVE_BACKGROUND_POSTS)
+def test_only_exact_observed_native_background_posts_are_exempt(host, path):
+    expected = NATIVE_BACKGROUND_POSTS[host, path]
+    assert publication_request_kind("POST", f"https://{host}{path}") == expected
+    for url in (
+        f"https://{host}.evil.invalid{path}",
+        f"https://{host}{path}/update",
+        f"http://{host}{path}",
+        f"https://secret@{host}{path}",
+        f"https://{host}:444{path}",
+    ):
+        assert publication_request_kind("POST", url) == "UNRECOGNIZED_WRITE"
+    assert publication_request_kind("PUT", f"https://{host}{path}") == "UNRECOGNIZED_WRITE"
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        SUBMIT_PATH,
+        "/mp/agw/article/new",
+        "/mp/agw/article/delete",
+        "/mp/agw/article/%64elete",
+        "/mp/agw/article/post_now",
+    ],
+)
+def test_get_cannot_bypass_article_mutation_guards(path):
+    assert publication_request_kind("GET", f"https://mp.toutiao.com{path}") == "FORBIDDEN_MUTATION"
+
+
+def test_image_import_and_unverified_setting_switch_are_not_background_reads():
+    assert (
+        publication_request_kind("POST", "https://mp.toutiao.com/spice/image?upload_source=fixture")
+        == "IMAGE_UPLOAD_REQUIRED"
+    )
+    assert (
+        publication_request_kind(
+            "POST", "https://mp.toutiao.com/mp/agw/creator_helper/spell_check_switch"
+        )
+        == "UNRECOGNIZED_WRITE"
+    )

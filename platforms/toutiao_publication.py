@@ -4,9 +4,14 @@ from __future__ import annotations
 
 import json
 import re
+from collections import deque
 from urllib.parse import parse_qsl, urlsplit
+from weakref import WeakSet
+
+from loguru import logger
 
 from platforms.base import DraftVerificationEvidence, PublishResultUnknownError, SelectorError
+from platforms.toutiao_request_policy import publication_request_kind
 
 SUBMIT_PATH = "/mp/agw/article/publish"
 EDIT_PATH = "/mp/agw/article/edit"
@@ -107,20 +112,20 @@ class ToutiaoPublicationMixin:
         self._publication_preview_sent = 0
         self._publication_post_sent = 0
         self._publication_blocked = []
+        self._publication_network_events = deque(maxlen=200)
+        self._publication_local_aborts = WeakSet()
+        self._publication_guard_error = None
         self._publication_guard_installed = True
 
         async def guard(route, request):
-            location = urlsplit(request.url)
-            allowed = request.method in {"GET", "HEAD", "OPTIONS"}
-            if location.path == "/mp/agw/article/new" or any(
-                word in location.path.lower() for word in ("delete", "post_now")
-            ):
-                allowed = False
-            if (
-                request.method == "POST"
-                and location.netloc == "mp.toutiao.com"
-                and location.path == SUBMIT_PATH
-            ):
+            kind = publication_request_kind(request.method, request.url)
+            allowed = kind not in {
+                "ARTICLE_SUBMISSION",
+                "FORBIDDEN_MUTATION",
+                "IMAGE_UPLOAD_REQUIRED",
+                "UNRECOGNIZED_WRITE",
+            }
+            if kind == "ARTICLE_SUBMISSION":
                 stage = self._publication_stage
                 counter = (
                     "_publication_preview_sent" if stage == "preview" else "_publication_post_sent"
@@ -151,10 +156,18 @@ class ToutiaoPublicationMixin:
             if allowed:
                 await route.fallback()
             else:
-                if location.netloc == "mp.toutiao.com":
-                    self._publication_blocked.append(f"{request.method} {location.path}")
+                # A local cancellation is not an Internet failure. Keep only
+                # bounded category-level evidence, never URLs, tokens or bodies.
+                self._publication_local_aborts.add(request)
+                self._publication_blocked.append(kind)
+                del self._publication_blocked[:-200]
+                self._record_publication_network("LOCAL_REQUEST_BLOCKED", kind)
+                if kind != "ARTICLE_SUBMISSION":
+                    self._publication_guard_error = kind
                 await route.abort()
 
+        self.context.on("requestfailed", self._publication_request_failed)
+        self.context.on("response", self._publication_response_observed)
         await self.context.route("**/*", guard)
         probe = await self.verify_draft_readonly(title)
         if probe.get("match_count") != 1 or probe.get("draft_url") != edit_url:
@@ -192,7 +205,31 @@ class ToutiaoPublicationMixin:
             raise SelectorError("头条原稿广告设置无法确认")
         await self._assert_publication_content()
 
+    def _record_publication_network(self, code: str, kind: str, **details) -> None:
+        event = {"code": code, "request_kind": kind, **details}
+        self._publication_network_events.append(event)
+        logger.info("Toutiao request outcome: {}", event)
+
+    def _publication_request_failed(self, request) -> None:
+        if request not in self._publication_local_aborts:
+            self._record_publication_network(
+                "BROWSER_REQUEST_FAILED", publication_request_kind(request.method, request.url)
+            )
+
+    def _publication_response_observed(self, response) -> None:
+        if response.status >= 400:
+            self._record_publication_network(
+                "PLATFORM_HTTP_ERROR",
+                publication_request_kind(response.request.method, response.url),
+                http_status=response.status,
+            )
+
     async def _assert_publication_content(self) -> None:
+        if getattr(self, "_publication_guard_error", None):
+            raise SelectorError(
+                "TOUTIAO_LOCAL_REQUEST_BLOCKED: 原稿需要未获准的写操作；"
+                "本地拦截后停止，不能据此判断断网或掉登录"
+            )
         if (
             self.page.url != self._publication_edit_url
             or (await self.page.locator(TITLE).input_value()).strip() != self._publication_title
@@ -208,7 +245,7 @@ class ToutiaoPublicationMixin:
 
     async def _prepare_publication_settings(self) -> None:
         """The currently verified publication contract is ordinary, immediate, no cover."""
-        await self.page.bring_to_front()
+        await self.actions.perform(self.page.bring_to_front)
         cover = self.page.locator("label.byte-radio").filter(has_text="无封面")
         if await cover.count() != 1:
             raise SelectorError("头条无封面控件不唯一")
@@ -331,6 +368,15 @@ class ToutiaoPublicationMixin:
                 await self.actions.perform(button.click, timeout=8000)
             response = await pending.value
             result = await response.json()
+            self._record_publication_network(
+                "PLATFORM_ACK"
+                if type(result.get("code")) is int and result["code"] == 0
+                else "PLATFORM_BUSINESS_ERROR",
+                "ARTICLE_SUBMISSION",
+                http_status=response.status,
+                # Unrecognized response values must not leak into diagnostic logs.
+                platform_code=result.get("code") if type(result.get("code")) is int else None,
+            )
             self._publication_last_reply = {
                 "stage": stage,
                 "http_status": response.status,

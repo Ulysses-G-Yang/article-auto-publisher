@@ -73,7 +73,8 @@ def test_clicks_serialize_with_interval_and_no_retry(monkeypatch):
 
     asyncio.run(scenario())
     assert len(starts) == 2
-    assert starts[1] - starts[0] >= 1
+    assert starts[0] >= 5
+    assert starts[1] - starts[0] >= 5
 
 
 @pytest.mark.parametrize("method", ["fill", "insert_metadata"])
@@ -86,11 +87,72 @@ def test_title_is_filled_once_without_transient_draft_titles(monkeypatch, method
     assert clock[0] >= 4 / 6
 
 
-def test_native_keyboard_shortcut_sequence_has_minimum_typing_delay():
-    pacer = ActionPacer()
+def test_native_keyboard_shortcut_sequence_has_minimum_typing_delay(monkeypatch):
+    pacer, clock = clocked_pacer(monkeypatch)
     keyboard = SimpleNamespace(type=AsyncMock())
     asyncio.run(pacer.type_text(keyboard, "## ", delay=1))
-    keyboard.type.assert_awaited_once_with("## ", delay=1000 / 6)
+    keyboard.type.assert_awaited_once()
+    assert keyboard.type.await_args.args == ("## ",)
+    assert 1000 / 6 <= keyboard.type.await_args.kwargs["delay"] <= 1500 / 6
+    assert clock[0] >= 5
+
+
+def test_each_action_draws_a_new_random_interval_including_first_action(monkeypatch):
+    pacer, clock = clocked_pacer(monkeypatch)
+    samples = iter([5.1, 9.7, 6.4])
+    draws, starts = [], []
+
+    def uniform(low, high):
+        draws.append((low, high))
+        return next(samples)
+
+    monkeypatch.setattr("platforms.action_pacing.random.uniform", uniform)
+
+    async def click():
+        starts.append(clock[0])
+
+    async def scenario():
+        for _ in range(3):
+            await pacer.perform(click)
+
+    asyncio.run(scenario())
+    assert draws == [(5, 10)] * 3
+    assert starts == pytest.approx([5.1, 14.8, 21.2])
+
+
+def test_typing_and_paragraphs_are_random_without_weakening_minimum(monkeypatch):
+    pacer, clock = clocked_pacer(monkeypatch)
+    samples = iter([6, 1, 1.5, 2, 1.2, 2.4])
+    monkeypatch.setattr("platforms.action_pacing.random.uniform", lambda *_: next(samples))
+    starts = []
+
+    async def insert(char):
+        starts.append((char, clock[0]))
+
+    asyncio.run(pacer.insert_text(SimpleNamespace(insert_text=insert), "甲\n乙"))
+    assert [char for char, _ in starts] == ["甲", "\n", "乙"]
+    assert starts[1][1] - starts[0][1] == pytest.approx(1 / 6)
+    assert starts[2][1] - starts[1][1] == pytest.approx(1.5 / 6 + 2)
+
+
+@pytest.mark.parametrize("legacy", [0.5, 1, 10])
+def test_legacy_fixed_interval_migrates_to_five_to_ten_seconds(legacy):
+    pacer = ActionPacer({"action_interval_seconds": legacy})
+    assert (pacer.action_interval_min, pacer.action_interval_max) == (5, 10)
+
+
+@pytest.mark.parametrize(
+    "settings",
+    [
+        {"action_interval_min_seconds": 1},
+        {"action_interval_min_seconds": 10},
+        {"action_interval_max_seconds": 5},
+        {"action_interval_min_seconds": 8, "action_interval_max_seconds": 7},
+    ],
+)
+def test_fixed_or_fast_action_ranges_are_rejected(settings):
+    with pytest.raises(ValueError):
+        ActionPacer(settings)
 
 
 def test_event_wait_accounts_for_configured_pause_before_the_native_click():
@@ -126,6 +188,14 @@ def test_existing_platform_actions_cannot_skip_shared_pacer():
         "fill",
         "insert_text",
         "type",
+        "focus",
+        "hover",
+        "drag_to",
+        "drag_and_drop",
+        "dispatch_event",
+        "clear",
+        "bring_to_front",
+        "scroll_into_view_if_needed",
     }
     bypasses = []
     for path in root.glob("*.py"):
@@ -153,6 +223,7 @@ def test_existing_platform_actions_cannot_skip_shared_pacer():
                         ".insertContent(",
                         ".insertContentAt(",
                         ".insertAdjacentHTML(",
+                        ".focus(",
                     )
                 )
                 for arg in call.args
@@ -189,22 +260,20 @@ def test_real_native_body_input_preserves_multiline_and_readback():
                 # its original timeout. No real account or network is involved.
                 await page.set_content(
                     '<input id="file" type="file" style="display:none">'
-                    '<button onclick="document.querySelector(\'#file\').click()">'
-                    '选择文件</button>'
+                    "<button onclick=\"document.querySelector('#file').click()\">"
+                    "选择文件</button>"
                 )
-                paced = ActionPacer({"action_interval_seconds": 0.5})
+                paced = ActionPacer()
                 paced._sleep = asyncio.sleep
                 await paced.perform(page.locator("button").focus)
                 started = asyncio.get_running_loop().time()
-                async with page.expect_file_chooser(
-                    timeout=paced.event_timeout(400)
-                ) as pending:
+                async with page.expect_file_chooser(timeout=paced.event_timeout(400)) as pending:
                     await paced.perform(page.locator("button").click)
                 assert await (await pending.value).element.get_attribute("id") == "file"
-                assert asyncio.get_running_loop().time() - started >= 0.5
+                assert asyncio.get_running_loop().time() - started >= 5
                 platform = ReceiptPlatform()
                 platform.page = page
-                await page.set_content('<p>文章提到安全验证，但没有要求用户操作</p>')
+                await page.set_content("<p>文章提到安全验证，但没有要求用户操作</p>")
                 assert await platform.login_obstacle_code() == "SESSION_CHECK_FAILED"
                 await page.set_content('<div role="dialog">请完成安全验证</div>')
                 assert await platform.login_obstacle_code() == "CHALLENGE"

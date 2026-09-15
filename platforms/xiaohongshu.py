@@ -1210,7 +1210,7 @@ class XiaohongshuPlatform(BasePlatform):
                 "error": "小红书下一步按钮不可见或候选不唯一",
             }
         try:
-            await action.scroll_into_view_if_needed(timeout=10000)
+            await self.actions.perform(action.scroll_into_view_if_needed, timeout=10000)
             snapshot = await self._layout_snapshot()
         except BrowserLifecycleError:
             raise
@@ -1422,7 +1422,7 @@ class XiaohongshuPlatform(BasePlatform):
         if await self._private_locator_in_viewport(locator):
             return True
         try:
-            await locator.scroll_into_view_if_needed(timeout=10000)
+            await self.actions.perform(locator.scroll_into_view_if_needed, timeout=10000)
         except Exception:  # noqa: BLE001
             return False
         return await self._private_locator_in_viewport(locator)
@@ -2597,7 +2597,7 @@ class XiaohongshuPlatform(BasePlatform):
     async def _place_body_caret_at_end(self) -> None:
         """把选区放到 TipTap 正文末尾，不依赖工具栏点击后的焦点状态。"""
 
-        placed = await self.page.evaluate(
+        placed = await self.actions.perform(self.page.evaluate,
             """(selector) => {
                 const root = document.querySelector(selector);
                 if (!root || !root.isContentEditable) return false;

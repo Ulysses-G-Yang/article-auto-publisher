@@ -1309,7 +1309,7 @@ class ToutiaoPlatform(ToutiaoPublicationMixin, BasePlatform):
                 self._mark_editor_mutation()
             else:
                 # 工具栏和上传面板会移动焦点；后续块重新锚定正文末尾。
-                await editor.focus(timeout=8000)
+                await self.actions.perform(editor.focus, timeout=8000)
                 await self.actions.perform(editor.press, "Control+End")
                 self._mark_editor_mutation()
                 if wrote_any and not await self._can_reuse_existing_empty_tail():
@@ -1531,7 +1531,7 @@ class ToutiaoPlatform(ToutiaoPublicationMixin, BasePlatform):
         if await editor.count() != 1:
             return False
         try:
-            await editor.focus(timeout=8000)
+            await self.actions.perform(editor.focus, timeout=8000)
             await self.actions.perform(editor.press, "Control+End")
             await self.page.evaluate(
                 """() => new Promise((resolve) => {
@@ -1583,7 +1583,7 @@ class ToutiaoPlatform(ToutiaoPublicationMixin, BasePlatform):
         if await editor.count() != 1:
             return False
         try:
-            await editor.focus(timeout=8000)
+            await self.actions.perform(editor.focus, timeout=8000)
             await self.actions.perform(editor.press, "Control+End")
             # Enter 产生的新段落要先经过 ProseMirror 事务和浏览器绘制，
             # 否则 last-child 仍可能是上一段或图片节点。

@@ -971,7 +971,7 @@ class WeiboPlatform(BasePlatform):
             try:
                 await self.actions.perform(editor.click, timeout=5000)
             except Exception:
-                await editor.evaluate("(el) => el.focus()")
+                await self.actions.perform(editor.evaluate, "(el) => el.focus()")
             focused = await self.page.evaluate(
                 """() => {
                     const el = document.activeElement;
@@ -1291,7 +1291,7 @@ class WeiboPlatform(BasePlatform):
                 raise ContentValidationError(
                     "WEIBO_BODY_IMAGE_TRIGGER_NOT_UNIQUE: 正文插图入口不存在或不唯一"
                 )
-            await matches[0].hover(timeout=5000)
+            await self.actions.perform(matches[0].hover, timeout=5000)
             await asyncio.sleep(0.45)
             labels = await self.page.evaluate(
                     """() => {

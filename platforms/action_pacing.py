@@ -6,6 +6,7 @@ controller never retries an action, including a partially completed input.
 
 import asyncio
 import math
+import random
 import time
 from collections.abc import Awaitable, Callable
 
@@ -14,7 +15,14 @@ class ActionPacer:
     def __init__(self, config: dict | None = None) -> None:
         config = config or {}
         self.characters_per_second = self._number(config, "characters_per_second", 6, 1, 8)
-        self.action_interval = self._number(config, "action_interval_seconds", 1, 0.5, 10)
+        # Migrate old fixed intervals without retaining the previous fast path.
+        self._number(config, "action_interval_seconds", 5, 0.5, 10)
+        self.action_interval_min = self._number(config, "action_interval_min_seconds", 5, 5, 10)
+        self.action_interval_max = self._number(config, "action_interval_max_seconds", 10, 5, 10)
+        if self.action_interval_min >= self.action_interval_max:
+            raise ValueError("Action pacing requires a nonempty random interval")
+        # Compatibility for callers budgeting an armed event: use the upper bound.
+        self.action_interval = self.action_interval_max
         self.paragraph_pause = self._number(config, "paragraph_pause_seconds", 1.2, 1, 5)
         self._last_finished: float | None = None
         self._lock = asyncio.Lock()
@@ -37,10 +45,16 @@ class ActionPacer:
         return math.ceil(timeout_ms + actions * self.action_interval * 1000) if timeout_ms else 0
 
     async def _wait(self) -> None:
-        if self._last_finished is not None:
-            remaining = self.action_interval - (time.monotonic() - self._last_finished)
-            if remaining > 0:
-                await self._sleep(remaining)
+        interval = random.uniform(self.action_interval_min, self.action_interval_max)
+        elapsed = 0 if self._last_finished is None else time.monotonic() - self._last_finished
+        if interval > elapsed:
+            await self._sleep(interval - elapsed)
+
+    def _character_pause(self) -> float:
+        return random.uniform(1, 1.5) / self.characters_per_second
+
+    async def _paragraph_wait(self) -> None:
+        await self._sleep(random.uniform(self.paragraph_pause, self.paragraph_pause * 2))
 
     async def perform(self, action: Callable[..., Awaitable], *args, **kwargs):
         """Serialize one native action and propagate failure without a retry."""
@@ -58,7 +72,7 @@ class ActionPacer:
             try:
                 await self._sleep(len(text) / self.characters_per_second)
                 result = await action(*args, **kwargs)
-                await self._sleep(self.paragraph_pause)
+                await self._paragraph_wait()
                 return result
             finally:
                 self._last_finished = time.monotonic()
@@ -72,7 +86,9 @@ class ActionPacer:
 
     async def type_text(self, keyboard, text: str, **kwargs) -> None:
         # Keep native key sequences (e.g. editor Markdown shortcuts) intact.
-        kwargs["delay"] = max(1000 / self.characters_per_second, kwargs.get("delay", 0))
+        # These short control sequences keep the existing native call boundary;
+        # body text uses insert_text/fill_body with a new sample per character.
+        kwargs["delay"] = max(1000 * self._character_pause(), kwargs.get("delay", 0))
         await self.perform(keyboard.type, text, **kwargs)
 
     async def _input(self, action, text: str, **kwargs) -> None:
@@ -81,11 +97,11 @@ class ActionPacer:
             try:
                 for char in text:
                     await action(char, **kwargs)
-                    await self._sleep(1 / self.characters_per_second)
+                    await self._sleep(self._character_pause())
                     if char == "\n":
-                        await self._sleep(self.paragraph_pause)
+                        await self._paragraph_wait()
                 if text:
-                    await self._sleep(self.paragraph_pause)
+                    await self._paragraph_wait()
             finally:
                 self._last_finished = time.monotonic()
 
@@ -112,10 +128,10 @@ class ActionPacer:
                 await locator.fill("", **kwargs)
                 for char in text:
                     await locator.press_sequentially(char, **kwargs)
-                    await self._sleep(1 / self.characters_per_second)
+                    await self._sleep(self._character_pause())
                     if char == "\n":
-                        await self._sleep(self.paragraph_pause)
+                        await self._paragraph_wait()
                 if text:
-                    await self._sleep(self.paragraph_pause)
+                    await self._paragraph_wait()
             finally:
                 self._last_finished = time.monotonic()

@@ -1127,7 +1127,7 @@ class ZOLPlatform(BasePlatform):
                 # 用 focus 作为遮罩场景的有限回退；必须确认 activeElement，
                 # 否则按不可交互失败，绝不吞掉点击校验。
                 try:
-                    await fresh.focus()
+                    await self.actions.perform(fresh.focus)
                     active = await fresh.evaluate(
                         "el => document.activeElement === el"
                     )
@@ -1467,7 +1467,7 @@ class ZOLPlatform(BasePlatform):
 
         try:
             if editor_kind == "textarea":
-                await editor.evaluate(
+                await self.actions.perform(editor.evaluate,
                     """
                     (el) => {
                         el.focus();
@@ -1481,7 +1481,7 @@ class ZOLPlatform(BasePlatform):
                 raise ContentValidationError(
                     "ZOL_CONTENT_CURSOR_FAILED: 编辑器类型未确认"
                 )
-            positioned = await editor.evaluate(
+            positioned = await self.actions.perform(editor.evaluate,
                 """
                 (root) => {
                     const selection = root.ownerDocument.getSelection();
@@ -1573,7 +1573,7 @@ class ZOLPlatform(BasePlatform):
                 "ZOL_CONTENT_ANCHOR_FAILED: 富文本编辑器类型未确认"
             )
         try:
-            anchored = await editor.evaluate(
+            anchored = await self.actions.perform(editor.evaluate,
                 """
                 (root) => {
                     const doc = root.ownerDocument;

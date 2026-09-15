@@ -917,7 +917,7 @@ class BasePlatform(ABC):
                 if isinstance(publication, dict):
                     receipt = publication.get("verification_evidence")
                     if (
-                        self.platform_name not in {"zol", "baijiahao", "weibo", "smzdm"}
+                        self.platform_name not in {"zol", "baijiahao", "weibo", "smzdm", "toutiao"}
                         or publication.get("status") != "SUBMITTED"
                         or not isinstance(receipt, dict)
                         or receipt.get("submit_acknowledged") is not True
@@ -926,14 +926,14 @@ class BasePlatform(ABC):
                         or receipt.get("submission_scope") != "PUBLIC"
                     ):
                         raise PublishResultUnknownError("平台发布接收回执无效")
-                    if self.platform_name == "baijiahao":
+                    if self.platform_name in {"baijiahao", "toutiao"}:
                         article_id = publication.get("platform_article_id")
                         if (
                             not isinstance(article_id, str) or not article_id.isascii()
                             or not article_id.isdigit() or len(article_id) > 30
                             or receipt.get("submission_article_id") != article_id
                         ):
-                            raise PublishResultUnknownError("百家号发布回执缺少有效文章 ID")
+                            raise PublishResultUnknownError("平台发布回执缺少有效文章 ID")
                         publication_article_id = article_id
                     if self.platform_name == "smzdm":
                         article_id = publication.get("platform_article_id")

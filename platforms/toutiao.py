@@ -19,14 +19,14 @@
 - 草稿：无独立存草稿按钮，「草稿将自动保存」（自动保存接口
   POST /mp/agw/article/publish?type=article，save=0）。
 
-2026-08 历史验收曾出现：**头条自动化草稿保存被风控拒绝**——
+2026-08 历史验收曾出现：**头条自动化草稿保存被平台拒绝**——
 - 自动保存请求（带正文，save=0）返回 code 7050「保存失败」；
   空正文保存可通过（深诊空草稿成功落库）。
-- 已排除：封面模式（选无封面 coverType=1 仍 7050）、输入节奏
+- 当时排查过：封面模式（选无封面 coverType=1 仍 7050）、输入节奏
   （超真人慢速/随机停顿/打错重打仍 7050）、频率（冷却后仍 7050）、
   发布路径（点「预览并发布」同样 save=0 → 7050）。
-- 人工手动（真人浏览器）保存/发布正常——是**字节系风控判定
-  Playwright 启动的 Chrome 为自动化环境**，带内容（高风险）保存被拒。
+- 人工浏览器保存/发布正常，提示启动环境可能有关；历史记录没有平台侧诊断，
+  不能据此确定具体风控算法或排除所有其他原因。
 - 当前适配器不绕过平台接口，只实现正常编辑器操作与严格证据链：保存前建立
   ``pgc_id`` 基线，按 Word 顺序写入文字/H2/图片，等待自动保存，绑定唯一
   新增实体并重开核对标题、图文和图片指纹。平台明确拒绝或证据不足时停止
@@ -35,7 +35,7 @@
 2026-09-01 真实验收：改为启动普通系统 Chrome，再通过固定非零本地调试端口
 连接 CDP；同一七图 Word 已产生唯一新 ``pgc_id``，重开后标题、29 个图文块及
 7 张图片顺序一致。头条适配器因此必须使用本文件的原生 Chrome + CDP 初始化，
-不能退回 ``launch_persistent_context``，否则会重新触发 code 7050 假失败。
+不退回此前失败的 ``launch_persistent_context`` 路线；CDP 本身不是风控保证。
 """
 
 from __future__ import annotations
@@ -66,6 +66,7 @@ from platforms.base import (
     SelectorError,
 )
 from platforms.content_validation import ensure_valid_content, safe_media_error
+from platforms.toutiao_publication import ToutiaoPublicationMixin
 
 LOGIN_URL = "https://mp.toutiao.com/auth/page/login"
 HOME_URL = "https://mp.toutiao.com/profile_v4/"
@@ -171,7 +172,7 @@ class ToutiaoDraftSaveRejectedError(PlatformAutomationError):
     error_code = "TOUTIAO_DRAFT_SAVE_REJECTED"
 
 
-class ToutiaoPlatform(BasePlatform):
+class ToutiaoPlatform(ToutiaoPublicationMixin, BasePlatform):
     """头条号账号会话适配器；投递开放需通过真实草稿验收。"""
 
     platform_name = "toutiao"
@@ -1903,6 +1904,10 @@ class ToutiaoPlatform(BasePlatform):
                             return;
                         }
                         if (node.nodeType !== Node.ELEMENT_NODE) return;
+                        if (node.tagName === 'BR') {
+                            textBuffer += ' ';
+                            return;
+                        }
                         if (node.tagName === 'IMG') {
                             flushText();
                             tokens.push({
@@ -2679,6 +2684,3 @@ class ToutiaoPlatform(BasePlatform):
             "dom_blocks_match": None,
             "structure": {"draft_id": draft_id},
         }
-
-    async def publish_now(self, title: str = "") -> str:
-        raise PlatformNotImplementedError("头条号公开发布未开启")

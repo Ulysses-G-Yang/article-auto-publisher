@@ -1702,7 +1702,7 @@ def _is_verified_public_submission(platform: str, result: dict) -> bool:
             or evidence.get("submission_article_id") != article_id
         ):
             return False
-    if platform == "baijiahao":
+    if platform in {"baijiahao", "toutiao"}:
         article_id = result.get("platform_article_id")
         if (
             not isinstance(article_id, str) or not re.fullmatch(r"[0-9]{1,30}", article_id)
@@ -1711,7 +1711,8 @@ def _is_verified_public_submission(platform: str, result: dict) -> bool:
         ):
             return False
     return (
-        platform in {"zol", "baijiahao", "weibo", "smzdm"} and result.get("status") == "SUBMITTED"
+        platform in {"zol", "baijiahao", "weibo", "smzdm", "toutiao"}
+        and result.get("status") == "SUBMITTED"
         and isinstance(evidence, dict)
         and evidence.get("submit_acknowledged") is True
         and evidence.get("submission_source") == f"{platform}_publish_response"

@@ -240,6 +240,7 @@ class ToutiaoPlatform(BasePlatform):
 
     async def initialize(self):
         """以普通系统 Chrome 启动，再经 CDP 驱动同一个账号 Profile。"""
+        self.invalidate_delivery_identity()
 
         os.environ.pop("NODE_OPTIONS", None)
         chrome_profile_dir = self.profile_dir or Path(
@@ -419,6 +420,7 @@ class ToutiaoPlatform(BasePlatform):
 
     async def cleanup(self):
         """关闭本次 CDP 会话和本次启动的 Chrome，不触碰其它进程。"""
+        self.invalidate_delivery_identity()
 
         self._cleanup_started = True
         self._lifecycle_stage = "主动清理"
@@ -485,7 +487,7 @@ class ToutiaoPlatform(BasePlatform):
             self.last_login_error = ""
             self._require_page_alive("头条号登录态检测")
             if not await self._has_session_cookie_signal():
-                self.last_login_error = "LOGIN_REQUIRED: 头条号账号需要登录"
+                self.last_login_error = await self.login_obstacle_code()
                 return False
             # 身份捕获本身会打开一次工作台；这里不再提前重复导航 HOME。
             identity = await self.fetch_identity_payload()
@@ -507,22 +509,21 @@ class ToutiaoPlatform(BasePlatform):
         """打开头条号登录页（无 redirect_url 参数），等待抖音 App 扫码登录。"""
 
         self._require_page_alive("头条号打开登录页")
-        await self.page.goto(
+        await self.actions.perform(
+            self.page.goto,
             LOGIN_URL,
             wait_until="domcontentloaded",
             timeout=20000,
         )
         # 确保「扫码登录」Tab 激活
         try:
-            await self.page.evaluate(
-                """() => {
+            await self.actions.perform(self.page.evaluate, """() => {
                     const nodes = Array.from(document.querySelectorAll('span, div'));
                     const tab = nodes.find(
                         (el) => (el.innerText || '').trim() === '扫码登录'
                     );
                     if (tab) tab.click();
-                }"""
-            )
+                }""")
         except Exception:
             pass
         await self._show_scan_hint()
@@ -560,7 +561,8 @@ class ToutiaoPlatform(BasePlatform):
 
         try:
             self.page.on("response", _on_response)
-            await self.page.goto(
+            await self.actions.perform(
+                self.page.goto,
                 HOME_URL,
                 wait_until="domcontentloaded",
                 timeout=30000,
@@ -761,13 +763,15 @@ class ToutiaoPlatform(BasePlatform):
                 if urlparse(str(getattr(self.page, "url", ""))).path != urlparse(
                     DRAFT_BOX_URL
                 ).path:
-                    await self.page.goto(
+                    await self.actions.perform(
+                        self.page.goto,
                         DRAFT_BOX_URL,
                         wait_until="domcontentloaded",
                         timeout=30000,
                     )
             else:
-                await self.page.goto(
+                await self.actions.perform(
+                    self.page.goto,
                     DRAFT_BOX_URL,
                     wait_until="domcontentloaded",
                     timeout=30000,
@@ -860,7 +864,8 @@ class ToutiaoPlatform(BasePlatform):
                     if expected_entity_ready(state):
                         break
                     if attempt in {9, 29, 49}:
-                        await self.page.goto(
+                        await self.actions.perform(
+                            self.page.goto,
                             DRAFT_BOX_URL,
                             wait_until="domcontentloaded",
                             timeout=30000,
@@ -1128,7 +1133,7 @@ class ToutiaoPlatform(BasePlatform):
             raise SelectorError(
                 "SELECTOR_ERROR: 头条号编辑器原生退出控件不存在或不唯一"
             )
-        await control.click(timeout=8000)
+        await self.actions.perform(control.click, timeout=8000)
         publish_path = urlparse(PUBLISH_URL).path
         previous_count = -1
         stable_rounds = 0
@@ -1186,7 +1191,7 @@ class ToutiaoPlatform(BasePlatform):
             raise SelectorError(
                 "SELECTOR_ERROR: 头条号草稿页的文章创作入口不存在或不唯一"
             )
-        await create_link.click(timeout=8000)
+        await self.actions.perform(create_link.click, timeout=8000)
         try:
             await self.page.wait_for_selector(
                 TITLE_SELECTOR,
@@ -1221,7 +1226,7 @@ class ToutiaoPlatform(BasePlatform):
         if await title_input.count() != 1:
             raise SelectorError("SELECTOR_ERROR: 头条号编辑器标题输入框不存在或不唯一")
         generation = self._mark_editor_mutation()
-        await title_input.fill(expected)
+        await self.actions.fill(title_input, expected)
         actual = (await title_input.input_value()).strip()
         if actual != expected:
             raise SelectorError("SELECTOR_ERROR: 头条号标题回读不一致")
@@ -1258,12 +1263,12 @@ class ToutiaoPlatform(BasePlatform):
         self._require_page_alive("头条号填写正文")
         editor = self.page.locator(BODY_SELECTOR)
         try:
-            await editor.click(timeout=8000)
+            await self.actions.perform(editor.click, timeout=8000)
         except Exception:
             pass
         self._mark_editor_mutation()
-        await editor.press("Control+A")
-        await editor.press("Backspace")
+        await self.actions.perform(editor.press, "Control+A")
+        await self.actions.perform(editor.press, "Backspace")
 
         expected_tokens: list[dict[str, str]] = []
         expected_images = 0
@@ -1299,15 +1304,15 @@ class ToutiaoPlatform(BasePlatform):
                 # 清空动作留下的原生选区直接输入。连续文字块也只使用原生
                 # Enter 换段，避免再次重建选区触发保存失败。
                 if native_text_continuation or native_image_continuation:
-                    await self.page.keyboard.press("Enter")
+                    await self.actions.perform(self.page.keyboard.press, "Enter")
                 self._mark_editor_mutation()
             else:
                 # 工具栏和上传面板会移动焦点；后续块重新锚定正文末尾。
                 await editor.focus(timeout=8000)
-                await editor.press("Control+End")
+                await self.actions.perform(editor.press, "Control+End")
                 self._mark_editor_mutation()
                 if wrote_any and not await self._can_reuse_existing_empty_tail():
-                    await self.page.keyboard.press("Enter")
+                    await self.actions.perform(self.page.keyboard.press, "Enter")
             if block_type in {"text", "heading"}:
                 if (
                     not (first_plain_text or native_text_continuation)
@@ -1319,9 +1324,9 @@ class ToutiaoPlatform(BasePlatform):
                 lines = text.splitlines() or [text]
                 for index, line in enumerate(lines):
                     if line:
-                        await self.page.keyboard.insert_text(line)
+                        await self.actions.insert_text(self.page.keyboard, line)
                     if index < len(lines) - 1:
-                        await self.page.keyboard.press("Shift+Enter")
+                        await self.actions.perform(self.page.keyboard.press, "Shift+Enter")
                 if block_type == "heading":
                     await self._apply_h2_to_current_block()
                 expected_tokens.append(
@@ -1526,7 +1531,7 @@ class ToutiaoPlatform(BasePlatform):
             return False
         try:
             await editor.focus(timeout=8000)
-            await editor.press("Control+End")
+            await self.actions.perform(editor.press, "Control+End")
             await self.page.evaluate(
                 """() => new Promise((resolve) => {
                     requestAnimationFrame(() => requestAnimationFrame(resolve));
@@ -1578,7 +1583,7 @@ class ToutiaoPlatform(BasePlatform):
             return False
         try:
             await editor.focus(timeout=8000)
-            await editor.press("Control+End")
+            await self.actions.perform(editor.press, "Control+End")
             # Enter 产生的新段落要先经过 ProseMirror 事务和浏览器绘制，
             # 否则 last-child 仍可能是上一段或图片节点。
             await self.page.evaluate(
@@ -1684,8 +1689,8 @@ class ToutiaoPlatform(BasePlatform):
         tail = editor.locator(":scope > p:last-child")
         if await tail.count() != 1:
             return False
-        await tail.click(timeout=8000, position={"x": 4, "y": 4})
-        await editor.press("End")
+        await self.actions.perform(tail.click, timeout=8000, position={"x": 4, "y": 4})
+        await self.actions.perform(editor.press, "End")
         for attempt in range(20):
             if await selection_is_stable():
                 return True
@@ -1733,7 +1738,7 @@ class ToutiaoPlatform(BasePlatform):
         button = self.page.locator(HEADING_BUTTON_SELECTOR)
         if await button.count() != 1:
             raise SelectorError("SELECTOR_ERROR: 头条号 H2 工具按钮不存在或不唯一")
-        await button.click(timeout=8000)
+        await self.actions.perform(button.click, timeout=8000)
         await self.simulator.random_delay(0.2, 0.5)
         is_h2 = await self._block_signature_is_h2(target)
         if not is_h2:
@@ -1741,7 +1746,7 @@ class ToutiaoPlatform(BasePlatform):
             # 再使用编辑器标准 H2 快捷键一次，最后仍按同一块的 DOM 回读。
             if not await self._restore_block_selection(target):
                 raise SelectorError("SELECTOR_ERROR: 头条号 H2 段落重新定位失败")
-            await self.page.keyboard.press("Control+Alt+2")
+            await self.actions.perform(self.page.keyboard.press, "Control+Alt+2")
             await self.simulator.random_delay(0.2, 0.5)
             is_h2 = await self._block_signature_is_h2(target)
         if not is_h2:
@@ -1801,8 +1806,8 @@ class ToutiaoPlatform(BasePlatform):
             )
             if await block.count() != 1:
                 return False
-            await block.click(timeout=8000, position={"x": 4, "y": 4})
-            await self.page.keyboard.press("End")
+            await self.actions.perform(block.click, timeout=8000, position={"x": 4, "y": 4})
+            await self.actions.perform(self.page.keyboard.press, "End")
             await self.page.evaluate(
                 """() => new Promise((resolve) => {
                     requestAnimationFrame(() => requestAnimationFrame(resolve));
@@ -1984,7 +1989,7 @@ class ToutiaoPlatform(BasePlatform):
             image_button = self.page.locator(IMAGE_BUTTON_SELECTOR)
             if await image_button.count() != 1:
                 return {"success": False, "error": "头条号正文图片按钮不存在或不唯一"}
-            await image_button.click(timeout=8000)
+            await self.actions.perform(image_button.click, timeout=8000)
             drawer = self.page.locator(IMAGE_DRAWER_SELECTOR)
             try:
                 await drawer.wait_for(state="visible", timeout=10000)
@@ -2084,7 +2089,7 @@ class ToutiaoPlatform(BasePlatform):
             if len(matches) != 1:
                 return False
             upload_tab = tabs.nth(matches[0])
-            await upload_tab.click(timeout=8000)
+            await self.actions.perform(upload_tab.click, timeout=8000)
             active = False
             for _ in range(20):
                 class_names = str(await upload_tab.get_attribute("class") or "")
@@ -2160,7 +2165,7 @@ class ToutiaoPlatform(BasePlatform):
                 return {"success": False, "error": "头条号正文图片上传面板未加载"}
             if await file_inputs.count() != 1:
                 return {"success": False, "error": "头条号正文图片上传控件不存在或不唯一"}
-            await file_inputs.set_input_files(str(image_path), timeout=15000)
+            await self.actions.perform(file_inputs.set_input_files, str(image_path), timeout=15000)
 
             # 头条本地上传只把文件放进图片抽屉；必须等待上传项全部成功，
             # 再点击抽屉内的“确定”，图片才会真正插入 ProseMirror 正文。
@@ -2206,7 +2211,7 @@ class ToutiaoPlatform(BasePlatform):
                         fallback="头条号图片上传未完成，确认按钮仍不可用",
                     ),
                 }
-            await confirm_button.click(timeout=8000)
+            await self.actions.perform(confirm_button.click, timeout=8000)
             try:
                 await drawer.wait_for(state="hidden", timeout=10000)
             except Exception as exc:
@@ -2373,7 +2378,7 @@ class ToutiaoPlatform(BasePlatform):
         close_button = drawer.locator(IMAGE_DRAWER_CLOSE_IN_DRAWER_SELECTOR)
         if await close_button.count() != 1:
             return "头条号图片抽屉关闭按钮不存在或不唯一"
-        await close_button.click(timeout=8000)
+        await self.actions.perform(close_button.click, timeout=8000)
         try:
             await drawer.wait_for(state="hidden", timeout=8000)
         except Exception as exc:
@@ -2628,7 +2633,12 @@ class ToutiaoPlatform(BasePlatform):
     ) -> tuple[bool, bool]:
         """精确重开本次 ``pgc_id``，核对标题和全部 DOM token。"""
 
-        await self.page.goto(edit_url, wait_until="domcontentloaded", timeout=30000)
+        await self.actions.perform(
+            self.page.goto,
+            edit_url,
+            wait_until="domcontentloaded",
+            timeout=30000,
+        )
         await self.page.wait_for_selector(TITLE_SELECTOR, timeout=20000)
         await self.page.wait_for_selector(BODY_SELECTOR, timeout=20000)
         expected_tokens = self._expected_persisted_tokens or []

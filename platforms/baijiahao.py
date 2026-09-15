@@ -150,7 +150,8 @@ class BaijiahaoPlatform(BasePlatform):
         try:
             self.last_login_error = ""
             self._require_page_alive("百家号登录态检测")
-            await self.page.goto(
+            await self.actions.perform(
+                self.page.goto,
                 HOME_URL,
                 wait_until="domcontentloaded",
                 timeout=15000,
@@ -158,7 +159,7 @@ class BaijiahaoPlatform(BasePlatform):
             await asyncio.sleep(4)
             if await self._has_session_cookie_signal():
                 return True
-            self.last_login_error = "LOGIN_REQUIRED: 百家号账号需要登录"
+            self.last_login_error = await self.login_obstacle_code()
             return False
         except BrowserLifecycleError:
             raise
@@ -174,7 +175,8 @@ class BaijiahaoPlatform(BasePlatform):
         """打开百度扫码登录页，等待用户在隔离 Profile 中扫码登录。"""
 
         self._require_page_alive("百家号打开登录页")
-        await self.page.goto(
+        await self.actions.perform(
+            self.page.goto,
             LOGIN_URL,
             wait_until="domcontentloaded",
             timeout=20000,
@@ -253,7 +255,8 @@ class BaijiahaoPlatform(BasePlatform):
 
             self.page.on("response", _on_response)
             try:
-                await self.page.goto(
+                await self.actions.perform(
+                    self.page.goto,
                     CREATOR_HOME,
                     wait_until="domcontentloaded",
                     timeout=30000,
@@ -404,7 +407,8 @@ class BaijiahaoPlatform(BasePlatform):
         return " ".join(str(value or "").split())
 
     async def _open_works_page(self) -> None:
-        await self.page.goto(
+        await self.actions.perform(
+            self.page.goto,
             WORKS_URL,
             wait_until="domcontentloaded",
             timeout=30000,
@@ -430,7 +434,7 @@ class BaijiahaoPlatform(BasePlatform):
                 "DRAFT_BASELINE_FAILED: 百家号草稿标签不存在或不唯一"
             )
         tab = visible[0]
-        await tab.click(timeout=5000)
+        await self.actions.perform(tab.click, timeout=5000)
         for _ in range(30):
             selected = str(await tab.get_attribute("aria-selected") or "").lower()
             class_name = str(await tab.get_attribute("class") or "").lower()
@@ -449,7 +453,7 @@ class BaijiahaoPlatform(BasePlatform):
             raise DraftBaselineError(
                 "DRAFT_BASELINE_FAILED: 百家号作品搜索框不可用"
             )
-        await search.fill(title)
+        await self.actions.fill(search, title)
         # 真实页面是受控输入 + 防抖查询。按 Enter 会触发表单默认行为并把
         # 已正确过滤的草稿行清空；填值后等待防抖完成即可。
         await asyncio.sleep(4)
@@ -529,7 +533,8 @@ class BaijiahaoPlatform(BasePlatform):
         """
         self._require_page_alive("百家号打开编辑器")
         try:
-            await self.page.goto(
+            await self.actions.perform(
+                self.page.goto,
                 "https://baijiahao.baidu.com/builder/rc/edit?type=news",
                 wait_until="domcontentloaded",
                 timeout=30000,
@@ -596,7 +601,7 @@ class BaijiahaoPlatform(BasePlatform):
         if await editor.count() == 0 or not await editor.is_visible():
             raise RuntimeError(f"{label}编辑器不可见")
         try:
-            await editor.click(timeout=5000)
+            await self.actions.perform(editor.click, timeout=5000)
         except Exception:
             await editor.evaluate("(el) => el.focus()")
         # 焦点检查必须在编辑器所属 frame 内执行（正文在 iframe 中）
@@ -618,11 +623,11 @@ class BaijiahaoPlatform(BasePlatform):
             await self._focus_editor(editor, "标题")
             await self.simulator.random_delay(0.3, 0.8)
             try:
-                await self.page.keyboard.press("Control+A")
-                await self.page.keyboard.press("Backspace")
+                await self.actions.perform(self.page.keyboard.press, "Control+A")
+                await self.actions.perform(self.page.keyboard.press, "Backspace")
             except Exception:
                 pass
-            await self.page.keyboard.insert_text(str(title or "").strip())
+            await self.actions.insert_metadata(self.page.keyboard, str(title or "").strip())
             actual = await editor.inner_text()
             if (title or "").strip() and title.strip() not in actual:
                 raise RuntimeError("标题回读不一致")
@@ -702,8 +707,8 @@ class BaijiahaoPlatform(BasePlatform):
         editor = await self._current_body_editor()
         try:
             await self._focus_editor(editor, "正文")
-            await editor.press("Control+A")
-            await editor.press("Backspace")
+            await self.actions.perform(editor.press, "Control+A")
+            await self.actions.perform(editor.press, "Backspace")
             await self.simulator.random_delay(0.3, 0.8)
         except Exception as exc:
             if self._exception_means_browser_closed(exc):
@@ -739,14 +744,14 @@ class BaijiahaoPlatform(BasePlatform):
                     if paragraph_ready_after_image:
                         paragraph_ready_after_image = False
                     else:
-                        await self.page.keyboard.press("Enter")
+                        await self.actions.perform(self.page.keyboard.press, "Enter")
                 await self._place_body_caret_at_end()
                 lines = text.splitlines() or [text]
                 for line_index, line in enumerate(lines):
                     if line.strip():
-                        await self.page.keyboard.insert_text(line.strip())
+                        await self.actions.insert_text(self.page.keyboard, line.strip())
                     if line_index < len(lines) - 1:
-                        await self.page.keyboard.press("Enter")
+                        await self.actions.perform(self.page.keyboard.press, "Enter")
                 if block_type == "heading":
                     await self._apply_h2_to_current_block()
                 else:
@@ -763,7 +768,7 @@ class BaijiahaoPlatform(BasePlatform):
                 if paragraph_ready_after_image:
                     paragraph_ready_after_image = False
                 else:
-                    await self.page.keyboard.press("Enter")
+                    await self.actions.perform(self.page.keyboard.press, "Enter")
             await self._place_body_caret_at_end()
             image_path = self._image_path_for_block(block, images)
             if image_path:
@@ -866,7 +871,7 @@ class BaijiahaoPlatform(BasePlatform):
     async def _place_body_caret_at_end(self) -> None:
         editor = await self._current_body_editor()
         try:
-            await editor.press("Control+End")
+            await self.actions.perform(editor.press, "Control+End")
         except Exception as exc:
             if self._exception_means_browser_closed(exc):
                 raise BrowserLifecycleError(
@@ -923,8 +928,7 @@ class BaijiahaoPlatform(BasePlatform):
 
         editor = await self._current_body_editor()
         return bool(
-            await editor.evaluate(
-                r"""(root, fontSize) => {
+            await self.actions.perform(editor.evaluate, r"""(root, fontSize) => {
                     const doc = root.ownerDocument;
                     const selection = doc.getSelection();
                     let node = selection && selection.anchorNode;
@@ -959,18 +963,16 @@ class BaijiahaoPlatform(BasePlatform):
                     return fontSize
                         ? block.style.fontSize === fontSize
                         : block.style.fontSize === '';
-                }""",
-                font_size,
-            )
+                }""", font_size)
         )
 
     async def _create_paragraph_after_image(self) -> None:
         editor = await self._current_body_editor()
         try:
-            await editor.press("Control+End")
-            await self.page.keyboard.press("ArrowDown")
-            await self.page.keyboard.press("ArrowRight")
-            await self.page.keyboard.press("Enter")
+            await self.actions.perform(editor.press, "Control+End")
+            await self.actions.perform(self.page.keyboard.press, "ArrowDown")
+            await self.actions.perform(self.page.keyboard.press, "ArrowRight")
+            await self.actions.perform(self.page.keyboard.press, "Enter")
             tail_ready = bool(
                 await editor.evaluate(
                     """root => {
@@ -1206,7 +1208,7 @@ class BaijiahaoPlatform(BasePlatform):
                     "error_code": "BAIJIAHAO_BODY_IMAGE_TRIGGER_AMBIGUOUS",
                     "error": "百家号正文图片入口不存在或候选不唯一，已安全停止",
                 }
-            await candidates[0].click(timeout=5000)
+            await self.actions.perform(candidates[0].click, timeout=5000)
             await self.simulator.random_delay(0.5, 1)
             modals = self.page.locator(f"{IMAGE_MODAL_SELECTOR}:visible")
             visible_modals = [
@@ -1228,7 +1230,7 @@ class BaijiahaoPlatform(BasePlatform):
                     "error_code": "BAIJIAHAO_BODY_IMAGE_INPUT_AMBIGUOUS",
                     "error": "百家号正文图片控件不存在或候选不唯一，已安全停止",
                 }
-            await inputs.first.set_input_files(str(image_path), timeout=15000)
+            await self.actions.perform(inputs.first.set_input_files, str(image_path), timeout=15000)
 
             confirm = modal.get_by_text("确认", exact=True)
             confirm_button = None
@@ -1255,7 +1257,7 @@ class BaijiahaoPlatform(BasePlatform):
                     "error_code": "BAIJIAHAO_BODY_IMAGE_CONFIRM_NOT_READY",
                     "error": "百家号正文图片上传后确认控件未就绪",
                 }
-            await confirm_button.click(timeout=5000)
+            await self.actions.perform(confirm_button.click, timeout=5000)
 
             stable_streak = 0
             observed = before
@@ -1354,7 +1356,7 @@ class BaijiahaoPlatform(BasePlatform):
                     "BAIJIAHAO_COVER_TRIGGER_NOT_FOUND",
                     "百家号「选择封面」按钮未找到或候选不唯一",
                 )
-            await trigger.click(timeout=5000)
+            await self.actions.perform(trigger.click, timeout=5000)
             modal = await self._wait_for_cover_modal()
             if modal is None:
                 return await self._cover_failure(
@@ -1372,7 +1374,7 @@ class BaijiahaoPlatform(BasePlatform):
                     "百家号封面图片控件不存在或候选不唯一",
                 )
             baseline = await self._cover_preview_state(modal)
-            await cover_input.set_input_files(str(image_path), timeout=15000)
+            await self.actions.perform(cover_input.set_input_files, str(image_path), timeout=15000)
             if not await self._wait_for_cover_preview(modal, baseline):
                 return await self._cover_failure(
                     "BAIJIAHAO_COVER_PREVIEW_NOT_READY",
@@ -1589,7 +1591,7 @@ class BaijiahaoPlatform(BasePlatform):
                     return False
             except AttributeError:
                 pass
-            await candidate.click(timeout=5000)
+            await self.actions.perform(candidate.click, timeout=5000)
             await asyncio.sleep(1)
         return not await self._visible_items(self.page.locator(".cheetah-modal"))
 
@@ -1622,7 +1624,7 @@ class BaijiahaoPlatform(BasePlatform):
             if cancel is None:
                 return False
             try:
-                await cancel.click(timeout=3000)
+                await self.actions.perform(cancel.click, timeout=3000)
             except Exception:
                 return False
             await asyncio.sleep(0.5)
@@ -1709,7 +1711,7 @@ class BaijiahaoPlatform(BasePlatform):
                 raise DraftResultUnknownError(
                     "DRAFT_RESULT_UNKNOWN: 百家号精确存草稿按钮不存在或不唯一"
                 )
-            await visible[0].click(timeout=5000)
+            await self.actions.perform(visible[0].click, timeout=5000)
         except DraftResultUnknownError:
             raise
         except Exception as exc:
@@ -1900,7 +1902,9 @@ class BaijiahaoPlatform(BasePlatform):
                     self._last_draft_entity_source = "baseline_new_id"
                     break
             if attempt + 1 < 6:
-                await self.page.reload(wait_until="domcontentloaded", timeout=30000)
+                await self.actions.perform(
+                    self.page.reload, wait_until="domcontentloaded", timeout=30000
+                )
                 await self.simulator.random_delay(1, 2)
         if created_match is None:
             self._last_draft_entity_bound = False
@@ -1983,8 +1987,7 @@ class BaijiahaoPlatform(BasePlatform):
                 "DRAFT_RESULT_UNKNOWN: 百家号目标草稿行索引无效"
             )
         before_page_ids = {id(page) for page in self.context.pages}
-        click_result = await self.page.evaluate(
-            """({title, rowIndex}) => {
+        click_result = await self.actions.perform(self.page.evaluate, """({title, rowIndex}) => {
                 const visible = (el) => !!(
                     el && (el.offsetWidth || el.offsetHeight
                         || el.getClientRects().length)
@@ -2017,9 +2020,7 @@ class BaijiahaoPlatform(BasePlatform):
                 }
                 actions[0].click();
                 return {status: 'CLICKED'};
-            }""",
-            {"title": title, "rowIndex": row_index},
-        )
+            }""", {"title": title, "rowIndex": row_index})
         if not isinstance(click_result, dict) or click_result.get("status") != "CLICKED":
             raise DraftResultUnknownError(
                 "DRAFT_RESULT_UNKNOWN: 百家号目标草稿修改动作不可用"
@@ -2143,7 +2144,12 @@ class BaijiahaoPlatform(BasePlatform):
         self._bound_draft_id = ""
         self._publication_preview_required = None
         self._publication_preview_draft_id = ""
-        await self.page.goto(edit_url, wait_until="domcontentloaded", timeout=30000)
+        await self.actions.perform(
+            self.page.goto,
+            edit_url,
+            wait_until="domcontentloaded",
+            timeout=30000,
+        )
         await self._wait_for_editor_ready(timeout_seconds=45)
         expected_tokens = self._expected_content_tokens(blocks)
         actual_tokens: list[dict] = []
@@ -2252,7 +2258,7 @@ class BaijiahaoPlatform(BasePlatform):
         if await checkbox.is_checked():
             # Controlled React inputs may briefly revert before the parent commits.
             # Click once, then observe settlement; never toggle again on a timeout.
-            await checkbox.click(timeout=5000)
+            await self.actions.perform(checkbox.click, timeout=5000)
         for _ in range(50):
             if not await checkbox.is_checked():
                 return
@@ -2378,9 +2384,10 @@ class BaijiahaoPlatform(BasePlatform):
         self._public_publish_attempted = True
         try:
             async with self.page.expect_response(
-                self._is_publication_response, timeout=self.PUBLICATION_TIMEOUT_MS,
+                self._is_publication_response,
+                timeout=self.actions.event_timeout(self.PUBLICATION_TIMEOUT_MS),
             ) as pending:
-                await buttons.click(timeout=8000)
+                await self.actions.perform(buttons.click, timeout=8000)
             response = await pending.value
             if not self._publication_request_matches(
                 response.request, draft_id, self._normalize_title(title),

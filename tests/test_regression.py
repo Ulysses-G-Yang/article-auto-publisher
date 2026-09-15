@@ -112,6 +112,9 @@ class FakeLocator:
         if self.page:
             self.page.active = self
 
+    async def press_sequentially(self, value, **_kwargs):
+        await self.fill(self.value + value)
+
     async def input_value(self):
         return self.value
 
@@ -741,7 +744,7 @@ class RegressionTests(DatabaseTestCase):
         with patch("platforms.zol.asyncio.sleep", new=AsyncMock()):
             self.assertTrue(asyncio.run(platform.check_login()))
 
-    def test_zol_creator_cookie_bridge_copies_auth_scope_without_logging_values(self):
+    def test_zol_creator_cookie_bridge_never_copies_auth_scope(self):
         platform = ZOLPlatform()
         platform.context = type("Context", (), {})()
         platform.context.cookies = AsyncMock(return_value=[
@@ -767,10 +770,9 @@ class RegressionTests(DatabaseTestCase):
 
         count = asyncio.run(platform._bridge_creator_cookies())
 
-        self.assertEqual(count, 1)
-        copied = platform.context.add_cookies.await_args.args[0]
-        self.assertEqual(copied[0]["name"], "zol_sid")
-        self.assertEqual(copied[0]["domain"], ".zol.com.cn")
+        self.assertEqual(count, 0)
+        platform.context.cookies.assert_not_awaited()
+        platform.context.add_cookies.assert_not_awaited()
 
     def test_zol_creator_routes_are_configured(self):
         zol_cfg = get_config()["platforms"]["zol"]

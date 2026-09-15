@@ -83,11 +83,13 @@ def test_weibo_writes_text_and_images_in_frozen_block_order() -> None:
 
     assert result["media_status"] == "completed"
     assert result["uploaded_images"] == 2
-    assert events.index("text:开头") < events.index("image:D:/one.png")
-    assert events.index("image:D:/one.png") < events.index("text:二级标题")
-    assert events.index("text:二级标题") < events.index("heading:h2")
-    assert events.index("text:二级标题") < events.index("image:D:/two.png")
-    assert events.index("image:D:/two.png") < events.index("text:结尾")
+    text_and_images = [event for event in events if event.startswith(("text:", "image:"))]
+    assert text_and_images == [
+        "text:开", "text:头", "image:D:/one.png",
+        "text:二", "text:级", "text:标", "text:题", "image:D:/two.png",
+        "text:结", "text:尾",
+    ]
+    assert events.index("text:题") < events.index("heading:h2") < events.index("image:D:/two.png")
     assert platform._upload_image.await_args_list == [
         call("D:/one.png"),
         call("D:/two.png"),
@@ -827,7 +829,7 @@ class _NewDraftPage:
 
     def expect_response(self, predicate, *, timeout: int):
         response = _CreateResponse()
-        assert timeout == 20000
+        assert timeout == 21000  # Original 20 seconds plus the default action pause.
         assert predicate(response) is True
         return _ResponseInfo(response)
 

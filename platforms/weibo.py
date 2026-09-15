@@ -139,7 +139,8 @@ class WeiboPlatform(BasePlatform):
         try:
             self.last_login_error = ""
             self._require_page_alive("微博登录态检测")
-            await self.page.goto(
+            await self.actions.perform(
+                self.page.goto,
                 HOME_URL,
                 wait_until="domcontentloaded",
                 timeout=15000,
@@ -153,7 +154,7 @@ class WeiboPlatform(BasePlatform):
                     "WEIBO_IDENTITY_MISSING: 微博会话存在但身份未确认"
                 )
                 return False
-            self.last_login_error = "LOGIN_REQUIRED: 微博账号需要登录"
+            self.last_login_error = await self.login_obstacle_code()
             return False
         except BrowserLifecycleError:
             raise
@@ -169,7 +170,8 @@ class WeiboPlatform(BasePlatform):
         """打开微博扫码登录页，等待用户在隔离 Profile 中扫码登录。"""
 
         self._require_page_alive("微博打开登录页")
-        await self.page.goto(
+        await self.actions.perform(
+            self.page.goto,
             LOGIN_URL,
             wait_until="domcontentloaded",
             timeout=20000,
@@ -389,7 +391,8 @@ class WeiboPlatform(BasePlatform):
         return draft_id if re.fullmatch(r"[1-9][0-9]*", draft_id) else ""
 
     async def _open_draft_list(self) -> None:
-        await self.page.goto(
+        await self.actions.perform(
+            self.page.goto,
             DRAFTS_URL,
             wait_until="domcontentloaded",
             timeout=30000,
@@ -489,8 +492,7 @@ class WeiboPlatform(BasePlatform):
         title: str,
         title_occurrence: int,
     ) -> str:
-        clicked = await self.page.evaluate(
-            r"""(target) => {
+        clicked = await self.actions.perform(self.page.evaluate, r"""(target) => {
                 const visible = (node) => {
                     const rect = node.getBoundingClientRect();
                     const style = getComputedStyle(node);
@@ -506,9 +508,7 @@ class WeiboPlatform(BasePlatform):
                 if (!card) return false;
                 card.click();
                 return true;
-            }""",
-            {"title": title, "occurrence": title_occurrence},
-        )
+            }""", {"title": title, "occurrence": title_occurrence})
         if not clicked:
             raise DraftBaselineError(
                 "DRAFT_BASELINE_FAILED: 微博草稿卡无法按标题序号打开"
@@ -680,7 +680,8 @@ class WeiboPlatform(BasePlatform):
             raise DraftBaselineError(
                 "DRAFT_BASELINE_FAILED: 微博待恢复草稿 ID 无效"
             )
-        await self.page.goto(
+        await self.actions.perform(
+            self.page.goto,
             editor_url,
             wait_until="domcontentloaded",
             timeout=30000,
@@ -735,7 +736,8 @@ class WeiboPlatform(BasePlatform):
             )
         create_started = False
         try:
-            await self.page.goto(
+            await self.actions.perform(
+                self.page.goto,
                 DRAFTS_URL,
                 wait_until="domcontentloaded",
                 timeout=30000,
@@ -775,10 +777,10 @@ class WeiboPlatform(BasePlatform):
                     and urlsplit(str(response.url or "")).path
                     == "/article/v5/aj/editor/draft/create"
                 ),
-                timeout=20000,
+                timeout=self.actions.event_timeout(20000),
             ) as response_info:
                 create_started = True
-                await write_buttons.click(timeout=10000)
+                await self.actions.perform(write_buttons.click, timeout=10000)
             create_response = await response_info.value
             if not 200 <= int(create_response.status) < 300:
                 raise DraftResultUnknownError(
@@ -910,7 +912,7 @@ class WeiboPlatform(BasePlatform):
             if await title_field.count() == 0 or not await title_field.is_visible():
                 raise RuntimeError("标题输入框不可见")
             # 直接 fill（不依赖 click，避免加载遮罩拦截命中）
-            await title_field.fill(expected_title)
+            await self.actions.fill(title_field, expected_title)
             if str(await title_field.input_value()).strip() != expected_title:
                 raise RuntimeError("标题回读不一致")
         except Exception as exc:
@@ -967,7 +969,7 @@ class WeiboPlatform(BasePlatform):
         editor = await self._current_body_editor()
         try:
             try:
-                await editor.click(timeout=5000)
+                await self.actions.perform(editor.click, timeout=5000)
             except Exception:
                 await editor.evaluate("(el) => el.focus()")
             focused = await self.page.evaluate(
@@ -988,8 +990,8 @@ class WeiboPlatform(BasePlatform):
             raise SelectorError("微博正文编辑器未找到或无法聚焦") from exc
 
         try:
-            await self.page.keyboard.press("Control+A")
-            await self.page.keyboard.press("Backspace")
+            await self.actions.perform(self.page.keyboard.press, "Control+A")
+            await self.actions.perform(self.page.keyboard.press, "Backspace")
         except Exception:
             pass
         await self.simulator.random_delay(0.3, 0.8)
@@ -1013,14 +1015,14 @@ class WeiboPlatform(BasePlatform):
                     if paragraph_ready_after_image:
                         paragraph_ready_after_image = False
                     else:
-                        await self.page.keyboard.press("Enter")
+                        await self.actions.perform(self.page.keyboard.press, "Enter")
                 await self._place_body_caret_at_end()
                 lines = text.splitlines() or [text]
                 for line_index, line in enumerate(lines):
                     if line.strip():
-                        await self.page.keyboard.insert_text(line.strip())
+                        await self.actions.insert_text(self.page.keyboard, line.strip())
                     if line_index < len(lines) - 1:
-                        await self.page.keyboard.press("Enter")
+                        await self.actions.perform(self.page.keyboard.press, "Enter")
                 if block_type == "heading":
                     await self._apply_h2_to_current_block()
                 content_started = True
@@ -1035,7 +1037,7 @@ class WeiboPlatform(BasePlatform):
                 if paragraph_ready_after_image:
                     paragraph_ready_after_image = False
                 else:
-                    await self.page.keyboard.press("Enter")
+                    await self.actions.perform(self.page.keyboard.press, "Enter")
             await self._place_body_caret_at_end()
             image_path = self._image_path_for_block(block, images)
             if not image_path:
@@ -1202,7 +1204,7 @@ class WeiboPlatform(BasePlatform):
     async def _place_body_caret_at_end(self) -> None:
         editor = await self._current_body_editor()
         try:
-            await editor.press("Control+End")
+            await self.actions.perform(editor.press, "Control+End")
         except Exception as exc:
             if self._exception_means_browser_closed(exc):
                 raise BrowserLifecycleError(
@@ -1229,7 +1231,7 @@ class WeiboPlatform(BasePlatform):
                     trigger_matches.append(candidate)
             if len(trigger_matches) != 1:
                 raise RuntimeError("标题格式入口不唯一")
-            await trigger_matches[0].click(timeout=5000)
+            await self.actions.perform(trigger_matches[0].click, timeout=5000)
             await asyncio.sleep(0.25)
 
             options = self.page.locator(".n-popover:visible .card")
@@ -1242,7 +1244,7 @@ class WeiboPlatform(BasePlatform):
                     option_matches.append(candidate)
             if len(option_matches) != 1:
                 raise RuntimeError("标题 2 选项不唯一")
-            await option_matches[0].click(timeout=5000)
+            await self.actions.perform(option_matches[0].click, timeout=5000)
             await asyncio.sleep(0.25)
             editor = await self._current_body_editor()
             tail_tag = str(
@@ -1328,10 +1330,10 @@ class WeiboPlatform(BasePlatform):
 
         editor = await self._current_body_editor()
         try:
-            await editor.press("Control+End")
-            await self.page.keyboard.press("ArrowDown")
-            await self.page.keyboard.press("ArrowRight")
-            await self.page.keyboard.press("Enter")
+            await self.actions.perform(editor.press, "Control+End")
+            await self.actions.perform(self.page.keyboard.press, "ArrowDown")
+            await self.actions.perform(self.page.keyboard.press, "ArrowRight")
+            await self.actions.perform(self.page.keyboard.press, "Enter")
             tail_ready = bool(
                 await editor.evaluate(
                     """root => {
@@ -1591,7 +1593,7 @@ class WeiboPlatform(BasePlatform):
                         fallback="微博正文已有图片结构无法确认",
                     ),
                 }
-            await trigger.click(timeout=5000)
+            await self.actions.perform(trigger.click, timeout=5000)
             await asyncio.sleep(0.5)
             dialogs = self.page.locator(".n-dialog:visible")
             dialog_matches = []
@@ -1669,7 +1671,7 @@ class WeiboPlatform(BasePlatform):
                     "error_code": "WEIBO_BODY_IMAGE_LIBRARY_UNSTABLE",
                     "error": "微博图片库基线无法稳定确认",
                 }
-            await body_input.set_input_files(str(image_path), timeout=15000)
+            await self.actions.perform(body_input.set_input_files, str(image_path), timeout=15000)
 
             # 2026-08-21 当前官方编辑器逻辑：上传成功只会新增 image-item，
             # 还必须点中该项（class=is-selected）才会启用“插入”。官方上传
@@ -1730,7 +1732,7 @@ class WeiboPlatform(BasePlatform):
                     "error_code": "WEIBO_BODY_IMAGE_SELECTION_DIRTY",
                     "error": "微博图片弹窗在选择前存在无法归属的旧选中项",
                 }
-            await uploaded_item.click(timeout=5000)
+            await self.actions.perform(uploaded_item.click, timeout=5000)
             selection_confirmed = False
             for _ in range(20):
                 if await selected_items.count() == 1:
@@ -1772,7 +1774,7 @@ class WeiboPlatform(BasePlatform):
                     "error_code": "WEIBO_BODY_IMAGE_INSERT_NOT_READY",
                     "error": "微博正文图片上传后唯一插入按钮未就绪",
                 }
-            await insert_button.click(timeout=5000)
+            await self.actions.perform(insert_button.click, timeout=5000)
             dialog_closed = False
             for _ in range(20):
                 if await dialogs.count() == 0:
@@ -1853,7 +1855,7 @@ class WeiboPlatform(BasePlatform):
             return {"success": False, "error": "微博空封面入口不唯一，现有封面不自动替换"}
         self._cover_attempted = True
         try:
-            await trigger.click(timeout=5000)
+            await self.actions.perform(trigger.click, timeout=5000)
             dialog = self.page.locator(".n-dialog:visible")
             await dialog.wait_for(timeout=10000)
             if await dialog.get_by_text("正文图片", exact=True).count() != 1:
@@ -1865,10 +1867,13 @@ class WeiboPlatform(BasePlatform):
             await candidate.wait_for(timeout=10000)
             if await candidate.count() != 1 or await candidate.get_attribute("src") != first_source:
                 raise SelectorError("微博封面首候选与正文首图不匹配")
-            await items.first.click(timeout=5000)
+            await self.actions.perform(items.first.click, timeout=5000)
             if await dialog.locator(".image-item.is-selected").count() != 1:
                 raise SelectorError("微博封面未唯一选中首图")
-            await dialog.get_by_role("button", name="下一步", exact=True).click(timeout=5000)
+            await self.actions.perform(
+                dialog.get_by_role("button", name="下一步", exact=True).click,
+                timeout=5000,
+            )
             crop = self.page.locator(".n-dialog:visible").filter(
                 has=self.page.locator("cropper-selection"),
             )
@@ -1885,7 +1890,10 @@ class WeiboPlatform(BasePlatform):
             if not ready:
                 raise SelectorError("微博原生裁剪区域尚未就绪")
             await asyncio.sleep(0.5)
-            await crop.get_by_role("button", name="确定", exact=True).click(timeout=5000)
+            await self.actions.perform(
+                crop.get_by_role("button", name="确定", exact=True).click,
+                timeout=5000,
+            )
             await crop.wait_for(state="hidden", timeout=45000)
             covers = self.page.locator(".cover-preview img.cover-img")
             await covers.wait_for(timeout=10000)
@@ -2037,8 +2045,7 @@ class WeiboPlatform(BasePlatform):
             route_registered = True
             self.page.on("response", _on_response)
             response_registered = True
-            click_result = await self.page.evaluate(
-                """() => {
+            click_result = await self.actions.perform(self.page.evaluate, """() => {
                     const nodes = Array.from(
                         document.querySelectorAll('button, [role=button]')
                     );
@@ -2058,8 +2065,7 @@ class WeiboPlatform(BasePlatform):
                     }
                     candidates[0].click();
                     return {clicked: true, count: 1};
-                }"""
-            )
+                }""")
             if not isinstance(click_result, dict) or not click_result.get("clicked"):
                 raise DraftBaselineError(
                     "DRAFT_BASELINE_FAILED: 微博精确保存草稿按钮不存在或不唯一"
@@ -2123,7 +2129,8 @@ class WeiboPlatform(BasePlatform):
                 source=binding_source,
                 id_match=True,
             )
-            await self.page.goto(
+            await self.actions.perform(
+                self.page.goto,
                 draft_url,
                 wait_until="domcontentloaded",
                 timeout=30000,
@@ -2311,7 +2318,7 @@ class WeiboPlatform(BasePlatform):
             raise SelectorError("微博粉丝阅读复选框不唯一")
         state = await checkbox.get_attribute("aria-checked")
         if state == "true":
-            await checkbox.click(timeout=5000)
+            await self.actions.perform(checkbox.click, timeout=5000)
         for _ in range(40):
             if await checkbox.get_attribute("aria-checked") == "false":
                 return
@@ -2444,9 +2451,9 @@ class WeiboPlatform(BasePlatform):
                 lambda response: self._native_request_at(
                     response.request, self.PUBLICATION_SAVE_PATH,
                 ),
-                timeout=self.PUBLICATION_TIMEOUT_MS,
+                timeout=self.actions.event_timeout(self.PUBLICATION_TIMEOUT_MS),
             ) as pending:
-                await buttons.click(timeout=8000)
+                await self.actions.perform(buttons.click, timeout=8000)
             await self._assert_native_ack(await pending.value)
             await self.page.locator(".publish-modal:visible").wait_for(timeout=15000)
             await self._assert_publication_ready(title)
@@ -2472,7 +2479,7 @@ class WeiboPlatform(BasePlatform):
             raise SelectorError("微博附加关注选项不唯一")
         if await follow.count() == 1:
             if await follow.get_attribute("aria-checked") == "true":
-                await follow.click(timeout=5000)
+                await self.actions.perform(follow.click, timeout=5000)
             if await follow.get_attribute("aria-checked") != "false":
                 raise SelectorError("微博附加关注选项未关闭")
         if await dialog.get_by_text("公开", exact=True).count() != 1:
@@ -2492,9 +2499,9 @@ class WeiboPlatform(BasePlatform):
         try:
             async with self.page.expect_response(
                 lambda response: self._native_request_at(response.request, self.PUBLICATION_PATH),
-                timeout=self.PUBLICATION_TIMEOUT_MS,
+                timeout=self.actions.event_timeout(self.PUBLICATION_TIMEOUT_MS),
             ) as pending:
-                await buttons.click(timeout=8000)
+                await self.actions.perform(buttons.click, timeout=8000)
             await self._assert_native_ack(await pending.value)
             return {
                 "status": "SUBMITTED",

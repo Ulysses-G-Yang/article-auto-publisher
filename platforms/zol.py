@@ -317,56 +317,8 @@ class ZOLPlatform(BasePlatform):
         }
 
     async def _bridge_creator_cookies(self):
-        """把同一登录会话补到创作者中心使用的 .zol.com.cn 域。"""
-        if not self.context:
-            return 0
-        try:
-            cookies = await self.context.cookies()
-        except TypeError:
-            cookies = await self.context.cookies([
-                "https://service.zol.com.cn/",
-                "https://post.zol.com.cn/",
-                "https://open-api.zol.com.cn/",
-            ])
-
-        auth_names = {
-            "zol_sid", "zol_userid", "zol_check", "zol_cipher",
-            "toKen", "userName", "userId", "last_userid",
-        }
-        existing = {
-            (item.get("name", ""), item.get("domain", "").lower())
-            for item in cookies
-        }
-        now = time.time()
-        clones = []
-        for item in cookies:
-            domain = (item.get("domain") or "").lower()
-            name = item.get("name", "")
-            expires = item.get("expires", -1)
-            if domain != ".zol.com" or name not in auth_names:
-                continue
-            if expires not in (-1, None) and expires <= now:
-                continue
-            if (name, ".zol.com.cn") in existing:
-                continue
-            clone = {
-                key: item[key]
-                for key in (
-                    "name", "value", "path", "expires",
-                    "httpOnly", "secure", "sameSite",
-                )
-                if key in item
-            }
-            clone["domain"] = ".zol.com.cn"
-            clones.append(clone)
-
-        if clones:
-            await self.context.add_cookies(clones)
-            logger.info(
-                "ZOL 创作者中心会话域兼容完成: cloned_cookie_count={}",
-                len(clones),
-            )
-        return len(clones)
+        """Retired compatibility hook: authentication scopes are never copied."""
+        return 0
 
     async def _read_page_state(self) -> dict:
         self._require_page_alive("ZOL 页面状态探测")
@@ -436,7 +388,7 @@ class ZOLPlatform(BasePlatform):
                 ) from exc
             return {"ok": False, "error": str(exc)}
 
-    async def check_login(self, *, allow_cookie_bridge: bool = True) -> bool:
+    async def check_login(self, *, allow_cookie_bridge: bool = False) -> bool:
         """检查是否能进入真实 ZOL 创作者中心编辑器。
 
         个人中心 Cookie 存在并不等于博客编辑器可用；过期或域不完整的
@@ -449,9 +401,8 @@ class ZOLPlatform(BasePlatform):
             editor_url = self.platform_cfg.get(
                 "editor_url", "https://post.zol.com.cn/v2/create/article"
             )
-            if allow_cookie_bridge and self._host(editor_url) == self.CREATOR_HOST:
-                await self._bridge_creator_cookies()
-            await self.page.goto(
+            await self.actions.perform(
+                self.page.goto,
                 editor_url,
                 wait_until="domcontentloaded",
                 timeout=15000,
@@ -502,7 +453,7 @@ class ZOLPlatform(BasePlatform):
                 return True
             cookie_names = await self._valid_cookie_names()
             if not (page_state.get("hasUser") or page_state.get("hasLogout") or cookie_names):
-                self.last_login_error = "LOGIN_REQUIRED: ZOL 编辑器没有可验证的登录信号"
+                self.last_login_error = "SESSION_CHECK_FAILED: ZOL 编辑器没有可验证的登录信号"
                 return False
             logger.info(
                 "ZOL 博客编辑器登录态验证成功: url={}, selector_count={}, cookie_names={}",
@@ -555,7 +506,7 @@ class ZOLPlatform(BasePlatform):
             "login_url",
             "https://post.zol.com.cn/v2/login",
         )
-        await self.page.goto(login_url, wait_until="domcontentloaded")
+        await self.actions.perform(self.page.goto, login_url, wait_until="domcontentloaded")
         await self.simulator.random_delay(1, 2)
 
         if self._host(login_url) == self.CREATOR_HOST:
@@ -563,7 +514,7 @@ class ZOLPlatform(BasePlatform):
             qr_tab = self.page.get_by_role("tab", name="APP扫码登录", exact=True).first
             if await qr_tab.count() == 0 or not await qr_tab.is_visible():
                 raise SelectorError("ZOL_QR_TAB_NOT_FOUND: 未找到创作者中心 APP 扫码登录标签")
-            await qr_tab.click(timeout=5000)
+            await self.actions.perform(qr_tab.click, timeout=5000)
             qr_frame_locator = self.page.locator(
                 "iframe[src*='siteLogin.php'][src*='loginType=qrcode']"
             ).first
@@ -584,7 +535,7 @@ class ZOLPlatform(BasePlatform):
                     qr_toggle = self.page.locator("#tel-login .login-change").first
                     if await qr_toggle.count() == 0 or not await qr_toggle.is_visible():
                         raise SelectorError("ZOL_QR_TOGGLE_NOT_FOUND: 未找到可见的扫码切换按钮")
-                    await qr_toggle.click(timeout=5000)
+                    await self.actions.perform(qr_toggle.click, timeout=5000)
                     await self.simulator.random_delay(0.5, 1.5)
 
                 qr_panel = self.page.locator(".code-login").first
@@ -821,9 +772,10 @@ class ZOLPlatform(BasePlatform):
         try:
             async with target_page.expect_response(
                 self._is_draft_list_response,
-                timeout=15000,
+                timeout=self.actions.event_timeout(15000),
             ) as response_info:
-                await target_page.goto(
+                await self.actions.perform(
+                    target_page.goto,
                     draft_url,
                     wait_until="domcontentloaded",
                     timeout=15000,
@@ -871,7 +823,8 @@ class ZOLPlatform(BasePlatform):
             "editor_url", "https://post.zol.com.cn/v2/create/article"
         )
         try:
-            await self.page.goto(
+            await self.actions.perform(
+                self.page.goto,
                 editor_url,
                 wait_until="domcontentloaded",
                 timeout=15000,
@@ -926,14 +879,16 @@ class ZOLPlatform(BasePlatform):
                     # 真正可编辑节点由后面的 placeholder 选择器定位。
                     continue
                 if tag_name in ("input", "textarea"):
-                    await locator.fill(expected)
+                    await self.actions.fill(locator, expected)
                     actual = await locator.input_value()
                 else:
-                    await locator.click()
-                    await self.page.keyboard.press("Control+A")
-                    await self.page.keyboard.insert_text(expected)
-                    await locator.evaluate(
-                        "el => el.dispatchEvent(new InputEvent('input', {bubbles: true, inputType: 'insertText'}))"
+                    await self.actions.perform(locator.click)
+                    await self.actions.perform(self.page.keyboard.press, "Control+A")
+                    await self.actions.insert_metadata(self.page.keyboard, expected)
+                    await self.actions.perform(
+                        locator.evaluate,
+                        "el => el.dispatchEvent(new InputEvent('input', "
+                        "{bubbles: true, inputType: 'insertText'}))",
                     )
                     actual = await locator.inner_text()
                 actual_normalized = re.sub(r"\s+", " ", actual.strip())
@@ -1123,8 +1078,7 @@ class ZOLPlatform(BasePlatform):
         """
 
         try:
-            dismissed = await self.page.evaluate(
-                """() => {
+            dismissed = await self.actions.perform(self.page.evaluate, """() => {
                     const tips = Array.from(
                         document.querySelectorAll('.editor-draft-tip-box')
                     );
@@ -1137,8 +1091,7 @@ class ZOLPlatform(BasePlatform):
                         tip.style.display = 'none';
                     }
                     return true;
-                }"""
-            )
+                }""")
             if dismissed:
                 await self.simulator.random_delay(0.3, 0.8)
         except Exception as exc:  # noqa: BLE001
@@ -1150,7 +1103,7 @@ class ZOLPlatform(BasePlatform):
         await self._dismiss_editor_overlays()
         current, editor_kind = await self._resolve_content_editor()
         try:
-            await current.click(timeout=5000)
+            await self.actions.perform(current.click, timeout=5000)
             return current, editor_kind
         except Exception as first_error:
             if self._exception_means_browser_closed(first_error):
@@ -1162,7 +1115,7 @@ class ZOLPlatform(BasePlatform):
             # 传入的旧 locator 当作当前正文节点继续 focus。
             fresh, fresh_kind = await self._resolve_content_editor()
             try:
-                await fresh.click(timeout=5000)
+                await self.actions.perform(fresh.click, timeout=5000)
                 return fresh, fresh_kind
             except Exception as second_error:
                 if self._exception_means_browser_closed(second_error):
@@ -1579,8 +1532,7 @@ class ZOLPlatform(BasePlatform):
         if editor_kind == "textarea":
             return
         try:
-            await editor.evaluate(
-                """
+            await self.actions.perform(editor.evaluate, """
                 (root) => {
                     root.dispatchEvent(new InputEvent('input', {
                         bubbles: true,
@@ -1603,8 +1555,7 @@ class ZOLPlatform(BasePlatform):
                         // DOM input/change 仍是主同步信号；TinyMCE API 是同源增强。
                     }
                 }
-                """
-            )
+                """)
         except Exception as exc:
             if self._exception_means_browser_closed(exc):
                 raise BrowserLifecycleError(
@@ -1711,8 +1662,7 @@ class ZOLPlatform(BasePlatform):
                 "ZOL_STRUCTURED_BLOCK_INVALID: 正文块类型无效"
             )
         try:
-            inserted = await editor.evaluate(
-                """
+            inserted = await self.actions.structured_block(editor.evaluate, text, """
                 (root, markup) => {
                     const view = root.ownerDocument.defaultView;
                     const frame = view && view.frameElement;
@@ -1739,9 +1689,7 @@ class ZOLPlatform(BasePlatform):
                     root.dispatchEvent(new Event('change', {bubbles: true}));
                     return true;
                 }
-                """,
-                markup,
-            )
+                """, markup)
             if inserted is not True:
                 raise ContentValidationError(
                     "ZOL_STRUCTURED_BLOCK_INSERT_FAILED: TinyMCE 模型写入未确认"
@@ -1873,7 +1821,7 @@ class ZOLPlatform(BasePlatform):
 
         editor, editor_kind = await self._resolve_content_editor()
         await self._dismiss_editor_overlays()
-        await editor.fill(expected_text)
+        await self.actions.fill_body(editor, expected_text)
         await self._commit_editor_dom_change(editor, editor_kind)
 
         control = self.page.locator(self.DRAFT_SAVE_SELECTOR)
@@ -1895,7 +1843,8 @@ class ZOLPlatform(BasePlatform):
             }
         )
         try:
-            await self.page.goto(
+            await self.actions.perform(
+                self.page.goto,
                 editor_url,
                 wait_until="domcontentloaded",
                 timeout=15000,
@@ -1999,11 +1948,11 @@ class ZOLPlatform(BasePlatform):
         # 规范化只用于读回比较，不得改变冻结内容的写入文本或排版。
         if not has_images and not has_headings:
             await self._dismiss_editor_overlays()
-            await editor.fill(expected_value)
+            await self.actions.fill_body(editor, expected_value)
         else:
             editor, editor_kind = await self._click_editor(editor)
-            await self.page.keyboard.press("Control+A")
-            await self.page.keyboard.press("Backspace")
+            await self.actions.perform(self.page.keyboard.press, "Control+A")
+            await self.actions.perform(self.page.keyboard.press, "Backspace")
             previous_kind = None
             for block_index, block in enumerate(content_blocks):
                 btype = block.get("type")
@@ -2034,8 +1983,8 @@ class ZOLPlatform(BasePlatform):
                     else:
                         await self._collapse_editor_selection_at_end(editor, editor_kind)
                     if previous_kind == "text":
-                        await self.page.keyboard.press("Enter")
-                        await self.page.keyboard.press("Enter")
+                        await self.actions.perform(self.page.keyboard.press, "Enter")
+                        await self.actions.perform(self.page.keyboard.press, "Enter")
                     editor, editor_kind = await self._apply_heading_block(
                         editor,
                         block_text,
@@ -2076,14 +2025,14 @@ class ZOLPlatform(BasePlatform):
                             await self._append_editor_block_anchor(editor, editor_kind)
                         await self._collapse_editor_selection_at_end(editor, editor_kind)
                         if previous_kind == "text":
-                            await self.page.keyboard.press("Enter")
-                            await self.page.keyboard.press("Enter")
+                            await self.actions.perform(self.page.keyboard.press, "Enter")
+                            await self.actions.perform(self.page.keyboard.press, "Enter")
                         block_lines = block_text.splitlines() or [block_text]
                         for index, line in enumerate(block_lines):
                             if line:
-                                await self.page.keyboard.insert_text(line)
+                                await self.actions.insert_text(self.page.keyboard, line)
                             if index < len(block_lines) - 1:
-                                await self.page.keyboard.press("Enter")
+                                await self.actions.perform(self.page.keyboard.press, "Enter")
                     previous_kind = "text"
                 elif btype == "image":
                     editor, editor_kind = await self._click_editor(editor)
@@ -2530,7 +2479,7 @@ class ZOLPlatform(BasePlatform):
                     "error_code": "ZOL_IMAGE_UPLOAD_CONTROL_NOT_FOUND",
                     "error": "未找到 ZOL 图片上传按钮",
                 }
-            await button.click(timeout=5000)
+            await self.actions.perform(button.click, timeout=5000)
             modal = self.page.locator(self.IMAGE_MODAL).last
             await modal.wait_for(state="visible", timeout=5000)
 
@@ -2541,7 +2490,7 @@ class ZOLPlatform(BasePlatform):
                     "error_code": "ZOL_IMAGE_UPLOAD_CONTROL_NOT_FOUND",
                     "error": "图片弹窗中未找到唯一正文图片控件",
                 }
-            await file_input.set_input_files(str(Path(image_path).resolve()))
+            await self.actions.perform(file_input.set_input_files, str(Path(image_path).resolve()))
             await self.page.wait_for_timeout(300)
 
             insert_button = modal.get_by_role("button", name="插入编辑器", exact=True)
@@ -2562,7 +2511,7 @@ class ZOLPlatform(BasePlatform):
                         "error": "图片上传后插入编辑器按钮在 15 秒内仍不可用",
                     }
                 await asyncio.sleep(0.5)
-            await insert_button.click(timeout=5000)
+            await self.actions.perform(insert_button.click, timeout=5000)
 
             deadline = asyncio.get_running_loop().time() + 15
             stable_fingerprints: list[str] | None = None
@@ -2676,11 +2625,11 @@ class ZOLPlatform(BasePlatform):
                 return
             close = active.locator("button[aria-label='Close'], .ant-modal-close").first
             if await close.count() > 0:
-                await close.click()
+                await self.actions.perform(close.click)
             else:
                 cancel = active.get_by_role("button", name="取 消", exact=True).first
                 if await cancel.count() > 0:
-                    await cancel.click()
+                    await self.actions.perform(cancel.click)
                 else:
                     raise SelectorError(
                         "ZOL_IMAGE_MODAL_CLOSE_FAILED: 图片弹窗没有可验证关闭控件"
@@ -2761,11 +2710,11 @@ class ZOLPlatform(BasePlatform):
             if await modal.count() and await modal.is_visible():
                 close = modal.locator("button[aria-label='Close'], .ant-modal-close").first
                 if await close.count():
-                    await close.click(force=True)
+                    await self.actions.perform(close.click, force=True)
                 else:
                     cancel = modal.get_by_role("button", name="取 消", exact=True).first
                     if await cancel.count():
-                        await cancel.click(force=True)
+                        await self.actions.perform(cancel.click, force=True)
         except Exception as exc:
             if self._exception_means_browser_closed(exc):
                 raise BrowserLifecycleError("BROWSER_CONTEXT_CLOSED: ZOL 关闭话题弹窗时页面已关闭") from exc
@@ -2853,7 +2802,7 @@ class ZOLPlatform(BasePlatform):
             before_sources = tuple(
                 (urlparse(url).hostname, urlparse(url).path) for url in before_urls
             )
-            await inputs.first.set_input_files(str(cover_path), timeout=15000)
+            await self.actions.perform(inputs.first.set_input_files, str(cover_path), timeout=15000)
             await asyncio.sleep(1)
             modals = self.page.locator(".ant-modal-wrap:visible")
             await modals.first.wait_for(state="visible", timeout=5000)
@@ -2875,7 +2824,7 @@ class ZOLPlatform(BasePlatform):
                     raise ContentValidationError(
                         "ZOL_COVER_CONFIRM_AMBIGUOUS: 导读图确认控件不唯一"
                     )
-                await visible_confirms[0].click(timeout=5000)
+                await self.actions.perform(visible_confirms[0].click, timeout=5000)
                 await modal.wait_for(state="hidden", timeout=15000)
                 crop_confirmed = True
             if not crop_confirmed:
@@ -3041,7 +2990,7 @@ class ZOLPlatform(BasePlatform):
 
         all_candidates = []
         try:
-            await button.click(timeout=5000)
+            await self.actions.perform(button.click, timeout=5000)
             modal = self.page.locator(self.TOPIC_MODAL).last
             await modal.wait_for(state="visible", timeout=5000)
             search = modal.locator("input[placeholder='搜索话题']").first
@@ -3055,7 +3004,7 @@ class ZOLPlatform(BasePlatform):
                 }
 
             for query in queries:
-                await search.fill(query)
+                await self.actions.fill(search, query)
                 await self.page.wait_for_timeout(800)
                 candidates = await self._topic_candidates(modal)
                 for candidate in candidates:
@@ -3068,7 +3017,7 @@ class ZOLPlatform(BasePlatform):
                 item = modal.locator(".list .item .title").filter(has_text=selected).first
                 if await item.count() == 0:
                     continue
-                await item.click(timeout=5000)
+                await self.actions.perform(item.click, timeout=5000)
                 confirm = modal.get_by_role("button", name="确 定", exact=True).first
                 if await confirm.count() == 0:
                     return {
@@ -3080,7 +3029,7 @@ class ZOLPlatform(BasePlatform):
                             "kind": "topic", "query": query, "candidates": all_candidates,
                         },
                     }
-                await confirm.click(timeout=5000)
+                await self.actions.perform(confirm.click, timeout=5000)
                 await modal.wait_for(state="hidden", timeout=5000)
                 if not await self._verify_topic_selected(selected):
                     return {
@@ -3207,7 +3156,7 @@ class ZOLPlatform(BasePlatform):
 
         self.page.on("response", collect)
         try:
-            await control.click(timeout=5000)
+            await self.actions.perform(control.click, timeout=5000)
             deadline = asyncio.get_running_loop().time() + self.DRAFT_RESPONSE_WAIT_SECONDS
             while asyncio.get_running_loop().time() < deadline:
                 await asyncio.sleep(self.DRAFT_RESPONSE_POLL_INTERVAL)
@@ -3365,7 +3314,8 @@ class ZOLPlatform(BasePlatform):
             if delay:
                 await asyncio.sleep(delay)
             try:
-                await self.page.goto(
+                await self.actions.perform(
+                    self.page.goto,
                     editor_url,
                     wait_until="domcontentloaded",
                     timeout=15000,
@@ -3645,9 +3595,10 @@ class ZOLPlatform(BasePlatform):
         self._public_publish_attempted = True
         try:
             async with self.page.expect_response(
-                self._is_publication_response, timeout=self.PUBLICATION_TIMEOUT_MS,
+                self._is_publication_response,
+                timeout=self.actions.event_timeout(self.PUBLICATION_TIMEOUT_MS),
             ) as pending:
-                await button.click(timeout=8000)
+                await self.actions.perform(button.click, timeout=8000)
             response = await pending.value
             if not self._publication_request_matches(response.request, draft_id, expected_title):
                 raise ValueError("发布请求与当前草稿不匹配")

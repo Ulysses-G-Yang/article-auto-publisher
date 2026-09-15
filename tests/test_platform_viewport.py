@@ -91,12 +91,18 @@ def test_base_initialize_keeps_fixed_viewport_for_other_platforms(tmp_path) -> N
         profile_dir=tmp_path / "isolated-profile",
         strict_profile_lock=True,
     )
-    playwright, _context = _initialize(platform, tmp_path)
+    playwright, context = _initialize(platform, tmp_path)
 
     kwargs = playwright.chromium.calls[0]
     assert kwargs["headless"] is False
     assert kwargs["viewport"] == {"width": 1366, "height": 900}
     assert "no_viewport" not in kwargs
+    assert kwargs["channel"] == "chrome"
+    assert kwargs["user_data_dir"] == str((tmp_path / "isolated-profile").resolve())
+    assert kwargs["args"] == [
+        "--no-first-run", "--no-default-browser-check", "--no-proxy-server",
+    ]
+    context.add_init_script.assert_not_awaited()
 
 
 def test_xiaohongshu_initialize_uses_native_window_viewport(tmp_path) -> None:

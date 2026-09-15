@@ -44,7 +44,6 @@ def test_paced_writer_waits_for_native_blocks_and_stops_before_later_upload(tmp_
                 platform.page = page
                 platform.context = page.context
                 platform.simulator.random_delay = AsyncMock()
-                platform.TEXT_CHUNK_INTERVAL_SECONDS = 0.005
                 platform.BLOCK_SETTLE_SECONDS = 0.03
                 platform.EDITOR_WAIT_INTERVAL_SECONDS = 0.02
                 platform.EDITOR_WAIT_ATTEMPTS = 35
@@ -67,7 +66,7 @@ def test_paced_writer_waits_for_native_blocks_and_stops_before_later_upload(tmp_
                     )
                     assert await page.evaluate("window.uploads") == 2
                     chunks = await page.evaluate("window.inputs")
-                    assert max(map(len, chunks)) <= platform.TEXT_CHUNK_SIZE
+                    assert max(map(len, chunks)) == 1
                     assert "旧稿" not in await page.locator("[contenteditable]").inner_text()
                 else:
                     with pytest.raises(ContentValidationError):

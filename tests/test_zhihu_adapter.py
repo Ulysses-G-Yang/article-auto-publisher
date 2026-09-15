@@ -130,7 +130,7 @@ def test_cookie_is_only_weak_signal_and_cannot_prove_login() -> None:
     )
 
     assert run(platform.check_login()) is False
-    assert platform.last_login_error.startswith("ZHIHU_SESSION_INVALID:")
+    assert platform.last_login_error == "LOGIN_REQUIRED"
     assert "secret-must-not-leak" not in platform.last_login_error
     assert platform._identity_payload is None
 
@@ -187,6 +187,7 @@ def test_account_service_creates_and_verifies_isolated_zhihu_profile(
     created_platforms = []
 
     class FakeZhihuSessionPlatform:
+        last_login_error = "LOGIN_REQUIRED"
         platform_name = "zhihu"
 
         def __init__(self, checks: list[bool]) -> None:
@@ -262,6 +263,7 @@ def test_account_service_cleans_up_after_zhihu_login_timeout(
     database = AccountDatabase(f"sqlite+aiosqlite:///{(tmp_path / 'accounts.db').as_posix()}")
 
     class TimeoutPlatform:
+        last_login_error = "LOGIN_REQUIRED"
         platform_name = "zhihu"
 
         def __init__(self) -> None:
@@ -572,7 +574,6 @@ def _make_delivery_platform(page=None):
     platform.context = FakeContext()
     platform.simulator = _InstantSimulator()
     platform.PERSIST_VERIFY_INTERVAL_SECONDS = 0
-    platform.TEXT_CHUNK_INTERVAL_SECONDS = 0
     platform.BLOCK_SETTLE_SECONDS = 0
     platform.EDITOR_WAIT_INTERVAL_SECONDS = 0
     platform.EDITOR_WAIT_ATTEMPTS = 2

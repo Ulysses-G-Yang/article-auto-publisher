@@ -200,7 +200,7 @@ class SmzdmPublicationMixin:
                 r.request.method == "POST"
                 and r.url == f"https://post.smzdm.com/api/draft/{draft_id}"
             ),
-            timeout=30000,
+            timeout=self.actions.event_timeout(30000),
         ) as pending:
             await self._verify_persisted_draft(title, edit_url)
         response = await pending.value
@@ -313,8 +313,12 @@ class SmzdmPublicationMixin:
         await self._assert_publication_content(self._publication_title)
         if await self.page.locator(COVER_SELECTOR).count():
             raise SelectorError("什么值得买已有封面，不自动覆盖")
-        await self.page.get_by_text("添加长图", exact=True).click(timeout=5000)
-        await self.page.get_by_text("已上传图片", exact=True).click(timeout=15000)
+        await self.actions.perform(
+            self.page.get_by_text("添加长图", exact=True).click, timeout=5000,
+        )
+        await self.actions.perform(
+            self.page.get_by_text("已上传图片", exact=True).click, timeout=15000,
+        )
         thumbs = self.page.locator(".pic-box .pic-item img.thumb-imgs")
         await thumbs.first.wait_for(state="visible", timeout=15000)
         sources = await thumbs.evaluate_all("es => es.map(e => e.src)")
@@ -327,9 +331,9 @@ class SmzdmPublicationMixin:
             lambda r: (
                 r.url == "https://post.smzdm.com/api/image/original" and r.request.method == "POST"
             ),
-            timeout=20000,
+            timeout=self.actions.event_timeout(20000),
         ) as pending:
-            await thumbs.nth(matches[0]).click(timeout=5000)
+            await self.actions.perform(thumbs.nth(matches[0]).click, timeout=5000)
         response = await pending.value
         payload = await response.json()
         original = (payload.get("data") or {}).get("original_url", "")
@@ -352,9 +356,9 @@ class SmzdmPublicationMixin:
         try:
             async with self.page.expect_response(
                 lambda r: r.url == CROP_URL and r.request.method == "POST",
-                timeout=30000,
+                timeout=self.actions.event_timeout(30000),
             ) as pending:
-                await button.click(timeout=5000)
+                await self.actions.perform(button.click, timeout=5000)
             response = await pending.value
             result = await response.json()
             rows = result.get("data")
@@ -486,9 +490,9 @@ class SmzdmPublicationMixin:
         try:
             async with self.page.expect_response(
                 lambda r: r.url == SUBMIT_URL and r.request.method == "POST",
-                timeout=self.PUBLICATION_TIMEOUT_MS,
+                timeout=self.actions.event_timeout(self.PUBLICATION_TIMEOUT_MS),
             ) as pending:
-                await button.click(timeout=8000)
+                await self.actions.perform(button.click, timeout=8000)
             response = await pending.value
             result = await response.json()
             if (

@@ -420,9 +420,15 @@ class XiaoheihePlatform(BasePlatform):
         注意：x_xhh_tokenid 是未登录也存在的埋点 cookie，不能用作登录态判断。
         游客态不会有 heybox_id / nickname / pkey 等登录 cookie。
         """
+        self.last_login_error = ""
         try:
             self._raise_if_page_closed("小黑盒登录态检测")
-            await self.page.goto("https://www.xiaoheihe.cn/", wait_until="domcontentloaded", timeout=15000)
+            await self.actions.perform(
+                self.page.goto,
+                "https://www.xiaoheihe.cn/",
+                wait_until="domcontentloaded",
+                timeout=15000,
+            )
             # SPA hydration 和登录 Cookie 可在不同时间落地。保持原有 4 秒
             # 总等待预算，但改为多次只读观测，避免某一次 context.cookies()
             # 暂时失败就把已验证账号降级为 LOGIN_REQUIRED。
@@ -432,32 +438,42 @@ class XiaoheihePlatform(BasePlatform):
                     return True
                 if attempt < 2:
                     await asyncio.sleep(1)
+            self.last_login_error = await self.login_obstacle_code()
             return False
         except BrowserLifecycleError:
             raise
         except Exception as exc:
             if self._exception_means_browser_closed(exc):
                 raise BrowserLifecycleError("BROWSER_CONTEXT_CLOSED: 小黑盒登录态检测时页面已关闭") from exc
+            self.last_login_error = "XIAOHEIHE_LOGIN_CHECK_ERROR"
             return False
 
     async def login(self):
         """打开首页，点击右上角头像弹出二维码，等待扫码登录"""
         # 1. 访问首页
         self._raise_if_page_closed("小黑盒打开登录页")
-        await self.page.goto("https://www.xiaoheihe.cn/", wait_until="domcontentloaded")
+        await self.actions.perform(
+            self.page.goto,
+            "https://www.xiaoheihe.cn/",
+            wait_until="domcontentloaded",
+        )
         await asyncio.sleep(2)
 
         # 2. 点击右上角头像，弹出登录二维码面板
         try:
-            await self.page.click(self.LOGIN_TRIGGER, timeout=8000)
+            await self.actions.perform(self.page.click, self.LOGIN_TRIGGER, timeout=8000)
         except Exception as e:
             if self._exception_means_browser_closed(e):
                 raise BrowserLifecycleError("BROWSER_CONTEXT_CLOSED: 小黑盒打开登录入口时页面已关闭") from e
             logger.warning("小黑盒点击用户入口失败，尝试重新打开: {}", e)
-            await self.page.goto("https://www.xiaoheihe.cn/", wait_until="domcontentloaded")
+            await self.actions.perform(
+                self.page.goto,
+                "https://www.xiaoheihe.cn/",
+                wait_until="domcontentloaded",
+            )
             await asyncio.sleep(2)
             try:
-                await self.page.click(self.LOGIN_TRIGGER, timeout=8000)
+                await self.actions.perform(self.page.click, self.LOGIN_TRIGGER, timeout=8000)
             except Exception as e2:
                 if self._exception_means_browser_closed(e2):
                     raise BrowserLifecycleError("BROWSER_CONTEXT_CLOSED: 小黑盒重试登录入口时页面已关闭") from e2
@@ -520,7 +536,11 @@ class XiaoheihePlatform(BasePlatform):
         self._raise_if_page_closed("小黑盒打开文章编辑器")
 
         # 先回首页，确保从干净状态进入
-        await self.page.goto("https://www.xiaoheihe.cn/", wait_until="domcontentloaded")
+        await self.actions.perform(
+            self.page.goto,
+            "https://www.xiaoheihe.cn/",
+            wait_until="domcontentloaded",
+        )
         await self.simulator.random_delay(2, 4)
         self._raise_if_page_closed("小黑盒首页发布入口")
 
@@ -533,7 +553,11 @@ class XiaoheihePlatform(BasePlatform):
                 raise BrowserLifecycleError("BROWSER_CONTEXT_CLOSED: 小黑盒打开发布菜单时页面已关闭") from e
             logger.warning("小黑盒点击发布内容失败，尝试创作中心兜底: {}", e)
             try:
-                await self.page.goto("https://www.xiaoheihe.cn/creator", wait_until="domcontentloaded")
+                await self.actions.perform(
+                    self.page.goto,
+                    "https://www.xiaoheihe.cn/creator",
+                    wait_until="domcontentloaded",
+                )
                 await self.simulator.random_delay(2, 4)
                 publish_button = await self._wait_first_visible(self.PUBLISH_BTN, timeout_ms=10000)
                 await self._click_with_fallback(publish_button, timeout=10000)
@@ -591,12 +615,14 @@ class XiaoheihePlatform(BasePlatform):
         try:
             if await locator.count() == 0 or not await locator.is_visible():
                 raise RuntimeError("真实标题编辑器不可见")
-            await locator.click()
+            await self.actions.perform(locator.click)
             # Locator.fill 对 contenteditable 会先清空已有 ProseMirror 节点，
             # 避免 Ctrl+A 在 SPA 编辑器焦点尚未稳定时把文字追加到旧内容。
-            await locator.fill(expected)
-            await locator.evaluate(
-                "el => el.dispatchEvent(new InputEvent('input', {bubbles: true, inputType: 'insertText'}))"
+            await self.actions.fill(locator, expected)
+            await self.actions.perform(
+                locator.evaluate,
+                "el => el.dispatchEvent(new InputEvent('input', "
+                "{bubbles: true, inputType: 'insertText'}))",
             )
             actual = " ".join((await locator.inner_text()).split())
             if actual != expected:
@@ -628,7 +654,7 @@ class XiaoheihePlatform(BasePlatform):
             "failed_image_count": 0,
         }
         editor = await self._current_body_editor()
-        await editor.fill("")
+        await self.actions.fill(editor, "")
         await self._place_body_caret_at_end()
         await self.simulator.random_delay(0.3, 0.8)
 
@@ -654,19 +680,20 @@ class XiaoheihePlatform(BasePlatform):
                         )
                 if content_started:
                     await self._place_body_caret_at_end()
-                    await self.page.keyboard.press("Enter")
-                    await self.page.keyboard.press("Enter")
+                    await self.actions.perform(self.page.keyboard.press, "Enter")
+                    await self.actions.perform(self.page.keyboard.press, "Enter")
                 await self._place_body_caret_at_end()
                 if heading_level is not None:
-                    await self.page.keyboard.type(
-                        self.HEADING_MARKDOWN_PREFIX[heading_level]
+                    await self.actions.type_text(
+                        self.page.keyboard,
+                        self.HEADING_MARKDOWN_PREFIX[heading_level],
                     )
                 lines = text.splitlines() or [text]
                 for i, line in enumerate(lines):
                     if line.strip():
-                        await self.page.keyboard.insert_text(line.strip())
+                        await self.actions.insert_text(self.page.keyboard, line.strip())
                     if i < len(lines) - 1:
-                        await self.page.keyboard.press("Enter")
+                        await self.actions.perform(self.page.keyboard.press, "Enter")
                 content_started = True
                 if heading_level is not None:
                     await self._validate_heading_structure(
@@ -680,8 +707,8 @@ class XiaoheihePlatform(BasePlatform):
 
             if content_started:
                 await self._place_body_caret_at_end()
-                await self.page.keyboard.press("Enter")
-                await self.page.keyboard.press("Enter")
+                await self.actions.perform(self.page.keyboard.press, "Enter")
+                await self.actions.perform(self.page.keyboard.press, "Enter")
             await self._place_body_caret_at_end()
 
             img_path = self._image_path_for_block(block, images)
@@ -724,9 +751,10 @@ class XiaoheihePlatform(BasePlatform):
                 await self.simulator.random_delay(2.5, 4.5)
 
         editor = await self._current_body_editor()
-        await editor.evaluate(
+        await self.actions.perform(
+            editor.evaluate,
             "el => el.dispatchEvent(new InputEvent('input', {bubbles: true, "
-            "inputType: 'insertText'}))"
+            "inputType: 'insertText'}))",
         )
 
         actual_text = await editor.inner_text()
@@ -1084,10 +1112,12 @@ class XiaoheihePlatform(BasePlatform):
         expect_file_chooser = getattr(self.page, "expect_file_chooser", None)
         if callable(expect_file_chooser):
             try:
-                async with expect_file_chooser(timeout=4000) as chooser_info:
+                async with expect_file_chooser(
+                    timeout=self.actions.event_timeout(4000)
+                ) as chooser_info:
                     await self._click_with_fallback(trigger, timeout=5000)
                 chooser = await chooser_info.value
-                await chooser.set_files(image_path)
+                await self.actions.perform(chooser.set_files, image_path)
                 return True
             except Exception as exc:
                 logger.debug(
@@ -1101,7 +1131,7 @@ class XiaoheihePlatform(BasePlatform):
         if file_input is None:
             return False
         try:
-            await file_input.set_input_files(image_path)
+            await self.actions.perform(file_input.set_input_files, image_path)
             return True
         except Exception as exc:
             logger.debug("小黑盒设置文件控件失败: error_type={}", type(exc).__name__)
@@ -1333,24 +1363,28 @@ class XiaoheihePlatform(BasePlatform):
         try:
             add_community = self.page.locator("button:has-text('添加社区')").first
             if await add_community.count() > 0:
-                await add_community.click(timeout=5000)
+                await self.actions.perform(add_community.click, timeout=5000)
                 await self.simulator.random_delay(1, 2)
                 search = await self.page.wait_for_selector(
                     ".modal input, [class*='dialog'] input, input[placeholder*='社区'], input[placeholder*='搜索']",
                     timeout=5000,
                 )
                 if search:
-                    await search.fill(topic[:10])
+                    await self.actions.fill(search, topic[:10])
                     await self.simulator.random_delay(1, 2)
                     first = await self.page.wait_for_selector(
                         ".modal .community-item:first-child, [class*='dialog'] li:first-child, .search-result-item:first-child",
                         timeout=5000,
                     )
                     if first:
-                        await first.click()
+                        await self.actions.perform(first.click)
                         await self.simulator.random_delay(0.5, 1.0)
                 try:
-                    await self.page.click("button:has-text('确定'), button:has-text('完成')", timeout=3000)
+                    await self.actions.perform(
+                        self.page.click,
+                        "button:has-text('确定'), button:has-text('完成')",
+                        timeout=3000,
+                    )
                 except Exception:
                     pass
         except Exception as e:
@@ -1362,24 +1396,28 @@ class XiaoheihePlatform(BasePlatform):
         try:
             add_topic = self.page.locator("button:has-text('添加话题')").first
             if await add_topic.count() > 0:
-                await add_topic.click(timeout=5000)
+                await self.actions.perform(add_topic.click, timeout=5000)
                 await self.simulator.random_delay(1, 2)
                 search = await self.page.wait_for_selector(
                     ".modal input, [class*='dialog'] input, input[placeholder*='话题'], input[placeholder*='搜索']",
                     timeout=5000,
                 )
                 if search:
-                    await search.fill(topic[:10])
+                    await self.actions.fill(search, topic[:10])
                     await self.simulator.random_delay(1, 2)
                     first = await self.page.wait_for_selector(
                         ".modal .topic-item:first-child, [class*='dialog'] li:first-child, .search-result-item:first-child",
                         timeout=5000,
                     )
                     if first:
-                        await first.click()
+                        await self.actions.perform(first.click)
                         await self.simulator.random_delay(0.5, 1.0)
                 try:
-                    await self.page.click("button:has-text('确定'), button:has-text('完成')", timeout=3000)
+                    await self.actions.perform(
+                        self.page.click,
+                        "button:has-text('确定'), button:has-text('完成')",
+                        timeout=3000,
+                    )
                 except Exception:
                     pass
         except Exception as e:
@@ -1410,7 +1448,7 @@ class XiaoheihePlatform(BasePlatform):
         """点击编辑器内部滚动容器中的控件，兼容元素可见但坐标不在视口的情况。"""
         self._raise_if_page_closed("点击编辑器控件")
         try:
-            await locator.click(timeout=timeout)
+            await self.actions.perform(locator.click, timeout=timeout)
             return
         except Exception as first_error:
             try:
@@ -1440,14 +1478,16 @@ class XiaoheihePlatform(BasePlatform):
             except Exception:
                 pass
             try:
-                await locator.click(timeout=2000, force=True)
+                await self.actions.perform(locator.click, timeout=2000, force=True)
                 return
             except Exception:
                 # React/Vue 按钮仍会走正常 click handler；最后用 DOM click，
                 # 并保留第一处错误作为日志上下文。
                 try:
-                    await locator.evaluate(
-                        "el => { el.scrollIntoView({block: 'center', inline: 'nearest'}); el.click(); }"
+                    await self.actions.perform(
+                        locator.evaluate,
+                        "el => { el.scrollIntoView({block: 'center', "
+                        "inline: 'nearest'}); el.click(); }",
                     )
                     return
                 except Exception as final_error:
@@ -1509,7 +1549,7 @@ class XiaoheihePlatform(BasePlatform):
                     "needs_selection": True,
                     "error": f"小黑盒{kind}选择弹窗未找到实时搜索框",
                 }
-            await search.fill(query[:30])
+            await self.actions.fill(search, query[:30])
             await self.simulator.random_delay(1, 2)
 
             first_result = await self._wait_first_visible(result_selector, timeout_ms=5000)
@@ -1746,7 +1786,12 @@ class XiaoheihePlatform(BasePlatform):
             }
         body_url = await editor_images.first.get_attribute("src") or ""
         body_bytes = await self._cover_image_bytes(body_url)
-        await self.page.goto(self.DRAFTS_URL, wait_until="domcontentloaded", timeout=30000)
+        await self.actions.perform(
+            self.page.goto,
+            self.DRAFTS_URL,
+            wait_until="domcontentloaded",
+            timeout=30000,
+        )
         await self.simulator.random_delay(2, 3)
         card_urls = await self.page.evaluate(
             r"""
@@ -1806,9 +1851,9 @@ class XiaoheihePlatform(BasePlatform):
         try:
             self._raise_if_page_closed("关闭小黑盒弹窗遮罩")
             # 一次 Escape 可能只关闭嵌套弹窗，连续两次再检查遮罩状态。
-            await self.page.keyboard.press("Escape")
+            await self.actions.perform(self.page.keyboard.press, "Escape")
             await asyncio.sleep(0.2)
-            await self.page.keyboard.press("Escape")
+            await self.actions.perform(self.page.keyboard.press, "Escape")
             await self.simulator.random_delay(0.3, 0.6)
 
             for selector in (
@@ -1842,7 +1887,11 @@ class XiaoheihePlatform(BasePlatform):
         if getattr(self, "_editor_url", ""):
             self._raise_if_page_closed("返回小黑盒文章编辑器")
             try:
-                await self.page.goto(self._editor_url, wait_until="domcontentloaded")
+                await self.actions.perform(
+                    self.page.goto,
+                    self._editor_url,
+                    wait_until="domcontentloaded",
+                )
                 await self.simulator.random_delay(2, 4)
             except Exception as exc:
                 if self._exception_means_browser_closed(exc):
@@ -1887,7 +1936,7 @@ class XiaoheihePlatform(BasePlatform):
             await self._dismiss_overlays()
             save_button = await self._resolve_save_draft_button()
             clicked = True
-            await save_button.click(timeout=8000)
+            await self.actions.perform(save_button.click, timeout=8000)
         except asyncio.CancelledError as exc:
             if clicked:
                 raise DraftResultUnknownError(
@@ -2257,7 +2306,11 @@ class XiaoheihePlatform(BasePlatform):
         baseline_page = None
         try:
             baseline_page = await new_page()
-            await baseline_page.goto(self.DRAFTS_URL, wait_until="domcontentloaded")
+            await self.actions.perform(
+                baseline_page.goto,
+                self.DRAFTS_URL,
+                wait_until="domcontentloaded",
+            )
             if not self._is_drafts_route(getattr(baseline_page, "url", "")):
                 logger.warning("小黑盒保存草稿拒绝：草稿箱页面路由未确认")
                 return None
@@ -2366,7 +2419,8 @@ class XiaoheihePlatform(BasePlatform):
                 "DRAFT_RESULT_UNKNOWN: 小黑盒草稿 ID 无效"
             )
         try:
-            await self.page.goto(
+            await self.actions.perform(
+                self.page.goto,
                 editor_url,
                 wait_until="domcontentloaded",
                 timeout=30000,
@@ -2398,8 +2452,7 @@ class XiaoheihePlatform(BasePlatform):
             )
 
         try:
-            match_count = await self.page.evaluate(
-                r"""
+            match_count = await self.actions.perform(self.page.evaluate, r"""
                 (expectedOpaque) => {
                     const normalize = (value) => String(value || '')
                         .replace(/\s+/g, ' ').trim();
@@ -2469,9 +2522,7 @@ class XiaoheihePlatform(BasePlatform):
                     }
                     return matches.length;
                 }
-                """,
-                expected_opaque,
-            )
+                """, expected_opaque)
         except Exception as exc:
             if self._exception_means_browser_closed(exc):
                 raise BrowserLifecycleError(
@@ -2592,7 +2643,11 @@ class XiaoheihePlatform(BasePlatform):
         """保存后轮询具体草稿卡片，确认新实体出现；失败返回空串。"""
         try:
             self._raise_if_page_closed("小黑盒验证草稿箱")
-            await self.page.goto(self.DRAFTS_URL, wait_until="domcontentloaded")
+            await self.actions.perform(
+                self.page.goto,
+                self.DRAFTS_URL,
+                wait_until="domcontentloaded",
+            )
             await self.simulator.random_delay(3, 5)
         except BrowserLifecycleError:
             raise
@@ -2614,7 +2669,8 @@ class XiaoheihePlatform(BasePlatform):
                 try:
                     # SPA 草稿列表可能保留首次空快照。重新导航只读页面，
                     # 强制取得新的列表响应；不会重复保存，也不会产生副作用。
-                    await self.page.goto(
+                    await self.actions.perform(
+                        self.page.goto,
                         self.DRAFTS_URL,
                         wait_until="domcontentloaded",
                         timeout=30000,
@@ -2685,11 +2741,11 @@ class XiaoheihePlatform(BasePlatform):
         expected_url = f"https://www.xiaoheihe.cn/app/bbs/link/{draft_id}"
         self._public_publish_attempted = True
         try:
-            await buttons.click(timeout=8000)
+            await self.actions.perform(buttons.click, timeout=8000)
             await self.simulator.random_delay(3, 6)
             confirmation = self.page.get_by_role("button", name="确认发布", exact=True)
             if await confirmation.count() == 1 and await confirmation.is_visible():
-                await confirmation.click(timeout=3000)
+                await self.actions.perform(confirmation.click, timeout=3000)
             await self.page.wait_for_url(expected_url, timeout=self.PUBLICATION_RESULT_TIMEOUT_MS)
             await self.page.get_by_text(expected_title, exact=True).first.wait_for(
                 state="visible", timeout=self.PUBLICATION_RESULT_TIMEOUT_MS,

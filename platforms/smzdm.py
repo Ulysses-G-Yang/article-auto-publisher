@@ -421,7 +421,8 @@ class SmzdmPlatform(SmzdmPublicationMixin, BasePlatform):
 
             self.page.on("response", _on_response)
             try:
-                await self.page.goto(
+                await self.actions.perform(
+                    self.page.goto,
                     HOME_URL,
                     wait_until="domcontentloaded",
                     timeout=30000,
@@ -552,7 +553,8 @@ class SmzdmPlatform(SmzdmPublicationMixin, BasePlatform):
         # 当作本次草稿壳。只有点击“发布新文章”并看到标题框后才允许绑定。
         self._preflight_editor_draft_id = None
         try:
-            await self.page.goto(
+            await self.actions.perform(
+                self.page.goto,
                 "https://post.smzdm.com/tougao/",
                 wait_until="domcontentloaded",
                 timeout=30000,
@@ -568,8 +570,7 @@ class SmzdmPlatform(SmzdmPublicationMixin, BasePlatform):
                 }""",
                 timeout=20000,
             )
-            clicked = await self.page.evaluate(
-                """() => {
+            clicked = await self.actions.perform(self.page.evaluate, """() => {
                     const nodes = Array.from(document.querySelectorAll('*'));
                     const target = nodes.find((el) => {
                         const t = (el.innerText || '').trim();
@@ -578,8 +579,7 @@ class SmzdmPlatform(SmzdmPublicationMixin, BasePlatform):
                     });
                     if (target) { target.click(); return true; }
                     return false;
-                }"""
-            )
+                }""")
             if not clicked:
                 raise RuntimeError("发布新文章入口未找到")
             await self.page.wait_for_selector(
@@ -609,7 +609,7 @@ class SmzdmPlatform(SmzdmPublicationMixin, BasePlatform):
         try:
             if await title_field.count() == 0 or not await title_field.is_visible():
                 raise RuntimeError("标题输入框不可见")
-            await title_field.fill(str(title or "").strip())
+            await self.actions.fill(title_field, str(title or "").strip())
         except Exception as exc:
             if self._exception_means_browser_closed(exc):
                 raise BrowserLifecycleError(
@@ -631,9 +631,9 @@ class SmzdmPlatform(SmzdmPublicationMixin, BasePlatform):
         }
         editor = await self._current_body_editor()
         try:
-            await editor.click(timeout=5000)
-            await self.page.keyboard.press("Control+A")
-            await self.page.keyboard.press("Backspace")
+            await self.actions.perform(editor.click, timeout=5000)
+            await self.actions.perform(self.page.keyboard.press, "Control+A")
+            await self.actions.perform(self.page.keyboard.press, "Backspace")
             await self.simulator.random_delay(0.3, 0.8)
         except Exception as exc:
             if self._exception_means_browser_closed(exc):
@@ -667,14 +667,14 @@ class SmzdmPlatform(SmzdmPublicationMixin, BasePlatform):
                     if paragraph_ready_after_image:
                         paragraph_ready_after_image = False
                     else:
-                        await self.page.keyboard.press("Enter")
+                        await self.actions.perform(self.page.keyboard.press, "Enter")
                 await self._place_body_caret_at_end()
                 lines = text.splitlines() or [text]
                 for line_index, line in enumerate(lines):
                     if line.strip():
-                        await self.page.keyboard.insert_text(line.strip())
+                        await self.actions.insert_text(self.page.keyboard, line.strip())
                     if line_index < len(lines) - 1:
-                        await self.page.keyboard.press("Enter")
+                        await self.actions.perform(self.page.keyboard.press, "Enter")
                 if block_type == "heading":
                     await self._apply_h2_to_current_block()
                 content_started = True
@@ -689,7 +689,7 @@ class SmzdmPlatform(SmzdmPublicationMixin, BasePlatform):
                 if paragraph_ready_after_image:
                     paragraph_ready_after_image = False
                 else:
-                    await self.page.keyboard.press("Enter")
+                    await self.actions.perform(self.page.keyboard.press, "Enter")
             await self._place_body_caret_at_end()
             image_path = self._image_path_for_block(block, images)
             if image_path:
@@ -820,7 +820,7 @@ class SmzdmPlatform(SmzdmPublicationMixin, BasePlatform):
     async def _place_body_caret_at_end(self) -> None:
         editor = await self._current_body_editor()
         try:
-            await editor.press("Control+End")
+            await self.actions.perform(editor.press, "Control+End")
         except Exception as exc:
             if self._exception_means_browser_closed(exc):
                 raise BrowserLifecycleError(
@@ -835,13 +835,13 @@ class SmzdmPlatform(SmzdmPublicationMixin, BasePlatform):
             menu = self.page.locator("button.list-item:has(svg.zicon-t)").first
             if await menu.count() == 0 or not await menu.is_visible():
                 raise RuntimeError("标题菜单不可见")
-            await menu.click(timeout=5000)
+            await self.actions.perform(menu.click, timeout=5000)
             option = self.page.locator(".dropdown-listitem").filter(
                 has_text=re.compile(r"^二级标题$")
             ).first
             if await option.count() == 0 or not await option.is_visible():
                 raise RuntimeError("二级标题选项不可见")
-            await option.click(timeout=5000)
+            await self.actions.perform(option.click, timeout=5000)
         except Exception as exc:
             if self._exception_means_browser_closed(exc):
                 raise BrowserLifecycleError(
@@ -873,8 +873,7 @@ class SmzdmPlatform(SmzdmPublicationMixin, BasePlatform):
             for attempt in range(self.POST_IMAGE_PARAGRAPH_POLL_ATTEMPTS):
                 editor = await self._current_body_editor()
                 try:
-                    mutation = await editor.evaluate(
-                """root => {
+                    mutation = await self.actions.perform(editor.evaluate, """root => {
                     const domTailIsParagraph = () => {
                         const tail = root.lastElementChild;
                         return !!tail && tail.tagName.toLowerCase() === 'p'
@@ -929,8 +928,7 @@ class SmzdmPlatform(SmzdmPublicationMixin, BasePlatform):
                     }
                     commands.focus('end');
                     return {ok: true, action: 'inserted'};
-                }"""
-                    )
+                }""")
                 except Exception as exc:
                     if self._exception_means_browser_closed(exc):
                         raise BrowserLifecycleError(
@@ -1136,7 +1134,7 @@ class SmzdmPlatform(SmzdmPublicationMixin, BasePlatform):
                     "error": "smzdm 正文图片入口未找到，已安全停止",
                 }
             before = await self.page.locator(f"{BODY_SELECTOR} img").count()
-            await trigger.click(timeout=5000)
+            await self.actions.perform(trigger.click, timeout=5000)
             await self.simulator.random_delay(0.3, 0.8)
             file_inputs = self.page.locator(BODY_IMAGE_INPUT)
             image_candidates = []
@@ -1157,7 +1155,7 @@ class SmzdmPlatform(SmzdmPublicationMixin, BasePlatform):
                     "error": "smzdm 正文图片控件候选不唯一，已安全停止",
                 }
             target_input = image_candidates[0]
-            await target_input.set_input_files(str(image_path), timeout=15000)
+            await self.actions.perform(target_input.set_input_files, str(image_path), timeout=15000)
             ready_streak = 0
             for _ in range(40):
                 await asyncio.sleep(0.25)
@@ -1200,7 +1198,7 @@ class SmzdmPlatform(SmzdmPublicationMixin, BasePlatform):
                     "error_code": "SMZDM_BODY_IMAGE_INSERT_NOT_READY",
                     "error": "smzdm 图片已选择，但插入正文控件未就绪",
                 }
-            await insert_button.click(timeout=5000)
+            await self.actions.perform(insert_button.click, timeout=5000)
             after = before
             stable_streak = 0
             for _ in range(30):
@@ -1278,7 +1276,7 @@ class SmzdmPlatform(SmzdmPublicationMixin, BasePlatform):
             raise ContentValidationError(
                 f"SMZDM_COVER_TRIGGER_AMBIGUOUS: {label}入口不存在或候选不唯一"
             )
-        await visible_triggers[0].click(timeout=5000)
+        await self.actions.perform(visible_triggers[0].click, timeout=5000)
         await asyncio.sleep(0.5)
         inputs = self.page.locator(
             'input[type=file][accept="image/gif, image/png, image/jpeg"]'
@@ -1293,7 +1291,7 @@ class SmzdmPlatform(SmzdmPublicationMixin, BasePlatform):
                 "SMZDM_COVER_INPUT_AMBIGUOUS: 封面图片控件不存在或候选不唯一"
             )
         before = await self.page.locator(".pic-box img.thumb-imgs").count()
-        await visible_inputs[0].set_input_files(image_path, timeout=15000)
+        await self.actions.perform(visible_inputs[0].set_input_files, image_path, timeout=15000)
         ready = False
         for _ in range(30):
             await asyncio.sleep(0.5)
@@ -1321,7 +1319,7 @@ class SmzdmPlatform(SmzdmPublicationMixin, BasePlatform):
             raise ContentValidationError(
                 "SMZDM_COVER_ACTION_AMBIGUOUS: 设为封面图操作不唯一"
             )
-        await visible_actions[0].click(timeout=5000)
+        await self.actions.perform(visible_actions[0].click, timeout=5000)
         modal_title = f"封面图-{label.removeprefix('添加')}编辑"
         await self.page.get_by_text(modal_title, exact=True).wait_for(
             state="visible", timeout=10000
@@ -1336,11 +1334,11 @@ class SmzdmPlatform(SmzdmPublicationMixin, BasePlatform):
             raise ContentValidationError(
                 "SMZDM_COVER_CONFIRM_AMBIGUOUS: 封面裁剪确认控件不唯一"
             )
-        await visible_confirms[0].click(timeout=5000)
+        await self.actions.perform(visible_confirms[0].click, timeout=5000)
         await self.page.get_by_text(modal_title, exact=True).wait_for(
             state="hidden", timeout=10000
         )
-        await self.page.keyboard.press("Escape")
+        await self.actions.perform(self.page.keyboard.press, "Escape")
         await asyncio.sleep(0.5)
 
     async def apply_cover(self, cover: dict | None = None) -> dict:
@@ -1378,7 +1376,7 @@ class SmzdmPlatform(SmzdmPublicationMixin, BasePlatform):
                     "BROWSER_CONTEXT_CLOSED: 什么值得买设置封面时页面已关闭"
                 ) from exc
             try:
-                await self.page.keyboard.press("Escape")
+                await self.actions.perform(self.page.keyboard.press, "Escape")
             except Exception:
                 pass
             return {
@@ -1536,10 +1534,10 @@ class SmzdmPlatform(SmzdmPublicationMixin, BasePlatform):
         try:
             self.page.on("response", _on_response)
             editor = await self._current_body_editor()
-            await editor.press("Control+End")
+            await self.actions.perform(editor.press, "Control+End")
             await self.simulator.random_delay(0.3, 0.8)
-            await self.page.keyboard.type(" ", delay=50)
-            await self.page.keyboard.press("Backspace")
+            await self.actions.type_text(self.page.keyboard, " ", delay=50)
+            await self.actions.perform(self.page.keyboard.press, "Backspace")
             await editor.evaluate("el => el.blur()")
             await self.simulator.random_delay(1, 2)
             for _ in range(20):
@@ -1854,7 +1852,8 @@ class SmzdmPlatform(SmzdmPublicationMixin, BasePlatform):
         """只导航一次草稿箱，在当前 DOM 内等待实体集合稳定。"""
 
         try:
-            await self.page.goto(
+            await self.actions.perform(
+                self.page.goto,
                 DRAFT_LIST_URL,
                 wait_until="domcontentloaded",
                 timeout=30000,
@@ -1922,7 +1921,8 @@ class SmzdmPlatform(SmzdmPublicationMixin, BasePlatform):
                 "DRAFT_RESULT_UNKNOWN: smzdm 缺少冻结内容核验快照"
             )
         try:
-            await self.page.goto(
+            await self.actions.perform(
+                self.page.goto,
                 edit_url,
                 wait_until="domcontentloaded",
                 timeout=30000,
@@ -1980,7 +1980,8 @@ class SmzdmPlatform(SmzdmPublicationMixin, BasePlatform):
         if not expected_title:
             return {"error_code": "PROBE_TITLE_MISSING", "error_message": "缺少可核验标题"}
         try:
-            await self.page.goto(
+            await self.actions.perform(
+                self.page.goto,
                 DRAFT_LIST_URL,
                 wait_until="domcontentloaded",
                 timeout=30000,

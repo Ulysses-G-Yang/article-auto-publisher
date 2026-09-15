@@ -198,7 +198,7 @@ async def test_private_submit_needs_no_entity_ids_or_article_url(ack: str) -> No
         prepared = await platform.prepare_private_visibility(
             note_title=NOTE_TITLE, identity_snapshot=IDENTITY, layout_result=LAYOUT_RESULT,
         )
-        assert prepared["success"] is True
+        assert prepared["success"] is True, prepared
         assert prepared["entity_baseline_bound"] is False
         await page.locator("#publish").evaluate("""(button, ack) => {
           button.addEventListener('click', () => {
@@ -320,7 +320,7 @@ async def test_private_prepare_requires_cached_identity_and_waits_for_delayed_do
 
         prepared = await _prepare(platform)
 
-        assert prepared["success"] is True
+        assert prepared["success"] is True, prepared
         assert await page.locator("#visibility-trigger").inner_text() == "仅自己可见"
 
 
@@ -348,7 +348,7 @@ async def test_private_publish_requires_confirmation_and_exact_bindings() -> Non
     async with _local_page(_editor_html(), url=CREATOR_PUBLISH) as page:
         platform = _ready_editor_platform(page)
         prepared = await _prepare(platform)
-        assert prepared["success"] is True
+        assert prepared["success"] is True, prepared
 
         not_confirmed = await platform.publish_private(
             confirmed=False,

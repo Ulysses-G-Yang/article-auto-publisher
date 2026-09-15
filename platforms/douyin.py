@@ -94,7 +94,8 @@ class DouyinPlatform(BasePlatform):
         try:
             self.last_login_error = ""
             self._require_page_alive("抖音登录态检测")
-            await self.page.goto(
+            await self.actions.perform(
+                self.page.goto,
                 CREATOR_HOME,
                 wait_until="domcontentloaded",
                 timeout=15000,
@@ -103,7 +104,7 @@ class DouyinPlatform(BasePlatform):
             await asyncio.sleep(4)
             if await self._has_session_cookie_signal():
                 return True
-            self.last_login_error = "LOGIN_REQUIRED: 抖音账号需要登录"
+            self.last_login_error = await self.login_obstacle_code()
             return False
         except BrowserLifecycleError:
             raise
@@ -119,22 +120,21 @@ class DouyinPlatform(BasePlatform):
         """打开抖音创作者中心登录页，等待用户在隔离 Profile 中扫码登录。"""
 
         self._require_page_alive("抖音打开登录页")
-        await self.page.goto(
+        await self.actions.perform(
+            self.page.goto,
             CREATOR_HOME,
             wait_until="domcontentloaded",
             timeout=15000,
         )
         # 确保「扫码登录」Tab 激活（默认即扫码登录，点击幂等）
         try:
-            await self.page.evaluate(
-                """() => {
+            await self.actions.perform(self.page.evaluate, """() => {
                     const nodes = Array.from(document.querySelectorAll('span, div'));
                     const tab = nodes.find(
                         (el) => (el.innerText || '').trim() === '扫码登录'
                     );
                     if (tab) tab.click();
-                }"""
-            )
+                }""")
         except Exception:
             pass
         # 等待二维码出现：约 180x180 的 base64 PNG
@@ -212,7 +212,8 @@ class DouyinPlatform(BasePlatform):
 
             self.page.on("response", _on_response)
             try:
-                await self.page.goto(
+                await self.actions.perform(
+                    self.page.goto,
                     CREATOR_MICRO_HOME,
                     wait_until="domcontentloaded",
                     timeout=30000,
@@ -281,7 +282,8 @@ class DouyinPlatform(BasePlatform):
 
         self._require_page_alive("抖音打开编辑器")
         try:
-            await self.page.goto(
+            await self.actions.perform(
+                self.page.goto,
                 PUBLISH_URL,
                 wait_until="domcontentloaded",
                 timeout=30000,
@@ -308,8 +310,8 @@ class DouyinPlatform(BasePlatform):
         try:
             if await title_field.count() == 0 or not await title_field.is_visible():
                 raise RuntimeError("标题输入框不可见")
-            await title_field.click()
-            await title_field.fill(str(title or "").strip())
+            await self.actions.perform(title_field.click)
+            await self.actions.fill(title_field, str(title or "").strip())
         except Exception as exc:
             if self._exception_means_browser_closed(exc):
                 raise BrowserLifecycleError(
@@ -329,7 +331,7 @@ class DouyinPlatform(BasePlatform):
         try:
             if await editor.count() == 0 or not await editor.is_visible():
                 raise RuntimeError("正文编辑器不可见")
-            await editor.click()
+            await self.actions.perform(editor.click)
         except Exception as exc:
             if self._exception_means_browser_closed(exc):
                 raise BrowserLifecycleError(
@@ -338,8 +340,8 @@ class DouyinPlatform(BasePlatform):
             raise SelectorError("抖音正文编辑器未找到") from exc
 
         try:
-            await self.page.keyboard.press("Control+A")
-            await self.page.keyboard.press("Backspace")
+            await self.actions.perform(self.page.keyboard.press, "Control+A")
+            await self.actions.perform(self.page.keyboard.press, "Backspace")
         except Exception:
             pass
         await self.simulator.random_delay(0.3, 0.8)
@@ -352,13 +354,13 @@ class DouyinPlatform(BasePlatform):
                 if not text:
                     continue
                 if not first_text:
-                    await self.page.keyboard.press("Enter")
+                    await self.actions.perform(self.page.keyboard.press, "Enter")
                 lines = text.splitlines() or [text]
                 for i, line in enumerate(lines):
                     if line.strip():
-                        await self.page.keyboard.insert_text(line.strip())
+                        await self.actions.insert_text(self.page.keyboard, line.strip())
                     if i < len(lines) - 1:
-                        await self.page.keyboard.press("Enter")
+                        await self.actions.perform(self.page.keyboard.press, "Enter")
                 first_text = False
 
         actual_text = await editor.inner_text()
@@ -458,7 +460,11 @@ class DouyinPlatform(BasePlatform):
                     '.zone-container img, .editor-kit-container img'
                 ).length"""
             )
-            await file_inputs.first.set_input_files(str(image_path), timeout=15000)
+            await self.actions.perform(
+                file_inputs.first.set_input_files,
+                str(image_path),
+                timeout=15000,
+            )
             after = before
             for _ in range(10):
                 await asyncio.sleep(1)
@@ -531,14 +537,12 @@ class DouyinPlatform(BasePlatform):
 
         try:
             self.page.on("response", _on_response)
-            await self.page.evaluate(
-                """() => {
+            await self.actions.perform(self.page.evaluate, """() => {
                     const nodes = Array.from(document.querySelectorAll('button, [role=button]'));
                     const target = nodes.find((el) =>
                         (el.innerText || '').replace(/\\s+/g, '').includes('暂存离开'));
                     if (target) target.click();
-                }"""
-            )
+                }""")
             await self.simulator.random_delay(2, 4)
             # 可能的确认弹窗
             try:
@@ -546,7 +550,7 @@ class DouyinPlatform(BasePlatform):
                     "button:has-text('确定'), button:has-text('暂存')"
                 ).first
                 if await confirm.count() > 0:
-                    await confirm.click(timeout=3000)
+                    await self.actions.perform(confirm.click, timeout=3000)
                     await self.simulator.random_delay(2, 4)
             except Exception:
                 pass
@@ -566,7 +570,8 @@ class DouyinPlatform(BasePlatform):
             return ""
         # 去内容管理页验证标题
         try:
-            await self.page.goto(
+            await self.actions.perform(
+                self.page.goto,
                 "https://creator.douyin.com/creator-micro/content/manage",
                 wait_until="domcontentloaded",
                 timeout=30000,

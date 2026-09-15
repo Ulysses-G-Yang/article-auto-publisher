@@ -41,6 +41,12 @@ class AccountIdentityError(AccountSessionError):
     http_status = 409
 
 
+class AccountVerificationError(AccountIdentityError):
+    """The current check failed; it did not prove that authentication expired."""
+
+    error_code = "SESSION_CHECK_FAILED"
+
+
 class AccountIdentityMismatchError(AccountIdentityError):
     """平台当前身份与账号首次绑定身份不一致。"""
 

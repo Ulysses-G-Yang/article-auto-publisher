@@ -251,9 +251,7 @@ class ZhihuPlatform(BasePlatform):
     LOGIN_POLL_INTERVAL_SECONDS = 2
     PERSIST_VERIFY_ATTEMPTS = 15
     PERSIST_VERIFY_INTERVAL_SECONDS = 2
-    TEXT_CHUNK_SIZE = 8
-    TEXT_CHUNK_INTERVAL_SECONDS = 0.16
-    BLOCK_SETTLE_SECONDS = 0.6
+    BLOCK_SETTLE_SECONDS = 1.2
     EDITOR_WAIT_ATTEMPTS = 30
     EDITOR_WAIT_INTERVAL_SECONDS = 0.1
     PUBLICATION_TIMEOUT_MS = 45000
@@ -341,7 +339,8 @@ class ZhihuPlatform(BasePlatform):
         try:
             self.last_login_error = ""
             self._require_page_alive("知乎登录态检测")
-            await self.page.goto(
+            await self.actions.perform(
+                self.page.goto,
                 self.platform_cfg.get("home_url", "https://www.zhihu.com/"),
                 wait_until="domcontentloaded",
                 timeout=15000,
@@ -349,11 +348,9 @@ class ZhihuPlatform(BasePlatform):
             identity = await self.fetch_identity_payload()
             if identity["ok"]:
                 return True
-            has_weak_signal = await self._has_session_cookie_signal()
             self.last_login_error = (
-                "ZHIHU_SESSION_INVALID: 知乎身份 API 未确认当前会话"
-                if has_weak_signal
-                else "LOGIN_REQUIRED: 知乎账号需要登录"
+                "LOGIN_REQUIRED" if identity.get("status") == 401
+                else await self.login_obstacle_code()
             )
             return False
         except BrowserLifecycleError:
@@ -370,7 +367,8 @@ class ZhihuPlatform(BasePlatform):
         """打开知乎官方登录页，等待用户在隔离 Profile 中交互登录。"""
 
         self._require_page_alive("知乎打开登录页")
-        await self.page.goto(
+        await self.actions.perform(
+            self.page.goto,
             self.platform_cfg.get("login_url", "https://www.zhihu.com/signin"),
             wait_until="domcontentloaded",
             timeout=15000,
@@ -408,7 +406,8 @@ class ZhihuPlatform(BasePlatform):
         last_error: Exception | None = None
         for url in urls:
             try:
-                await self.page.goto(
+                await self.actions.perform(
+                    self.page.goto,
                     url,
                     wait_until="domcontentloaded",
                     timeout=30000,
@@ -437,8 +436,8 @@ class ZhihuPlatform(BasePlatform):
         try:
             if await title_field.count() == 0 or not await title_field.is_visible():
                 raise RuntimeError("标题输入框不可见")
-            await title_field.click()
-            await title_field.fill(str(title or "").strip())
+            await self.actions.perform(title_field.click)
+            await self.actions.fill(title_field, str(title or "").strip())
         except Exception as exc:
             if self._exception_means_browser_closed(exc):
                 raise BrowserLifecycleError(
@@ -484,11 +483,7 @@ class ZhihuPlatform(BasePlatform):
                     if not line:
                         continue
                     await self._prepare_empty_body_block()
-                    for start in range(0, len(line), self.TEXT_CHUNK_SIZE):
-                        await self.page.keyboard.insert_text(
-                            line[start : start + self.TEXT_CHUNK_SIZE]
-                        )
-                        await asyncio.sleep(self.TEXT_CHUNK_INTERVAL_SECONDS)
+                    await self.actions.insert_text(self.page.keyboard, line)
                     paragraph = {"type": "text", "text": line}
                     await self._wait_dom_exact(
                         [*written_blocks, paragraph], phase=f"第{block_index + 1}块文字"
@@ -600,7 +595,7 @@ class ZhihuPlatform(BasePlatform):
             # Draft.js 维护自己的 SelectionState。直接改 DOM Range 看似移动了
             # 光标，但不会可靠同步内部状态；真实键盘 End 事件才会让后续
             # Enter 在文档末尾创建新 block。
-            await editor.press("Control+End")
+            await self.actions.perform(editor.press, "Control+End")
             for _ in range(self.EDITOR_WAIT_ATTEMPTS):
                 if (await self._body_selection_state()).get("at_end"):
                     return
@@ -658,14 +653,14 @@ class ZhihuPlatform(BasePlatform):
             # 真实编辑器中 Control+A 可能只选中局部文本。先用原生按键选到
             # 文档起点，确认全文及图片均在选区内，才允许删除旧正文。
             await self._place_body_caret_at_end()
-            await self.page.keyboard.press("Control+Shift+Home")
+            await self.actions.perform(self.page.keyboard.press, "Control+Shift+Home")
             for _ in range(self.EDITOR_WAIT_ATTEMPTS):
                 if (await self._body_selection_state()).get("selected_all"):
                     break
                 await asyncio.sleep(self.EDITOR_WAIT_INTERVAL_SECONDS)
             else:
                 raise ContentValidationError("ZHIHU_SELECTION_UNVERIFIED: 未完整选中旧正文")
-            await self.page.keyboard.press("Backspace")
+            await self.actions.perform(self.page.keyboard.press, "Backspace")
         await self._wait_dom_exact([], phase="清空正文")
         await asyncio.sleep(self.BLOCK_SETTLE_SECONDS)
 
@@ -673,7 +668,7 @@ class ZhihuPlatform(BasePlatform):
         await self._place_body_caret_at_end()
         previous = await self._body_selection_state()
         if not previous.get("empty"):
-            await self.page.keyboard.press("Enter")
+            await self.actions.perform(self.page.keyboard.press, "Enter")
         for _ in range(self.EDITOR_WAIT_ATTEMPTS):
             current = await self._body_selection_state()
             if (
@@ -701,12 +696,12 @@ class ZhihuPlatform(BasePlatform):
             heading_menu = self.page.get_by_role("button", name="标题", exact=True)
             if await heading_menu.count() != 1 or not await heading_menu.is_visible():
                 raise ContentValidationError("ZHIHU_HEADING_APPLY_FAILED: 标题菜单不唯一")
-            await heading_menu.click(timeout=5000)
+            await self.actions.perform(heading_menu.click, timeout=5000)
             h2_option = self.page.get_by_role("button", name="二级标题", exact=True)
             await h2_option.wait_for(state="visible", timeout=5000)
             if await h2_option.count() != 1 or not await h2_option.is_visible():
                 raise ContentValidationError("ZHIHU_HEADING_APPLY_FAILED: 二级标题选项不唯一")
-            await h2_option.click(timeout=5000)
+            await self.actions.perform(h2_option.click, timeout=5000)
         except Exception as exc:
             if self._exception_means_browser_closed(exc):
                 raise BrowserLifecycleError(
@@ -720,7 +715,7 @@ class ZhihuPlatform(BasePlatform):
         """图片上传后关闭模态层；未关闭时拒绝继续写后续正文。"""
 
         try:
-            await self.page.keyboard.press("Escape")
+            await self.actions.perform(self.page.keyboard.press, "Escape")
             backdrop = self.page.locator(".Modal-backdrop").first
             for _ in range(6):
                 if await backdrop.count() == 0 or not await backdrop.is_visible():
@@ -899,11 +894,11 @@ class ZhihuPlatform(BasePlatform):
                 return {"success": False, "error": "知乎工具栏图片按钮未找到"}
             editor = await self._current_body_editor()
             before = await editor.locator("img").count()
-            await button.click(timeout=5000)
+            await self.actions.perform(button.click, timeout=5000)
             await self.simulator.random_delay(0.5, 0.8)
             if input_handle is None or not await input_handle.evaluate("e => e.isConnected"):
                 return {"success": False, "error": "知乎正文图片上传控件已替换"}
-            await input_handle.set_input_files(str(image_path), timeout=15000)
+            await self.actions.perform(input_handle.set_input_files, str(image_path), timeout=15000)
             for _ in range(60):
                 editor = await self._current_body_editor()
                 ready = await editor.locator("img").evaluate_all(
@@ -965,7 +960,7 @@ class ZhihuPlatform(BasePlatform):
                 "error": "知乎封面上传控件不存在或候选不唯一",
             }
         try:
-            await inputs.first.set_input_files(str(cover_path), timeout=15000)
+            await self.actions.perform(inputs.first.set_input_files, str(cover_path), timeout=15000)
             ready = False
             for _ in range(30):
                 await asyncio.sleep(0.5)
@@ -1109,7 +1104,8 @@ class ZhihuPlatform(BasePlatform):
 
         drafts_url = self.platform_cfg.get("drafts_url") or DRAFTS_URL
         try:
-            await self.page.goto(
+            await self.actions.perform(
+                self.page.goto,
                 drafts_url,
                 wait_until="domcontentloaded",
                 timeout=30000,
@@ -1199,7 +1195,8 @@ class ZhihuPlatform(BasePlatform):
 
         drafts_url = self.platform_cfg.get("drafts_url") or DRAFTS_URL
         try:
-            await self.page.goto(
+            await self.actions.perform(
+                self.page.goto,
                 drafts_url,
                 wait_until="domcontentloaded",
                 timeout=30000,
@@ -1276,7 +1273,8 @@ class ZhihuPlatform(BasePlatform):
             return {"error_code": "PROBE_TITLE_MISSING", "error_message": "缺少可核验标题"}
         drafts_url = self.platform_cfg.get("drafts_url") or DRAFTS_URL
         try:
-            await self.page.goto(
+            await self.actions.perform(
+                self.page.goto,
                 drafts_url,
                 wait_until="domcontentloaded",
                 timeout=30000,
@@ -1380,15 +1378,15 @@ class ZhihuPlatform(BasePlatform):
         try:
             async with self.page.expect_response(
                 self._is_drafts_list_response,
-                timeout=20000,
+                timeout=self.actions.event_timeout(20000, actions=2),
             ) as response_info:
-                await self.page.reload(
+                await self.actions.perform(
+                    self.page.reload,
                     wait_until="domcontentloaded",
                     timeout=30000,
                 )
                 await self.simulator.random_delay(2, 4)
-                clicked = await self.page.evaluate(
-                    """() => {
+                clicked = await self.actions.perform(self.page.evaluate, """() => {
                         const nodes = Array.from(
                             document.querySelectorAll('a, button, [role=button]')
                         );
@@ -1397,8 +1395,7 @@ class ZhihuPlatform(BasePlatform):
                         );
                         if (target) { target.click(); return true; }
                         return false;
-                    }"""
-                )
+                    }""")
                 await self.simulator.random_delay(2, 4)
             if not clicked:
                 return None
@@ -1479,7 +1476,8 @@ class ZhihuPlatform(BasePlatform):
         if blocks is None:
             raise DraftResultUnknownError("DRAFT_RESULT_UNKNOWN: 知乎缺少冻结内容核验快照")
         try:
-            await self.page.goto(
+            await self.actions.perform(
+                self.page.goto,
                 edit_url,
                 wait_until="domcontentloaded",
                 timeout=30000,
@@ -1652,7 +1650,8 @@ class ZhihuPlatform(BasePlatform):
         self._publication_guard_installed = True
         async with self.page.expect_response(
             lambda r: r.request.method == "GET"
-            and r.url == f"https://zhuanlan.zhihu.com{save_path}", timeout=30000,
+            and r.url == f"https://zhuanlan.zhihu.com{save_path}",
+            timeout=self.actions.event_timeout(30000),
         ) as pending:
             await self._verify_persisted_draft(title, edit_url)
         response = await pending.value
@@ -1744,7 +1743,12 @@ class ZhihuPlatform(BasePlatform):
     async def verify_publication_readonly(self, title: str) -> str:
         """要求公开文章页面的标题、作者链接、全文结构和有序图片全部匹配。"""
         url = f"https://zhuanlan.zhihu.com/p/{self._publication_id}"
-        response = await self.page.goto(url, wait_until="domcontentloaded", timeout=30000)
+        response = await self.actions.perform(
+            self.page.goto,
+            url,
+            wait_until="domcontentloaded",
+            timeout=30000,
+        )
         heading = self.page.locator("h1.Post-Title")
         body = self.page.locator(".Post-RichTextContainer")
         await heading.wait_for(state="visible", timeout=20000)
@@ -1785,9 +1789,9 @@ class ZhihuPlatform(BasePlatform):
         try:
             async with self.page.expect_response(
                 lambda r: self._is_publication_request(r.request),
-                timeout=self.PUBLICATION_TIMEOUT_MS,
+                timeout=self.actions.event_timeout(self.PUBLICATION_TIMEOUT_MS),
             ) as pending:
-                await buttons.click(timeout=8000)
+                await self.actions.perform(buttons.click, timeout=8000)
             response = await pending.value
             if not response.ok or self._publication_post_sent != 1:
                 raise PublishResultUnknownError("知乎原生提交未返回成功 HTTP 状态")

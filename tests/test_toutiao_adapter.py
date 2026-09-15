@@ -321,7 +321,7 @@ def test_check_login_false_without_session_cookie(monkeypatch) -> None:
     platform = _make_platform(page)
 
     assert run(platform.check_login()) is False
-    assert platform.last_login_error.startswith("LOGIN_REQUIRED:")
+    assert platform.last_login_error == "SESSION_CHECK_FAILED"
     assert page.goto_calls == []
 
 

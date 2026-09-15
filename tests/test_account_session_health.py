@@ -1003,7 +1003,7 @@ def test_smzdm_interactive_login_skips_precheck_then_verifies_once(
         run(database.dispose())
 
 
-def test_account_service_check_login_false_is_login_required_without_interactive_login(
+def test_account_service_check_login_false_without_reason_is_not_expired(
     tmp_path: Path,
 ) -> None:
     from account_sessions.account_service import AccountSessionService
@@ -1041,8 +1041,8 @@ def test_account_service_check_login_false_is_login_required_without_interactive
 
     error, stored, platform, database = run(scenario())
     try:
-        assert error.error_code == "LOGIN_REQUIRED"
-        assert stored.session_status == "LOGIN_REQUIRED"
+        assert error.error_code == "SESSION_CHECK_FAILED"
+        assert stored.session_status == "ERROR"
         assert stored.last_verified_at is None
         assert platform.login_calls == 0
         assert platform.cleaned is True

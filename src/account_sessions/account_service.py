@@ -18,6 +18,7 @@ from account_sessions.errors import (
     AccountNotFoundError,
     AccountPlatformMismatchError,
     AccountSessionError,
+    AccountVerificationError,
 )
 from account_sessions.identity import extract_identity
 from account_sessions.leases import AccountProfileLease, _is_within
@@ -35,6 +36,7 @@ from account_sessions.runtime_paths import (
     managed_profile_path,
 )
 from account_sessions.security import mask_platform_user_id, safe_error_message
+from platforms.session_state import login_check_failure
 
 SUPPORTED_PLATFORMS = ACCOUNT_ENABLED_PLATFORMS
 
@@ -309,13 +311,18 @@ class AccountSessionService:
                             platform,
                             read_only=not allow_interactive_login,
                         )
-                        if not valid and allow_interactive_login:
+                        if (
+                            not valid
+                            and allow_interactive_login
+                            and login_check_failure(platform).requires_login
+                        ):
                             await platform.login()
                             valid = await _check_login(platform, read_only=False)
                     if not valid:
-                        raise AccountIdentityError(
-                            "登录态已失效，需要重新登录",
-                            error_code="LOGIN_REQUIRED",
+                        failure = login_check_failure(platform)
+                        raise AccountVerificationError(
+                            failure.message,
+                            error_code=failure.code,
                         )
                     identity = await extract_identity(platform)
                 finally:
@@ -414,16 +421,22 @@ class AccountSessionService:
         投递执行单的账号快照因此不会被运行时页面内容静默改写。
         """
 
+        # A receipt belongs only to this exact live browser and this identity check.
+        from platforms.base import BasePlatform
+
+        if isinstance(platform, BasePlatform):
+            platform.invalidate_delivery_identity()
         if not await _check_login(platform, read_only=True):
+            failure = login_check_failure(platform)
             await self._mark_runtime_identity_failure(
                 account.account_id,
                 access,
-                status="LOGIN_REQUIRED",
-                error_code="LOGIN_REQUIRED",
+                status="LOGIN_REQUIRED" if failure.requires_login else "ERROR",
+                error_code=failure.code,
             )
             raise AccountIdentityError(
-                "投递前登录态无法确认",
-                error_code="LOGIN_REQUIRED",
+                failure.message,
+                error_code=failure.code,
             )
 
         try:
@@ -467,6 +480,8 @@ class AccountSessionService:
             raise AccountIdentityMismatchError(
                 "平台当前身份与已绑定账号不一致"
             )
+        if isinstance(platform, BasePlatform):
+            platform.remember_delivery_identity()
 
     async def _mark_runtime_identity_failure(
         self,
@@ -783,6 +798,10 @@ class AccountSessionService:
             elif classification.category == "LOGIN_REQUIRED":
                 account.session_status = "LOGIN_REQUIRED"
                 account.last_verified_at = None
+            elif isinstance(exc, AccountVerificationError):
+                # Keep the last successful timestamp as history, but do not
+                # present a failed current check as a currently usable account.
+                account.session_status = "ERROR"
             elif classification.preserve_session and account.session_status == "VERIFYING":
                 account.session_status = "VALID" if account.last_verified_at else "UNVERIFIED"
             elif classification.category == "ERROR" and account.session_status != "VALID":

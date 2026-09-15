@@ -795,7 +795,9 @@ def test_resume_repairs_only_strict_trailing_plain_text() -> None:
     repaired = run(platform._repair_strict_trailing_text_only(blocks))
 
     assert repaired is True
-    platform.page.keyboard.insert_text.assert_awaited_once_with("唯一缺失尾段")
+    assert [
+        item.args[0] for item in platform.page.keyboard.insert_text.await_args_list
+    ] == list("唯一缺失尾段")
     platform._assert_editor_body_tokens.assert_awaited_once_with(blocks)
 
 

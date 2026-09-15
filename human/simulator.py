@@ -8,7 +8,7 @@ from config import get_config
 
 
 class HumanSimulator:
-    """模拟真实用户操作行为，规避风控检测"""
+    """鼠标和滚动交互辅助；平台业务输入与动作由 ActionPacer 统一限频。"""
 
     def __init__(self, config: dict = None):
         cfg = config or get_config().get("human_simulation", {})

@@ -203,7 +203,8 @@ class XiaohongshuPlatform(BasePlatform):
         try:
             self.last_login_error = ""
             self._require_page_alive("小红书登录态检测")
-            await self.page.goto(
+            await self.actions.perform(
+                self.page.goto,
                 CREATOR_HOME,
                 wait_until="domcontentloaded",
                 timeout=15000,
@@ -211,7 +212,7 @@ class XiaohongshuPlatform(BasePlatform):
             await asyncio.sleep(4)
             if await self._has_session_cookie_signal():
                 return True
-            self.last_login_error = "LOGIN_REQUIRED: 小红书账号需要登录"
+            self.last_login_error = await self.login_obstacle_code()
             return False
         except BrowserLifecycleError:
             raise
@@ -227,7 +228,8 @@ class XiaohongshuPlatform(BasePlatform):
         """打开小红书创作服务登录页，等待用户在隔离 Profile 中扫码登录。"""
 
         self._require_page_alive("小红书打开登录页")
-        await self.page.goto(
+        await self.actions.perform(
+            self.page.goto,
             LOGIN_URL,
             wait_until="domcontentloaded",
             timeout=15000,
@@ -314,7 +316,8 @@ class XiaohongshuPlatform(BasePlatform):
 
             self.page.on("response", _on_response)
             try:
-                await self.page.goto(
+                await self.actions.perform(
+                    self.page.goto,
                     CREATOR_MAIN,
                     wait_until="domcontentloaded",
                     timeout=30000,
@@ -418,7 +421,8 @@ class XiaohongshuPlatform(BasePlatform):
                 return
             raise SelectorError("小红书待恢复草稿编辑器已失效")
         try:
-            await self.page.goto(
+            await self.actions.perform(
+                self.page.goto,
                 "https://creator.xiaohongshu.com/publish/publish",
                 wait_until="domcontentloaded",
                 timeout=30000,
@@ -463,7 +467,7 @@ class XiaohongshuPlatform(BasePlatform):
                 visible_entries.append(entry)
         if len(visible_entries) != 1:
             raise DraftBaselineError("DRAFT_BASELINE_FAILED: 小红书草稿箱入口不唯一")
-        await visible_entries[0].click(timeout=15000)
+        await self.actions.perform(visible_entries[0].click, timeout=15000)
         tabs = self.page.get_by_text(re.compile(r"^长文笔记\(\d+\)$"))
         visible_tabs = []
         for index in range(await tabs.count()):
@@ -479,7 +483,7 @@ class XiaohongshuPlatform(BasePlatform):
                 "DRAFT_BASELINE_FAILED: 小红书长文草稿数量标签无法识别"
             )
         expected_items = int(count_match.group(1))
-        await visible_tabs[0].click(timeout=15000)
+        await self.actions.perform(visible_tabs[0].click, timeout=15000)
         await self.page.wait_for_selector(
             ".draft-drawer .draft-list",
             state="visible",
@@ -576,8 +580,7 @@ class XiaohongshuPlatform(BasePlatform):
             )
         except Exception:
             pass
-        clicked = await self.page.evaluate(
-            """(t) => {
+        clicked = await self.actions.perform(self.page.evaluate, """(t) => {
                 const nodes = Array.from(document.querySelectorAll('*'));
                 const target = nodes.find((el) => {
                     const txt = (el.innerText || '').trim();
@@ -585,9 +588,7 @@ class XiaohongshuPlatform(BasePlatform):
                 });
                 if (target) { target.click(); return true; }
                 return false;
-            }""",
-            text,
-        )
+            }""", text)
         if not clicked:
             raise SelectorError(f"小红书侧栏未找到「{text}」入口")
         await self.simulator.random_delay(1, 2)
@@ -625,8 +626,8 @@ class XiaohongshuPlatform(BasePlatform):
                 )
             if await title_field.count() == 0 or not await title_field.is_visible():
                 raise RuntimeError("标题输入框不可见")
-            await title_field.click()
-            await title_field.fill(str(title or "").strip())
+            await self.actions.perform(title_field.click)
+            await self.actions.fill(title_field, str(title or "").strip())
         except ContentValidationError:
             raise
         except Exception as exc:
@@ -652,7 +653,7 @@ class XiaohongshuPlatform(BasePlatform):
         try:
             if await editor.count() == 0 or not await editor.is_visible():
                 raise RuntimeError("正文编辑器不可见")
-            await editor.click()
+            await self.actions.perform(editor.click)
         except Exception as exc:
             if self._exception_means_browser_closed(exc):
                 raise BrowserLifecycleError(
@@ -661,8 +662,8 @@ class XiaohongshuPlatform(BasePlatform):
             raise SelectorError("小红书正文编辑器未找到") from exc
 
         try:
-            await self.page.keyboard.press("Control+A")
-            await self.page.keyboard.press("Backspace")
+            await self.actions.perform(self.page.keyboard.press, "Control+A")
+            await self.actions.perform(self.page.keyboard.press, "Backspace")
         except Exception:
             pass
         await self.simulator.random_delay(0.3, 0.8)
@@ -684,16 +685,16 @@ class XiaohongshuPlatform(BasePlatform):
                     raise ContentValidationError("XHS_HEADING_UNSUPPORTED: 仅支持单行二级标题")
                 await self._place_body_caret_at_end()
                 if wrote_any and not previous_was_image:
-                    await self.page.keyboard.press("Enter")
+                    await self.actions.perform(self.page.keyboard.press, "Enter")
                     # 分段间留足节奏，降低风控敏感度
                     await self.simulator.random_delay(0.8, 1.5)
                 lines = text.splitlines() or [text]
                 for i, line in enumerate(lines):
                     if line.strip():
-                        await self.page.keyboard.insert_text(line.strip())
+                        await self.actions.insert_text(self.page.keyboard, line.strip())
                         await self.simulator.random_delay(0.1, 0.3)
                     if i < len(lines) - 1:
-                        await self.page.keyboard.press("Enter")
+                        await self.actions.perform(self.page.keyboard.press, "Enter")
                         await self.simulator.random_delay(0.8, 1.5)
                 if btype == "heading":
                     await self._apply_h2_to_current_block()
@@ -713,7 +714,7 @@ class XiaohongshuPlatform(BasePlatform):
                         img_path = matches[0]
                 if img_path:
                     if wrote_any and not previous_was_image:
-                        await self.page.keyboard.press("Enter")
+                        await self.actions.perform(self.page.keyboard.press, "Enter")
                         await self.simulator.random_delay(0.8, 1.5)
                     upload_result = await self._upload_image(img_path) or {}
                     if upload_result.get("success"):
@@ -722,7 +723,7 @@ class XiaohongshuPlatform(BasePlatform):
                         previous_was_image = True
                         # 图片节点后创建下一段，确保后续文字不会落到图片前面。
                         await self._place_body_caret_at_end()
-                        await self.page.keyboard.press("Enter")
+                        await self.actions.perform(self.page.keyboard.press, "Enter")
                     else:
                         failed_images.append(
                             {
@@ -867,9 +868,9 @@ class XiaohongshuPlatform(BasePlatform):
 
         await self._place_body_caret_at_end()
         for item in missing:
-            await self.page.keyboard.press("Enter")
+            await self.actions.perform(self.page.keyboard.press, "Enter")
             await self.simulator.random_delay(0.8, 1.5)
-            await self.page.keyboard.insert_text(str(item["text"]))
+            await self.actions.insert_text(self.page.keyboard, str(item["text"]))
             await self.simulator.random_delay(0.8, 1.5)
 
         # 给平台的原始草稿自动保存留出时间；下一步还会离开并重开验证，
@@ -893,7 +894,8 @@ class XiaohongshuPlatform(BasePlatform):
         """重开同一唯一草稿，证明尾段和图片已由平台持久化。"""
 
         expected_title = self._preflight_title
-        await self.page.goto(
+        await self.actions.perform(
+            self.page.goto,
             "https://creator.xiaohongshu.com/publish/publish",
             wait_until="domcontentloaded",
             timeout=30000,
@@ -905,7 +907,7 @@ class XiaohongshuPlatform(BasePlatform):
         actions = matches[0].locator(".draft-actions .btn").filter(has_text=re.compile(r"^编辑$"))
         if await actions.count() != 1:
             raise ContentValidationError("XHS_RESUME_REOPEN_FAILED: 尾段修复后编辑入口不唯一")
-        await actions.click(timeout=15000)
+        await self.actions.perform(actions.click, timeout=15000)
         await self.page.wait_for_selector(
             XHS_EDITOR_SELECTOR,
             state="visible",
@@ -1080,7 +1082,7 @@ class XiaohongshuPlatform(BasePlatform):
                 "XHS_COVER_PREVIEW_ENTRY_MISSING",
                 "小红书封面预览入口不存在或候选不唯一",
             )
-        await action.click(timeout=10000)
+        await self.actions.perform(action.click, timeout=10000)
         try:
             await self.page.get_by_text("封面预览", exact=True).wait_for(
                 state="visible", timeout=15000
@@ -1117,7 +1119,7 @@ class XiaohongshuPlatform(BasePlatform):
             if await assessment.nth(index).is_visible()
         ]
         if len(visible_assessments) == 1:
-            await visible_assessments[0].click(timeout=5000)
+            await self.actions.perform(visible_assessments[0].click, timeout=5000)
         passed = False
         for _ in range(20):
             await asyncio.sleep(0.5)
@@ -1534,7 +1536,7 @@ class XiaohongshuPlatform(BasePlatform):
                     "小红书最终设置「更多设置」未完整落入视口",
                 )
             try:
-                await more.click(timeout=10000)
+                await self.actions.perform(more.click, timeout=10000)
             except Exception:
                 return self._private_unknown(
                     "XHS_PRIVATE_SETTINGS_OPEN_FAILED",
@@ -1552,7 +1554,7 @@ class XiaohongshuPlatform(BasePlatform):
                 "小红书可见范围当前控件未完整落入视口",
             )
         try:
-            await trigger.click(timeout=10000)
+            await self.actions.perform(trigger.click, timeout=10000)
         except Exception:
             return self._private_unknown(
                 "XHS_PRIVATE_VISIBILITY_OPEN_FAILED",
@@ -1581,7 +1583,7 @@ class XiaohongshuPlatform(BasePlatform):
                 "小红书「仅自己可见」选项未完整落入视口",
             )
         try:
-            await options[0].click(timeout=10000)
+            await self.actions.perform(options[0].click, timeout=10000)
         except Exception:
             return self._private_unknown(
                 "XHS_PRIVATE_SELF_ONLY_SELECT_FAILED",
@@ -1717,7 +1719,7 @@ class XiaohongshuPlatform(BasePlatform):
         self._private_baseline_entity_ids = baseline_ids
         self._private_content_binding = copy.deepcopy(self._expected_persisted_blocks)
         try:
-            await action.click(timeout=10000)
+            await self.actions.perform(action.click, timeout=10000)
         except Exception:
             result = self._private_unknown(
                 "XHS_PRIVATE_NEXT_STEP_CLICK_UNKNOWN",
@@ -1909,7 +1911,7 @@ class XiaohongshuPlatform(BasePlatform):
         # 不论 click 成功、超时还是抛出异常，attempted 都保持 True。
         self._private_publish_attempted = True
         try:
-            await action.click(timeout=10000)
+            await self.actions.perform(action.click, timeout=10000)
         except asyncio.CancelledError:
             result = self._private_unknown(
                 "XHS_PRIVATE_SUBMIT_CANCELLED", "发布提交时任务中断，结果待确认；不会自动重发",
@@ -2336,7 +2338,7 @@ class XiaohongshuPlatform(BasePlatform):
 
         try:
             self.page.on("response", _on_response)
-            await action.click(timeout=10000)
+            await self.actions.perform(action.click, timeout=10000)
             ready = await self._wait_for_layout_ready(
                 expected_images=expected_images,
                 require_first_page_image=require_first_page_image,
@@ -2621,7 +2623,7 @@ class XiaohongshuPlatform(BasePlatform):
             raise ContentValidationError("XHS_H2_BUTTON_UNVERIFIED: 二级标题按钮不符合已验证指纹")
         headings = self.page.locator(f"{XHS_EDITOR_SELECTOR} > h2")
         before = await headings.count()
-        await button.click(timeout=5000)
+        await self.actions.perform(button.click, timeout=5000)
         for _ in range(10):
             headings = self.page.locator(f"{XHS_EDITOR_SELECTOR} > h2")
             if await headings.count() == before + 1 and normalize_for_comparison(
@@ -2724,8 +2726,10 @@ class XiaohongshuPlatform(BasePlatform):
             }
         try:
             before = await self._editor_image_count()
-            async with self.page.expect_file_chooser(timeout=5000) as pending:
-                await image_button.click(timeout=5000)
+            async with self.page.expect_file_chooser(
+                timeout=self.actions.event_timeout(5000)
+            ) as pending:
+                await self.actions.perform(image_button.click, timeout=5000)
             chooser = await pending.value
             metadata = await chooser.element.evaluate(
                 """(el) => ({
@@ -2752,7 +2756,9 @@ class XiaohongshuPlatform(BasePlatform):
                     "error_code": "XHS_BODY_FILE_CHOOSER_UNVERIFIED",
                     "error": "小红书文件选择器属性与正文图片证据不一致",
                 }
-            await chooser.set_files(str(Path(image_path).resolve()), timeout=20000)
+            await self.actions.perform(
+                chooser.set_files, str(Path(image_path).resolve()), timeout=20000
+            )
             observed = before
             for _ in range(15):
                 await asyncio.sleep(1)
@@ -2906,7 +2912,7 @@ class XiaohongshuPlatform(BasePlatform):
         actions = matches[0].locator(".draft-actions .btn").filter(has_text=re.compile(r"^编辑$"))
         if await actions.count() != 1:
             raise DraftResultUnknownError("DRAFT_RESULT_UNKNOWN: 小红书草稿编辑入口不唯一")
-        await actions.click(timeout=15000)
+        await self.actions.perform(actions.click, timeout=15000)
         await self.page.wait_for_selector(
             XHS_EDITOR_SELECTOR,
             state="visible",

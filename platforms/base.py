@@ -1,20 +1,23 @@
 """平台自动化抽象基类 —— 使用系统 Chrome 浏览器，Cookie 天然持久化"""
+import asyncio
 import os
 import random
 import re
-import asyncio
+import time
 from abc import ABC, abstractmethod
-from typing import Optional
 from pathlib import Path
+from typing import Optional
 
-from playwright.async_api import async_playwright, Browser, BrowserContext, Page
 from loguru import logger
+from playwright.async_api import Browser, BrowserContext, Page, async_playwright
 
+from config import get_config
 from human.simulator import HumanSimulator
 from models.database import Database
-from config import get_config
+from platforms.action_pacing import ActionPacer
 from platforms.content_validation import safe_media_error
 from platforms.media_progress import safe_media_progress
+from platforms.session_state import login_check_failure
 
 
 class DraftVerificationEvidence:
@@ -153,6 +156,12 @@ class BrowserLifecycleError(PlatformAutomationError):
     error_code = "BROWSER_CONTEXT_CLOSED"
 
 
+class BrowserStartupError(PlatformAutomationError):
+    """Browser startup failed without evidence of a Profile conflict."""
+
+    error_code = "BROWSER_START_FAILED"
+
+
 class PlatformAccessError(PlatformAutomationError):
     """已经打开平台页面，但没有进入目标业务页面。"""
 
@@ -212,12 +221,77 @@ class BasePlatform(ABC):
         self.cfg = get_config()
         self.platform_cfg = self.cfg["platforms"].get(self.platform_name, {})
         self.simulator = HumanSimulator()
+        self._actions = ActionPacer(self.platform_cfg.get("action_pacing"))
         self.playwright = None
         self.browser: Optional[Browser] = None
         self.context: Optional[BrowserContext] = None
         self.page: Optional[Page] = None
         self.profile_dir = Path(profile_dir).resolve() if profile_dir else None
         self.strict_profile_lock = strict_profile_lock
+        self._delivery_identity_receipt = None
+
+    @property
+    def actions(self) -> ActionPacer:
+        # Legacy adapter-only callers may construct an adapter without its
+        # browser lifecycle. They still get the same bounded action policy.
+        if not hasattr(self, "_actions"):
+            self._actions = ActionPacer(getattr(self, "platform_cfg", {}).get("action_pacing"))
+        return self._actions
+
+    def invalidate_delivery_identity(self) -> None:
+        self._delivery_identity_receipt = None
+
+    def remember_delivery_identity(self) -> None:
+        """Called only after the account service checks the bound identity.
+
+        The receipt cannot survive a new page, context, task, Profile or attempt.
+        It only removes the immediately repeated check in Base.publish.
+        """
+        self._require_page_alive("绑定本次投递身份")
+        self._delivery_identity_receipt = (
+            self.context, self.page, self.profile_dir, getattr(self.page, "url", None),
+            asyncio.current_task(), time.monotonic()
+        )
+
+    def _consume_delivery_identity(self) -> bool:
+        receipt = getattr(self, "_delivery_identity_receipt", None)
+        self.invalidate_delivery_identity()
+        if receipt is None:
+            return False
+        context, page, profile, page_url, task, verified_at = receipt
+        if (
+            context is not self.context or page is not self.page
+            or profile != self.profile_dir or task is not asyncio.current_task()
+            or page_url != getattr(self.page, "url", None)
+            or not 0 <= time.monotonic() - verified_at <= 30
+        ):
+            return False
+        self._require_page_alive("复用本次投递身份")
+        return True
+
+    async def login_obstacle_code(self) -> str:
+        """Read visible authentication UI; absent cookies alone are inconclusive."""
+        state = await self.page.evaluate(r"""() => {
+            const visible = el => el && el.getClientRects().length > 0
+                && getComputedStyle(el).visibility !== 'hidden';
+            const challenge = [...document.querySelectorAll(
+                '[id*="captcha"], [class*="captcha"], [role="dialog"]'
+            )].some(el => visible(el)
+                && /安全验证|滑块验证|拖动滑块|完成验证|验证身份/.test(el.innerText || ''));
+            return {
+                challenge,
+                login: /\/(?:login|signin)(?:[\/?#]|$)/i.test(
+                    location.pathname
+                        + (location.hash.startsWith('#/') ? location.hash.slice(1) : '')
+                )
+                    || [...document.querySelectorAll('input[type="password"]')].some(visible)
+            };
+        }""")
+        if not isinstance(state, dict):
+            return "SESSION_CHECK_FAILED"
+        if state.get("challenge") is True:
+            return "CHALLENGE"
+        return "LOGIN_REQUIRED" if state.get("login") is True else "SESSION_CHECK_FAILED"
 
     @staticmethod
     def _exception_means_browser_closed(exc: Exception) -> bool:
@@ -296,6 +370,7 @@ class BasePlatform(ABC):
 
     async def initialize(self):
         """使用系统 Chrome 浏览器初始化，每个平台独立用户数据目录"""
+        self.invalidate_delivery_identity()
         if "NODE_OPTIONS" in os.environ:
             del os.environ["NODE_OPTIONS"]
 
@@ -342,11 +417,9 @@ class BasePlatform(ABC):
                     "locale": "zh-CN",
                     "timezone_id": "Asia/Shanghai",
                     "args": [
-                        "--disable-blink-features=AutomationControlled",
                         "--no-first-run",
                         "--no-default-browser-check",
-                        "--no-proxy-server",          # 不走系统代理
-                        "--disable-features=IsolateOrigins,site-per-process",
+                        "--no-proxy-server",  # Preserve the existing network route.
                     ],
                 }
                 if self.use_native_viewport:
@@ -360,26 +433,19 @@ class BasePlatform(ABC):
             except Exception as e:
                 last_error = e
                 if self.strict_profile_lock:
-                    raise PlatformAutomationError(
-                        f"PROFILE_IN_USE: 无法安全打开账号 Profile: {e}"
+                    raise BrowserStartupError(
+                        "BROWSER_START_FAILED: 浏览器启动失败，请检查 Chrome 和账号资料目录。"
                     ) from e
                 # 旧入口保留有限重试，但同样不删除 Chrome 占用凭据。
                 await asyncio.sleep(3)
         else:
             raise last_error
 
-        # 注入反检测脚本
-        await self.context.add_init_script("""
-            Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-            Object.defineProperty(navigator, 'plugins', { get: () => [1,2,3,4,5] });
-            Object.defineProperty(navigator, 'languages', { get: () => ['zh-CN','zh','en'] });
-            window.chrome = { runtime: {} };
-        """)
-
         self.page = self.context.pages[0] if self.context.pages else await self.context.new_page()
 
     async def cleanup(self):
         """关闭浏览器"""
+        self.invalidate_delivery_identity()
         if self.context:
             await self.context.close()
         # 注意：不关闭 browser，因为 persistent context 会自己管理
@@ -532,33 +598,27 @@ class BasePlatform(ABC):
         if db is None:
             db = Database.get_instance()
         try:
-            # 1. 检查登录
-            if not await self.check_login():
-                if auto_login:
+            # Only reuse the immediately preceding check in this live task.
+            if not self._consume_delivery_identity() and not await self.check_login():
+                failure = login_check_failure(self)
+                if auto_login and failure.requires_login:
                     db.add_task_log(task_id, "INFO", "未登录，打开浏览器等待手动登录...")
                     await self.login()
                     db.add_task_log(task_id, "INFO", "登录完成")
                     if not await self.check_login():
-                        login_error = getattr(self, "last_login_error", "") or (
-                            f"{self.platform_name} 登录后验证失败"
-                        )
-                        login_code = login_error.split(":", 1)[0] if ":" in login_error else "LOGIN_REQUIRED"
+                        failure = login_check_failure(self)
                         return {
                             "success": False,
-                            "error_code": login_code,
-                            "error": login_error,
-                            "need_login": login_code == "LOGIN_REQUIRED",
+                            "error_code": failure.code,
+                            "error": failure.message,
+                            "need_login": failure.requires_login,
                         }
                 else:
-                    login_error = getattr(self, "last_login_error", "") or (
-                        f"{self.platform_name} 未登录，请前往账号页完成扫码登录后再发布"
-                    )
-                    login_code = login_error.split(":", 1)[0] if ":" in login_error else "LOGIN_REQUIRED"
                     return {
                         "success": False,
-                        "error_code": login_code,
-                        "error": login_error,
-                        "need_login": login_code == "LOGIN_REQUIRED",
+                        "error_code": failure.code,
+                        "error": failure.message,
+                        "need_login": failure.requires_login,
                     }
 
             # 2. 在任何编辑器自动保存副作用发生前执行平台预检。

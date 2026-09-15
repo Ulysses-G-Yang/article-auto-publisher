@@ -116,7 +116,7 @@ def test_smzdm_fill_content_processes_blocks_in_source_order() -> None:
     )
     platform._apply_h2_to_current_block.assert_awaited_once()
     platform._validate_dom_exact.assert_awaited_once_with(blocks, phase="正文最终")
-    assert keyboard.insert_text.await_args_list == [call("开头"), call("章节"), call("结尾")]
+    assert keyboard.insert_text.await_args_list == [call(char) for char in "开头章节结尾"]
     assert result["media_status"] == "completed"
     assert result["uploaded_images"] == 1
 
@@ -157,9 +157,7 @@ def test_smzdm_full_multi_image_contract_handles_consecutive_and_final_images() 
     ]
     assert platform._create_paragraph_after_image.await_count == 7
     assert keyboard.insert_text.await_args_list == [
-        call("开头"),
-        call("连续图片后的正文"),
-        call("第二组图片后的正文"),
+        call(char) for char in "开头连续图片后的正文第二组图片后的正文"
     ]
     platform._validate_dom_exact.assert_awaited_once_with(blocks, phase="正文最终")
     assert result["media_status"] == "completed"

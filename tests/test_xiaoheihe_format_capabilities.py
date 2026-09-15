@@ -32,6 +32,14 @@ class _HeadingKeyboard(FakeKeyboard):
                 {"tag": f"h{level}", "text": value}
             )
             self.page.pending_heading_level = None
+            self.page.active_heading = self.page.body.heading_nodes[-1]
+        elif getattr(self.page, "active_heading", None) is not None:
+            self.page.active_heading["text"] += value
+
+    async def press(self, key):
+        if key == "Enter":
+            self.page.active_heading = None
+        await super().press(key)
 
 
 class _HeadingEditor(FakeLocator):

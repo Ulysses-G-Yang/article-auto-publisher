@@ -12,6 +12,8 @@ import sys
 import uuid
 from contextlib import nullcontext
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from pydantic import ValidationError
@@ -57,6 +59,159 @@ from content_studio.errors import DeliveryPlanStaleError
 from content_studio.models import ContentVersion, DraftTarget
 from content_studio.service import ContentStudioService
 from content_studio.web import ContentStudioRuntimeState
+from platforms.xiaoheihe import XiaoheihePlatform
+from platforms.zol import ZOLPlatform
+
+
+def _zol_selection_fixture(candidates: list[str]) -> tuple[ZOLPlatform, MagicMock]:
+    """保留真实选择流程，只提供内存中的弹窗和标签回读。"""
+
+    platform = object.__new__(ZOLPlatform)
+    platform.context = None
+    control = MagicMock()
+    control.first = control.last = control
+    control.filter.return_value = control
+    control.locator.return_value = control
+    control.get_by_role.return_value = control
+    control.count = AsyncMock(return_value=1)
+    control.is_visible = AsyncMock(return_value=True)
+    control.click = AsyncMock()
+    control.wait_for = AsyncMock()
+    control.fill = AsyncMock()
+    platform.page = MagicMock()
+    platform.page.is_closed.return_value = False
+    platform.page.locator.return_value = control
+    platform.page.wait_for_timeout = AsyncMock()
+    platform._topic_candidates = AsyncMock(return_value=candidates)
+    platform._verify_topic_selected = AsyncMock(return_value=True)
+    platform._close_topic_modal = AsyncMock()
+    return platform, control
+
+
+@pytest.mark.parametrize("has_candidate", [True, False])
+def test_zol_base_publish_uses_selection_override_without_legacy_arguments(
+    has_candidate: bool,
+) -> None:
+    platform, control = _zol_selection_fixture(["冻结话题"] if has_candidate else [])
+    platform.simulator = SimpleNamespace(random_delay=AsyncMock())
+    platform.check_login = AsyncMock(return_value=True)
+    platform.preflight_delivery = AsyncMock()
+    platform.navigate_to_editor = AsyncMock()
+    platform.fill_title = AsyncMock()
+    platform.fill_content = AsyncMock(return_value={"text_ok": True})
+    platform.apply_cover = AsyncMock(
+        return_value={"success": True, "cover_status": "not_required"}
+    )
+    platform._safe_simulate_scroll = AsyncMock()
+    platform._safe_random_mouse_movement = AsyncMock()
+    platform.save_draft = AsyncMock(return_value="https://example.invalid/zol/draft/1")
+    platform.publish_now = AsyncMock(side_effect=AssertionError("本测试禁止公开发布"))
+    snapshot = {"topic": "冻结话题", "selection_query": "冻结搜索词"}
+
+    result = asyncio.run(
+        platform.publish(
+            title="隔离测试文章",
+            content_blocks=[{"type": "text", "text": "正文"}],
+            images=[],
+            selection_override=snapshot,
+            auto_login=False,
+            delivery_mode="DRAFT",
+            db=MagicMock(),
+        )
+    )
+
+    assert result["success"] is True
+    assert control.fill.await_args_list[0].args == ("冻结话题",)
+    assert snapshot == {"topic": "冻结话题", "selection_query": "冻结搜索词"}
+    platform.save_draft.assert_awaited_once_with("隔离测试文章")
+    platform.publish_now.assert_not_awaited()
+    if has_candidate:
+        assert result["selection"]["topic"] == "冻结话题"
+        assert result["selection_status"] == "completed"
+        platform._verify_topic_selected.assert_awaited_once_with("冻结话题")
+    else:
+        assert result["selection_status"] == "needs_selection"
+        assert result["selection_error_code"] == "ZOL_SELECTION_NO_CANDIDATE"
+        assert [call.args[0] for call in control.fill.await_args_list] == [
+            "冻结话题",
+            "冻结搜索词",
+        ]
+        platform._verify_topic_selected.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    "override,topic,expected_queries",
+    [
+        ({"selection_query": "冻结搜索词"}, "", ["冻结搜索词"]),
+        (
+            {"topic": "冻结话题", "selection_query": "冻结搜索词"},
+            "旧话题",
+            ["冻结话题", "冻结搜索词"],
+        ),
+        (
+            {"selection_query": "冻结搜索词"},
+            "显式话题",
+            ["显式话题", "冻结搜索词"],
+        ),
+    ],
+)
+def test_zol_frozen_query_replaces_runtime_query_and_keeps_explicit_topic_first(
+    override: dict, topic: str, expected_queries: list[str],
+) -> None:
+    platform, control = _zol_selection_fixture([])
+
+    result = asyncio.run(
+        platform.select_topic(
+            topic=topic,
+            selection_query="运行时旧搜索词",
+            selection_override=override,
+        )
+    )
+
+    assert [call.args[0] for call in control.fill.await_args_list] == expected_queries
+    assert result["needs_selection"] is True
+    assert result["error_code"] == "ZOL_SELECTION_NO_CANDIDATE"
+
+
+@pytest.mark.parametrize("explicit_source", ["none", "arguments", "snapshot"])
+def test_xiaoheihe_consumes_frozen_query_and_prefers_explicit_choices(
+    explicit_source: str,
+) -> None:
+    platform = object.__new__(XiaoheihePlatform)
+    platform.page = None
+    platform.select_community = AsyncMock(
+        return_value={"success": True, "value": "实际社区"}
+    )
+    platform._select_from_editor_dialog = AsyncMock(
+        return_value={"success": True, "value": "实际话题"}
+    )
+    snapshot = {"selection_query": "冻结搜索词 备用词"}
+    if explicit_source == "snapshot":
+        snapshot.update(community="冻结社区", topic="冻结话题")
+    result = asyncio.run(
+        platform.select_topic(
+            community="显式社区" if explicit_source != "none" else "",
+            topic="显式话题" if explicit_source != "none" else "",
+            selection_query="运行时旧搜索词",
+            selection_override=snapshot,
+        )
+    )
+
+    expected_community, expected_topic = (
+        (["冻结搜索词", "备用词"], ["冻结搜索词", "备用词"])
+        if explicit_source == "none"
+        else ("冻结社区", "冻结话题")
+        if explicit_source == "snapshot"
+        else ("显式社区", "显式话题")
+    )
+    platform.select_community.assert_awaited_once_with(
+        expected_community, "冻结搜索词 备用词"
+    )
+    assert platform._select_from_editor_dialog.await_args.args[1] == expected_topic
+    assert result == {
+        "success": True,
+        "selection": {"community": "实际社区", "topic": "实际话题"},
+    }
 
 
 def test_selection_contract_defaults_and_rejects_unbounded_values() -> None:
@@ -397,7 +552,11 @@ def test_content_studio_persists_and_freezes_selection_without_content_version_l
                 blocks=[{"type": "text", "text": "冻结正文", "position": 0}],
             )
         )
-        selection = {"community": "社区", "topic": "话题"}
+        selection = {
+            "community": "社区",
+            "topic": "话题",
+            "selection_query": "冻结搜索词",
+        }
         targeted = await service.replace_targets(
             draft["draft_id"],
             ReplaceTargetsRequest(
@@ -430,7 +589,7 @@ def test_content_studio_persists_and_freezes_selection_without_content_version_l
                 select(DraftTarget).where(DraftTarget.draft_id == draft["draft_id"])
             )
             assert source is not None
-            source.platform_selection = {"community": "源选择已改"}
+            source.platform_selection = {**selection, "selection_query": "源搜索词已改"}
         with pytest.raises(DeliveryPlanStaleError):
             await service.get_plan_execution_context(plan["plan_id"], LOCAL_WEB_CONTEXT)
 
@@ -483,7 +642,11 @@ def test_content_studio_persists_and_freezes_selection_without_content_version_l
 def test_delivery_execute_passes_selection_override_and_persists_outcome(
     tmp_path: Path,
 ) -> None:
-    selection = {"community": "社区", "topic": "话题"}
+    selection = {
+        "community": "社区",
+        "topic": "话题",
+        "selection_query": "冻结搜索词",
+    }
 
     class FakePlatform:
         context = None

@@ -1,4 +1,5 @@
 import re
+import subprocess
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -183,27 +184,25 @@ def test_bulk_target_controls_select_only_deliverable_platforms_and_valid_accoun
 
 
 def test_target_saves_are_serialized_and_latest_selection_is_coalesced() -> None:
-    script = read("web/static/js/content-studio.js")
+    assert_target_save_behavior("target-queue")
 
-    assert "targetSavePending: null" in script
-    assert "targetSavePromise: null" in script
-    assert "function saveTargets(targets)" in script
-    assert "async function drainTargetSaveQueue()" in script
-    assert "while (state.targetSavePending !== null)" in script
-    assert "saved = await persistTargets(targets);" in script
-    assert "state.targetSavePending = cloneValue(targets);" in script
-    assert "async function flushTargetSaveQueue()" in script
-    assert "if (!(await flushTargetSaveQueue())" in script
-    assert "targetSaving: false" in script
-    assert "mutationPromise: null" in script
-    assert "function enqueueDraftMutation(operation)" in script
-    assert "return enqueueDraftMutation(saveDraftNowUnlocked);" in script
-    assert "state.targetSaving = true;" in script
-    assert "state.targetSaving = false;" in script
-    assert "const requestDraftId = state.draft.draft_id;" in script
-    assert "if (state.draft?.draft_id !== requestDraftId) return true;" in script
-    assert "restoreSwitcherSelection(serverTargets);" in script
-    assert "已恢复到最后一次服务端状态" in script
+
+def assert_target_save_behavior(scenario: str) -> None:
+    result = subprocess.run(
+        [
+            "node",
+            str(ROOT / "tests/frontend/publication_advice_behavior.test.cjs"),
+            str(ROOT / "web/static/js/content-studio.js"),
+            scenario,
+        ],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        timeout=30,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr or result.stdout
 
 
 def test_delayed_content_patch_is_bound_to_its_source_draft() -> None:
@@ -218,19 +217,7 @@ def test_delayed_content_patch_is_bound_to_its_source_draft() -> None:
 
 
 def test_existing_targets_survive_account_metadata_loading() -> None:
-    script = read("web/static/js/content-studio.js")
-
-    assert "const existingTargets = (state.draft.targets || [])" in script
-    assert "const existingTarget = existingTargets" in script
-    assert "const accountsLoading = !Array.isArray" in script
-    assert "if (!account && accountsLoading && existingTarget)" in script
-    assert "...existingTarget," in script
-    assert "function reconcileLoadedAccountSelection" in script
-    assert "selected.filter(accountId => !validIds.has(accountId))" in script
-    assert "if (render && reconcile && invalidIds.length) rebuildTargets();" in script
-    assert "当前登录状态无效" in script
-    assert "switcherAccountLoadFailed: {}" in script
-    assert "部分平台账号加载失败，本次全选未保存" in script
+    assert_target_save_behavior("target-loading")
 
 
 def test_failed_publish_confirmation_stays_open_for_retry() -> None:

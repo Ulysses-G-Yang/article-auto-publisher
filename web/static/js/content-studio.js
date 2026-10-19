@@ -81,6 +81,7 @@
         lastAccountRefreshAt: 0,
         targetSaveDesired: [],
         targetSavePending: null,
+        targetSavePendingAdvice: null,
         targetSavePromise: null,
         targetSaving: false,
         mutationPromise: null,
@@ -103,6 +104,8 @@
         coverAutoNoteVisible: false,
         publicationAdviceLoading: false,
         publicationAdvice: null,
+        publicationAdvicePlatforms: [],
+        publicationAdviceApplying: false,
         publicationAdviceController: null,
         publicationAdviceAbortReason: null,
         publicationAdviceStage: null,
@@ -1835,7 +1838,7 @@
             const accounts = state.switcherAccounts[platform.id] || [];
             const accountsLoading = !Array.isArray(state.switcherAccounts[platform.id])
                 || state.switcherAccountLoadFailed[platform.id];
-            const existingTargets = (state.draft.targets || [])
+            const existingTargets = (state.targetSaveDesired || state.draft.targets || [])
                 .filter(target => target.platform === platform.id);
             for (const accountId of state.switcherSelected[platform.id] || []) {
                 const account = accounts.find(item => item.account_id === accountId);
@@ -1855,6 +1858,7 @@
                     account_id: accountId,
                     mode,
                     persist_login: Boolean(account.persist_login),
+                    platform_selection: cloneValue(existingTarget?.platform_selection ?? null),
                 });
             }
         }
@@ -1862,13 +1866,17 @@
         const same = desired.length === targets.length && desired.every((target, index) =>
             target.platform === targets[index].platform
             && target.account_id === targets[index].account_id
-            && target.mode === targets[index].mode);
+            && target.mode === targets[index].mode
+            && target.persist_login === targets[index].persist_login
+            && JSON.stringify(target.platform_selection ?? null)
+                === JSON.stringify(targets[index].platform_selection ?? null));
         if (!same) saveTargets(targets);
     }
 
-    function saveTargets(targets) {
+    function saveTargets(targets, advice = null) {
         state.targetSaveDesired = cloneValue(targets);
         state.targetSavePending = cloneValue(targets);
+        state.targetSavePendingAdvice = advice;
         if (!state.targetSavePromise) {
             state.targetSavePromise = drainTargetSaveQueue().finally(() => {
                 state.targetSavePromise = null;
@@ -1881,10 +1889,13 @@
         let saved = true;
         while (state.targetSavePending !== null) {
             const targets = state.targetSavePending;
+            const advice = state.targetSavePendingAdvice;
             state.targetSavePending = null;
-            saved = await persistTargets(targets);
+            state.targetSavePendingAdvice = null;
+            saved = await persistTargets(targets, advice);
             if (!saved) {
                 state.targetSavePending = null;
+                state.targetSavePendingAdvice = null;
                 const serverTargets = state.conflictServerDraft?.targets
                     || state.draft?.targets
                     || [];
@@ -1903,13 +1914,18 @@
 
     async function flushTargetSaveQueue() {
         if (state.targetSavePending !== null && !state.targetSavePromise) {
-            saveTargets(state.targetSavePending);
+            saveTargets(state.targetSavePending, state.targetSavePendingAdvice);
         }
         return state.targetSavePromise ? state.targetSavePromise : true;
     }
 
-    async function persistTargets(targets) {
+    async function persistTargets(targets, advice = null) {
         const initialDraftId = state.draft?.draft_id;
+        const adviceIsCurrent = () => !advice || (
+            !state.dirty && state.draft?.draft_id === advice.draft_id
+            && state.draft?.revision === advice.revision
+        );
+        if (!adviceIsCurrent()) return false;
         if (!(await saveDraftNow()) || state.conflictServerDraft) return false;
         if (initialDraftId && state.draft?.draft_id !== initialDraftId) return true;
         if (!state.draft?.draft_id) {
@@ -1923,6 +1939,7 @@
         const requestDraftId = state.draft.draft_id;
         const requestedTargets = cloneValue(targets);
         return enqueueDraftMutation(async () => {
+            if (!adviceIsCurrent()) return false;
             if (state.draft?.draft_id !== requestDraftId) return true;
             const requestRevision = state.draft.revision;
             state.targetSaving = true;
@@ -1937,11 +1954,14 @@
                     body: JSON.stringify({
                         revision: requestRevision,
                         targets: requestedTargets.map(target => ({
-                            target_id: target.target_id || undefined,
+                            target_id: target.target_id || state.draft.targets.find(saved =>
+                                saved.platform === target.platform
+                                && saved.account_id === target.account_id)?.target_id || undefined,
                             platform: target.platform,
                             account_id: target.account_id,
                             mode: target.mode,
                             persist_login: target.persist_login,
+                            platform_selection: target.platform_selection ?? null,
                         })),
                     }),
                 });
@@ -2023,6 +2043,12 @@
             const account = document.createElement('div'); const accountStrong = document.createElement('strong'); accountStrong.textContent = target.account_display_name || '平台账号'; const accountSmall = document.createElement('small'); accountSmall.textContent = target.account_id ? `账号 ${target.account_id.slice(0, 8)}…` : '账号'; account.append(accountStrong, accountSmall);
             const mode = document.createElement('div'); const modeBadge = document.createElement('span'); modeBadge.className = `badge ${target.mode === 'PUBLISH' ? 'text-bg-danger' : 'text-bg-info'}`; modeBadge.textContent = modeLabel(target.mode); mode.appendChild(modeBadge);
             const policy = document.createElement('div'); const policyStrong = document.createElement('strong'); policyStrong.textContent = target.persist_login ? '保持登录态' : '不持久会话'; const policySmall = document.createElement('small'); policySmall.textContent = '会话策略'; policy.append(policyStrong, policySmall);
+            const selection = target.platform_selection;
+            if (selection && ['zol', 'xiaoheihe'].includes(target.platform)) {
+                const hint = document.createElement('small');
+                hint.textContent = `投递时尝试选择：${[selection.community, selection.topic || selection.selection_query].filter(Boolean).join(' / ')}`;
+                policy.appendChild(hint);
+            }
             const remove = document.createElement('button'); remove.type = 'button'; remove.className = 'btn btn-outline-danger btn-sm'; remove.textContent = '移除'; remove.addEventListener('click', () => {
                 // 从滑块状态移除该账号勾选，重建 targets（与滑块同源）
                 const selected = state.switcherSelected[target.platform] || (state.switcherSelected[target.platform] = []);
@@ -2837,6 +2863,7 @@
 
     function renderPublicationAdvice(payload) {
         state.publicationAdvice = payload;
+        state.publicationAdvicePlatforms = [...enabledPlatformIds()];
         const panel = byId('publication-advice-panel');
         const results = byId('publication-advice-results');
         const recommendations = Array.isArray(payload?.recommendations)
@@ -2858,9 +2885,82 @@
             card.append(title, facts, reason);
             return card;
         }));
+        if (recommendations.some(item => ['zol', 'xiaoheihe'].includes(item.platform))) {
+            const apply = document.createElement('button');
+            apply.id = 'apply-publication-advice';
+            apply.type = 'button';
+            apply.className = 'btn btn-primary';
+            apply.textContent = '应用到中关村在线 / 小黑盒已选账户';
+            apply.addEventListener('click', applyPublicationAdvice);
+            const hint = document.createElement('p');
+            hint.className = 'small text-body-secondary';
+            hint.textContent = '只保存选择参数，不会立即投递。执行时再搜索平台真实选项并回读；其他平台暂时仅展示建议。';
+            results.append(apply, hint);
+        }
         byId('publication-advice-status').textContent = recommendations.length
             ? `已生成 ${recommendations.length} 个平台建议 · 模型 ${payload.model || '未知'}`
             : 'AI 未返回可展示的建议';
+    }
+
+    function publicationSelection(item) {
+        if (!['zol', 'xiaoheihe'].includes(item.platform)) return null;
+        const topic = (item.suggested_topics || []).find(value => value.trim())?.trim() || '';
+        const query = (item.topic_queries || []).find(value => value.trim())?.trim() || '';
+        const community = item.platform === 'xiaoheihe' ? (item.suggested_community || '').trim() : '';
+        if (!topic && !query && !community) return null;
+        return {
+            topic, selection_query: query,
+            ...(item.platform === 'xiaoheihe' ? {community} : {}),
+        };
+    }
+
+    async function applyPublicationAdvice() {
+        if (state.publicationAdviceApplying) return false;
+        const advice = state.publicationAdvice;
+        const sourceDraftId = state.draft?.draft_id;
+        const adviceIsCurrent = () => state.draft?.draft_id === sourceDraftId
+            && state.publicationAdvice === advice;
+        const button = byId('apply-publication-advice');
+        setMessage('publication-advice-error', '');
+        try {
+            if (!advice) throw new Error('请先生成新的平台建议。');
+            if (state.publicationAdviceLoading || state.targetSavePromise || state.saving || state.planBusy) {
+                throw new Error('当前文章或目标正在处理，请完成后再应用建议。');
+            }
+            validatePublicationAdvice(advice, advice.draft_id, advice.revision, state.publicationAdvicePlatforms);
+            let count = 0;
+            const targets = (state.draft.targets || []).map(target => {
+                const item = advice.recommendations.find(item => item.platform === target.platform);
+                const selection = item && publicationSelection(item);
+                if (!selection) return cloneValue(target);
+                count += 1;
+                return {...cloneValue(target), platform_selection: {
+                    ...cloneValue(target.platform_selection || {}), ...selection,
+                }};
+            });
+            if (!count) throw new Error('请先选择中关村在线或小黑盒的可用账户，再生成建议。');
+            state.publicationAdviceApplying = true;
+            if (button) { button.disabled = true; button.textContent = '正在保存选择参数…'; }
+            const saved = await saveTargets(targets, advice);
+            if (!adviceIsCurrent()) return false;
+            if (!saved) {
+                throw new Error('建议未应用：文章或目标已变化，或保存失败；请确认当前内容后重新生成。');
+            }
+            state.targetSaveDesired = cloneValue(state.draft.targets);
+            state.publicationAdvice = null;
+            if (button) button.textContent = `已应用到 ${count} 个账户`;
+            byId('publication-advice-status').textContent = state.dirty
+                ? '选择参数已保存，但文章又有修改；请重新生成建议。尚未在平台填写或发布。'
+                : `已保存选择参数；尚未在平台填写或发布。请在投递目标中查看当前账户的参数。`;
+            return true;
+        } catch (error) {
+            if (!adviceIsCurrent()) return false;
+            setMessage('publication-advice-error', error.message || '应用建议失败');
+            if (button) { button.disabled = false; button.textContent = '重新应用建议'; }
+            return false;
+        } finally {
+            state.publicationAdviceApplying = false;
+        }
     }
 
     async function generatePublicationAdvice() {

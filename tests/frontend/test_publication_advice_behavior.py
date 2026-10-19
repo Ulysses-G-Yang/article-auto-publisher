@@ -11,7 +11,11 @@ ROOT = Path(__file__).resolve().parents[2]
 
 @pytest.mark.parametrize(
     "scenario",
-    ("success", "validation", "cancel-save", "timeout", "stale-request"),
+    (
+        "success", "validation", "cancel-save", "timeout", "stale-request",
+        "apply-success", "apply-double", "apply-stale", "apply-queued-stale",
+        "apply-failure", "apply-navigate", "target-preserve",
+    ),
 )
 def test_publication_advice_run_is_bounded_and_cancellable(scenario: str) -> None:
     result = subprocess.run(
